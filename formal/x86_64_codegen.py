@@ -824,6 +824,21 @@ class X86_64Codegen:
         # indistinguishable from two integers, and the operator silently
         # lowers to pointer arithmetic.
         self._blob_vars = set()
+        # …and the element-count estimate for each of them, so that a blob's
+        # reserved size follows the binding that produced it instead of falling
+        # back to `model.BLOB_ESTIMATE_FALLBACK` for every name. The two tables
+        # are written together in `_note_binding` and reset together, because
+        # an estimate for a name `_blob_vars` no longer holds is a promise
+        # about a blob that is not there.
+        self._blob_var_est: dict = {}
+        # The loops the code being emitted sits inside, innermost last, as
+        # `(trip count or None, name estimates on entry, names its body
+        # binds)`. A blob-producing site reads this to learn whether its
+        # reservation has to survive more than one execution —
+        # `model.blob_loop_growth` is the arithmetic, `model.stmt_bound_names`
+        # the second half of the question and `model.blob_names_read` the
+        # first.
+        self._blob_loop_stack: list = []
         # Names bound to a FILE DESCRIPTOR (the lowered `open`, or an alias of
         # one). `write`/`close` lower to the C library's `write(2)`/`close(2)`,
         # so the receiver has to be one, and `open(2)` is the only thing on
@@ -1237,6 +1252,8 @@ class X86_64Codegen:
         # order-dependent rule the local marks already implement.
         self._note_global_kinds(f)
         self._blob_vars = set()
+        self._blob_var_est = {}
+        self._blob_loop_stack = []
         self._fd_vars = set()
         # `comptime NAME = value` bindings in scope, and the list-valued ones
         # kept as their AST. Reset per function, exactly like the tables above:
@@ -2034,22 +2051,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.WhileStmt):
-            self._emit_loop(cond=stmt.condition, body=stmt.body,
-                            else_body=stmt.else_body or [], for_info=None)
+            self._blob_loop_push(None, stmt.body)
+            try:
+                self._emit_loop(cond=stmt.condition, body=stmt.body,
+                                else_body=stmt.else_body or [], for_info=None)
+            finally:
+                self._blob_loop_pop()
             return
 
         if isinstance(stmt, F.ForStmt):
             rargs = _range_args(stmt.iterable)
             if rargs is None:
-                self._emit_for_list(stmt, stmt.else_body or [])
+                self._blob_loop_push(
+                    self._blob_iter_trip_bound(stmt.iterable), stmt.body)
+                try:
+                    self._emit_for_list(stmt, stmt.else_body or [])
+                finally:
+                    self._blob_loop_pop()
                 return
             if (not isinstance(stmt.target, str)
                     or not stmt.target.isidentifier()):
                 raise CodegenError(
                     f"for-loop target must be a plain name (got {stmt.target!r})")
-            self._emit_loop(cond=None, body=stmt.body,
-                            else_body=stmt.else_body or [],
-                            for_info=(stmt.target, rargs))
+            self._blob_loop_push(self._blob_range_trip_bound(rargs), stmt.body)
+            try:
+                self._emit_loop(cond=None, body=stmt.body,
+                                else_body=stmt.else_body or [],
+                                for_info=(stmt.target, rargs))
+            finally:
+                self._blob_loop_pop()
             return
 
         if isinstance(stmt, F.BreakStmt):
@@ -3086,6 +3116,146 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         offset = self._list_cursor
         self._list_cursor += nbytes
         return offset
+
+    # ── how many times the code being emitted runs ────────────────────
+    #
+    # A blob's reservation is made ONCE per site, so a site inside a loop has
+    # to reserve for the LAST iteration rather than the first. Four questions,
+    # and `model.blob_loop_growth` is the arithmetic that turns their answers
+    # into a number; arm64's four are the same four, reading the same model
+    # functions, so the two machines cannot size a loop-carried container
+    # differently.
+
+    def _blob_loop_push(self, trips, body) -> None:
+        """Enter a loop body whose iteration count is bounded by `trips`.
+
+        `None` means "no compile-time bound" (`while`, or a `for … in` over
+        something whose length is not a number here) and is NOT the same answer
+        as `0` — `model.blob_loop_growth`'s arithmetic multiplies by it and an
+        empty range really does run no times, so the two answers cannot be
+        collapsed. The table snapshot is what makes `entry` in
+        `_blob_site_growth` the length an operand had when the loop started,
+        rather than whatever a previous iteration left in it."""
+        self._blob_loop_stack.append(
+            (trips, dict(self._blob_var_est), M.stmt_bound_names(body)))
+
+    def _blob_loop_pop(self) -> None:
+        self._blob_loop_stack.pop()
+
+    def _stmt_loop_trips(self, stmt):
+        """`model.walk_stmt_trips`'s reader for one loop statement's header.
+
+        A `while` has no compile-time iteration count and says so. A `for` over
+        `range(...)` is a count of literals; a `for … in` over a container is
+        that container's own length. A `comptime for` is folded and unrolled
+        when its iterable is compile-time-known, so it runs once per value, and
+        otherwise it lowers as the ordinary runtime loop."""
+        if isinstance(stmt, F.WhileStmt):
+            return None
+        if isinstance(stmt, F.ComptimeForStmt):
+            vals = self._comptime_iterable(stmt.iterable)
+            return None if vals is None else max(1, len(vals))
+        if isinstance(stmt, F.ForStmt):
+            rargs = _range_args(stmt.iterable)
+            if rargs is None:
+                return self._blob_iter_trip_bound(stmt.iterable)
+            return self._blob_range_trip_bound(rargs)
+        return 1
+
+    def _blob_range_trip_bound(self, rargs):
+        """`model.loop_trip_count` over a `range()` header, or None.
+
+        `_range_info` is what normalises the one-, two- and three-argument
+        spellings, so the trip count is read off the same three expressions the
+        loop's own head test uses rather than off the argument list."""
+        start, stop, step = _range_info(rargs)
+        return M.loop_trip_count(self._static_int(start),
+                                 self._static_int(stop),
+                                 self._static_int(step))
+
+    def _blob_iter_trip_bound(self, iterable):
+        """How many values `for … in iterable` can yield, or None.
+
+        A container's own estimate is the bound, which is what makes
+        `for x in [1, 2, 3]` exact. `enumerate(x)`/`reversed(x)`/`sorted(x)`
+        yield as many as their argument and `zip(a, b)` as many as its
+        LONGEST argument, so those read through rather than take the fallback.
+        Everything else — `while`, a generator, an object with `__iter__` — has
+        no length here and answers None."""
+        e = iterable
+        if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
+            name = e.func.name
+            if name in ("enumerate", "reversed", "sorted", "list", "set"):
+                if not e.args:
+                    return None
+                return self._blob_iter_trip_bound(e.args[0])
+            if name == "zip":
+                bounds = [self._blob_iter_trip_bound(a) for a in e.args]
+                return None if any(b is None for b in bounds) else max(bounds)
+            return None
+        if self._is_container_expr(e) or isinstance(e, (F.SliceExpr,
+                                                         F.Comprehension)):
+            return self._blob_est(e)
+        return None
+
+    def _blob_est_at_entry(self, e) -> int:
+        """`_blob_est(e)` as it stood on entry to the innermost open loop."""
+        if not self._blob_loop_stack:
+            return self._blob_est(e)
+        table = self._blob_loop_stack[-1][1]
+        if isinstance(e, F.IdentExpr):
+            return table.get(e.name, M.BLOB_ESTIMATE_FALLBACK)
+        return self._blob_est(e, exact=True)
+
+    def _blob_site_growth(self, legacy, exact, *operands) -> int:
+        """Elements to reserve for a blob-producing SITE inside a loop.
+
+        Two numbers come in and the LARGER goes out, which is what makes this
+        change unable to shrink a reservation:
+
+        * `legacy` is what this site reserved before any of it existed —
+          `model.BLOB_ESTIMATE_FALLBACK` words for any operand whose length
+          this path does not know, which is every bare name. Keeping it as a
+          floor is what stops a newly-tracked estimate from turning a program
+          that builds into one that hits its run-time guard;
+        * `exact` is the same sum with the estimate each binding recorded, and
+          it is what the loop arithmetic needs, because "one more element per
+          iteration" is only a statement about a number that knows how long the
+          operands are.
+
+        `operands` are the expressions both numbers came from, and they carry
+        the two things the numbers alone do not: which names the site READS (a
+        site whose operands the loop never rebinds produces the same blob every
+        time, so `legacy` is the whole reservation) and how long those operands
+        were on entry (the growth is per iteration, so `entry` is not
+        multiplied).
+
+        A loop whose iteration count is NOT a compile-time number contributes
+        no multiplier, which is exactly what the site reserved before. That is
+        deliberate: `while` and `for i in range(n)` have no bound to multiply
+        by, and the two available answers are a guess (what this used to be, on
+        both machines) and a refusal. A refusal here would take away programs
+        that build and answer today — `for i in range(n): s.append(x)` is the
+        commonest way real code builds a list — to fix a case a message would
+        not have fixed anyway. So the multiplier is applied where there is one,
+        and the run-time guard keeps answering for the rest, which is what it
+        is for."""
+        if not self._blob_loop_stack:
+            return max(1, legacy)
+        reads = set()
+        for e in operands:
+            reads |= M.blob_names_read(e)
+        if not any(reads & bound
+                   for _t, _tab, bound in self._blob_loop_stack):
+            return max(1, legacy)
+        trips = 1
+        for t, _tab, _bound in self._blob_loop_stack:
+            if t is None:
+                return max(1, legacy)
+            trips *= t
+        entry = max([self._blob_est_at_entry(e) for e in operands] or [0])
+        return max(max(1, legacy),
+                   M.blob_loop_growth(entry, exact, trips))
 
     def _emit_elem_addr(self, base_reg: Reg, index_reg: Reg, dst_reg: Reg,
                         header: int = 8, scale: int = 3) -> None:
@@ -4433,15 +4603,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"list.append() takes exactly one argument on this path "
                 f"(got {len(args)})")
         recv = e.func.obj
-        cap = self._list_caps_by_name.get(
-            recv.name if isinstance(recv, F.IdentExpr) else None)
-        if cap is None:
+        name = recv.name if isinstance(recv, F.IdentExpr) else None
+        room = self._list_caps_by_name.get(name)
+        if room is None:
             raise CodegenError(
                 f"list.append() is not lowered on the formal x86-64 path: a "
                 f"list blob lives in the frame, so the room an append needs "
                 f"has to be known when the list is built. This one is not "
                 f"(the receiver is not a list literal this function appends "
                 f"to, or it is also bound to something that is not a list)")
+        base, count = room
+        cap = base + count
         self._push_slot(Reg.RAX)
         self._emit_expr(recv)                      # RAX = base
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
@@ -5171,7 +5343,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # mnemonic, chosen from the pointee the model established.
             self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
-    def _blob_est(self, e) -> int:
+    def _blob_est(self, e, exact: bool = False) -> int:
         """Static upper bound on a blob expression's element count.
 
         A concat has to reserve its result BEFORE evaluating either operand
@@ -5193,11 +5365,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.DictExpr):
             return len(e.pairs)
         if isinstance(e, F.SliceExpr):
-            return 64
+            return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.Comprehension):
             return self._compr_cap(e)
         if isinstance(e, F.CallExpr):
-            return 64
+            return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.BinaryOp):
             if e.op in ("+", "|"):
                 return self._blob_est(e.left) + self._blob_est(e.right)
@@ -5213,11 +5385,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                else (e.right, e.left))
                 n = self._static_int(count)
                 if n is None:
-                    return 64
+                    return M.BLOB_ESTIMATE_FALLBACK
                 return max(0, self._blob_est(blob) * max(0, n))
             if e.op in ("or", "and"):
                 return max(self._blob_est(e.left), self._blob_est(e.right))
-        return 64
+        if isinstance(e, F.IdentExpr):
+            # `exact=False` is the historical answer — the fallback for every
+            # name, which is why `s = [0]; s = s + [1]` in a loop reserved 65
+            # words and made the 66th element the last this path could answer
+            # (measured on both architectures). `exact=True` reads the estimate
+            # the binding recorded instead, which is what the loop-growth
+            # arithmetic needs; the reservation takes the LARGER of the two, so
+            # tracking a name can only ever make a reservation bigger.
+            if exact:
+                return self._blob_var_est.get(
+                    e.name, M.BLOB_ESTIMATE_FALLBACK)
+            return M.BLOB_ESTIMATE_FALLBACK
+        return M.BLOB_ESTIMATE_FALLBACK
 
     def _compr_cap(self, expr: F.Comprehension) -> int:
         """Upper bound on a comprehension's RESULT size, for the reservation.
@@ -5252,16 +5436,28 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         against it — an under-estimate exits(1) rather than overwriting the
         spill slots above the blob area.
 
+        **The estimate is multiplied by the loop the site sits in**, because
+        the emitted code is one copy however many times it runs, and the value
+        it produces is what the next iteration reads. `_blob_site_growth` is
+        the whole of that, and the arithmetic is `model`'s so x86-64 sizes the
+        same program the same way. Measured on both
+        architectures before it: this reservation was the fallback estimate
+        plus one element, so x86-64 answered `len=65` and then exited 1 having
+        printed nothing, and arm64 wrote past its own reservation.
+
         Register plan for the two copies (no call happens in between, so
         caller-saved scratch is free): RSI/RDX the operands, RDI the result,
         R8/R9 the two counts, RCX a walking destination pointer, RAX the
         element, R11 the index."""
-        est = max(1, self._blob_est(left) + self._blob_est(right))
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
         avail = self._blob_available() - self._blob_used()
         if avail < 16:
             raise CodegenError(M.frame_blob_refusal(
                 "a list concatenation", 16, avail))
-        cap = min(est, (avail - 8) // 8)
+        cap = min(want, (avail - 8) // 8)
 
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                    # [rsp] = left
@@ -5276,7 +5472,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if avail < 16:
             raise CodegenError(M.frame_blob_refusal(
                 "a list concatenation", 16, avail))
-        cap = min(est, (avail - 8) // 8)
+        cap = min(want, (avail - 8) // 8)
         offset = self._reserve_blob(8 + 8 * cap, "a list concatenation")
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
@@ -5362,12 +5558,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reservation is made before anything runs and there is no heap to grow
         into afterwards.
         """
-        est = max(0, self._blob_est(blob) * max(0, count))
+        legacy = max(0, self._blob_est(blob) * max(0, count))
+        exact = max(0, self._blob_est(blob, exact=True) * max(0, count))
+        want = self._blob_site_growth(legacy, exact, blob)
         avail = self._blob_available() - self._blob_used()
         if avail < 16:
             raise CodegenError(M.frame_blob_refusal(
                 "a list repetition", 16, avail))
-        cap = max(1, min(est, (avail - 8) // 8))
+        cap = max(1, min(want, (avail - 8) // 8))
 
         self._emit_expr(blob)
         self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))   # blob
@@ -5381,7 +5579,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if avail < 16:
             raise CodegenError(M.frame_blob_refusal(
                 "a list repetition", 16, avail))
-        cap = max(1, min(est, (avail - 8) // 8))
+        cap = max(1, min(want, (avail - 8) // 8))
         offset = self._reserve_blob(8 + 8 * cap, "a list repetition")
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # len(blob)
@@ -8629,11 +8827,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         `xs.append(v)` needs room the literal's own element count does not
         promise — `xs = []` plus one append is the commonest shape there is and
         starts with nothing. The number of `append` call sites on a name in
-        this function is a sound compile-time bound for STRAIGHT-LINE code, and
-        the store is bounds-checked against it at run time, so the shape this
-        gets wrong (an append inside a loop) exits(1) loudly instead of writing
-        past the blob — the same bargain every other bounded container
-        operation on this path makes.
+        this function MULTIPLIED BY how many times each site can run is a sound
+        compile-time bound, and the store is bounds-checked against it at run
+        time. Counting SITES alone was the bug: `for i in range(70):
+        s.append(x)` has one site and seventy appends, so it stopped with
+        nothing printed at the second append on BOTH architectures
+        (measured). `model.
+        walk_stmt_trips` supplies the multiplier, and a site in a loop without
+        a compile-time iteration count keeps the one-per-site bound it always
+        had — the run-time guard (`model.list_append_overflow_message`) answers
+        for that, which is what it is for.
 
         Two maps because the two ends of the operation are different places:
         `_emit_list` allocates and has only the literal NODE (an expression
@@ -8642,10 +8845,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         disagree. A name bound to more than one literal takes the smallest of
         their capacities, so the bound holds whichever blob is live."""
         appends: dict = {}
-        for _node, recv, method, _args in _walk_value_methods(fn):
+        trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
+            getattr(fn, "body", None) or [], self._stmt_loop_trips)}
+        for node, recv, method, _args in _walk_value_methods(fn):
             if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
-            appends[recv.name] = appends.get(recv.name, 0) + 1
+            # `or 1`, not a refusal: a site inside a loop with no compile-time
+            # iteration count keeps the one-per-site bound it always had, and
+            # the run-time guard answers for it. See `_blob_site_growth` for
+            # why an unbounded loop is not made into a build failure.
+            trips = trips_by_id.get(id(node), 1) or 1
+            appends[recv.name] = appends.get(recv.name, 0) + trips
         by_node: dict = {}
         by_name: dict = {}
         for name, count in appends.items():
@@ -8666,12 +8876,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             # (`bytearray()` occupies 0 slots and `bytearray(3)` occupies 3),
             # which is what makes a constructor-built blob appendable. One
             # rule, in the model, read by both backends.
-            want = min(M.blob_reserved_slots(lit)
-                       for lit in literals) + count
+            base = min(M.blob_reserved_slots(lit) for lit in literals)
+            want = base + count
             for literal in literals:
                 prev = by_node.get(id(literal))
                 by_node[id(literal)] = want if prev is None else min(prev, want)
-            by_name[name] = want
+            by_name[name] = (base, count)
         return by_node, by_name
 
     def _note_global_kinds(self, fn) -> None:
@@ -8730,6 +8940,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 isinstance(value, F.IdentExpr)
                 and value.name in self._blob_vars):
             self._blob_vars.add(name)
+            self._blob_var_est[name] = self._blob_est(value, exact=True)
         elif isinstance(value, F.StringLiteral) or (
                 isinstance(value, F.IdentExpr)
                 and self._expr_str_kind(value) == M.STR_KIND):
@@ -8755,6 +8966,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._string_vars.discard(name)
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
+            self._blob_var_est.pop(name, None)
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a blob pointer rather than an

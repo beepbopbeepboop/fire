@@ -27,13 +27,15 @@ still stands (a `Random` INSTANCE is 624 words behind a pointer, which is
 which has to agree with CPython to the bit for the two callers'
 differential checks to be worth anything.
 
-**One shape is unavailable on x86-64 and worth knowing before the module is
-written: growing the state.** `s = s + [x]` inside a loop is correct on arm64
-and prints NOTHING on x86-64 past 65 elements (exact: 65 works, 66 exits 1) —
-filed as `bugs/FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements.md`.
-A fixed-size LITERAL state works on both, so a 624-word literal is the way to
-write this; a state built by filling 624 slots in a loop is not, on one
-architecture today.
+**Growing the state used to be unavailable on x86-64 and is FIXED (2026-10-04,
+`work/formal28-6`).** `s = s + [x]` inside a loop printed NOTHING on x86-64
+past 65 elements (exact: 65 worked, 66 exited 1) because a blob's reservation is
+made once per SITE and the site runs once per iteration; `formal/model.py`'s
+`blob_loop_growth` now multiplies a loop-carried site's estimate by the loop's
+compile-time trip count, on BOTH backends, and `s.append(x)` in the same loop
+(which stopped at the second append on both) is fixed by the same change. So a
+state built by filling 624 slots in a loop now works on both machines, as does a
+624-word literal.
 
 **Claim** `sweep20:hostmods-wave3` on `work/formal20-hostmods-wave3`. Written
 2026-10-04 after `formal/hostmods/glob.mojo` landed (commit `d2edb1aa`). The
