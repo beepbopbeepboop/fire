@@ -2,34 +2,98 @@
 
 ## Status
 
-OPEN, and NEW — found 2026-10-04 by `tools/formal_model_fuzz.py`, which runs a
-generated instruction on the CPU and the same bytes through `arm64_step` and
-compares the state. It is the **second** class of finding that tool produces
-(`WRONG` is the first), and it is the worse one: a wrong answer is a false
-theorem about the instruction, while a refusal is a proof about NOTHING.
+**Fourteen of the sixteen counterexamples are LANDED (2026-10-04, `formal28-2`),
+and the number that says so is the fuzzer's own tally, not this file.** Twelve
+memory forms and two flag-setting compares now have model arms, `work_step_*`
+lemmas and generator rows, and both 300-case sweeps went from
+`AGREE 197 / NOSTEP 99` (seed `sweepB`) and `AGREE 208 / NOSTEP 86` (seed
+`sweepC`) to:
 
-**Step 1's first half has LANDED (2026-10-04, `formal28-2`), with a measurement
-attached.** `lib/ProofLib.lean` has `mem_write_u32` — the four-byte write beside
-`mem_write_u64` — and the `STR Wt` arm (0xB9000000) uses it, because `STR Wt` is
-four bytes wide and the arm wrote eight: the four bytes above the stored word
-were clobbered in the model and left alone by the hardware (seed `sweepC`, case
-123). §3's last paragraph is therefore done: the `STR Wt` defect that was "already
-landed as well" is closed, and what remains of step 1 is the NARROWER widths
-(`mem_read_u8`/`mem_write_u8`, `mem_read_u16`/`mem_write_u16`, and
-`mem_read_u32` for the narrow-width loads) plus the two named in §4 step 1 that
-no arm uses yet. `mem_write_u32`'s docstring says why it is a definition and not
-a composition of `mem_write_u64`: the peel lemmas (`mem_read_after_write_u64`,
-the `FrameOk` window family) rewrite `mem_read_u64 ∘ mem_write_u64`, so a 32-bit
-store spelled as a 64-bit write would be *provable* and wrong.
+| seed | before | after |
+|---|---|---|
+| `sweepB` | AGREE 197 WRONG 0 NOSTEP 99 | **AGREE 279 WRONG 0 NOSTEP 17** |
+| `sweepC` | AGREE 208 WRONG 2 NOSTEP 86 | **AGREE 273 WRONG 0 NOSTEP 23** |
 
-**The base-register half of the same family is also landed**, and it is not in
-this document because it was a separate bug
-(`ldr x0, [sp, #32]` modelled as a load from address 32): the three
-unsigned-offset arms now read `Rn` through `arm64_reg_or_sp`, and
-`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` runs those three
-instructions on the CPU. That is the shape of test this document's nine
-encodings want, and it is the reason step 3 below has a template rather than
-being open-ended.
+Every remaining `NOSTEP` is a **`CSEL`** — the one instruction here with its own
+document and its own blocker
+(`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
+whose Status says the certificate is the expensive part and that the certificate
+belongs to another claim), so the reachable set this file names is now empty.
+
+What landed, in the order §4 gives:
+
+1. **The width helpers.** `mem_read_u8` / `mem_read_u16` / `mem_read_u32` /
+   `mem_write_u8` / `mem_write_u16` / `mem_write_u32` in `lib/ProofLib.lean`.
+   Each is a definition and not a composition of the 64-bit pair, because the
+   peel lemmas rewrite `mem_read_u64 ∘ mem_write_u64` — a narrow store spelled
+   wide would be *provable* and wrong.
+2. **The twelve memory arms**, APPENDED at the end of `arm64_step`'s `if` chain
+   with their twelve `work_step_*` lemmas. **Appending is the engineering
+   decision, not a convenience**: the chain is matched by `else if`, so a branch's
+   proof rewrites every earlier condition with an `hne_` of its own, and putting
+   these in the architectural position would have meant editing all 34 existing
+   lemmas. Appending leaves every existing rewrite chain untouched, and the price
+   — that no earlier branch may claim these words — is paid by the twelve new
+   lemmas themselves, each of which states the `¬` fact for all the arms before it
+   as a `bv_decide` over 2^32 words. They would not typecheck if an earlier arm
+   claimed one of these encodings.
+3. **`CMN` and `TST`**, also appended, with `arm64_adds_flags` and
+   `arm64_logic_flags`. See the correction below: **both of their encoders are
+   UNWIRED**, so this is not for the images.
+4. `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` runs all eighteen
+   of these on the CPU and compares `arm64_step`'s final state against it — about
+   two seconds, and the reason three of the mistakes below were caught rather
+   than landed.
+
+**What is left is `CSEL` and `BLR`**, and each is a different kind of work: the
+`CSEL` row is three lines of Lean once a certificate that is not its own problem
+is fixed, and `BLR` needs the `Callee` table machinery (`arm64_step_call`), which
+§3 already says is not "three lines".
+
+## §2 is WRONG about two of its sixteen, and that reorders the work
+
+**`encode_cmn_xn_xm` and `encode_tst_xn_xm` are UNWIRED.** Measured on the tree
+this file was filed against and again on the tree this landed on:
+`grep -c encode_cmn_xn_xm formal/arm64_codegen.py` is **0**, the same for
+`encode_tst_xn_xm`, and both are in `tools/arm64_insn_audit.py::unwired_encoders`.
+§3's "CMN … `encode_cmn_xn_xm` is emitted by `formal/arm64_codegen.py`" is false,
+and so is §2's "Every encoder in the table above is wired" for those two rows.
+
+So the file's own distinguishing test — an encoder no lowering references cannot
+occur in an image, so a model that cannot step it costs nothing — says those two
+cost nothing, and §4's ordering (step 2, two one-line arms, before the eight
+memory arms) was wrong on that basis.
+
+**They are modelled anyway, and the reason is a SECOND consumer of the model.**
+`tools/formal_model_fuzz.py` builds its pool from the ENCODER TABLE, not from
+images, so an unwired encoder still appears there as a `NOSTEP`: on seed `sweepB`,
+38 of them before these two arms, every one `CMN` or `TST`. The audit's test
+answers "can an image contain this", and the fuzzer's tally answers "can the model
+step this" — two questions, and a reader of the second is not told which one the
+first settled. Two arms and two lemmas take it to zero, which is cheaper than the
+alternative (hiding the gap in the pool) and leaves the model complete for
+everything `formal/arm64.py` can produce.
+
+**Three mistakes the hardware caught, each of which is a mask or a formula, and
+each of which a byte-level review would have passed:**
+
+* **The `CMN` flags were modelled as a subtraction.** §3 says "`CMP` is `CMN` with
+  the operands the other way round, so all three are one-line changes to an
+  existing arm's shape". `CMN Xn, Xm` is `ADDS XZR, Xn, Xm` — the flags of the
+  SUM. With `arm64_subs_flags` the model answered a carry bit the subtraction
+  cannot produce: `cmp x10, #2047 ; cmn x12, x7` gave 0x4 where the hardware gave
+  0xc.
+* **`arm64_adds_flags`'s first version was wrong in both formulas.** It used
+  `((a & b) | ((a ^ sum) & (b ^ sum))) >>> 63` for the carry, which is the identity
+  for no addition at all (the right one is `((a & b) | ((a | b) & ~sum)) >>> 63`),
+  and it complemented `a` where the overflow identity complements `a ^ b`. Five
+  wrong out of six hand-picked operand pairs through the fuzzer.
+* **Two masks.** The unscaled pair wanted `0xffe00c00` and got `0xffdffc00`, which
+  clears bit 21 — but bit 21 is FIXED at 0 in that class (the `opc` field is
+  23:22), and the 9-bit offset runs 20:12, so the first version decoded
+  `ldur x7, [sp, #24]` (offset 24 → bit 20 set) as nothing. And the register-offset
+  pair wanted `0xffe0fc00`, not `0xffe00c00`: `option` is bits 15:13 and `S` is bit
+  12, and a mask that leaves them free does not match the instruction's own word.
 
 Every case below is `NOSTEP`: `arm64_step` answered `none`, the CPU ran the
 instruction, and the two disagreed in the only way a step function can disagree
@@ -133,23 +197,37 @@ $ python3 -c "import importlib.util as u; s=u.spec_from_file_location('a',
   (`arm64_step_call`), not just a decode arm, so it is the one row here that is
   not "three lines".
 
-## 4. The exact next step
+## 4. The exact next step — steps 1, 2, 3 and 5 are DONE; see §Status
 
-1. The width helpers, in this order and for the reason in §3: `mem_read_u32`,
+The list is kept as written because the two rows that remain (§4.4 below) are
+still the work, and because steps 1–3 record the order the work actually took,
+which was NOT this one: the helpers and the twelve memory arms first (§Status
+item 2 says why), and `CMN`/`TST` last even though this list puts them second,
+because they are the two an image cannot contain.
+
+1. ~~The width helpers,~~ LANDED, in this order and for the reason in §3:
+   `mem_read_u32`,
    `mem_write_u32`, `mem_read_u8`, `mem_write_u8`, `mem_read_u16`,
    `mem_write_u16` beside `mem_read_u64`/`mem_write_u64` in `lib/ProofLib.lean`,
    with `mem_read_u64 = mem_read_u32 ∘ …`-style equations if the simplifier
    needs them. `mem_read_two_writes_*` are already in the file and are the
    pattern to follow.
-2. `CMN` (2 arms) and `TST` (1 arm). `CMP` is `arm64_subs_flags (arm64_reg xm
-   s) (arm64_reg rn s)` with the operands swapped, so all three are one-line
-   changes to an existing arm's shape.
-3. The eight memory arms, one per encoding, each with its `_STEP_CONDS` row,
-   its `work_step_*` lemma and its `_step_rhs` row in the SAME commit — the
-   `CSEL` doc's §2 is the measurement of what happens when the table and the
+2. ~~`CMN` (2 arms) and `TST` (1 arm).~~ LANDED, and **this row's reasoning was
+   wrong**: `CMN` is `ADDS`, not `CMP` with the operands swapped, so it needs
+   `arm64_adds_flags` and not `arm64_subs_flags` — §Status has the measurement.
+3. ~~The eight memory arms, one per encoding, each with its `_STEP_CONDS` row,
+   its `work_step_*` lemma and its `_step_rhs` row in the SAME commit~~ LANDED,
+   and there were **twelve** rather than eight: the list above counted the
+   counterexamples, and `LDR Wt`, `LDUR` and `STUR` were in it while the register-
+   offset pair and the two sign-extending loads were not called out separately.
+   The `CSEL` doc's §2 is the measurement of what happens when the table and the
    model move apart, and `check_step_conds` is what catches it.
-4. `CSEL` and `BLR` last, and only after their own docs' blockers.
-5. Re-run the tool. The number to move is the NOSTEP column of §1's per-mix
+4. **`CSEL` and `BLR` are what remains**, and each is a different kind of work:
+   the `CSEL` row is three lines of Lean once a certificate that is not its own
+   problem is fixed (its own document says so), and `BLR` needs the `Callee`
+   table machinery `arm64_step_call` provides, which §3 already says is not three
+   lines.
+5. ~~Re-run the tool.~~ DONE — the table is §Status's, measured. The number to move is the NOSTEP column of §1's per-mix
    table, and it should be measured rather than asserted:
    `python3 tools/formal_model_fuzz.py --cases 300 --seed sweepB`.
 6. **The harness's own coverage note.** `tools/formal_model_fuzz.py` puts a

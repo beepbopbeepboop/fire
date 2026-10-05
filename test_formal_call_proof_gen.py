@@ -3969,6 +3969,32 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         ("ldr x7, [sp, #64]", lambda A: A.encode_ldr_xt_xn_imm(7, 31, 64)),
         ("str x7, [sp, #32]", lambda A: A.encode_str_xt_xn_imm(7, 31, 32)),
         ("str w7, [sp, #32]", lambda A: A.encode_str_wt_wn_imm(7, 31, 32)),
+        # The twelve narrower/unscaled forms and the two flag-setting compares,
+        # all of which `arm64_step` refused to step before this class existed's
+        # subject was fixed. The register-offset pair is the one that cannot be
+        # spelled `[sp, …]`, so it is the one case where the base register is a
+        # name rather than the stack pointer — and that is exactly why it is here:
+        # a pool that only drew SP-relative forms would never have noticed the
+        # register-offset mask being wrong.
+        ("ldrb w7, [sp, #8]", lambda A: A.encode_ldrb_wd_wn(7, 31, 8)),
+        ("strb w7, [sp, #8]", lambda A: A.encode_strb_wd_wn(7, 31, 8)),
+        ("ldrh w7, [sp, #8]", lambda A: A.encode_ldrh_wt_wn_imm(7, 31, 8)),
+        ("strh w7, [sp, #8]", lambda A: A.encode_strh_wt_wn_imm(7, 31, 8)),
+        ("ldrsb x7, [sp, #8]", lambda A: A.encode_ldrsb_xt_xn_imm(7, 31, 8)),
+        ("ldrsh x7, [sp, #8]", lambda A: A.encode_ldrsh_xt_xn_imm(7, 31, 8)),
+        ("ldrsw x7, [sp, #8]", lambda A: A.encode_ldrsw_xt_xn_imm(7, 31, 8)),
+        ("ldr w7, [sp, #8]", lambda A: A.encode_ldr_wt_wn_imm(7, 31, 8)),
+        ("ldur x7, [sp, #-8]", lambda A: A.encode_ldur_xt_xn_imm(7, 31, -8)),
+        ("stur x7, [sp, #-8]", lambda A: A.encode_stur_xt_xn_imm(7, 31, -8)),
+        ("ldr x7, [x9, x4]", lambda A: A.encode_ldr_xt_xn_xm(7, 9, 4)),
+        ("str x7, [x9, x4]", lambda A: A.encode_str_xt_xn_xm(7, 9, 4)),
+        # `CMN` and `TST`: the flags-only pair, and the only two cases here whose
+        # answer lives in PSTATE rather than in a register. They are the rows the
+        # fuzzer's `flags` and `select` mixes draw, and the comparison reads them
+        # back through four conditional branches, so an agreement here is an
+        # agreement about all four flag bits.
+        ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
+        ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
     )
 
     @classmethod
@@ -3992,11 +4018,17 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         out = []
         for text, enc in self.CASES:
             regs = [0x0102030405060708] * 31
+            # `x9` and `x4` point into the window and `x4` is a small offset, so
+            # the register-offset pair addresses inside it — the harness reads
+            # memory outside the window as a fault, which is a fact about the
+            # pool and not about the model.
+            regs[9] = fm.MODEL_SP
+            regs[4] = 8
             # A distinctive byte above each access as well as at it, so a store
             # that is too WIDE shows up as a difference rather than as a value
             # that happens to match.
             mem = bytearray(b"\x11" * (fm.MEM_HI - fm.MEM_LO))
-            for off in (32, 64):
+            for off in (8, 32, 64):
                 for k in range(8):
                     mem[fm.MODEL_SP + off - fm.MEM_LO + k] = 0xA0 + k
             words = [struct.unpack("<I", A.encode_cmp_xn_imm(0, 1))[0],
