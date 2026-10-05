@@ -29,6 +29,32 @@ the language lets a query be written, not in a coverage number. The residue is
 unchanged and is still the residue: Blocker 1's two permanent refusals and the
 `-mcpu=` feature of item 4.**
 
+**RE-MEASURED 2026-10-05 (`work/formal29-5`), and THE GATE HAS MOVED AGAIN —
+so the warning two paragraphs below is now the live state of this document and
+not a correction that has been overtaken.** `python3 fire.py build --formal
+--no-prove -o .tmp/out/info ../new-modular/Mojo/stdlib/std/sys/info.mojo`,
+arm64, one build:
+
+    build: info.mojo imports 'std.collections.string.string_span', which cannot
+    be built either: `FormatStruct` is called, and it is imported from
+    `std.format._utils`, so the call has to bind a symbol `std.format._utils`
+    exports. That module does not export it, and the reason is `doc/ABI.md`'s
+    export rule rather than anything else.
+
+**Two of the three gates this document has named are now gone**: the 2026-10-03
+measurement below stopped at `binary_heap.mojo`'s `pop()` (the mutator-return
+refusal, fixed since), and today it stops at an EXPORT — `std.format._utils` not
+exporting `FormatStruct` — which is the same refusal `std/builtin/builtin_slice.mojo`
+reports and which is the largest single wall in the `std/collections` slice
+(`bugs/FORMAL_sweep14_std_collections.md`'s header table, measured the same day).
+**So the sentence "A planner who measured the gate this document names would
+measure the wrong thing" is now true of the sentence itself, and the reader who
+wants the right thing wants the one above.** What has NOT moved: neither of
+Blocker 1's two permanent refusals (`target_has_feature`, and `_current_target()`
+asking for the target as a value), so `info.mojo` still does not build and
+neither do the files behind it, and item 4 below is still a feature rather than
+a fix.
+
 **Re-measured 2026-10-03 a second time (`work/formal16-8`): the gate this
 document names is no longer the one that fires, and the one that does belongs to
 another claim.** The table below says all three rows are stopped by "the dylib

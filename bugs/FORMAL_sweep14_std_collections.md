@@ -1,5 +1,37 @@
 # FORMAL_sweep14_std_collections: `std/collections`, `std/memory` and `std/algorithm` on both architectures
 
+**RE-MEASURED 2026-10-05 (`work/formal29-5`), and THREE OF THE SIX WALLS HAVE
+MOVED — which is the whole content of this document, refreshed.** Each wall was
+built directly (`tools/formal_sweep.py -j 1 -t 120 <file>` on the stdlib
+checkout at `../new-modular`, one build each), and the terminal cause of three of
+the four largest rows is no longer what §3 names:
+
+| §3's wall | files in this slice | what it says NOW | measured |
+|---|---:|---|---|
+| `binary_heap.mojo`'s `pop()` | **25** | **`self.unsafe_ptr()` is a method call on a value** — the mutator-return refusal is GONE, and the file's terminal cause is a `Pointer` method | `CODEGEN`, arm64 |
+| `builtin_slice.mojo`'s `self = other` | **13** | **`FormatStruct` is imported from `std.format._utils`, which does not export it** — the doc's export rule, on a different name | `CODEGEN`, arm64 |
+| `tile.mojo`'s `workgroup_function[…](…)` | **4** (+2 in `format_int.mojo`) | **`the body reads 'tile_size_list', its *-parameter, and this path has no variadic ABI`** | `CODEGEN`, arm64 |
+| `type_dict.mojo`'s parameter binding | 1 | unchanged — still `Self._index` reads a `comptime` class attribute whose value is `Self.keys.try_index(key)` | `CODEGEN`, arm64 |
+
+**AND ONE WALL NOW STANDS IN FRONT OF BOTH OF THE BIGGEST ONES.** Every file
+measured above that is not yet refused in its own body stops at the same
+sentence — `` `FormatStruct` is called, and it is imported from
+`std.format._utils`, so the call has to bind a symbol `std.format._utils`
+exports. That module does not export it `` — and `std/sys/info.mojo`, which
+this project has measured six times over for a different reason
+(`bugs/FORMAL_target_query_evaluator.md`), now reports it too, where it used to
+report `binary_heap`'s `pop()`. **So the export rule is the largest single wall
+in this area, ahead of both rows §6 called items 1 and 2, and it is one missing
+export in one module rather than 38 files of anything.** Whether
+`std/format/_utils.mojo` can export it is a one-line question this session did
+not ask, and it is the first thing a planner should measure: it is the wall
+`FORMAL_stdlib_module_names_are_not_classified` and the `-77` files behind it
+both sit behind.
+
+**Everything below is the 2026-10-04 measurement and is kept as it was**,
+because it is the record of what the row was and the three rows above are what
+it is now; §6's ordering is stale in the same way §3's table is, and §6 says so.
+
 **53 files, and the two architectures are the same sweep again: every file has
 the same class on arm64 and on x86-64, and 3 of 53 build.** The 46 files refused
 in a module they import are behind **six** module walls, and **25 of the 46 are
@@ -195,7 +227,19 @@ either way; the wall and the in-file row are the same refusal.
 
 ## 6. What this slice needs, in order
 
-1. **`binary_heap.mojo`'s `pop()`** — 25 of the 46 rows here, ~165 in the corpus,
+**STALE IN ITS FIRST THREE ITEMS as of 2026-10-05 — see the header table.**
+Item 1 is DONE by somebody else and the row moved; item 2's refusal is gone and
+its row moved onto the export rule; item 3's refusal is gone and its rows moved
+onto the variadic ABI. **The order to measure in now is: (0) the
+`std.format._utils` export of `FormatStruct`, which stands in front of items 1,
+2 and 3 at once, then (1) `binary_heap.mojo`'s new `self.unsafe_ptr()` row,
+then (2) `builtin_slice.mojo` past the export gate.** Items 4-6 below are
+unchanged and still not this claim's.
+
+1. ~~**`binary_heap.mojo`'s `pop()`**~~ — **FIXED between 2026-10-04 and
+   2026-10-05** (`formal/model.py`'s one-field-mutator receiver handover, which
+   this claim's own `5f8ba760`-era neighbour work records). 25 of the 46 rows
+   here, ~165 in the corpus,
    and the export gate that used to sit behind it is gone. Not this claim's row.
 2. **`builtin_slice.mojo`'s `self = other`** — 13 rows here, 43 in the corpus.
    Not this claim's row.

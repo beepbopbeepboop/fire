@@ -5,6 +5,12 @@
 which is the number every host-import row in this project predicts. §5 items 2-5
 remain and each is named below with why it is not this wave's.
 
+**Status 2026-10-05 (`work/formal29-5`): §5 item 2, `random`, is DONE** —
+`formal/hostmods/random.mojo` and `test_formal_random.py`, **8 of the 8 files
+changed class, 1 reached an in-file finding, 0 passes**, which is the number
+every host-import row in this project predicts. §5 items 3-5 remain and each is
+named below with why it is not this wave's.
+
 **Status 2026-10-04 (`work/formal25-6`): §5 item 2, `random`, is REACHABLE —
 measured, both architectures — and is a real module-sized job, not an afternoon.
 The three pieces a Mersenne Twister needs were each measured on this path and
@@ -27,6 +33,15 @@ still stands (a `Random` INSTANCE is 624 words behind a pointer, which is
 which has to agree with CPython to the bit for the two callers'
 differential checks to be worth anything.
 
+**Two of those three pieces were measured on a LOCAL list, and the module needs
+the state to be MODULE-level, which is the premise the 2026-10-05 work
+measured separately and which is the one thing worth carrying forward from
+this paragraph: a module's OWN `global` HAS storage and survives across calls
+in one process** (see §1a below). That is what makes the row reachable at all,
+and `bugs/FORMAL_module_state_no_storage.md`'s framing does not describe it —
+`formal/imports.py`'s own `module_attribute_refusal` advice ("give it an
+accessor … which reads the same slot and lowers today") already assumed it.
+
 **Growing the state used to be unavailable on x86-64 and is FIXED (2026-10-04,
 `work/formal28-6`).** `s = s + [x]` inside a loop printed NOTHING on x86-64
 past 65 elements (exact: 65 worked, 66 exited 1) because a blob's reservation is
@@ -36,6 +51,12 @@ compile-time trip count, on BOTH backends, and `s.append(x)` in the same loop
 (which stopped at the second append on both) is fixed by the same change. So a
 state built by filling 624 slots in a loop now works on both machines, as does a
 624-word literal.
+
+**What is still the only spelling of the module-level state that works is the
+LITERAL**, and that is a different shape from loop growth and was measured
+separately: `[0] * 624` at module level builds and then prints NOTHING on BOTH
+architectures, while the 624-word literal reads back correctly at every size
+tried (4, 65, 66, 128, 624).
 
 **Claim** `sweep20:hostmods-wave3` on `work/formal20-hostmods-wave3`. Written
 2026-10-04 after `formal/hostmods/glob.mojo` landed (commit `d2edb1aa`). The
@@ -100,6 +121,73 @@ reader deciding what to do next should read that as: the `glob` row is closed an
 the row behind it is somebody else's, which is the queue's answer and not a
 disappointment.
 
+## 1a. `random`, and the premise the row rests on (2026-10-05)
+
+`formal/hostmods/random.mojo` — `seed`, `randrange` — a Mersenne Twister over
+a 624-word module-level state, transcribed from CPython 3.14's
+`Modules/_randommodule.c` and checked answer-by-answer against CPython's own
+`random` on both architectures by `test_formal_random.py` (8 groups: the two
+call sites in this repository verbatim — 320 draws; one case per branch of
+`getrandbits`; 700 draws so the 624-word twist is inside the corpus; 15 seeds of
+one to three key words in both signs and zero; 7 widths just under a power of
+two so the rejection loop runs; the two ranges CPython raises on as the `-1`
+statuses they are here; and the four names the module does not publish refused
+by name).
+
+**THE PREMISE, measured before any of it was written, and it is the part worth
+keeping: a module's OWN `global` HAS storage, and it survives across calls inside
+one process.** A module-level `var` written through `global` by one function and
+read by another — arm64 exit 186, x86-64 exit 186, CPython 186 — and the same
+through a module-level `List[Int]` subscript: 211 on both, CPython 211.
+
+This is what `formal/imports.py`'s own `module_attribute_refusal` has been
+telling callers ("give `{mod}` an accessor … which reads the same slot and
+lowers today"), and it is NOT what `bugs/FORMAL_module_state_no_storage.md`'s
+title says. **The two are about different things and the difference is worth a
+sentence: a module's own globals have a home in its `__DATA`, while a value
+that has to CROSS a dylib boundary does not** — which is why `os.environ` is
+still refused and why a `Random` instance is still unreachable. The doc this
+one names is not mine to edit, so the note beside `random` in `HOST_MODELLED`
+records it where the ranking reads it.
+
+**What the row was worth, measured, and 0 passes is the number every host-import
+row in this project predicts.** All eight files re-swept
+(`tools/formal_sweep.py -j 2 -t 120 --no-stdlib`, arm64):
+
+| | before | after |
+|---|---|---|
+| `not-answerable/host-import` on `random` | **8** | **0** |
+| `codegen` (a finding IN the file) | 0 | **1** |
+| `not-answerable/host-import` on a DIFFERENT module | 0 | **6** |
+| `not-answerable/unresolved-import` (a sibling module) | 0 | **1** |
+| **files that changed class** | | **8 of 8** |
+| **pass** | **0** | **0** |
+
+The one file that reached an in-file finding is `test_formal_hashlib.py`, whose
+first refusal is an f-string at line 137 — a string with no buffer to compose
+in, which is `FORMAL_string_composition_has_no_buffer`'s row. The six that are
+behind a different host import are `fractions` ×1 (`test_formal_time.py`),
+`inspect` ×1 (`test_gimple.py`) and `collections` ×4 (the three
+`tools/formal_*fuzz.py` and `formal/x86_64_model_fuzz.py`'s sibling), so **the
+destination of this row is now mostly a CLAIMED row**
+(`module:platform+fnmatch+collections-rest`) and one fact about the target.
+
+**The five `Random(seed)` files are not a module-sized job and never were**, and
+§2.1's reasoning above is what said so first: a `Random` is an object with 624
+words of state behind a pointer, so it is `FORMAL_module_state_no_storage` and
+not a `.mojo` file's to fix. Four of the five also pass a STRING
+(`random.Random(f"{seed}:{index}:{mix}")`), which is CPython's version-2 seed —
+`sha512` of the bytes folded into a big integer — and a big-integer
+construction is not a value here at all. So the row's ceiling was 2 of 8 files
+when this doc was written and the ceiling is what landed.
+
+**A bug was found on the way, in another worker's area, and is filed rather
+than fixed:** `bugs/FORMAL_x86_64_seven_argument_call_evaluates_its_stack_arguments_first.md`
+— on x86-64 a call with seven or more integer arguments evaluates its
+STACK-passed arguments first, so a corpus that printed six `randrange` calls in
+one `printf` answered a rotation of CPython's sequence on one architecture and
+the right one on the other. arm64 and the gimple path are both right.
+
 ## 2. The ranking after `glob`, and why "the next 4-6 modules" is not there
 
 `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`, with `glob`
@@ -117,7 +205,7 @@ table as it stands rather than as it stood):
 | 10 | ? | modelled | `itertools` | not measurable (frozen) | §3 |
 | 10 | **10** | modelled | `types` | `ModuleType` x7, `SimpleNamespace` x4 | §3: a type factory. **The 0 was a tool defect**, `6a7c36bb` |
 | 7 | 3 | unreachable | `signal` | `signal` x3 | a process-wide host object |
-| 4 | 4 | modelled | `random` | `Random` x3, `seed` x3, `randrange` x2 | §3: reachable, and it is 4 files |
+| ~~4~~ | 4 | modelled | ~~`random`~~ | `Random` x3, `seed` x3, `randrange` x2 | **WRITTEN 2026-10-05**, §1a — this table is the `-9` census; today's reads **8 files, 7 uses** (`Random` x5, `randrange` x2, `seed` x2) on `bugs/sweeps/sweep-arm-12.txt` |
 | 4 | 4 | modelled | `inspect` | `getsource` x6, `signature` x5, `getsourcelines` | §3: needs a live interpreter's frames |
 | 3 | 3 | unreachable | `importlib.util` | `module_from_spec`, `spec_from_file_location` | an embedded CPython |
 | 2 | 2 | modelled | `datetime` | `datetime.now()` | a clock this tree reads plus a shaped record; `FORMAL_time_struct_shaped_answers.md` |
@@ -147,7 +235,12 @@ to three hours including the corpus, 1 file moved, 0 passes. `shlex.join` is
 `" ".join(map(quote, argv))` — a generator and a list, so not in reach by the
 same argument (`fnmatch.iglob`'s shape); `shlex.shlex` is a streaming reader.
 
-**`random` — 4 files, and reachable for a reason nobody had written down.**
+**~~`random` — 4 files, and reachable for a reason nobody had written down.~~
+DONE 2026-10-05, §1a: `formal/hostmods/random.mojo`, and the accounting is
+**2 of 8 files moved into `codegen`'s neighbourhood, 8 of 8 changed class, 0
+passes.** The reasoning below was right about the catch and optimistic about the
+rest, so both halves are worth reading next to what landed:
+
 `arc4random_buf` is in libSystem and is already called
 (`formal/hostmods/tempfile.mojo` uses it for `mkdtemp`'s eight characters), and
 CPython's `Random` is a **Mersenne Twister**: pure integer arithmetic over a
@@ -161,6 +254,18 @@ of state**, so `test_gimple.py`'s `rng = random.Random(20260930)` and
 (`FORMAL_module_state_no_storage`), and only the two module-level spellings
 (`seed` then `randrange`) are in reach: **2 of the 4 files, not 4.** It is worth
 a worker's afternoon and it is not worth this one.
+
+**WHAT THAT PARAGRAPH GOT WRONG, measured: `seed(n)` and `randrange(a, b)` are
+computable here only because a module's own `global` has storage and survives
+across calls** (§1a), and nothing in this section said so — the argument above
+rests on "no host object involved", which is true of the ALGORITHM and silent
+about where its 624 words live. A reader who took this section at its word would
+have written the module with the state in a parameter and found that no caller
+spells it that way. And the module turned out to be a day rather than an
+afternoon for a reason this section also did not say: `getrandbits(k)` for
+`33 <= k` has a wrong answer that LOOKS right (`((w0 | (w1 << 32)) >> (64-k))`
+drops the low word's top bits, so `k = 33` gives 2 bits and every answer is under
+`2**32`), and only a corpus compared against CPython finds it.
 
 ## 3. Why each of the rest is not work, in the order a reader will ask
 
@@ -258,11 +363,18 @@ no lean invocation, no gate.
    example of a module in NO tier; `test_formal_link_accounting.py` accounts for
    it beside `html`, `posixpath` and `glob`).
 1. ~~**`shlex`, 1 file.**~~ Done, above.
-2. **`random`, 2 of 4 files.** `arc4random_buf` is in libSystem and a Mersenne
-   Twister is integer arithmetic; the two module-level callers
-   (`test_formal_hashlib.py`, `test_formal_time.py`) already compare against
-   CPython's own. The two `Random(seed)` callers need an object with 624 words of
-   state and are behind `FORMAL_module_state_no_storage`.
+2. ~~**`random`, 2 of 4 files.**~~ **DONE 2026-10-05** — §1a, and the row is
+   CLOSED at the 2 files it could reach. `formal/hostmods/random.mojo` is
+   `seed` and `randrange` and nothing else, **8 of 8 files changed class, 1
+   reached an in-file finding, 0 passes**, and the row's destination is now
+   `collections` ×4 (claimed), `inspect` and `fractions` (facts about the
+   target) and one unresolved sibling import. The five `Random(seed)` callers
+   need an object with 624 words of state and are behind
+   `FORMAL_module_state_no_storage`, four of them through a STRING seed besides.
+   **What this item did not say and §1a measures: the premise is that a
+   module's OWN `global` has storage and survives across calls**, which is why
+   the arithmetic was reachable at all and which no other row in this file
+   needed.
 3. **`zlib`, 27 files.** A project, not a patch, and the entry in
    `formal/imports.py` says so with the argument. Whoever takes it should read
    `bugs/FORMAL_subprocess_row_measured_b7.md` §5 item 1 first.
@@ -281,8 +393,16 @@ no lean invocation, no gate.
 export PATH=/opt/homebrew/bin:$PATH
 cd "$(git rev-parse --show-toplevel)"
 
-# §1 and §2: the ranking, and the slice it names.
-python3 tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt
+# §1a: the row, its eight files, and their class after the module.
+python3 tools/memslot.py --gb 8 --label sw -- python3 tools/formal_sweep.py \
+  -j 2 -t 120 --no-stdlib formal/x86_64_model_fuzz.py test_formal_fuzz.py \
+  test_formal_hashlib.py test_formal_time.py test_gimple.py \
+  tools/formal_fuzz.py tools/formal_model_fuzz.py tools/formal_proof_fuzz.py
+python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_random.py
+
+# §1 and §2: the ranking, and the slice it names.  (`-12` is the current
+# census; §2's table is `-9` and says so.)
+python3 tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-12.txt
 python3 .tmp/rowfiles.py bugs/sweeps/sweep-arm-9.txt glob > .tmp/glob50.txt
 
 # §1: the re-sweep of exactly those 50 files, and the class delta.
