@@ -75,7 +75,8 @@ from mojo.middle.stmts_shared import _annotation_container_elem_type
 # for-loop lowering that has the same per-slot walk — see
 # `_compr_list_loop`'s own comment and `starred_slot_index`'s docstring.
 from mojo.middle.loops_shared import (
-    _emit_starred_slot_list, starred_slot_index, starred_slot_name,
+    _emit_starred_slot_list, _single_loop_target_name, starred_slot_index,
+    starred_slot_name,
 )
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
@@ -4608,8 +4609,18 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
-        gen._declare_var(gen0.target, vct,
-                        force=_compr_target_is_shadowed(gen, gen0.target))
+        # `[x for x, in gen()]` binds ONE name, and `gen0.target` is the
+        # literal string `'(x,)'` — `_single_loop_target_name` is the reader
+        # that knows the trailing comma is a spelling rather than a second
+        # slot. Declaring the raw string emitted `int64_t (x,);`, which is not
+        # a C declaration, so the comprehension did not compile. A multi-slot
+        # target over a generator whose yield arity was never recorded is the
+        # other mismatch and is filed
+        # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
+        _one = _single_loop_target_name(_target_str)
+        _tgt = _one if _one is not None else gen0.target
+        gen._declare_var(_tgt, vct,
+                        force=_compr_target_is_shadowed(gen, _tgt))
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -4624,7 +4635,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         # _cname, not the raw Python name: see _compr_range_loop's
         # reserved-identifier comment (`index` et al. are renamed by
         # _declare_var; body reads resolve through _c_names).
-        gen._emit(f"  {gen._cname(gen0.target)} = {val};")
+        gen._emit(f"  {gen._cname(_tgt)} = {val};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

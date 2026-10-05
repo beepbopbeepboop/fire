@@ -3634,6 +3634,41 @@ def main():
         print(a, b, c, d)
 """, "3\n1 2 3\n4 5 6 7\n")
 
+    # A `for`/comprehension target over a generator that yields ONE value per
+    # resume. `(x,)` is how a ONE-slot unpacking target is spelled — the
+    # trailing comma is a spelling and not a second slot — and the consumer
+    # declared the target's own STRING as a C variable, so every one of these
+    # failed to COMPILE with gcc's "expected ')' before ',' token" plus an
+    # undeclared-identifier error for the name the loop body reads.
+    # `Tools/c-analyzer/c_parser/preprocessor/__init__.py` is the real file
+    # that hit it (`for patterns, in _resolve_file_values(...)` and
+    # `[i for i, in _resolve_file_values(...)]`), which is how it was found.
+    #
+    # The tuple-target rows above are the other half of the same fix and were
+    # red for the same reason: the per-slot names are declared by
+    # `_emit_generator_tuple_unpack` from the generator's OWN slot types, so
+    # declaring the raw target string as well was never anything but invalid C.
+    test_generator_stdout("gen_one_slot_tuple_target_binds_one_name", """\
+def nums(n: Int):
+    yield 1
+    yield 2
+
+def main():
+    for x, in nums(1):
+        print(x)
+    for y, in nums(2):
+        print(y * 10)
+""", "1\n2\n10\n20\n")
+    test_generator_stdout("gen_one_slot_tuple_target_comprehension", """\
+def nums(n: Int):
+    yield 1
+    yield 2
+    yield 3
+
+def main():
+    print([x for x, in nums(1)])
+""", "[1, 2, 3]\n")
+
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a

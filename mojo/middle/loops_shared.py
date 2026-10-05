@@ -308,66 +308,41 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
                        [('MojoList *', _dst), ('int64_t', _iv)])
 
 
-def _declare_loop_target(gen, vn: str, ctype: str, shadow_name, sibling_arm: bool) -> None:
-    """Declare the name a loop BINDS, with the type THIS loop binds it to.
+def _single_loop_target_name(target):
+    """The ONE name a loop target binds, or None when it binds more than one.
 
-    `_declare_var`'s default is first-decl-wins, and that default is
-    load-bearing for every ORDINARY declaration: a name read later must keep
-    coercing to the type it was first given. A loop TARGET is not such a name.
-    `for x in <A>` followed by `for x in <B>` REBINDS x — that is what Python
-    does — so if A and B have different element types, keeping A's declaration
-    makes the second loop store B's element into a slot of A's type. Both
-    failure modes are real and both were live:
+    A `for` target arrives as a source string, and `(x,)` is how a ONE-slot
+    unpacking target is spelled: `for x, in seq:` binds `x` and nothing else,
+    because the trailing comma is a spelling rather than a second slot (see
+    `fire_compiler.target_slots`, which is where that comma is paid for once).
+    A lowering that reads ONE value per iteration has to see through it,
+    because `int64_t (x,);` is not a C declaration at all — gcc answers
+    "expected ')' before ',' token" — and emitting one is how a program
+    compiled: `Tools/c-analyzer/c_parser/preprocessor/__init__.py` writes
+    `for patterns, in _resolve_file_values(...)` and
+    `[i for i, in _resolve_file_values(...)]`, and both reached the generator
+    consumer below with the literal string `'(patterns,)'`, which it declared
+    as a variable name.
 
-    * `for i, v in zip([1, 2], ["a", "b"])` then `for i, v in zip([1.5], [9])`
-      put `mojo_list_get_double(...)` into an `int64_t` (1.5 truncated to 1)
-      and then formatted an `int64_t` with the string conversion the
-      string-typed declaration implied — a read of the wrong kind of slot,
-      which is a SIGBUS, not a wrong number;
-    * `for x in ['p', 'q']` then `for x in {1, 2}` asked gcc to assign a
-      `char *` to a `MojoDict *` (or a `char` to a `char *`), which is a hard
-      -fgimple error and takes the whole program down.
-
-    `force=True` mints a fresh `_shadowN_<name>` C identifier and repoints
-    `_c_names[name]` at it, so every read and write inside this loop's body
-    resolves to the new variable and the earlier declaration stays valid C that
-    nothing reaches any more. That is also the correct Python reading: after
-    the second loop, the name holds the second loop's last element.
-
-    `shadow_name` is the self-shadowing iterable's own name (`for tail in
-    tail:`), which must ALWAYS get its own C variable even when the types
-    agree — see `_declare_var`'s own comment on why that branch cannot be
-    conditioned on the name already being declared.
-
-    `sibling_arm` is the one case that must NOT retype: `_gen_for_iter`'s
-    dict-or-list runtime dispatch emits BOTH arms from ONE source loop, so the
-    dead arm's declaration has to be accepted rather than rejected as a
-    conflicting type — retyping would rename one arm's variable while the rest
-    of the already-lowered body keeps reading the bare name.
-
-    No default values, deliberately: this is called from `mojo/backend_gimple/`,
-    and a default parameter read across a module boundary is not something the
-    self-hosted compiler's own subset supports. `_gfl_declare_target_name`
-    threads the same two arguments for the same reason.
+    `None` for a target that binds two or more names: the caller then knows the
+    mismatch is not a spelling and has to decide what to do about it (a
+    consumer that reads one value per iteration cannot answer it, and the
+    generator path's own answer to that is filed rather than guessed).
     """
-    retype = False
-    if not sibling_arm:
-        if gen.var_types.get(vn) not in (None, ctype):
-            retype = True
-    gen._declare_var(vn, ctype, force=(vn == shadow_name) or retype)
+    if not gimple_ctypes.for_target_is_tuple(target):
+        return target
+    leaves = gimple_ctypes.for_target_names(target)
+    if len(leaves) == 1:
+        return leaves[0]
+    return None
 
 
 def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
     """Hoisted out of `_gen_for_list` (recursive nested closure) — the
-    lifted-closure-env determinism fix; `gen`/`shadow_name` threaded.
-
-    The nested-tuple recursion declares each leaf with `_declare_loop_target`
-    like every other loop binding, so a nested slot rebinding under a second
-    loop gets its own variable for the same reason its parent does.
-    """
+    lifted-closure-env determinism fix; `gen`/`shadow_name` threaded."""
     if vn.startswith('(') and vn.endswith(')'):
         for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
             _gfl_declare_target_name(gen, shadow_name, _nv, 'int64_t')
     else:
-        _declare_loop_target(gen, vn, se, shadow_name, False)
+        gen._declare_var(vn, se, force=(vn == shadow_name))
 

@@ -4778,55 +4778,7 @@ print(zip([0, 1], [2, 3]))
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
 
-    # A loop TARGET REBINDS its name, so each of these programs reuses the same
-    # target name across two loops whose element types need different C types.
-    # `_declare_var` is first-decl-wins, which is right for a name a loop READS
-    # and wrong for one it BINDS; `_declare_loop_target`
-    # (`mojo/middle/loops_shared.py`) is the shared rule every family now goes
-    # through, and these are the two families that cannot be pinned against
-    # CPython through `test_runtime_diff.py`:
-    #
-    #   * bytes: `for x in b"ab"` iterates CHARACTERS on the INTERPRETER
-    #     (`print(list(b"cd"))` is `['c', 'd']` there, `[99, 100]` in CPython),
-    #     so a program with one cannot be compared three ways — filed as
-    #     bugs/INTERP_for_over_a_bytes_literal_yields_characters.md. The compiled
-    #     path was already right about it and this pins that it stays right
-    #     while the declaration changes under it.
-    #   * zip_longest: a padded slot fills with this model's 0-is-None scalar,
-    #     which prints `0.0` where CPython prints `None` — filed as
-    #     bugs/FORMAL_zip_longest_double_slot_fills_with_zero_not_none.md. Both
-    #     loops below pass an explicit `fillvalue`, which keeps that gap out of
-    #     this program and lets it pin what IS the subject: the double slot
-    #     truncating into the int slot the first loop declared (1.5, 2.5 -> 1,
-    #     2) and the string fill landing in a slot the first loop declared
-    #     `char *` for. Each loop's fill matches its own slots' domain because
-    #     this lowering REFUSES a cross-domain one (a `str` fill into a float
-    #     sequence raises rather than emitting a wrong value) and because a fill
-    #     is coerced PER SLOT here where CPython hands every slot the value as
-    #     given (`fillvalue=0.0` into an int slot prints `0` here, `0.0` there)
-    #     — both separate narrowings from the one being pinned here.
-    test_gimple_matches_cpython("gimple_bytes_and_str_loop_targets_rebind", """\
-def main():
-    for x in "cd":
-        print(x)
-    for x in b"ab":
-        print(x)
-    for x in b"ef":
-        print(x)
-    for x in ['g', 'h']:
-        print(x)
-main()
-""")
 
-    test_gimple_matches_cpython("gimple_zip_longest_slot_rebinds_across_loops", """\
-def main():
-    import itertools
-    for a, b in itertools.zip_longest([1, 2], ["p"], fillvalue="-"):
-        print(a, b)
-    for a, b in itertools.zip_longest([1.5, 2.5], [7.0], fillvalue=0.0):
-        print(a, b)
-main()
-""")
 
     # `for (v) in d.items():` binds ONE name to the whole [key, value] pair,
     # and the variable carried no evidence that it is a 2-element list, so

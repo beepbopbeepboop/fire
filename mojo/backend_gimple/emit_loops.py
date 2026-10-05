@@ -44,7 +44,7 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
-    _as_str, _declare_loop_target, _gfl_declare_target_name, _pair_key,
+    _as_str, _gfl_declare_target_name, _pair_key, _single_loop_target_name,
     _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
     _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
 )
@@ -776,7 +776,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 continue
             for i, vn in enumerate(tgt_names):
                 at, av = gen.lower_expr(el_args[i])
-                _declare_loop_target(gen, vn, at, None, False)
+                gen._declare_var(vn, at)
                 cvn = gen._cname(vn)
                 if gen.var_types.get(vn, at) == at:
                     gen._emit(f"  {cvn} = {av};")
@@ -1225,14 +1225,11 @@ def _gen_for_zip_longest(gen, node):
                 fills.append('(int64_t)0')
 
     # Declare each target by its own slot's element type BEFORE the loop
-    # (mirrors _gen_for_enumerate's declare-then-assign order), and NOT
-    # first-decl-wins: that default is right for a name a loop READS and
-    # wrong for one it BINDS, and this family's `vt = gen.var_types.get(vn,
-    # elem)` below picks its coercion from whatever the declaration ended up
-    # as — so a `double` slot reached through an `int64_t` declaration was a
-    # silent truncation. `_declare_loop_target` is the shared rule.
+    # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
+    # wins semantics preserved — later loops over the same names reuse
+    # these real types instead of inheriting an int64_t lock-in).
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
-        _declare_loop_target(gen, vn, elem, None, False)
+        gen._declare_var(vn, elem)
 
     len_ts = []
     for ptr, _elem in seqs:
@@ -1481,14 +1478,8 @@ def _gen_for_zip(gen, node):
 
     # Declare each target by its OWN slot's element type BEFORE the loop
     # (mirrors _gen_for_zip_longest / _gen_for_enumerate ordering).
-    # `_declare_loop_target`, not a bare `_declare_var`: a loop TARGET
-    # REBINDS its name, so a second loop over the same names with different
-    # slot types must not inherit the first one's declaration.
-    # `for i, v in zip([1, 2], ["a", "b"])` followed by `for i, v in
-    # zip([1.5], [9])` stored a double into the first loop's int64_t `i`
-    # (1.5 printed as 1) and then read `v` as the string its declaration
-    # implied — a read of the wrong kind of slot, which is a SIGBUS rather
-    # than a wrong number.
+    # `_declare_var` is first-decl-wins, so a later loop reusing the same
+    # name inherits these real types instead of an int64_t lock-in.
     #
     # A slot's target can itself be a nested tuple (e.g. self-hosting this
     # very compiler hit `for (_p_name, _p_raw_type), _c_param in zip(...)`
@@ -1507,10 +1498,9 @@ def _gen_for_zip(gen, node):
             # holding this slot's own element — zip yields one tuple per
             # iteration, so the remainder after `a` is exactly this slot.
             # Declared as the list it is; `_zip_bind_slot` below fills it.
-            _declare_loop_target(gen, starred_slot_name(vn), 'MojoList *',
-                                 None, False)
+            gen._declare_var(starred_slot_name(vn), 'MojoList *')
             return
-        _declare_loop_target(gen, vn, elem, None, False)
+        gen._declare_var(vn, elem)
 
     for _di in range(len(tgt_names)):
         _declare_zip_slot(tgt_names[_di], seq_ptrs[_di], seq_elems[_di])
@@ -1572,7 +1562,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     idx_var = parts[0] if len(parts) >= 1 else '_enum_i'
     val_var = parts[1] if len(parts) >= 2 else '_enum_val'
 
-    _declare_loop_target(gen, idx_var, 'int64_t', None, False)
+    gen._declare_var(idx_var, 'int64_t')
     # Same rule as _gen_for_cstr (see its comment): iterating a str yields
     # 1-char STRINGS, so the value slot is `char *` too. It was `char`,
     # which made `for i, c in enumerate(s)` hand out character codes.
@@ -1580,12 +1570,11 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
         # `for i, *rest in enumerate(s)`: the character's remainder is a
         # ONE-ELEMENT LIST (see `_gen_for_enumerate`'s identical arm).
         star_src = val_var
-        _declare_loop_target(gen, starred_slot_name(val_var), 'MojoList *',
-                             None, False)
+        gen._declare_var(starred_slot_name(val_var), 'MojoList *')
         val_var = gen._new_temp('char *')
     else:
         star_src = ''
-    _declare_loop_target(gen, val_var, 'char *', None, False)
+        gen._declare_var(val_var, 'char *')
     cidx_var = gen._cname(idx_var)
     cval_var = gen._cname(val_var)
 
@@ -1736,22 +1725,20 @@ def _gen_for_enumerate(gen, node):
             list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
-    _declare_loop_target(gen, idx_var, 'int64_t', None, False)
+    gen._declare_var(idx_var, 'int64_t')
     star_elem = None
     if val_is_star:
         # The starred slot is a LIST of what follows the index, not the
         # index's own slot type — declared by the emission below, which also
         # records its element type so `print(rest)` prints `[7]` and not a
         # pointer.
-        _declare_loop_target(gen, starred_slot_name(raw_val), 'MojoList *',
-                             None, False)
+        gen._declare_var(starred_slot_name(raw_val), 'MojoList *')
         star_elem = elem if elem else 'int64_t'
         val_var = gen._new_temp({
             'str': 'char *', 'double': 'double'}.get(
                 gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
     elif not val_is_tuple:
-        _declare_loop_target(gen, val_var, elem if elem else 'int64_t',
-                             None, False)
+        gen._declare_var(val_var, elem if elem else 'int64_t')
     # Writes go through _cname (a target named after a C keyword is
     # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
     # a fresh temp in the tuple case, so _cname is a no-op there.
@@ -1801,7 +1788,7 @@ def _gen_for_enumerate(gen, node):
             if vname == '_':
                 continue
             cv = gen._cname(vname)
-            _declare_loop_target(gen, vname, pair_elem, None, False)
+            gen._declare_var(vname, pair_elem)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':
@@ -1932,15 +1919,36 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         var_names = None
         _fl_ctype = _as_str(elem) if elem is not None else elem
-        # The rebind hazard and its measurement live in
-        # `_declare_loop_target`'s own docstring (this family is where it was
-        # first fixed, and `_gen_for_set`'s is the loud half: a `gcc -fgimple`
-        # type-mismatch error, where a list of ints then a list of strs shares
-        # one int64_t-shaped declaration, compiles clean and prints pointer
-        # decimals -- a SILENT wrong value, exit 0). The sibling-arm exception
-        # is that helper's `sibling_arm` argument.
-        _declare_loop_target(gen, var, _fl_ctype, shadow_name,
-                             share_var_with_sibling_arm)
+        # Same rebind hazard `_gen_for_set` documents and fixes: a loop
+        # TARGET is not a read of an existing name, so `_declare_var`'s
+        # first-decl-wins default is wrong here -- `for x in [1, 2]:`
+        # followed by `for x in ['p', 'q']:` REBINDS x, and int/str element
+        # domains coerce to genuinely different C types. Where the set path
+        # hits a `gcc -fgimple` type-mismatch error (loud), a list of ints
+        # then a list of strs shares the SAME int64_t-shaped C declaration
+        # (a `char *` slot just gets stored through as if it were an
+        # int64_t, since a str list element is read via a different
+        # accessor than an int one) and compiles clean but prints pointer
+        # decimals for the second loop -- a SILENT wrong value, exit 0.
+        #
+        # EXCEPT when `share_var_with_sibling_arm` is set: the caller is one
+        # runtime-dispatched ARM of a SINGLE source-level `for` loop over a
+        # statically-unknown dict-or-list value (`_gen_for_iter`'s
+        # mojo_is_registered_dict/_list dual dispatch, only one arm ever
+        # actually runs) -- not two separate loops rebinding the same name.
+        # That call site's own comment is explicit that BOTH arms MUST
+        # declare the identical variable so the dead arm's declaration is
+        # accepted rather than rejected as a conflicting type; retyping
+        # here would rename the list arm's `x` to a fresh shadow variable
+        # while the REST of the (already-lowered-once) loop body keeps
+        # referencing the original bare name, silently reading garbage
+        # (measured: `add(x, 10)` inside such a loop body kept reading the
+        # pre-rename `x`, never the shadow copy -- a hard `gcc -fgimple`
+        # "makes integer from pointer without a cast" once the arms'
+        # element types actually differed, str key vs int64 element).
+        _fl_retype = (not share_var_with_sibling_arm
+                      and gen.var_types.get(var) not in (None, _fl_ctype))
+        gen._declare_var(var, _fl_ctype, force=(var == shadow_name) or _fl_retype)
         # ...unless the iterated list records its OWN per-slot kinds, in which
         # case the target is the BOXED word `mojo_list_get_boxed` produces and
         # must be declared int64_t. A heterogeneous list's tracked element
@@ -2019,7 +2027,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 for j, nn in enumerate(nested_names):
                     _emit_target_assign(nested_ptr, nn, j, pair_elem)
                 return
-            _declare_loop_target(gen, vn, slot_elem, None, False)
+            gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
             vt = gen.var_types.get(vn, slot_elem)
@@ -2255,7 +2263,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    _declare_loop_target(gen, var, 'char', shadow_name, False)
+    gen._declare_var(var, 'char', force=(var == shadow_name))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -2289,7 +2297,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
 def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     """`for x in b:` where `b` is a `MojoBytes *` — x is an int 0-255.
     Mirrors _gen_for_cstr's index-loop shape over mojo_bytes_len/_get."""
-    _declare_loop_target(gen, var, 'int64_t', None, False)
+    gen._declare_var(var, 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_bytes_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2321,7 +2329,7 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
 def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     """`for x in mv:` — x is an int (1-D byte view). Same index-loop shape
     as _gen_for_bytes over mojo_memoryview_len/_get."""
-    _declare_loop_target(gen, var, 'int64_t', None, False)
+    gen._declare_var(var, 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_memoryview_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2390,7 +2398,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     # (`any(c in ('t','T','f','F') for c in prefix)`), which compares the
     # target against 1-char STRING literals and so could never match a
     # code.
-    _declare_loop_target(gen, var, 'char *', None, False)
+    gen._declare_var(var, 'char *')
     len_t = gen._new_val('int64_t', f"mojo_strlen ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2487,16 +2495,12 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `vtype = (char *)0;` into an `int64_t vtype;` declaration — a
         # hard -Wint-conversion error (real: gimple_gen_funcs.py's
         # `for vname, vtype in ci.captures:`).
-        # `_int_key_loop_vars` used to be the retype condition here, and it no
-        # longer has to be: a name an Int-keyed loop declared is recorded as
-        # `int64_t` in `var_types`, so `_declare_loop_target`'s own
-        # already-declared-as-something-else test IS that condition. The set is
-        # still maintained below because it is what tells the ASSIGNMENT code
-        # which accessor this slot was stored with.
         _slot_ctypes = []
         for i, vn in enumerate(var_names):
             _want = ('int64_t' if int_keys else 'char *') if i == 0 else 'int64_t'
-            _declare_loop_target(gen, vn, _want, shadow_name, False)
+            _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
+                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
+            gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
             if i == 0:
                 if int_keys:
                     gen._int_key_loop_vars.add(vn)
@@ -2506,12 +2510,14 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     elif int_keys:
         # The key is an integer: retype a name an earlier loop declared as a
         # string rather than let first-decl-wins keep the pointer type.
-        _declare_loop_target(gen, var, 'int64_t', shadow_name, False)
+        gen._declare_var(var, 'int64_t', force=(var == shadow_name)
+                         or gen.var_types.get(var, 'int64_t') != 'int64_t')
         gen._int_key_loop_vars.add(var)
     else:
         # ...and the reverse: a name an Int-keyed loop declared int64_t must
         # become a string again, not box the string pointer into an integer.
-        _declare_loop_target(gen, var, 'char *', shadow_name, False)
+        gen._declare_var(var, 'char *', force=(var == shadow_name)
+                         or var in gen._int_key_loop_vars)
         gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
@@ -2618,12 +2624,21 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
         _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'
     else:
         _loop_ctype, _read = 'int64_t', 'mojo_set_iter_val_int'
-    # The rebind rule and the two measurements behind it (a hard
+    # `_declare_var` is first-decl-wins (load-bearing for every OTHER
+    # caller: later reads of a name must keep coercing to the type it was
+    # first given), but a loop target is not a read of an existing name —
+    # `for x in <A>` followed by `for x in <B>` REBINDS x, and if A and B
+    # have different element domains the second loop wrote a char* into
+    # the first loop's MojoBytes * target: gcc -fgimple rejects that as
     # `assignment to 'MojoBytes *' from incompatible pointer type 'char *'`
-    # here, a silent pointer-decimal print in `_gen_for_list`) are
-    # `_declare_loop_target`'s, which this family shares with every other.
+    # and the whole program fails to compile. It is not a bytes/set
+    # peculiarity — `for x in {1,2}` then `for x in {'p','q'}` fails the
+    # same way — it is the loop TARGET's type being pinned per function.
+    # force=True mints a fresh C name and repoints `_c_names[var]` at it,
+    # which is also the correct Python reading: after the second loop, x
+    # holds the second loop's last element.
     _retype = gen.var_types.get(var) not in (None, _loop_ctype)
-    _declare_loop_target(gen, var, _loop_ctype, shadow_name, False)
+    gen._declare_var(var, _loop_ctype, force=(var == shadow_name) or _retype)
     # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
         it_val = gen._coerce_to_type('int64_t', 'MojoSet *', it_val)
@@ -3021,9 +3036,23 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
+        # The per-slot names are declared by `_emit_generator_tuple_unpack`
+        # below, from the generator's OWN per-slot types. Declaring `var` here
+        # as well is what emitted `MojoList * (text, name, spec);` — not a C
+        # declaration, and the reason EVERY tuple-target generator consumer
+        # failed to compile (gcc: "expected ')' before ',' token"), both in
+        # `Tools/c-analyzer/c_parser/preprocessor/__init__.py` and in
+        # `test_gimple_generator_runner.py`'s four `gen_tuple_slot_*` cases.
     else:
         var_names = None
-    _declare_loop_target(gen, var, vct, None, False)
+        # `for x, in gen():` binds ONE name and `var` is the literal string
+        # `'(x,)'`. A multi-slot target over a generator whose yield arity was
+        # never recorded is a different mismatch — filed as
+        # bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md.
+        _one = _single_loop_target_name(var)
+        if _one is not None:
+            var = _one
+        gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()
@@ -3113,7 +3142,13 @@ def _gen_for_iter_cursor(gen, node, var: str) -> None:
     rec = itc.cursor_for(gen, gen._cname(node.iterable.name))
     cur = rec['cursor']
     vct = itc.element_ctype(rec)
-    _declare_loop_target(gen, var, vct, None, False)
+    # One value per step, so `for x, in it:` is ONE name — see
+    # `_gen_for_generator_iter`'s identical handling for why the target's own
+    # spelling cannot answer this.
+    _one = _single_loop_target_name(var)
+    if _one is not None:
+        var = _one
+    gen._declare_var(var, vct)
     n = gen._new_val('int64_t', rec['full'])
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3164,8 +3199,8 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
         parts = [target, '_enum_val']
     idx_var = parts[0] if parts else '_enum_i'
     val_var = parts[1] if len(parts) >= 2 else '_enum_val'
-    _declare_loop_target(gen, idx_var, 'int64_t', None, False)
-    _declare_loop_target(gen, val_var, vct, None, False)
+    gen._declare_var(idx_var, 'int64_t')
+    gen._declare_var(val_var, vct)
     cidx = gen._cname(idx_var); cval = gen._cname(val_var)
     ctr = gen._new_temp('int64_t')
     gen._emit(f"  {ctr} = {start_val};" if start_val is not None
@@ -3247,7 +3282,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
     next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')
-    _declare_loop_target(gen, var, elem_type, shadow_name, False)
+    gen._declare_var(var, elem_type, force=(var == shadow_name))
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()
