@@ -10569,6 +10569,16 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
     (`formal/hostmods/struct.mojo`'s own docstring records the shape and the
     measurement). The reader is being told what their program does, not that a
     capability is missing.
+
+    **The last paragraph names the three spellings that lower, and the copy is
+    the fourth and is NOT one of them.** A container whose blob has a known size
+    and holds only words is copied into this function's own scratch right after
+    the call (`model.returned_container_blob_bytes` /
+    `container_returned_blob_sites`), so the shape this message is about is one
+    the copy declined — a blob of blobs, a callee that does not return on every
+    path, a concatenation, or an element that is not provably a word. That is
+    why the advice below is about the SOURCE's spelling rather than about the
+    copy: none of the three reaches a program this path has no size for.
     """
     who = f"{fn.name}: " if getattr(fn, "name", None) else ""
     return (
@@ -10582,14 +10592,18 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
         f"answers for one source (arm64 reads the later call's scratch whole, "
         f"x86-64 reads a mix of the two frames), which is the shape of the "
         f"defect this backend exists to prevent rather than a value anybody can "
-        f"check. `bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
-        f"the capability that closes it (a container with a run-time length, "
-        f"`malloc`'d rather than frame-resident) and "
-        f"`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md` "
-        f"records the measurement and the fix's shape. What lowers today: read "
-        f"the value before calling anything else, keep the container in the "
-        f"caller and pass a slot to fill, or take the elements as scalars one "
-        f"at a time")
+        f"check. The shape here is one the CALLER-SIDE COPY declined — "
+        f"`model.returned_container_blob_bytes` sizes a blob only when the "
+        f"callee returns it on every path, when the result is a literal or a "
+        f"blob the callee appends to rather than a concatenation or a splat, "
+        f"and when every element is provably a word — so the reader is being "
+        f"told which of those four this program is. "
+        f"`bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
+        f"the capability that closes the rest (a container with a run-time "
+        f"length, `malloc`'d rather than frame-resident). What lowers today: "
+        f"read the value before calling anything else, keep the container in "
+        f"the caller and pass a slot to fill, or take the elements as scalars "
+        f"one at a time")
 
 
 def list_repeat_operands_refusal(left: str, right: str) -> str:

@@ -178,8 +178,12 @@ gone.
    returned, which has no static size to `malloc`.~~ **CORRECTED 2026-10-04: a
    container returned by a function in THIS image is frame-resident too, so this
    item was not a missing capability but a wrong answer, and it is now refused
-   at the read on both architectures — see the section above and
-   `bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.**
+   at the read on both architectures — see the section above, and note that the
+   caller-side copy landed after that section was written: a container of WORDS
+   whose blob has a known size is now copied into the caller's own frame right
+   after the call (`model.returned_container_blob_bytes`), so this item's
+   remaining remainder is the run-time-length half below and not the
+   frame-residency half.**
 4. ~~A `for` over it, and `len`.~~ **DONE**, above.
 
 That is Phase 6's tagged-value convergence arriving from the `os` side, and it
@@ -230,11 +234,13 @@ refusing the return took that module out (measured: the hostmods census went
 
 **The capability that would make it right is unchanged in substance and better
 specified than this document had it**: a `malloc`'d blob whose length is only
-known at run time (item 2) is what a copy has to copy, and the copy is the
-struct-frame convention applied to a blob. That is one piece of work for items 2
-and 3 together, and it is written down where the three pieces of it are:
-
-`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.
+known at run time (item 2) is what a copy has to copy. The COPY half of that
+landed 2026-10-05 for a blob whose length IS a compile-time constant —
+`formal/model.py`'s `returned_container_blob_bytes` sizes it and
+`container_returned_blob_sites` gives the caller the block it is copied into —
+and what is left here is exactly item 2: a blob sized by a LOOP has no constant
+to size the copy with, so it is the `malloc` that has to come first. That is the
+one piece of work this item still needs.
 
 **Item 1 is unaffected** — a blob another IMAGE `malloc`s (`os.listdir`,
 `os.walk`) crosses the boundary and is read by subscript today, which is the
