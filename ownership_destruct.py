@@ -213,9 +213,16 @@ def _is_fresh_string_expr(node) -> bool:
     `receiver_results_consumed` decide those, per call site, and the receiver
     may not even be a string), and any other call (whether it is fresh is
     exactly the question being asked)."""
-    if isinstance(node, (N.TstringLiteral, N.SliceExpr)):
+    # `N.is_fstring_literal(node)` as well as the (never-constructed, see its
+    # own definition) `TstringLiteral`: an f-string is a plain `StringLiteral`
+    # whose value keeps its `f` prefix and quotes, so without this an
+    # interpolated string read as a CONSTANT here and the name that holds it
+    # was never credited with owning anything.
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or N.is_fstring_literal(node):
         return True
-    return isinstance(node, N.BinaryOp) and node.op == '+'
+    if isinstance(node, N.BinaryOp) and node.op == '+':
+        return True
+    return _is_string_percent_expr(node)
 
 
 def _is_maybe_fresh_expr(node) -> bool:
@@ -228,11 +235,34 @@ def _is_maybe_fresh_expr(node) -> bool:
     really is, keeps ownership only when it can prove the value fresh at the
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
-    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension, N.TstringLiteral)):
+    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension,
+                         N.TstringLiteral)) or N.is_fstring_literal(node):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
-    return False
+    return _is_string_percent_expr(node)
+
+
+def _is_string_percent_expr(node) -> bool:
+    """`'%s' % xs` -- the one `%` that builds a fresh STRING.
+
+    `%` is two operations in Python and the AST does not say which: string
+    interpolation when the left operand is a string, numeric modulo otherwise
+    (`5 % 2`). Only the first allocates, and only the first may be freed, so
+    the left operand has to be a string LITERAL to answer it from the AST
+    alone -- which is what the codegen's own `_lower_percent` does too (it
+    returns None, and the caller falls through to integer modulo, for every
+    shape it cannot prove).
+
+    Without this arm `s = '%s' % xs` was not credited with owning its value,
+    so a container on the right leaked its repr buffer once per iteration:
+    measured 12.8 B/iteration, flat over a 4x range. `%d` of a container is
+    impossible, so the container case is `%s`/`%r` and both are covered by
+    the same left-operand test.
+    """
+    if not isinstance(node, N.BinaryOp) or node.op != '%':
+        return False
+    return isinstance(node.left, N.StringLiteral)
 
 
 class _FuncFacts:

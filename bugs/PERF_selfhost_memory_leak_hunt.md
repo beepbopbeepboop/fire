@@ -121,9 +121,13 @@ the self-hosted compiler, are all now measured:
   its doc is deleted with the fix: seven container shapes 60000 times peak at
   **12.8 MB**, and a printed STRUCT's per-field strings went with it
   (176.7 -> 80.4 B/iteration, `gimple_printed_struct_repr_does_not_grow`). What
-  remains in that family is the top-level repr result `print` never frees —
-  16.4 B per container print —
-  `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`;
+  remained in that family was the top-level repr result `print` never freed
+  (16.4 B per container print) — and the same walkers' four other consumers
+  with it (`str(xs)`, `repr(xs)`, `f"{xs}"`, `'%s' % xs` at 12.8 B each, plus
+  the `'%(k)s' % d` primitive at 122 B). All fixed 2026-10-04: `_OWNED_REPR_FNS`
+  now joins `_FRESH_STRING_RETURNS`, the f-string cat frees its right operand,
+  and `ownership_destruct` learns that an f-string is not a constant. Pinned by
+  the eight `gimple_*_repr_is_released` rows in `test_gimple_runner.py`;
 * a per-character string scan allocated one `malloc(2)` per character —
   `gimple_char_scan_allocates_nothing_per_character` measured **246.7 MB** and
   now measures **1.6 MB**. That one was `s[i]` spelled `mojo_cstr_slice(s, i,

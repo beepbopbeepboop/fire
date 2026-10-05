@@ -4538,6 +4538,120 @@ def main():
 main()
 """, "[1, 2, 3]\n" * 200000, 3)
 
+    # …and the FOUR SPELLINGS THAT DO NOT CONSUME AT THE CALL, which is where
+    # the rest of this doc's leak was. `print` frees after its last
+    # `mojo_print`; the other three hand the walker's buffer to something that
+    # COPIES out of it and then throw the buffer away, so the release is owed
+    # at the consumer and each consumer needs its own:
+    #
+    #   `s = str(xs)`   the walker result becomes `s`, and the free is the
+    #                   block-scope one at the end of the loop body
+    #   `s = repr(xs)`  the same, through `_repr_value`
+    #   `s = f"{xs}"`   `mojo_str_cat` copies out of the interpolated part
+    #   `s = '%s' % xs` `mojo_str_format_dict` copies out of the whole format
+    #
+    # All four leaked 12.8 B per iteration, flat over a 4x range, and the
+    # `%r`-of-a-dict row leaked 122 B — the buffer, not a fixed overhead.
+    # Each is its own row because they are four different consumers of one
+    # table, and a fix that reached three of them would pass a single-row
+    # test. Ceilings are 3 MB against ~1.6 MB measured: ~1.9x headroom each
+    # way, and the loops are 200 000 so the slope has room to show.
+    test_gimple_bounded_memory("gimple_str_of_container_repr_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    n = 0
+    for i in range(200000):
+        s = str(xs)
+        n = n + len(s)
+    print(n)
+main()
+""", "1800000\n", 3)
+    test_gimple_bounded_memory("gimple_repr_of_container_repr_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    n = 0
+    for i in range(200000):
+        s = repr(xs)
+        n = n + len(s)
+    print(n)
+main()
+""", "1800000\n", 3)
+    test_gimple_bounded_memory("gimple_fstring_interpolated_container_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    n = 0
+    for i in range(200000):
+        s = f"{xs}"
+        n = n + len(s)
+    print(n)
+main()
+""", "1800000\n", 3)
+    # The MULTI-part spelling too: `f"a{xs}b{xs}"` interpolates the walker
+    # TWICE and each copy is a separate allocation, so a fix that released
+    # only the last one would still leak at half the rate and still be under
+    # the ceiling above. Lengths sum, so the expected total is 2 x 450000.
+    test_gimple_bounded_memory("gimple_fstring_two_interpolated_containers_are_released", """\
+def main():
+    xs = [1, 2, 3]
+    n = 0
+    for i in range(200000):
+        s = f"a{xs}b{xs}"
+        n = n + len(s)
+    print(n)
+main()
+""", "4000000\n", 3)
+    test_gimple_bounded_memory("gimple_percent_s_of_container_repr_is_released", """\
+def main():
+    xs = [1, 2, 3]
+    n = 0
+    for i in range(200000):
+        s = "%s" % xs
+        n = n + len(s)
+    print(n)
+main()
+""", "1800000\n", 3)
+    # The dict-keyed `%` primitive, which is a DIFFERENT runtime helper from
+    # the repr walkers (`mojo_str_format_dict`, not `_mojo_repr_dict`) and so
+    # a second row rather than a variant of the one above: it was missing from
+    # the table too, and leaked the whole formatted buffer per call.
+    #
+    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter does not
+    # compile at all when `d` is a module-level global (a boxed `int64_t`
+    # reaching a `MojoDict *` parameter) and prints a two-character answer
+    # when it is a local. Both are filed as
+    # bugs/CODEGEN_percent_format_of_a_dict_is_a_different_bug.md, and a
+    # memory row pinned on a shape whose VALUE is wrong measures the wrong
+    # thing -- doc/MEMORY.html §8 is explicit that a slope is only evidence
+    # when the output is right.
+    test_gimple_bounded_memory("gimple_percent_keyed_of_dict_repr_is_released", """\
+def main():
+    d = {'k': 'v'}
+    n = 0
+    for i in range(200000):
+        s = '%(k)s' % d
+        n = n + len(s)
+    print(n)
+main()
+""", "200000\n", 3)
+
+    # …and the three shapes that must NOT be freed, because a `free` of a
+    # borrowed or literal buffer is a use-after-free / heap corruption rather
+    # than a leak, and `MallocScribble=1` (which
+    # `test_gimple_bounded_memory`'s own probe sets) turns that into a
+    # scrambled read. A plain string literal is a `_slit_N` pool global;
+    # `str("ab")` is the identity (`_stringify_value`'s `char *` arm returns
+    # its operand); integer `%` is not the string-concatenation operator at
+    # all. Each is flat, so a ceiling here measures "still not freed" and a
+    # use-after-free fails it as a crash.
+    test_gimple_bounded_memory("gimple_a_literal_and_an_identity_are_not_freed", """\
+def main():
+    n = 0
+    for i in range(200000):
+        n = n + len(str("ab")) + len("xy") + (5 % 2) + (i % 7)
+    print(n)
+main()
+""", "1599994\n", 3)
+
     # The text of every walker above, printed ONCE, against CPython. Separate
     # from the memory case because the memory case would still pass if a repr
     # printed something else and leaked nothing, and because this is the half
