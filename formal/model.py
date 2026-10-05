@@ -8970,35 +8970,258 @@ def is_interpolated_literal(node) -> bool:
             and node.value.startswith(INTERPOLATED_LITERAL_PREFIXES))
 
 
+def interpolated_literal_segments(spelled: str) -> list:
+    """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
+
+    **The source token, split into the chunks and the `{…}` fields it is made
+    of, with `{{` and `}}` honoured as the escapes they are.** That is the whole
+    of what this answers, and it is asked of the TOKEN because that is what the
+    parser preserved: an interpolated literal's `value` is `f"n={n}"` including
+    the prefix and the quotes (`fire_compiler.py`'s
+    `_strip_string_prefix_and_quotes`), so the fields are text inside a string
+    rather than a parsed structure, and nothing else in the tree has read them.
+
+    A `field` is `(expr, spec, conv)` rather than one string because those
+    three are three different questions and this is the place that can tell them
+    apart: `expr` is a value, `:spec` is a FORMAT (`>3`, `04d`) and `!conv` is a
+    CONVERSION (`!r`, `!s`) — and neither of the latter two is a value on this
+    path in any case, which is what
+    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
+    to say rather than answering them as if they were an f-string's field.
+
+    Brace-depth tracked, so `f"{d['k']}"` and `f"{ {'a': 1}['a'] }"` split
+    correctly — a naive `find('}')` truncates the first one at the dict literal.
+
+    **It refuses rather than guesses** on the two shapes it cannot read: a
+    triple-quoted body whose closing delimiter it cannot confirm, and a nested
+    `{` inside a field's own text at depth it cannot close. Both raise
+    `CodegenError` with a message that says what it saw, because a segment
+    reader that returned a plausible wrong split would feed a lowering the wrong
+    literal text — and a composed string with a chunk boundary in the wrong
+    place is a wrong answer, not a refusal.
+    """
+    if not isinstance(spelled, str) or len(spelled) < 3:
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it is not "
+            f"even a quoted token, so there are no parts to compose")
+    # The prefix is ONE character and it is still there — that is the whole of
+    # why this is readable at all (`is_interpolated_literal` tests it), so the
+    # quote is at index 1 and every test below is from THERE and not from 0.
+    quote = spelled[1]
+    if quote not in ('"', "'"):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: the "
+            f"character after the prefix is not a quote")
+    if spelled[1:4] == quote * 3:
+        term = quote * 3
+    elif spelled[1:2] == quote:
+        term = quote
+    else:
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: its "
+            f"opening delimiter does not close")
+    if not spelled.endswith(term):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it opens "
+            f"with {term} and does not end with {term}, so where its text "
+            f"stops is not knowable from the token")
+    body = spelled[1 + len(term):-len(term)]
+    out: list = []
+    lit: list = []
+    i, n = 0, len(body)
+    while i < n:
+        two = body[i:i + 2]
+        if two == '{{':
+            lit.append('{')
+            i += 2
+            continue
+        if two == '}}':
+            lit.append('}')
+            i += 2
+            continue
+        c = body[i]
+        if c == '}':
+            # A lone `}` with nothing to escape. CPython 3.14's tokenizer
+            # REFUSES `f"}"` ("single '}' is not allowed"), and this is asked
+            # after that has already run, so reaching here means the text was
+            # built rather than parsed — and a reader that silently dropped it
+            # would compose a string with a character missing from it.
+            raise CodegenError(
+                f"cannot read the interpolated literal {spelled!r}: a single "
+                f"'}}' is not allowed in an f-string — CPython's own tokenizer "
+                f"refuses it — so this is not source text a program could have "
+                f"written, and guessing where it was meant to end would "
+                f"compose a string with a character missing from it")
+        if c == '{':
+            if lit:
+                out.append(('lit', ''.join(lit)))
+                lit = []
+            j, depth = i + 1, 1
+            while j < n and depth:
+                if body[j] == '{':
+                    depth += 1
+                elif body[j] == '}':
+                    depth -= 1
+                j += 1
+            if depth:
+                raise CodegenError(
+                    f"cannot read the interpolated literal {spelled!r}: the "
+                    f"'{{' opened at character {i} is never closed, so the "
+                    f"field's text is not knowable")
+            inner = body[i + 1:j - 1]
+            # `!conv` binds tighter than `:spec`, and both may be absent, and a
+            # `!` or `:` INSIDE a bracket (`d['a:b']`) must not be mistaken for
+            # either — so the split is done at bracket depth zero.
+            k, bdepth, spec_at, conv_at = 0, 0, None, None
+            while k < len(inner):
+                ch = inner[k]
+                if ch in '([{':
+                    bdepth += 1
+                elif ch in ')]}':
+                    bdepth -= 1
+                elif bdepth == 0 and ch == '!' and conv_at is None:
+                    conv_at = k
+                elif bdepth == 0 and ch == ':' and spec_at is None:
+                    spec_at = k
+                k += 1
+            # The EXPRESSION ends at whichever comes first, so `!conv` is cut
+            # off as well as read off — `inner[:spec_at]` alone would leave the
+            # expression spelled `y !s`, which is neither a value nor what the
+            # source wrote, and a lowering that tried to evaluate it would be
+            # answering a different question.
+            first = len(inner)
+            for at in (conv_at, spec_at):
+                if at is not None and at < first:
+                    first = at
+            expr = inner[:first].strip()
+            if conv_at is None:
+                conv = ""
+            elif spec_at is not None and conv_at < spec_at:
+                conv = inner[conv_at + 1:spec_at].strip()
+            else:
+                conv = inner[conv_at + 1:].strip()
+            spec = inner[spec_at + 1:].strip() if spec_at is not None else ""
+            out.append(('field', expr, spec, conv))
+            i = j
+            continue
+        lit.append(c)
+        i += 1
+    if lit:
+        out.append(('lit', ''.join(lit)))
+    return out
+
+
 def interpolated_literal_refusal(node, where: str = "") -> str:
     """Why an f-string/t-string literal is refused on this path.
 
     `where` is the line the literal is on when the caller has it, so the
     message can point at the source rather than at the construct: two f-strings
     in one program are two refusals a reader has to tell apart.
+
+    **It says what the literal is MADE OF, and it no longer gives advice that
+    produces different text.** Both halves are measurements:
+
+      * the parts, read by `interpolated_literal_segments` above — how many
+        fields, what each one interpolates, and whether any carries a format
+        spec or a conversion, since those are three questions and the old
+        sentence merged them into one;
+      * the `print` advice, which was wrong and is gone.
+        `bugs/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
+        the fix** … the message's own advice is wrong", and it is: CPython's
+        `print` puts a `sep` between its operands, so following "Print the parts
+        as separate operands" on `f"n={n}"` with `n = 7` gives
+
+            CPython f"n={n}"      ->  n=7
+            CPython print("n=", n) ->  n= 7
+
+        — measured here on both this path and `python3`, which agree on
+        `print` and differ on the f-string. A reader who followed the advice got
+        a program that builds, runs, exits 0 and prints something else, which is
+        the outcome this backend exists to prevent. A fix DELETED the sentence
+        (the map's §5.1 records that the instrument rows are keyed on "no
+        buffer to compose one in" and not on the advice, precisely so that
+        deleting it could not take 115 files silently back to `other refusal`),
+        so nothing is lost by its absence and the diagnostic ends on the fact.
     """
     spelled = node.value if isinstance(node, str) else getattr(node, "value", "")
     # The article is spelled out rather than derived from the first letter:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    kind = "an f-string" if spelled[:1] in ("f", "F") else "a t-string"
+    is_t = spelled[:1] in ("t", "T")
+    kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
-    return (
-        f"{kind} literal{at} is refused on this path: its value is "
-        f"its INTERPOLATED text, and this path has no buffer to compose one "
-        f"in. The parser keeps the whole source token (`{spelled}`) as the "
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError as e:
+        # The reader refused, and the right thing to report is ITS reason: a
+        # generic "this path has no buffer" would be true and would hide the
+        # fact that the shape is not one this reader can even take apart.
+        return f"{kind} literal{at} is refused on this path, and its text could "\
+               f"not be taken apart either: {e}"
+    fields = [s for s in segs if s[0] == 'field']
+    chunks = [s for s in segs if s[0] == 'lit']
+    made = _interpolated_shape_sentence(segs)
+    tail = (
+        f"{kind} literal{at} is refused on this path: its value is its "
+        f"INTERPOLATED text, and this path has no buffer to compose one in. "
+        f"{made} The parser keeps the whole source token (`{spelled}`) as the "
         f"literal's value, so what this build would have printed is the "
         f"spelling: with `n = 7`, `print(f\"n={{n}}\")` printed "
-        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string "
-        f"here is a bare `char *` interned into read+execute __TEXT, so "
+        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string here "
+        f"is a bare `char *` interned into read+execute __TEXT, so "
         f"`\"n=\" + decimal(n)` has nowhere to be laid down at compile time "
-        f"(the field may be a runtime value) or at run time (there is no "
-        f"heap); this is the same missing buffer that keeps string "
-        f"concatenation and the length-dependent methods refused (see "
-        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
-        f"parts as separate operands, or build the text with `+` once that is "
-        f"lowered.")
+        f"(the field may be a runtime value) or at run time (there is no heap); "
+        f"this is the same missing buffer that keeps string concatenation and "
+        f"the length-dependent methods refused (see `string_concat_refusal` and "
+        f"LENGTH_DEPENDENT_METHODS).")
+    if is_t:
+        # §7.3 of the doc, landed rather than left as a note for a future
+        # lowering: a t-string's `{name}` is a TEMPLATE and `text.format`
+        # evaluates it, so it is not a field to be interpolated and refusing it
+        # as though it were one describes a construct this path does not have.
+        tail += (
+            f" A t-string is refused for a further reason that has nothing to "
+            f"do with the buffer: its `{{name}}` is a TEMPLATE, which is "
+            f"`str.format`/`text.format` evaluating an argument against a "
+            f"format string, so the answer is not the field's value and no "
+            f"lowering that composes an f-string's fields would be right here.")
+    return tail
+
+
+def _interpolated_shape_sentence(segs: list) -> str:
+    """What an interpolated literal is MADE OF, in one sentence.
+
+    The fields are named because they are the thing a reader has to look up in
+    their own source, and the count of chunks and their byte lengths is the
+    thing that decides the §7.1 bound — `formal/
+    FORMAL_string_composition_has_no_buffer.md` §7.1 asks for "a buffer with a
+    compile-time-known bound", and the bound IS the chunk bytes plus the widest
+    each field's declared type can render. So the diagnostic now prints the half
+    of that arithmetic a reader can check without running anything.
+    """
+    fields = [s for s in segs if s[0] == 'field']
+    chunks = [s for s in segs if s[0] == 'lit']
+    if not fields:
+        return (f"This one has NO field at all — {len(chunks)} literal chunk(s) "
+                f"of {sum(len(c[1]) for c in chunks)} byte(s) — so its value is "
+                f"a CONSTANT and this refusal is over a missing buffer rather "
+                f"than a run-time value.")
+    shown = ", ".join(f"`{f[1]}`" for f in fields[:4])
+    if len(fields) > 4:
+        shown += f", and {len(fields) - 4} more"
+    chunk_bytes = sum(len(c[1]) for c in chunks)
+    out = (f"It is made of {len(fields)} field(s) — {shown} — and "
+           f"{len(chunks)} literal chunk(s) totalling {chunk_bytes} byte(s).")
+    specs = [f for f in fields if f[2]]
+    convs = [f for f in fields if f[3]]
+    if specs:
+        out += (f" {len(specs)} of the field(s) carries a FORMAT SPEC "
+                f"(`:`), which is a rendering rather than a value.")
+    if convs:
+        out += (f" {len(convs)} of the field(s) carries a CONVERSION (`!`), "
+                f"which is a rendering rather than a value.")
+    return out
 
 
 def refuse_interpolated_literals(stmts) -> None:
