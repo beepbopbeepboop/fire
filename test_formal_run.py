@@ -12043,6 +12043,70 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # The refusal NAMES WHICH ELEMENT has no word, and this is the row for the
+    # shape `std/sys/arg.mojo:51` has: a first element this image can resolve to
+    # a declaration and a second it cannot. Before, the one sentence merged both
+    # cases and a reader could not tell which bracket element to look at — and it
+    # cannot be told from the type either, because `static_string.mojo`'s
+    # `__mlir_type.`!kgen.string`` initializer is itself an MLIR template
+    # (measured on that tree's `lib/ProofLib.lean`-adjacent `formal/types.py`:
+    # `int64_t` is `{ kgen.int_t<Si> }` for the same reason). The sentence
+    # therefore names the two SHAPES a bare name can have, which is the honest
+    # answer: this call cannot distinguish them.
+    ("sub_multi_index_comptime_params_names_the_unresolvable_element",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[Int, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:element 1 `Int` is a type this image knows; and element 2 "
+     "`ImmStaticOrigin` is a bare name this image cannot resolve to a "
+     "declaration", None),
+    # …and the OTHER case, where NO element resolves. Saying "element 2 is the
+    # problem" there would be a guess, so the sentence says the reader has two
+    # to resolve instead — and this row exists to pin that it does NOT accuse
+    # one of them, which is the direction that could produce a false claim.
+    ("sub_multi_index_comptime_params_with_nothing_resolvable_says_so",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:None of its 2 element(s) names something this image can resolve "
+     "to a declaration (StaticString, ImmStaticOrigin)", None),
+    # A BRACKETED type as an element — `List[Int]` — is a type, and it is the
+    # case a first version of the classifier got wrong by asking
+    # `subscript_is_a_type_application`, which answers about the WHOLE
+    # subscript and needs `structs_by_name` for its base. `List` is in
+    # `type_constructor_kind`'s table, so the element is a type whoever asks.
+    # Pinned as an element of a list that ALSO has a bare name, because that is
+    # the only arrangement in which the answer is visible in the message.
+    ("sub_multi_index_comptime_params_names_a_bracketed_type_an_element",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[List[Int], ImmStaticOrigin]\n"
+     "    return 0\n",
+     # `List[…]` rather than `List[Int]`: `_spell` is the message's own
+     # renderer for a subscript and it abbreviates the index, which is right
+     # for a diagnostic — the reader is being told WHICH element, not asked to
+     # re-read the source back. The needle uses what the renderer emits.
+     "refuse:element 1 `List[…]` is a type this image knows; and element 2 "
+     "`ImmStaticOrigin` is a bare name", None),
+    # …and the case where every element IS bindable, where the sentence must be
+    # ABSENT: `size_of[type, target]` is the sentence's own worked example in
+    # `formal/model.py`, and adding a note there would be a diagnosis about a
+    # construct that has none. Asserted with `refuse_without:`, so the row also
+    # pins that the refusal itself is still there.
+    ("sub_multi_index_comptime_params_of_literals_says_nothing_extra",
+     "def pick[type: Int, origin: Int]() -> Int:\n"
+     "    return type + origin\n\n"
+     "def main(n):\n"
+     "    v = pick[1, 2]\n"
+     "    return 0\n",
+     "refuse_without:is a compile-time explicit-parameter list on a generic:"
+     "is a bare name this image cannot resolve|None of its 2 element(s) names",
+     None),
     # A bracket list NESTED INSIDE another subscript's index, where the outer
     # one is a runtime index. This is the boundary of `model.type_position_nodes`
     # and it is here because that function exempts a bracket list from the

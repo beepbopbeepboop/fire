@@ -2346,12 +2346,122 @@ def _spell(node) -> str:
     return type(node).__name__
 
 
-def multi_index_refusal(kind: str, spelled: str) -> str:
+def _comptime_param_element_kind(node, structs_by_name=None) -> str:
+    """`'type'` / `'literal'` / `'name'` — what one bracket element IS here.
+
+    **Only claims this call can actually keep.** `'type'` is a positive claim
+    backed by a table in this file (`type_constructor_kind`,
+    `POINTER_TYPE_CTORS`, the `structs_by_name` this unit compiled, or a
+    subscript that is itself a type application), and `'literal'` is one backed
+    by the node being an `IntLiteral` / `BoolLiteral` / `StringLiteral` or
+    arithmetic over those. Everything else is `'name'`, which is deliberately
+    the WEAKEST answer and deliberately means "a bare name this image cannot
+    resolve to a declaration" — **not** "not a type".
+
+    That direction is the whole point, and it is the opposite of the reader's
+    first guess. `Span[StaticString, ImmStaticOrigin]` has a first element that
+    IS a type and a second that is a bare name, and a message that said "the
+    second is not a type" would be a claim this call cannot make — it never
+    resolved `StaticString` either, it only knows the name is not in a table it
+    holds. So `'name'` says what is knowable, and the refusal that uses it says
+    which of the two shapes a name can be: a type this image could not resolve,
+    or a `comptime` alias whose initializer does not fold — and
+    `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
+    measured the second, on the second element of exactly this bracket list.
+    """
+    if isinstance(node, F.SubscriptExpr):
+        # `subscript_is_a_type_application` is the right QUESTION and the wrong
+        # CALLER here: it is asked with `structs_by_name` because its callers
+        # need to know whether the WHOLE subscript is compile-time, which
+        # depends on a base this unit has to have declared. An ELEMENT of
+        # somebody else's parameter list does not: `List[Int]` is a type
+        # application whoever asks, and `List` is in `type_constructor_kind`'s
+        # table, so this asks the base name against the tables the same way the
+        # bare-name arm below does rather than through a predicate whose answer
+        # depends on state this call does not have.
+        _bn = _base_name(node.obj)
+        if (_bn is not None
+                and (type_constructor_kind(_bn) is not None
+                     or _bn in POINTER_TYPE_CTORS
+                     or (structs_by_name and _bn in structs_by_name))):
+            return "type"
+    if isinstance(node, (F.IntLiteral, F.BoolLiteral, F.StringLiteral)):
+        return "literal"
+    if isinstance(node, F.BinaryOp):
+        # Foldable arithmetic over literals: the only arithmetic on this path
+        # that has a value without running anything, and the shape
+        # `size_of[type, target]`-style code spells.
+        if all(isinstance(p, (F.IntLiteral, F.BoolLiteral, F.StringLiteral))
+               for p in (node.left, node.right)):
+            return "literal"
+    name = _base_name(node)
+    if (name is not None
+            and (type_constructor_kind(name) is not None
+                 or name in POINTER_TYPE_CTORS
+                 or (structs_by_name and name in structs_by_name))):
+        return "type"
+    # A `Self.X` attribute is a type PARAMETER reference — the stdlib spells
+    # `_DequeIter[Self.ElementType, origin_of(self), False]` — and a parameter
+    # reference is a type by construction, so it is claimed as one rather than
+    # left to be reported as a name this image cannot resolve.
+    if isinstance(node, F.MemberExpr) and _base_name(node.obj) == "Self":
+        return "type"
+    return "name"
+
+
+def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
+    """Which bracket element has no word, as one sentence — or `''`.
+
+    **The sentence is emitted only when it can name a culprit**, which is the
+    condition that keeps it from being a guess. It fires when at least one
+    element is a `'name'` AND at least one is positively classified, because
+    only then is the contrast informative: a list of two names says the reader
+    has to resolve both, and a list of two types says the refusal is about the
+    LIST and not about an element (which is the `size_of[type, target]` case the
+    old sentence already served correctly, and it is still served).
+    """
+    els = list(getattr(getattr(e, "index", None), "elements", ()) or ())
+    kinds = [_comptime_param_element_kind(x, structs_by_name) for x in els]
+    if not kinds or "name" not in kinds:
+        return ""
+    if all(k == "name" for k in kinds):
+        return (f" None of its {len(kinds)} element(s) names something this "
+                f"image can resolve to a declaration "
+                f"({', '.join(_spell(x) for x in els)}), so there is no word "
+                f"to bind for any of them.")
+    shown, cls = [], []
+    for i, (x, k) in enumerate(zip(els, kinds), 1):
+        if k == "type":
+            cls.append(f"element {i} `{_spell(x)}` is a type this image knows")
+        elif k == "literal":
+            cls.append(f"element {i} `{_spell(x)}` is a literal that folds")
+    named = [f"element {i} `{_spell(x)}`" for i, (x, k)
+             in enumerate(zip(els, kinds), 1) if k == "name"]
+    return (f" Of its {len(kinds)} element(s): {'; '.join(cls)}; and "
+            f"{' and '.join(named)} {'is a bare name' if len(named) == 1 else 'are bare names'}"
+            f" this image cannot resolve to a declaration. That is where the "
+            f"missing word is, and it has two shapes: a TYPE this unit does not "
+            f"declare, or a `comptime` ALIAS whose initializer does not fold "
+            f"(measured on `std/sys/arg.mojo`'s "
+            f"`Span[StaticString, ImmStaticOrigin]` — see "
+            f"`bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template"
+            f".md`, which is what this sentence exists for).")
+
+
+def multi_index_refusal(kind: str, spelled: str, elements_note: str = "") -> str:
     """The refusal text for a multi-element subscript, identical on both paths.
 
     `spelled` is how the source wrote the construct, so the message points at
     something the reader can find (`size_of[type, target]`,
-    `__mlir_attr[...]`, `a[i, j]`)."""
+    `__mlir_attr[...]`, `a[i, j]`).
+
+    `elements_note` is the per-element diagnosis, computed by
+    `_comptime_param_element_sentence` and passed in rather than derived here —
+    this function is handed a KIND and a SPELLING and has no node, and the one
+    caller that does have a node is `multi_index_refusal_for`. It is empty for
+    every kind but the comptime-parameter list, and empty means "nothing to add",
+    which is the answer for the MLIR-template and tuple-index cases where every
+    element's role is already covered by the sentence below."""
     if kind == MULTI_INDEX_MLIR_TEMPLATE:
         return (
             f"{spelled} assembles an MLIR attribute from a template of "
@@ -2368,10 +2478,11 @@ def multi_index_refusal(kind: str, spelled: str) -> str:
             "generic, not a subscript: the brackets name types and comptime "
             "values, none of which is a runtime word. This path has no type "
             "or comptime parameter to bind, so what the call means depends "
-            "entirely on which parameters were passed. Refused rather than "
-            "read as an index — a binding for `size_of[type, target]` would "
-            "have to come from a target description this backend does not "
-            "have, and a plausible constant is a fabricated answer."
+            f"entirely on which parameters were passed.{elements_note} "
+            "Refused rather than read as an index — a binding for "
+            "`size_of[type, target]` would have to come from a target "
+            "description this backend does not have, and a plausible constant "
+            "is a fabricated answer."
         )
     return (
         f"{spelled} is a subscript whose index is a tuple. A value here is "
@@ -2448,7 +2559,13 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
                             callee_defs=callee_defs)
     if kind is None:
         return None
-    return multi_index_refusal(kind, multi_index_spelling(e))
+    # The per-element diagnosis, and ONLY for the kind it is about: which
+    # bracket element has no word is a question about a compile-time parameter
+    # list, and for the MLIR-template and tuple-index kinds every element's role
+    # is already stated by the sentence they share.
+    note = (_comptime_param_element_sentence(e, structs_by_name)
+            if kind == MULTI_INDEX_COMPTIME_PARAMS else "")
+    return multi_index_refusal(kind, multi_index_spelling(e), note)
 
 
 # ── `external_call["sym", RetType](args…)` ─────────────────────────────────
