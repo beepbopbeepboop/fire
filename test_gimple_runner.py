@@ -4529,7 +4529,8 @@ main()
     # rather than a leak. `MallocScribble=1` is set by
     # `test_gimple_bounded_memory`'s own probe, so a free of the wrong buffer
     # shows up as a scrambled one rather than passing quietly.
-    # See bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    # See the eight `gimple_*_repr_is_released` rows below, which cover the
+    # other four consumers of the same walkers.
     test_gimple_bounded_memory("gimple_printed_container_repr_is_released", """\
 def main():
     xs = [1, 2, 3]
@@ -4733,7 +4734,7 @@ main()
     # for and never frees, which a plain `print([1, 2, 3])` loop leaks too (16.4
     # B/iteration) and which `gimple_printed_container_does_not_grow`'s 40 MB
     # ceiling is too loose to see. Filed, not fixed here:
-    # bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    # the repr-walker ownership family; all four consumers are pinned below.
     _P_REPR = ("[P(n=7, f=1.5, s='hi', l=[1, 2], d={'a': 1}, inner=Inner(k=3))]\n")
     test_gimple_bounded_memory("gimple_printed_struct_repr_does_not_grow", """\
 class Inner:
@@ -10674,7 +10675,7 @@ print(str(d))
     # Scoped to the five selfhost names rather than "only the user's fields",
     # because the cross-module registration has a SEPARATE defect of its own
     # (an `__init__` parameter name leaking in as a field — see
-    # `bugs/CODEGEN_imported_class_gets_ctor_params_as_fields.md`), and an
+    # an imported constructor's parameter names becoming struct fields), and an
     # assertion about that would be red for a reason this test is not about.
     def _parser_struct_and_symbols():
         global _PASS, _FAIL

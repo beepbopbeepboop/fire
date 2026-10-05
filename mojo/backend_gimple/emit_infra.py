@@ -5341,7 +5341,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # last `print_fn` call below — the repr walkers, which all `strdup` their
     # result and which nothing freed. 16.4 B per printed container, measured
     # flat over a 4x loop range; see
-    # `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`
+    # the repr-walker ownership family (print, str, repr, f-string, %-format)
     # and `_OWNED_REPR_FNS` above for which helpers may be released and which
     # three may not (each has a `return "<literal>"` arm, where a `free` is
     # heap corruption rather than a leak).

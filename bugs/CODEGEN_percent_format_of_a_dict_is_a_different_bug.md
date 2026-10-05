@@ -1,10 +1,13 @@
 # `'%(k)s' % d` works, `'%s' % d` does not compile — and `'%r' % d` prints two characters
 
 Found 2026-10-04 while closing
-`CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`'s last
-consumer (the `'%s' % xs` and `'%r' % d` spellings of a `%`-formatted
-container). The leak is fixed; this is the shape the fix's own regression test
-had to step around, and it is a different defect with a different mechanism.
+the repr-walker ownership family's last consumer (the `'%s' % xs` and
+`'%r' % d` spellings of a `%`-formatted container): 12.8 B per call for the
+first and 122 B for the second. That leak is fixed on the same branch, by
+putting `_OWNED_REPR_FNS` into `_FRESH_STRING_RETURNS` and teaching
+`ownership_destruct` that an f-string is not a constant. This doc is the shape
+that fix's own regression test had to step around, and it is a different defect
+with a different mechanism.
 
 ## What I ran
 
@@ -99,11 +102,10 @@ and `'%(k)s' % d` is right because it IS the keyed form.
 
 ## Related
 
-- `CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md` — the
-  leak this shape shares with `'%s' % xs`, `f"{xs}"`, `str(xs)` and
-  `repr(xs)`. Its `mojo_str_format_dict` rung is what makes the keyed form
-  flat now; this doc is why the `'%r' % d` row of that fix's memory coverage
-  is written `'%(k)s' % d` instead.
+- The repr-walker ownership family — the leak this shape shares with
+  `'%s' % xs`, `f"{xs}"`, `str(xs)` and `repr(xs)`. Its `mojo_str_format_dict`
+  rung is what makes the keyed form flat now; this doc is why that fix's
+  `'%r' % d` row of memory coverage is written `'%(k)s' % d` instead.
 - `CODEGEN_dict_comprehension_repr_is_separately_broken.md` — the same
   generated `_mojo_repr_dict` walker's other known defect.
 - `bugs/UNTESTED.md` §3.3: a compile failure and a wrong value are both

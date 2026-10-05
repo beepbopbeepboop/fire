@@ -76,11 +76,11 @@ called the deleted runtime function, and `GimpleGen._emit_dict_int_value_store`
 bytes-dict tests) was missing. All of it is back, and `emit_dict_int_value_store`
 has exactly the five callers its own docstring names.
 
-The merge damage was measured rather than inferred: the same missing delegate
-and the same four test failures are recorded in
-`bugs/CODEGEN_merge_dropped_the_emit_dict_int_value_store_delegate.md`, filed
-independently by another worker, and this change fixes that doc's subject (its
-doc is deleted with this commit).
+The merge damage was measured rather than inferred: the missing delegate and
+the same four test failures were filed independently by another worker and are
+fixed, along with the duplicate copy of that delegation the same merge left
+behind (`gimple_codegen.py` is the aggregator both copies of the shared file
+fed, and the merge was resolved file by file).
 
 ## What is STILL wrong
 

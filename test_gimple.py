@@ -6812,8 +6812,7 @@ def outer():
     # pipeline actually produces, and its own docstring spelled a third prefix.
     # It is now the intersection of the two artifacts' own symbol names, which
     # is what makes it un-rot-able: a rename on the emitting side moves both
-    # halves together. See
-    # bugs/CODEGEN_refuse_dropped_companion_matches_a_prefix_nothing_emits.md.
+    # halves together.
     test_raises(
         "nested_generator_needing_the_cpp_companion_is_refused_by_name",
         """\

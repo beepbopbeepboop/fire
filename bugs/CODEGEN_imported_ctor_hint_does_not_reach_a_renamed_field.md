@@ -1,7 +1,8 @@
 # An imported constructor's literal evidence never reaches a field stored under a DIFFERENT name
 
 Found 2026-10-04 while closing
-`CODEGEN_imported_class_gets_ctor_params_as_fields.md` (fixed and deleted). Same
+a phantom-struct-field bug in the same table (fixed and deleted on this
+branch). Same
 table (`_xmod_ctor_field_hints` in `mojo/backend_gimple/module_gen.py`), same
 producer, same consumer — but a different question, and the fix for the phantom
 field deliberately does NOT answer this one.
@@ -111,8 +112,8 @@ DECLARES, so:
 
 ## Related
 
-- `CODEGEN_imported_class_gets_ctor_params_as_fields.md` — the same table's
-  other defect, fixed on the same branch: the key half was written into
+- The same table's other defect, fixed on the same branch: the key half was
+  written into
   `struct_field_types` unconditionally, so every constructor parameter became a
   struct field. Its "Next step" says "derive the fields from `self.<x> = ...`
   ASSIGNMENTS only", which is right about the source of truth and does not say
