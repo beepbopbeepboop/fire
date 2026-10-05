@@ -1147,6 +1147,15 @@ def run_census_case(case, tmpdir, verbose):
     # The two paths that are NOT the parse, counted with the same wrapper. The
     # readers first: `del calls[:]` between them is what makes each count its
     # own sites rather than the sum of the two.
+    #
+    # The FIRST `del calls[:]` is the load-bearing one and it is here because the
+    # wrapper was installed and uninstalled around the parse without emptying
+    # it: the parse's single ask was still in the list when the readers ran, so
+    # `reads` below was the parse's ask wearing the readers' name — one ask,
+    # charged to the wrong path, on all four cases. The count each assertion
+    # wants is that path's OWN sites, so the counter starts empty every time a
+    # new path is measured.
+    del calls[:]
     M.struct_receiver_stores = counted
     try:
         for _ in range(3):
@@ -1155,7 +1164,7 @@ def run_census_case(case, tmpdir, verbose):
         n_methods = len(M.struct_methods(st))
         M.struct_field_names(st)
         M.struct_field_count(st)
-        M.struct_field_sole_field_name(st)
+        M.struct_sole_field_name(st)
         M.struct_fits_one_word(st)
         reads = list(calls)
         del calls[:]
