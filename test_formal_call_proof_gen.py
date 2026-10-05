@@ -4464,6 +4464,153 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
                          f"refused or never run is not an agreement")
 
 
+class TestANarrowTypedParameterGetsItsRange(unittest.TestCase):
+    """A narrow TYPED parameter's theorem carries the RANGE the truncation
+    needs, and the truncation discharges against it.
+
+    `def sgt8(n: Int8)` narrows the incoming word the way the architecture says
+    to — `SXTB` then `SXTW` — and the CFG walk's `have hprior_0_n : (s_0).x19 = n`
+    therefore asks Lean for `⊢ t32s (t32u (t8s n)) = n`.  Over the theorem's
+    unconstrained `n : UInt64` that goal is FALSE, so Lean REJECTS the file with
+    no `sorry` anywhere — which is why the hole census reads 0 and why the
+    examples were invisible rather than reported.
+
+    Three assertions, and the first is the one that matters: **the bound is on
+    the theorem, in the WORD's own `<`.**  A bound that is not there cannot be
+    discharged whatever the tactic, and the word-ordered form is what `bv_decide`
+    can blast; the `Nat`-valued form (`n.toNat < 128`) was tried first and does
+    not work — `omega` cannot derive `n.toNat < 128` from a `UInt64` bound and
+    cannot reason about `Nat`'s `&&&`, which is what `UInt64`'s `&&&` rewrites
+    to.
+
+    The second is that the hypothesis and the lemma that USES it are both
+    present and agree, which is the failure a partial fix has: a lemma without
+    the binder proves nothing and a binder without the lemma discharges nothing.
+
+    The third is against LEAN, because the whole defect is a kernel
+    REJECTION and nothing short of the kernel sees it.
+    """
+
+    PROBES = (
+        # (stem, the composed narrowing the codegen emits, the bound)
+        ("sgt8", "t32s (t32u (t8s n))", 128),
+        ("sle8", "t32s (t32u (t8s n))", 128),
+        ("ug8", "t8u n", 256),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = {}
+        for stem, _narrow, _bound in cls.PROBES:
+            src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
+            tmp = tempfile.mkdtemp(prefix=f"a2-narrow-{stem}-")
+            out = os.path.join(tmp, f"{stem}.aout")
+            r = _generate_dir(tmp, src, stem, out)
+            cls.texts[stem] = open(r["proof_path"]).read()
+
+    def test_the_range_hypothesis_is_on_the_universal_theorem(self):
+        for stem, _narrow, bound in self.PROBES:
+            text = self.texts[stem]
+            head = text[text.index(f"theorem {stem}_compiles_correctly_universal"):
+                        text.index(f"theorem {stem}_compiles_correctly_universal") + 400]
+            self.assertIn(f"(nw : n < {bound})", head,
+                          f"{stem}: the universal theorem has no range "
+                          f"hypothesis, so the walk's `t32s (t32u (t8s n)) = n` "
+                          f"is asked over an unconstrained n and is FALSE — the "
+                          f"defect this class is about")
+
+    def test_the_lemma_is_proved_and_states_the_composition_the_codegen_emits(self):
+        """The lemma must state the narrowing the CODEGEN emits, not a generic
+        one — and which that is, was measured rather than assumed: `ug8`'s
+        residual goal is `⊢ t8u n = n` (a zero-extend and nothing more) while
+        `sgt8`'s and `sle8`'s is `⊢ t32s (t32u (t8s n)) = n`.  A lemma for the
+        larger composition does not match the smaller goal at all, so a single
+        "the identity" statement would have closed two of the three examples and
+        left the third red.
+
+        The statement is about `x`, not `n`: the lemma is universally
+        quantified so it can be a `simp` rewrite with the theorem's hypothesis as
+        the side condition, which is why it reads `_NARROW_LEMMAS`'s text rather
+        than the walk's residual.
+        """
+        import formal.build as fb
+        import formal.arm64_proof_gen as G
+        from formal.types import function_var_types
+        for stem, _narrow, _bound in self.PROBES:
+            text = self.texts[stem]
+            with open(os.path.join(HERE, "formal", "examples",
+                                   f"{stem}.mojo")) as fh:
+                stmts = fb.parse_module(fh.read(), stem)
+            fn = [s for s in stmts
+                  if type(s).__name__ == "FunctionDef"][0]
+            t = function_var_types(fn, None)[fn.params[0][0]]
+            body, bound = G._NARROW_LEMMAS[(t.width, t.signed)]
+            name = f"narrow_t{t.width}{'s' if t.signed else 'u'}"
+            self.assertIn(f"theorem {name} : ∀ (x : UInt64), x < {bound} → "
+                          f"{body} = x := by",
+                          text,
+                          f"{stem}: no lemma states the composition the codegen "
+                          f"emits for a {t.name} parameter ({body} at x < "
+                          f"{bound}), so the hypothesis has nothing to "
+                          f"discharge it")
+            self.assertIn("bv_decide", text,
+                          f"{stem}: the narrow identity is not proved by "
+                          f"bv_decide, and bv_decide is the only thing that can "
+                          f"prove it — the goal is false without the bound, so "
+                          f"no other tactic applies")
+            self.assertIn(f"all_goals try simp [{name}, nw]", text,
+                          f"{stem}: the lemma is emitted but never used, so the "
+                          f"truncation is still undischarged. A binder without "
+                          f"the discharge, or a discharge without the binder, is "
+                          f"the partial fix this asserts against")
+
+    def test_a_wide_parameter_gets_neither(self):
+        """The control, and the reason a change to the universal theorem's
+        STATEMENT is safe to make at all: a 64-bit parameter contributes no
+        binder, no lemma and no discharge, so every other proof in the corpus is
+        byte-identical."""
+        import formal.build as fb
+        import formal.arm64_proof_gen as G
+        src = os.path.join(HERE, "formal", "examples", "count.mojo")
+        with open(src) as fh:
+            stmts = fb.parse_module(fh.read(), "count")
+        fn = [s for s in stmts if type(s).__name__ == "FunctionDef"][0]
+        self.assertEqual(G._narrow_param_bound(fn), [])
+        self.assertEqual(G._narrow_param_hyps(fn), [])
+        self.assertEqual(G._narrow_simp_args(fn), [])
+        self.assertEqual(G._narrow_lemma_texts(fn), [])
+
+    def test_lean_accepts_the_three_examples(self):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no Lean / no lib/ProofLib.olean: the defect is a "
+                          "kernel REJECTION and only the kernel sees it")
+        import formal.build as fb
+        from formal.lean import check_proof_cached
+        for stem, _narrow, _bound in self.PROBES:
+            tmp = tempfile.mkdtemp(prefix=f"a2-narrow-lean-{stem}-")
+            try:
+                src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
+                r = fb.compile_formal(src, arch="arm64",
+                                      output=os.path.join(tmp, f"{stem}.aout"),
+                                      prove=True, check=False)
+                ok, detail, _cached, sorries = check_proof_cached(
+                    r["proof_path"], repo_root=HERE)
+                self.assertTrue(
+                    ok,
+                    f"{stem} does not typecheck, and it did not before this "
+                    f"fix either:\n"
+                    + "\n".join(l for l in detail.splitlines()
+                                 if "error" in l or "⊢" in l)[:2000])
+                self.assertEqual(sorries, 0,
+                                 f"{stem} typechecks with {sorries} sorry(s): "
+                                 f"the range hypothesis must make the "
+                                 f"obligation TRUE, not admit it")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _generate_dir(tmp, src_path, name, out):
     """`compile_formal` on an existing `.mojo`, with NO Lean check.
 

@@ -1922,6 +1922,183 @@ def _entry_arg_names(arity: int) -> list:
     return ["n"] + [f"n{i}" for i in range(1, max(1, arity))]
 
 
+def _narrow_param_bound(fn) -> list:
+    """`(name, bound)` for each entry parameter whose DECLARED type is narrower
+    than 64 bits, or `[]`.
+
+    **This is the hypothesis a narrow typed parameter's theorem was missing, and
+    the obligation it discharges is FALSE without it.**  `def sgt8(n: Int8)`
+    narrows the incoming word the way the architecture says to — `SXTB` then
+    `SXTW`, rendered `t32u (t8s n)` then `t32s` — so the walk's
+    `have hprior_0_n : (s_0).x19 = n` asks Lean for
+
+        ⊢ t32s (t32u (t8s n)) = n
+
+    which holds exactly when `n` is a value the declared type can hold.  The
+    theorem's `n` is a `UInt64` with no range hypothesis at all — `hn` bounds the
+    FUEL and nothing bounds the argument — so the obligation is false for every
+    `n >= 2^(w-1)` and `sgt8` and `sle8` do not typecheck.  Measured on
+    `formal/examples/sgt8.mojo`: 12 diagnostics, four of them this goal at four
+    `hprior`s and eight `grind` counterexamples at the four `hcond`s that read
+    the same value, and zero `sorry` — Lean REJECTS the proof, which is why the
+    hole census reads 0 and why nothing noticed.
+
+    `bound` is `2^(w-1)` for a SIGNED type and `2^w` for an unsigned one, which
+    is the range in which `t{w}s (t{w}u (x)) = x` holds: `t8s` is the identity
+    on `0..127` and `t8u` on `0..255`, and the walk's SXTB-then-SXTW pair is
+    `t32u (t8s …)` for a signed parameter and `t32u (t8u …)` for an unsigned
+    one.  `formal/types.py::function_var_types` is the ONE reader of a
+    parameter's declared type and this asks it, so a second table of widths
+    cannot disagree with the one the codegen narrows by.
+
+    **It is a hypothesis and not a `Post` change, which is what makes this a
+    generator fix rather than a library project.**  The universal theorem states
+    its conclusion over `runProg {name}_prog n` directly for a non-recursive
+    entry, so adding a binder needs nothing from `lib/Refine.lean` — where
+    widening `Post`/`contract_sound` would have touched every recursive example
+    in the corpus.  The alternative, dropping the narrowing so the machine
+    agrees with the source on out-of-range values, is the narrower bug and the
+    wrong place: the truncation is what the architecture does.
+
+    A width-64 parameter contributes nothing, so `[]` for every program whose
+    parameters are unannotated — which is all of them but the four this fixes.
+    """
+    if fn is None:
+        return []
+    from formal.types import function_var_types
+    try:
+        vtypes = function_var_types(fn, None)
+    except Exception:                        # noqa: BLE001 - unresolvable types
+        return []
+    out = []
+    arity = _entry_arity(fn)
+    enames = _entry_arg_names(arity)
+    for i, (pname, _ptype) in enumerate(fn.params or []):
+        t = vtypes.get(pname)
+        if t is None or t.width >= 64:
+            continue
+        out.append((enames[i] if i < len(enames) else f"n{i}",
+                    1 << (t.width - 1 if t.signed else t.width)))
+    return out
+
+
+def _narrow_param_hyps(fn, fuel=None) -> list:
+    """The theorem BINDERS for `_narrow_param_bound`, as `(name : type)` text.
+
+    `None` for a function whose parameters are all 64 bits wide, which is every
+    program in the corpus but the four with a narrow typed parameter — so the
+    emitted theorem is byte-identical for everything this does not fix, which is
+    the property that keeps a change to the universal theorem's statement from
+    being a change to 40-odd proofs.
+
+    The bound is in the WORD's own `<`, not `x.toNat < k`, and that is not a
+    style choice: `bv_decide` bit-blasts `x < 128` on a `UInt64` and discharges
+    it, while the `Nat`-valued form is neither bit-blastable nor something
+    `omega` can see — `omega` does not derive `x.toNat < 128` from `x < 128`, and
+    it cannot reason about `Nat`'s `&&&` at all, which is what `UInt64`'s `&&&`
+    rewrites to. Measured: three attempts at a `Nat`-shaped hypothesis, all
+    failing on `simp made no progress` or `omega could not prove the goal`, and
+    the word-ordered form closing on the first try.
+
+    `fuel` is `None` for the ordinary entry-point theorem and a fuel expression
+    for the RECURSIVE arm; the recursive arm's own header is emitted by a
+    different code path and is NOT given these binders, because
+    `contract_sound` quantifies `arg` itself and widening it is the library
+    project this fix exists to avoid. See `_narrow_param_bound`.
+    """
+    return [f"{nm}w : {nm} < {b}" for nm, b in _narrow_param_bound(fn)]
+
+
+# The identity each narrow typed narrowing needs, as the Lean TEXT of a proved
+# lemma. Emitted into the proof file (never into `lib/ProofLib.lean`, which a
+# bounded worker cannot rebuild) and used by `simp`, so it is the ONE place the
+# statement of "the truncation is the identity on the declared range" exists.
+#
+# The statement is the composition the CODEGEN emits for that width and
+# signedness, not a generic one, and both spellings were measured rather than
+# derived — `formal/examples/ug8.mojo`'s residual goal is `⊢ t8u n = n` (a
+# zero-extend and nothing more) while `sgt8`'s and `sle8`'s is
+# `⊢ t32s (t32u (t8s n)) = n`. A generic lemma for the longer composition would
+# not have matched `ug8`'s goal at all.
+#
+# Each row carries the truncators to UNFOLD with it, because `unfold` fails on
+# a name the goal does not mention — measured, with one shared six-name `unfold`
+# every one of the three red examples reported `Tactic unfold failed`. The list
+# is derived from the statement rather than typed twice.
+_NARROW_LEMMAS = {
+    (8, True): ("t32s (t32u (t8s x))", 128),
+    (8, False): ("t8u x", 256),
+    (16, True): ("t32s (t16s x)", 32768),
+    (16, False): ("t32s (t16u x)", 65536),
+    (32, True): ("t32s x", 2147483648),
+}
+_TRUNCATORS = ("t32s", "t32u", "t16s", "t16u", "t8s", "t8u")
+
+
+def _narrow_lemma_texts(fn) -> list:
+    """The `_NARROW_LEMMAS` entries this function's narrow parameters need.
+
+    Keyed on the theorem stem so two narrow parameters of different widths in
+    one function get two differently-named lemmas rather than a collision, and
+    `[]` for everything else — the same all-or-nothing shape as
+    `_narrow_param_bound`, so a proof cannot gain a lemma without also gaining
+    the hypothesis that uses it.
+    """
+    from formal.types import function_var_types
+    try:
+        vtypes = function_var_types(fn, None)
+    except Exception:                        # noqa: BLE001 - unresolvable types
+        return []
+    out, seen = [], set()
+    for pname, _ptype in (fn.params or ()):
+        t = vtypes.get(pname)
+        if t is None or t.width >= 64:
+            continue
+        key = (t.width, t.signed)
+        if key in seen or key not in _NARROW_LEMMAS:
+            continue
+        seen.add(key)
+        body, bound = _NARROW_LEMMAS[key]
+        name = f"narrow_t{t.width}{'s' if t.signed else 'u'}"
+        # Only the truncators this statement MENTIONS: `unfold` fails on a name
+        # the goal does not contain, so one shared list is a hard error for every
+        # lemma that does not use all six.
+        used = [tr for tr in _TRUNCATORS if tr in body]
+        out.append(f"theorem {name} : ∀ (x : UInt64), x < {bound} → {body} = x := by\n"
+                   f"  unfold {' '.join(used)}\n"
+                   f"  bv_decide")
+    return out
+
+
+def _narrow_simp_args(fn) -> list:
+    """`[narrow_t8s, hnw, …]` — the `simp` arguments that close the truncation.
+
+    The proved lemma NAME and the theorem hypothesis that supplies its side
+    condition, and both come from `_NARROW_LEMMAS` and `_narrow_param_bound`
+    rather than being spelled here: a `simp` argument list that could name a
+    lemma the file does not contain, or a hypothesis the theorem does not have,
+    is a proof that stops elaborating for a reason no reader can see from the
+    emission.
+    """
+    from formal.types import function_var_types
+    try:
+        vtypes = function_var_types(fn, None)
+    except Exception:                        # noqa: BLE001 - unresolvable types
+        return []
+    out, seen = [], set()
+    for i, (pname, _ptype) in enumerate(fn.params or ()):
+        t = vtypes.get(pname)
+        if t is None or t.width >= 64:
+            continue
+        key = (t.width, t.signed)
+        if key in seen or key not in _NARROW_LEMMAS:
+            continue
+        seen.add(key)
+        out.append(f"narrow_t{t.width}{'s' if t.signed else 'u'}")
+        out.append(_narrow_param_hyps(fn)[i].split(" : ")[0])
+    return out
+
+
 def _entry_binders(arity: int) -> str:
     """`mojo`'s parameter list, at the entry's arity."""
     return " ".join(f"({n} : UInt64)" for n in _entry_arg_names(arity))
@@ -6453,6 +6630,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # therefore along a path and never across one, and that is the most
         # that is sound without changing what `s_{pb}` is.
         ctx["hprior_memo"] = dict(ctx.get("hprior_memo", {}))
+        # The `simp` arguments that discharge a narrow typed parameter's
+        # truncation: each proved lemma NAME plus the hypothesis that supplies
+        # its side condition, read once here rather than rebuilt per site.
+        # `[]` for every function whose parameters are 64 bits wide, which is
+        # all of the corpus but `sgt8`/`sle8`/`ug8`/`n8`.
+        _narrow_simp = list(ctx.get("narrow_simp") or ())
         EXIT = ctx.get("exit", exit_pc)
         is_contract = ctx.get("is_contract", False)
         exit_cond = "by omega"
@@ -7223,6 +7406,19 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
+                                # A narrow TYPED parameter's truncation, and the
+                                # last discharge in this list. `sgt8`'s residual
+                                # here is `⊢ t32s (t32u (t8s n)) = n`, which is
+                                # FALSE over the theorem's unconstrained `n` —
+                                # so with no `n < 128` binder on the theorem
+                                # there is nothing to discharge, which is why
+                                # `sgt8`/`sle8`/`ug8` were REJECTED by Lean with
+                                # zero `sorry` and so invisible to the hole
+                                # census. Emitted only when such a binder exists,
+                                # so every other proof is byte-identical.
+                                if _narrow_simp:
+                                    A(f"{IND}  all_goals try simp "
+                                      f"[{', '.join(_narrow_simp)}]")
                                 _hpriors.append(_hp)
                             if _ctr is not None:
                                 _cv, _crhs = _ctr
@@ -8258,8 +8454,19 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # statement is the same execution, and nothing is dropped by not routing it
     # through the framework's `Prog`.
     _via_prog = not (_fr.get("no_change") or entry_arity > 1)
+    # The RANGE hypothesis for a narrow TYPED parameter, as an extra binder on
+    # the universal theorem.  This is the whole of the fix for `sgt8`/`sle8`/
+    # `ug8`/`n8`: without it the walk asks Lean for `t32s (t32u (t8s n)) = n`
+    # over an unconstrained `UInt64`, which is false, so Lean rejects the file
+    # and the hole census reads 0.  `_narrow_param_bound` is the reader and
+    # `_narrow_param_hyps` the binder list, so the RECURSIVE arm below — which
+    # emits its own theorem header — cannot answer a different question about
+    # the same function.
+    _narrow_hyps = _narrow_param_hyps(fn, fuel)
     if fuel is None:
         A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
+    for _h in _narrow_hyps:
+        A(f"    ({_h})")
     for _h in (_fr.get("hyps") or []):
         A(f"    ({_h[0]} : {_h[1]})")
     if _fr.get("hbnd_binder"):
@@ -8291,6 +8498,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A("     | none => False)")
     A(f"  rw [arm64_exec_go_exit]")
     _init_ctx = {"loop_contract": _loop_contract} if _loop_contract else {}
+    # The narrow-parameter `simp` arguments, from the SAME pair that produced
+    # the binders above — one reader for "what is this parameter's range" and
+    # one for "what closes the truncation", so a proof cannot gain a discharge
+    # without the hypothesis that makes it sound.
+    if _narrow_hyps:
+        _init_ctx["narrow_simp"] = _narrow_simp_args(fn)
     if (frame or {}).get("lets"):
         _init_ctx["lets"] = list(frame["lets"])
     if (frame or {}).get("hx30_lets"):
@@ -9989,6 +10202,18 @@ def generate_arm64_proof(prog, code, info) -> str:
             "    SXTB/SXTW/AND-imm branches. -/\n" + trunc_defs + "\n")
     else:
         trunc_defs_section = "\n"
+    # The narrow-parameter identities, beside the truncators they are about and
+    # for the same reason: both exist only because a parameter declared `Int8`
+    # is truncated at the entry, and both are emitted only when one is. See
+    # `_NARROW_LEMMAS`.
+    _narrow_lemmas = _narrow_lemma_texts(fn)
+    if _narrow_lemmas:
+        trunc_defs_section += (
+            "\n/- A narrow TYPED parameter's truncation is the identity on the\n"
+            "    declared range. Proved by bv_decide, which is possible only because\n"
+            "    the bound is in the hypothesis: over an unconstrained UInt64 the\n"
+            "    statement is FALSE, which is the defect these close. -/\n"
+            + "\n\n".join(_narrow_lemmas) + "\n")
 
     return f"""import ProofLib
 import work
