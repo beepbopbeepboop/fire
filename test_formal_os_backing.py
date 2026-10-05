@@ -359,25 +359,39 @@ def main(n):
 #     names[i]          the element, as the element KIND the annotation gives
 #     for x in names    a loop whose target is that element kind
 #
-# `n`, `chars` and `first` are the aggregate answers and `len`-through-the-
+# `n`, `bytes` and `first` are the aggregate answers and `len`-through-the-
 # accessor is the CONTROL: the same count read both ways, in one image, so a
 # difference between them is a difference in how the kind was used rather than
 # in what the filesystem said. The oracle is CPython's `os.listdir` of the same
 # fixture, and its ORDER is the filesystem's `readdir` order, which is what
 # both sides walk.
+#
+# **`bytes` and not `chars`, and the change is the subject of
+# `FOREIGN_BYTES_KIND`.** This row's aggregate used to be
+# `chars = chars + len(x)`, which answered 11 where CPython answers 10 for a
+# directory holding `plain` and `héllo` — a `strlen` in a sum presented as a
+# character count, green build, exit 0, nothing on stderr, on BOTH
+# architectures. `len(x)` is now REFUSED by name (see
+# `len_of_a_directory_entry_is_refused` below, which is where that construct is
+# pinned), so the aggregate is spelled `os.str_len(x)` — the same `strlen`,
+# asked for as BYTES on purpose — and the oracle sums `len(os.fsencode(x))`,
+# which is the only CPython answer a byte count can be equal to. Every other
+# answer in this row is unchanged and is the control that says the kind was
+# seeded at the element and nowhere else: `len(names)` is still the count field,
+# `names[i]` is still the element, and a loop over the blob still walks it.
 CASES.append(Case(
     "listdir_is_a_python_level_list",
     '''\
-from os import listdir, listdir_len, listdir_free
+from os import listdir, listdir_len, listdir_free, str_len
 
 def show(tag, p):
     names = listdir(p)
     printf("%s_n=%d@@", tag, len(names))
     printf("%s_acc=%d@@", tag, listdir_len(names))
-    chars = 0
+    bytes = 0
     for x in names:
-        chars = chars + len(x)
-    printf("%s_chars=%d@@", tag, chars)
+        bytes = bytes + str_len(x)
+    printf("%s_bytes=%d@@", tag, bytes)
     printf("%s_first=[%s]@@", tag, names[0])
     printf("%s_last=[%s]@@", tag, names[len(names) - 1])
     listdir_free(names)
@@ -398,9 +412,17 @@ def _listdir_as_list_oracle():
     """CPython's answers for `listdir_is_a_python_level_list`.
 
     Computed against the SAME fixture the image walked, which is what makes the
-    three aggregate answers comparable rather than merely equal: `chars` is the
-    sum of `len(x)` over the same names, so a wrong element KIND shows up as a
-    wrong sum rather than as a crash.
+    three aggregate answers comparable rather than merely equal: `bytes` is the
+    sum of `len(os.fsencode(x))` over the same names, so a wrong element KIND
+    shows up as a wrong sum rather than as a crash.
+
+    **`os.fsencode` and not `len(x)`**, and the reason is the refusal this row's
+    comment names: `len(x)` counts CHARACTERS and the image's `str_len(x)` counts
+    BYTES, so the oracle has to be the same question CPython was asked. It is
+    still a real oracle rather than a copy of the image: `os.fsencode` is the
+    round trip through the same filesystem encoding `readdir(3)` produced, so a
+    name the kernel handed over as five characters and six bytes is six here and
+    would be five through `len(x)`.
 
     **Only directories that EXIST**, and the reason is in the module rather than
     here: a missing path makes `listdir` answer the WORD 0 rather than a blob,
@@ -414,13 +436,175 @@ def _listdir_as_list_oracle():
         names = os.listdir(path)
         out[f"{tag}_n"] = str(len(names))
         out[f"{tag}_acc"] = str(len(names))
-        out[f"{tag}_chars"] = str(sum(len(x) for x in names))
+        out[f"{tag}_bytes"] = str(sum(len(os.fsencode(x)) for x in names))
         # The brackets are part of the RECORD, not of the value: the program
         # prints `[%s]` so an empty listing is visible as `[]` rather than as a
         # missing field, and the oracle strips them back off for the comparison.
         out[f"{tag}_first"] = f"[{names[0]}]"
         out[f"{tag}_last"] = f"[{names[-1]}]"
     return out
+
+
+# ── 2c. BYTES THE KERNEL SUPPLIED, and what `len` cannot answer about them ──
+#
+# `os.listdir`'s names, `os.getenv`'s values and `os.getcwd`'s path are bytes the
+# KERNEL wrote, not bytes this image interned, and that is the only difference
+# that matters to `len`: `strlen` counts BYTES and CPython counts CHARACTERS, the
+# two agree for every ASCII name and disagree for every other one, and nothing in
+# the SOURCE says which it is holding. Measured before the kind existed, both
+# architectures, over `plain` + `héllo`: the image answered 11 where CPython
+# answers 10. Green build, exit 0, nothing on stderr.
+#
+# So the cases below are three things, and the third is the one that says the
+# kind was seeded correctly rather than over-seeded.
+CASES.append(Case(
+    "len_of_a_directory_entry_is_refused",
+    '''\
+from os import listdir, listdir_free
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    for x in names:
+        printf("%d@@", len(x))
+    listdir_free(names)
+    return 0
+''',
+    refusal="is len() of bytes the KERNEL supplied",
+))
+
+# THE CONTROL, and it is the row that carries the claim. `printf("%s", …)` over a
+# kernel-supplied name is a property of the BYTES and CPython agrees on it —
+# `os.listdir` decodes with `surrogateescape` and writes the same bytes back out
+# — so this must still build, still run and still print `héllo` rather than a
+# refused message or a number. `str_len` is the deliberate byte count, and the
+# oracle is `os.fsencode`, so all three answers are compared against the same
+# filesystem rather than against a table.
+CASES.append(Case(
+    "a_directory_entry_prints_and_measures_as_bytes",
+    '''\
+from os import listdir, listdir_free, str_len
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    printf("n=%d@@", len(names))
+    total = 0
+    i = 0
+    for x in names:
+        printf("name%d=[%s]@@", i, x)
+        printf("bytes%d=%d@@", i, str_len(x))
+        total = total + str_len(x)
+        i = i + 1
+    printf("total=%d@@", total)
+    listdir_free(names)
+    return 0
+''',
+    None,
+    oracle=lambda: _utf8_bytes_oracle(),
+))
+
+
+def _utf8_bytes_oracle():
+    """CPython's answers for `a_directory_entry_prints_and_measures_as_bytes`.
+
+    `bytes` is `len(os.fsencode(name))` and never `len(name)`: the image is
+    measuring BYTES, and the character count is the number
+    `len_of_a_directory_entry_is_refused` is about. The fixture's non-ASCII
+    entry is the whole point of it — APFS hands it back NFD-normalised, so it is
+    five characters and six bytes whichever spelling created it, and an oracle
+    written from the directory rather than from the source is what makes the row
+    survive a filesystem that normalises differently.
+    """
+    names = os.listdir(_UTF8[0])
+    out = {"n": str(len(names)), "total": str(sum(len(os.fsencode(x))
+                                                  for x in names))}
+    for i, x in enumerate(names):
+        out[f"name{i}"] = f"[{x}]"
+        out[f"bytes{i}"] = str(len(os.fsencode(x)))
+    return out
+
+
+# The value the two `getenv` rows hand to the image, and it is a CONSTANT rather
+# than something read out of `os.environ`, for the `env` contract: that dict is
+# the IMAGE's environment, not this process's, so an oracle reading
+# `os.environ[...]` would raise `KeyError` on a machine where the variable is
+# unset. One constant used by both rows makes them agree by construction, and it
+# makes the expected byte count (5 characters, 6 bytes) a claim about the source
+# rather than about whatever a shell did to the environment.
+_NONASCII_VALUE = "héllo"
+
+# A `getenv` value is the other half of the same kind and it is a DIFFERENT
+# kernel call, so it is its own row rather than a comment on the listdir one: a
+# seed that had covered only `readdir(3)` would leave this silent.
+CASES.append(Case(
+    "len_of_an_environment_value_is_refused",
+    '''\
+from os import getenv, getenv_or
+
+def main(n):
+    printf("%d@@", len(getenv("GMOJO_TESTS_NONASCII")))
+    printf("%d@@", len(getenv_or("GMOJO_TESTS_ABSENT", "fallback")))
+    return 0
+''',
+    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE,
+         "GMOJO_TESTS_ABSENT": ""},
+    refusal="is len() of bytes the KERNEL supplied",
+))
+
+# …and the same value is fine to PRINT, which is what makes the refusal a
+# statement about `len` rather than about the value. Without this row a rule that
+# simply made every kernel string unprintable would pass the three above.
+CASES.append(Case(
+    "an_environment_value_prints",
+    '''\
+from os import getenv, str_len
+
+def main(n):
+    v = getenv("GMOJO_TESTS_NONASCII")
+    printf("value=[%s]@@", v)
+    printf("bytes=%d@@", str_len(v))
+    return 0
+''',
+    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE},
+    expect={"value": f"[{_NONASCII_VALUE}]",
+            "bytes": str(len(_NONASCII_VALUE.encode()))},
+))
+
+# `getcwd` is `getcwd(3)` and not `environ`, so it is its own row for the same
+# reason: it is the third kernel source the seed names.
+CASES.append(Case(
+    "len_of_the_working_directory_is_refused",
+    '''\
+from os import getcwd, str_len
+
+def main(n):
+    printf("%d@@", len(getcwd()))
+    printf("%d@@", str_len(getcwd()))
+    return 0
+''',
+    refusal="is len() of bytes the KERNEL supplied",
+))
+
+# The seed is not one module's fix, and this is the row that says so: `glob`
+# reaches the same kinds through a DIFFERENT dylib and a different walk, and
+# `platform.node` through `uname(2)`. A seed that had covered only `os` would
+# leave both of these building, and it would leave them building the way the
+# `os` rows used to — exit 0 and a byte count.
+CASES.append(Case(
+    "len_of_a_globbed_name_is_refused",
+    '''\
+from glob import glob, glob_free
+from platform import node
+
+def main(n):
+    paths = glob("@@UTF8@@/*")
+    for p in paths:
+        printf("%d@@", len(p))
+    glob_free(paths)
+    printf("%d@@", len(node()))
+    return 0
+''',
+    refusal="is len() of bytes the KERNEL supplied",
+))
 
 
 # ── 3. The refusals ───────────────────────────────────────────────────────
@@ -1491,6 +1675,33 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
 # contract) and the fixture only exists inside `main`'s `TemporaryDirectory`.
 _FIXTURE = [""]
 
+# The NON-ASCII fixture, and it is a SEPARATE directory rather than two more
+# entries in `_FIXTURE` for a measured reason: `listdir_and_walk` walks
+# `@@ROOT@@` recursively against a CPython oracle, and adding a subdirectory to
+# that tree changes every one of its 49 answers for a change that has nothing to
+# do with them. A fixture whose only consumer is the byte-count rows keeps every
+# other row's numbers exactly as they were, which is what makes "the seed did
+# not change anything else" checkable rather than asserted.
+_UTF8 = [""]
+
+
+def make_utf8_fixture(root):
+    """A directory whose names make the BYTE/CHARACTER question visible.
+
+    Two entries, one ASCII and one not, because the whole defect is invisible on
+    an all-ASCII directory: `strlen` and `len()` are the same number for every
+    ASCII name, so a fixture of ASCII names cannot tell a correct byte answer
+    from a wrong one. The non-ASCII entry is written from its source spelling and
+    the ORACLE reads it back through `os.listdir` + `os.fsencode`, so a
+    filesystem that normalises the name to NFD (APFS does) is answered correctly
+    rather than compared against a hard-coded byte count.
+    """
+    os.makedirs(root)
+    for name in ("plain", "héllo"):
+        with open(os.path.join(root, name), "w") as f:
+            f.write("x")
+    return root
+
 
 def run_case(case, arch, tmpdir, verbose, fixture=None):
     """(ok, detail) for one case on one architecture.
@@ -1500,11 +1711,17 @@ def run_case(case, arch, tmpdir, verbose, fixture=None):
     convention is `LISTDIR_PROGRAM`'s own, generalised from it: a case that does
     not mention the marker is unaffected, and one that does gets the same
     `run_listdir_case` does.
+
+    `@@UTF8@@` is the second marker, for the same reason with a narrower scope:
+    it names the non-ASCII fixture, which is a different directory because only
+    the byte-count rows should see it.
     """
     src = os.path.join(tmpdir, case.name + ".mojo")
     with open(src, "w") as f:
-        f.write(case.source.replace("@@ROOT@@", fixture)
-                if fixture else case.source)
+        text = case.source
+        if fixture:
+            text = text.replace("@@ROOT@@", fixture)
+        f.write(text.replace("@@UTF8@@", _UTF8[0]))
     out = os.path.join(tmpdir, case.name + "." + arch)
     rc, text = build(src, out, arch)
     if case.refusal:
@@ -1572,6 +1789,8 @@ def main():
         os.makedirs(fixture)
         _FIXTURE[0] = fixture
         paths = make_shapes(fixture)
+        _UTF8[0] = make_utf8_fixture(
+            os.path.join(tmpdir, "utf8"))
         cases = list(CASES)
         for shape, p in sorted(paths.items()):
             cases.append(build_stat_case(p, tmpdir))

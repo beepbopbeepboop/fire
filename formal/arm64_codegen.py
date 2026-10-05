@@ -2311,7 +2311,7 @@ dylib_exports: list = None, globals_base: int = None,
             # rather than a value.
             store_obj = M.pointer_store_receiver(stmt.target)
             if store_obj is not None:
-                if self._expr_str_kind(store_obj) == M.STR_KIND:
+                if M.string_operand_is_string(self._expr_str_kind(store_obj)):
                     raise CodegenError(M.read_only_text_store_refusal(
                         _dotted(stmt.target.func), store_obj))
                 self._emit_pointer_store(stmt.target, stmt.value)
@@ -4418,7 +4418,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._blob_vars.add(name)          # an alias keeps it: `b = a`
                 self._string_vars.discard(name)
                 self._dict_vars.discard(name)
-            elif self._expr_str_kind(value) == M.STR_KIND:
+            elif M.string_operand_is_string(self._expr_str_kind(value)):
                 # `value.name in self._string_vars` OR a `comptime` binding
                 # whose folded value is the text: `var t = OS` binds exactly the
                 # `char *` `t = s` binds, and asking `_expr_str_kind` rather
@@ -4432,9 +4432,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._dict_vars.discard(name)
                 self._blob_vars.discard(name)
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
-                value, self._expr_str_kind(
+                value, M.string_operand_is_string(self._expr_str_kind(
                     value.func.obj if isinstance(value.func, F.MemberExpr)
-                    else None) == M.STR_KIND):
+                    else None))):
             # A lowered string method that yields a string: `m = s.lstrip()`
             # binds a `char *` exactly as `m = s` does. Without this the name
             # fell through to the clearing `else` below, and the consequence
@@ -4505,7 +4505,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         """
         if isinstance(obj, F.StringLiteral):
             return True
-        return self._expr_str_kind(obj) == M.STR_KIND
+        return M.string_operand_is_string(self._expr_str_kind(obj))
 
     def _emit_subscript(self, e: F.SubscriptExpr) -> None:
         """`obj[index]` → element/byte value in X0.
@@ -5542,7 +5542,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if callee is not None:
                 raise CodegenError(M.returnless_value_refusal(callee))
             kind = self._expr_str_kind(a)
-            if kind == M.STR_KIND:
+            if M.string_operand_is_string(kind):
                 frags.append("%s")
             elif M.is_number_kind(kind):
                 # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
@@ -8843,7 +8843,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # payload type, rather than the pointer model's.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and self._expr_str_kind(e.func.obj) != M.STR_KIND \
+                and not M.string_operand_is_string(
+                    self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:
             self._emit_dereference(e, e.func.member)
