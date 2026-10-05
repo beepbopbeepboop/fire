@@ -27959,20 +27959,6 @@ def struct_init_shapes(struct_def) -> list:
     return out
 
 
-def struct_init_overloads(struct_def) -> list:
-    """`[(required, optional, names)]` per `__init__` this struct declares.
-
-    `struct_init_shapes` without the methods and the positional bound, for the
-    diagnostics that only need to SPELL the overloads.  One derivation rather
-    than two: a second walk over the same declarations would eventually
-    disagree with the first about what an arity is, and the disagreement would
-    be a struct that one function can call and the other cannot.
-    """
-    return [(required, optional, [p for p, _d in params])
-            for _m, params, _pos, required, optional, _req
-            in struct_init_shapes(struct_def)]
-
-
 def init_call_bindings(shape, args, kwargs):
     """`({parameter name: argument}, why, names)` — how ONE `__init__` binds a
     call.
@@ -28047,17 +28033,35 @@ def init_overload_for_call(shapes, args, kwargs):
 
       1. `unknown_parameter` — a keyword names no parameter of ANY declared
          constructor.  First because it is a typo-shaped fact about the call
-         and nothing about arity can improve on it.  The names are the
-         keywords no overload knows, and they are the intersection over the
-         overloads: a name one of them declares was understood, so reporting it
-         would send the reader after a parameter the call did get right.
-      2. `missing` — every keyword is spelled right and something the
-         constructor REQUIRES was left out.  Second because it is still about
-         the keywords having been understood, which is the fact the refusal
-         above used to deny.  The names are the required parameters no
-         overload's binding was given, likewise intersected.
-      3. `no_overload` / `ambiguous` — the positionals are what failed, and
-         that is `init_overload_for_arity`'s question with its own two reasons.
+         and nothing about the positionals can improve on it.  The names are
+         read off the CALL against the union of the overloads' parameter names,
+         not off one overload's answer: a name one overload declares was
+         understood, and reporting it would send the reader after a parameter
+         the call did get right.
+      2. `twice` — one parameter given two values, by a positional and a keyword
+         or by two keywords.  CPython's `got multiple values for argument`.
+         Second for the same reason as the first: it is a fact about the
+         SPELLING, and it is the only one of the four whose own repair (drop one
+         of the two) leaves the rest of the call unchanged.
+      3. `too_many_positionals` — more positionals than the constructor's
+         positional boundary, so one of them would bind a keyword-only parameter
+         by position.  It carries no names of its own — which parameter the
+         surplus argument would have hit is not a fact about the call — so it is
+         reported on its presence rather than on the intersection rule the other
+         three use.
+      4. `missing` — every keyword is spelled right and something the
+         constructor REQUIRES was left out.  Last because it is the fallback
+         shape of "you did not supply enough", and it is the only one of the four
+         whose names come from the constructor rather than from the call.
+
+    For the two codes the overloads answer with names, the names are the
+    INTERSECTION over the overloads that produced that code, and that is a
+    deliberate choice rather than a convenience: when two constructors disagree
+    about what the call leaves out, neither set is what the call left out, so the
+    honest message is the count-based one below ("none of them takes that
+    count"), which is a statement about every declared overload at once.  A union
+    would name `b` and `c` for `S()` against `(a, b)` and `(a, c)` as though
+    supplying both would do.
     """
     bound = []
     whys = {}
@@ -28071,18 +28075,24 @@ def init_overload_for_call(shapes, args, kwargs):
         return (bound[0][0], bound[0][1], None, ())
     if len(bound) > 1:
         return (None, None, "ambiguous", ())
-    known = set.intersection(
-        *[set(p for p, _d in shape.params) for shape in shapes]) \
-        if shapes else set()
-    for code in ("unknown_parameter", "twice", "missing"):
+    declared = {p for shape in shapes for p, _d in shape.params}
+    unknown = tuple(k for k, _v in kwargs if k not in declared)
+    if unknown:
+        return (None, None, "unknown_parameter", unknown)
+    for code in ("twice", "missing"):
         if code not in whys:
             continue
-        spellings = [t for group in whys[code] for t in group]
+        # The intersection is a set and a set has no order; the names are taken
+        # back in the FIRST overload's declaration order, which is the order
+        # CPython reports them in (`missing 2 required positional arguments: 'n'
+        # and 'm'`, not the alphabetical one).
+        common = set.intersection(*[set(group) for group in whys[code]])
         names = tuple(dict.fromkeys(
-            n for n in spellings if code != "unknown_parameter"
-            or n not in known))
+            n for n in whys[code][0] if n in common))
         if names:
             return (None, None, code, names)
+    if "too_many_positionals" in whys:
+        return (None, None, "too_many_positionals", ())
     # The positionals are what failed, and this is the pre-existing question
     # with its own two reasons and its own message.
     hit = [s for s in shapes
@@ -29122,22 +29132,33 @@ def _init_type_position_names(value) -> set:
     return out
 
 
-def _init_overload_spelling(overloads) -> str:
+def _init_overload_spelling(shapes) -> str:
     """The declared shapes as one clause, for a message about selecting one.
 
     "it has a constructor" is not actionable, and `Slice`'s two shapes are
     small enough to print, so the arities and the parameter names both appear.
+    The KEYWORD-ONLY boundary is printed where there is one because it is the
+    boundary `too_many_positionals` refuses against: a reader who passed two
+    positionals to `(a, *, b)` cannot tell from `2 required (a, b)` which of
+    the two parameters was meant to take the second one.
     """
-    return "; ".join(
-        f"{req} required" + (f" and {opt} defaulted" if opt else "")
-        + (f" ({', '.join(names)})" if names else "")
-        for req, opt, names in overloads)
+    out = []
+    for shape in shapes:
+        names = [p for p, _d in shape.params]
+        text = (f"{shape.required} required"
+                + (f" and {shape.optional} defaulted" if shape.optional else "")
+                + (f" ({', '.join(names)})" if names else ""))
+        only = names[shape.positional:]
+        if only:
+            text += f", {', '.join(only)} keyword-only"
+        out.append(text)
+    return "; ".join(out)
 
 
-def construction_init_arity_refusal(name: str, overloads, got: int,
+def construction_init_arity_refusal(name: str, shapes, got: int,
                                     why: str, missing=()) -> str:
-    """`S(...)` at a count no declared `__init__` admits, two of them admit, or
-    one is left short of what it REQUIRES.
+    """`S(...)` at a count no declared `__init__` admits, two of them admit, one
+    crosses a keyword-only boundary, or one is left short of what it REQUIRES.
 
     Still a refusal that has to come BEFORE the plain arity one, because that
     message's claim — "a struct's fields are filled in DECLARATION ORDER and
@@ -29145,7 +29166,7 @@ def construction_init_arity_refusal(name: str, overloads, got: int,
     constructor, and a message that is false about the program in front of the
     reader is worse than no message.
 
-    The three reasons are different problems and are stated differently, because
+    The reasons are different problems and are stated differently, because
     they have different fixes:
 
       * `no_overload` — the count is outside every declared arity.  This is an
@@ -29163,6 +29184,11 @@ def construction_init_arity_refusal(name: str, overloads, got: int,
         and leaves `start` unfilled, and CPython says
         `TypeError: __init__() missing 1 required positional argument:
         'start'`.  `missing` is the names to say so with.
+      * `too_many_positionals` — the call passed more positionals than the
+        constructor will take by position, so one of them would have to bind a
+        keyword-only parameter by position, which is not a binding.  CPython
+        reports the boundary (`takes 1 positional argument but 2 were given`),
+        and this does too, naming which parameters have no positional slot.
 
     `std/builtin/builtin_slice.mojo`'s `Slice` is why this family exists at all:
     it declares a two-parameter constructor and a four-parameter one with a
@@ -29172,38 +29198,77 @@ def construction_init_arity_refusal(name: str, overloads, got: int,
     `Slice` genuinely does not have, and the counts two of its overloads would
     both claim.
     """
-    shapes = _init_overload_spelling(overloads)
+    spelling = _init_overload_spelling(shapes)
     if why == "ambiguous":
         return (f"constructing {name} with {got} argument(s) is a call to a "
                 f"user-defined `__init__` and TWO of them admit that call: "
-                f"{name} declares {len(overloads)} `__init__` overload"
-                f"{'' if len(overloads) == 1 else 's'} ({shapes}). This path "
+                f"{name} declares {len(shapes)} `__init__` overload"
+                f"{'' if len(shapes) == 1 else 's'} ({spelling}). This path "
                 f"resolves nothing by type — a call site carries the arguments "
                 f"and their parameter names, never their types — so it cannot "
                 f"say which of them the source named, and picking either would "
                 f"be running a constructor the program did not choose. Pass the "
                 f"arguments only one of them takes, or give the two different "
                 f"parameter lists")
+    if why == "too_many_positionals":
+        wide = max(s.positional for s in shapes)
+        if any(len(s.params) > s.positional for s in shapes):
+            return (f"constructing {name} with {got} positional argument(s) "
+                    f"crosses a keyword-only boundary: {name} declares "
+                    f"{len(shapes)} `__init__` overload"
+                    f"{'' if len(shapes) == 1 else 's'} ({spelling}) — the "
+                    f"parameters after that boundary have no positional slot, "
+                    f"so they have to be named, as `{name}(name=value)`, and a "
+                    f"surplus positional argument is not a binding. This is "
+                    f"CPython's `TypeError`: __init__() takes fewer positional "
+                    f"arguments than were given")
+        return (f"constructing {name} with {got} positional argument(s) is a "
+                f"call to a user-defined `__init__` and the widest one declared "
+                f"takes {wide} by position: {name} declares {len(shapes)} "
+                f"`__init__` overload{'' if len(shapes) == 1 else 's'} "
+                f"({spelling}). In Mojo a declared `__init__` is what "
+                f"`{name}(...)` calls, and this path lowers that call by "
+                f"inlining the constructor body at the construction site, where "
+                f"there is no `*args` to put the surplus argument in. This is "
+                f"CPython's `TypeError`: __init__() takes {wide + 1} "
+                f"positional argument{'' if wide == 0 else 's'} but "
+                f"{got + 1} were given")
     if why == "missing":
+        # CPython words the two kinds of required parameter differently, and
+        # saying "positional" about a keyword-only one is false: `T(1)` against
+        # `def __init__(out self, a: Int, *, b: Int)` raises `missing 1
+        # required keyword-only argument: 'b'`, not the positional spelling.
+        # The split is per NAME and reads every overload, because `missing` is
+        # only reported when they agree on the names.
+        kwonly = {n for n in missing if all(
+            n in [p for p, _d in s.params][s.positional:] for s in shapes)}
+        clauses = ", ".join(
+            f"missing {len(group)} required {kind} argument"
+            f"{'' if len(group) == 1 else 's'}: "
+            f"{', '.join(repr(n) for n in group)}"
+            for kind, group in (("positional",
+                                 tuple(n for n in missing if n not in kwonly)),
+                                ("keyword-only",
+                                 tuple(n for n in missing if n in kwonly)))
+            if group)
         names = ", ".join(repr(m) for m in missing)
-        plural = "s" if len(missing) != 1 else ""
         return (f"constructing {name} with {got} positional argument(s) leaves "
                 f"{names} unfilled, and {name} declares "
-                f"{len(overloads)} `__init__` overload"
-                f"{'' if len(overloads) == 1 else 's'} ({shapes}) — a "
+                f"{len(shapes)} `__init__` overload"
+                f"{'' if len(shapes) == 1 else 's'} ({spelling}) — a "
                 f"declared `__init__` is what `{name}(...)` calls, and its own "
                 f"parameters that have no default are arguments the call has "
                 f"to supply by position or by name. This is CPython's "
-                f"`TypeError`: __init__() missing {len(missing)} required "
-                f"positional argument{plural}: {names}")
-    return (f"constructing {name} with {got} argument(s) is a call to a "
-            f"user-defined `__init__` and none of them takes that count: "
-            f"{name} declares {len(overloads)} `__init__` overload"
-            f"{'' if len(overloads) == 1 else 's'} ({shapes}). In Mojo a "
+                f"`TypeError`: __init__() {clauses}")
+    return (f"constructing {name} with {got} positional argument(s) is a call "
+            f"to a user-defined `__init__` and none of them takes that call: "
+            f"{name} declares {len(shapes)} `__init__` overload"
+            f"{'' if len(shapes) == 1 else 's'} ({spelling}). In Mojo a "
             f"declared `__init__` is what `{name}(...)` calls, and this path "
             f"lowers that call by inlining the constructor body at the "
-            f"construction site — so the argument count selects the overload "
-            f"and nothing else does. Pass a count one of them takes")
+            f"construction site — so the call has to name exactly one of them, "
+            f"by its positional count together with the parameter names its "
+            f"keywords spell. Pass arguments one of them takes")
 
 
 def construction_init_body_refusal(name: str, why: str) -> str:
@@ -29310,7 +29375,7 @@ def construction_arity_refusal(name: str, got: int, summary: str,
 
 def construction_keyword_refusal(name: str, keys, why: str,
                                  fields=(), field: str = None,
-                                 params=()) -> str:
+                                 shapes=()) -> str:
     """`S(a=1)` — a keyword construction the field or parameter binding could not
     resolve.
 
@@ -29338,10 +29403,9 @@ def construction_keyword_refusal(name: str, keys, why: str,
       would be the same false-vocabulary defect in a new place.
     * `"unknown_parameter"` — `name` declares a user-defined `__init__` and a
       keyword names no parameter of ANY of them, which is CPython's
-      `got an unexpected keyword argument`. `params` is the declared
-      overloads' `(required, optional, names)` triples and the NAMES are
-      printed, because the reader's next move is to compare one name against
-      one list.
+      `got an unexpected keyword argument`. `shapes` is the declared
+      constructors' `InitShape` list and the parameter NAMES are printed,
+      because the reader's next move is to compare one name against one list.
 
     It used to have a fourth, `"init"`, which refused **every** keyword
     against a declared `__init__` on the grounds that "nothing here resolves by
@@ -29386,7 +29450,8 @@ def construction_keyword_refusal(name: str, keys, why: str,
                 f"{field!r}")
     if why == "unknown_parameter":
         declared = "; ".join(
-            f"{names}" for _r, _o, names in params if names) or "none"
+            ", ".join(p for p, _d in shape.params) for shape in shapes
+            if shape.params) or "none"
         return (f"constructing {name} with {keys} is a call to a user-defined "
                 f"`__init__`, and {keys.split(',')[0]} is not a parameter of "
                 f"any of them ({declared}). A keyword is bound to the parameter "
@@ -29706,15 +29771,13 @@ def struct_construction_plan(struct_def, call, decls: dict,
             shapes, args, kwargs)
         if why == "unknown_parameter":
             return (None, construction_keyword_refusal(
-                name, why_names, "unknown_parameter",
-                params=struct_init_overloads(struct_def)))
+                name, why_names, "unknown_parameter", shapes=shapes))
         if why == "twice":
             return (None, construction_keyword_refusal(
                 name, why_names, "twice_parameter", field=why_names[0]))
         if why is not None:
             return (None, construction_init_arity_refusal(
-                name, struct_init_overloads(struct_def), len(args), why,
-                missing=list(why_names)))
+                name, shapes, len(args), why, missing=list(why_names)))
         stores, refusal = init_body_stores(struct_def, call, shape, bindings,
                                            decls, rets)
         if refusal is not None:

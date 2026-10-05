@@ -10898,16 +10898,22 @@ CONSTRUCTION_REFUSALS = [
     # and that is a shape this path already emits — so the argument count now
     # selects the overload and the selected body becomes the stores
     # (`CASES`, "a DECLARED `__init__`").  What the inline cannot supply is an
-    # overload the count does not pick out of one, and a body that is not only
-    # those stores.  Each of the five cases below is one of those, and each
-    # names its own cause.
+    # overload the CALL does not pick out of one, and a body that is not only
+    # those stores.  Each of the cases below is one of those, and each names its
+    # own cause.
     #
-    # (1) No declared arity admits the count.  `Slice` admits 2, 3 and 4
-    # positionals, and `A(1)` is not one of them — an error the language reports
-    # at the call, and the fix is on the caller's side, so the message spells
-    # the declared shapes.  The needle is the SHAPES, because a count alone
-    # leaves the reader to work out which arity was wrong.
-    ("constr_refuse_an_init_count_no_overload_takes",
+    # (1) Too FEW positionals for a constructor that REQUIRES more.  `Slice`
+    # admits 2, 3 and 4 positionals, and `A(1)` is not one of them — an error the
+    # language reports at the call, and the fix is on the caller's side, so the
+    # message spells the declared shapes AND names the parameter left unfilled.
+    # **The name in the needle is the point, and the reason moved.**  This used
+    # to be refused as `no_overload` — "none of them takes that count" — because
+    # the selection was by COUNT, so a short count had no parameter to name.  A
+    # keyword is a reordering of an argument list the path already has, so the
+    # selection is now over the whole call and a short call HAS a name, which is
+    # CPython's `missing 1 required positional argument: 'b'`.  Both spellings
+    # were true; only one of them tells the reader what to add.
+    ("constr_refuse_too_few_positionals_for_a_declared_init",
      "struct A1:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -10919,15 +10925,18 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var x = A1(1)\n"
      "    return x.a\n",
-     "refuse:and none of them takes that count: A1 declares 1 `__init__` overload (2 required (a, b))",
-     None),
-    # (2) TWO overloads admit the count.  This path resolves nothing by type —
-    # a call site carries the argument count and the arguments, never their
+     "refuse:missing 1 required positional argument: 'b'", None),
+    # (2) TWO overloads admit the call.  This path resolves nothing by type —
+    # a call site carries the arguments and their parameter names, never their
     # types — so it cannot say which constructor the source named, and picking
     # either would be running a constructor the program did not choose.  The
     # needle is the AMBIGUITY, because "it is refused" and "it is refused
     # because two would have done" have different fixes and a reader who is sent
-    # to the class body can only find that out by reading both.
+    # to the class body can only find that out by reading both.  **"that CALL",
+    # not "that count"**: since the selection reads the keywords too, the
+    # constructor is named by the whole call, and the way out is to pass the
+    # arguments only one of them takes — which for this pair means a keyword
+    # `b=…`, since one shape declares `b` and the other does not.
     ("constr_refuse_two_inits_admitting_the_same_count",
      "struct A2:\n"
      "    var a: Int\n"
@@ -10941,7 +10950,7 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var x = A2(1)\n"
      "    return x.a\n",
-     "refuse:and TWO of them admit that count", None),
+     "refuse:and TWO of them admit that call", None),
     # (3) A BRANCH in the body.  The body is not a sequence of stores, and a
     # branch means the value in a field depends on a condition this path would
     # have to reproduce at the construction site rather than copy.  The needle
@@ -11266,9 +11275,11 @@ CONSTRUCTION_REFUSALS = [
     # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
     # `m` — and it used to build, run and return 7 by bringing both fields up
     # at zero.  A silently wrong value is the outcome this backend treats as
-    # worst available, and the count is not ambiguous here: `init_overload_
-    # for_arity` says no declared overload takes 0 and the message spells the
-    # overloads it does declare, so the fix is on the caller's side.
+    # worst available, and the call is not ambiguous here: there is ONE declared
+    # overload, it REQUIRES `n` and `m`, and the call supplied none of them, so
+    # the two parameters are named rather than a count — the same spelling
+    # `init_overload_for_arity` gave it by way of "none of them takes that
+    # count", which said nothing about what to pass.
     ("constr_refuse_a_zero_arg_construction_when_init_requires_parameters",
      "struct Bag4:\n"
      "    var n: Int\n"
@@ -11284,7 +11295,59 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var b = Bag4()\n"
      "    return b.get()\n",
-     "refuse:none of them takes that count", None),
+     "refuse:missing 2 required positional arguments: 'n', 'm'", None),
+    # ── the POSITIONAL boundary of a declared `__init__`, which is a third
+    # answer the count questions used to share ──
+    # A keyword-only parameter has no positional slot, so a surplus positional
+    # is not a binding — and with the keyword binding in place this is a shape
+    # a program can WRITE and be right about: `Rng(seed=7)` is the corpus's own
+    # spelling (`std/testing/prop/random.mojo`), and `Rng(7)` for the same
+    # struct is the mistake a reader makes by not knowing it.  CPython's
+    # `TypeError` for it is `takes 1 positional argument but 2 were given`, and
+    # the needle is the BOUNDARY rather than that sentence, because the boundary
+    # is the fact about the DECLARATION the reader has to look at.
+    ("constr_refuse_a_positional_for_a_keyword_only_parameter",
+     "struct Rng5:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(out self, *, seed: Int):\n"
+     "        self.n = seed\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng5(7)\n"
+     "    return r.n\n",
+     "refuse:crosses a keyword-only boundary: Rng5 declares 1 `__init__` "
+     "overload (1 required (seed), seed keyword-only)", None),
+    # The same code on a constructor with NO keyword-only parameter, where the
+    # fact is a different one and the message says that instead: there is no
+    # boundary to cross, there is a widest arity and the call is past it.  Two
+    # rows because one message covering both would have to claim "crosses a
+    # keyword-only boundary" about a struct that declares none.
+    ("constr_refuse_one_positional_too_many_for_a_declared_init",
+     "struct One5:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int):\n"
+     "        self.a = a\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var o = One5(1, 2)\n"
+     "    return o.a\n",
+     "refuse:the widest one declared takes 1 by position: One5 declares 1 "
+     "`__init__` overload (1 required (a))", None),
+    # And a keyword-only parameter the call does not supply is `missing`, in
+    # CPython's own spelling — "required KEYWORD-ONLY argument", not "required
+    # positional".  The word is the point: `Two5(1)` is right about `a` and
+    # wrong about `b`, and a reader told to add a positional would add it in the
+    # wrong place.
+    ("constr_refuse_a_keyword_only_parameter_left_unfilled",
+     "struct Two5:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, *, b: Int):\n"
+     "        self.a = a\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var t = Two5(1)\n"
+     "    return t.a\n",
+     "refuse:missing 1 required keyword-only argument: 'b'", None),
     # ── ARITY: too few, too many, and a zero-field struct ──
     # Too FEW. `S(1)` on a two-field `S` is not a one-field construction, it is
     # a two-field construction missing an argument, and the message has to say
