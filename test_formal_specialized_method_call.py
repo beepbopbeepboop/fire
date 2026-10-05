@@ -549,9 +549,80 @@ DIFF_CASES = [
      "\n"
      "main()\n"),
 
+    # THE REMEDY `inherited_layout_refusal` SPELLS, as a BUILD.  Its last
+    # sentence is "Give FancySlice the same shape as Slice — a subclass that
+    # adds no field of its own inherits the layout exactly", and a refusal whose
+    # advice is never executed is half a fact: the reader has no way to tell a
+    # correct remedy from a plausible one.
+    #
+    # So this is the same three classes as
+    # `refuse_a_derived_override_that_adds_a_field_is_a_layout_conflict` with the
+    # added field REMOVED — and the case turns on `extra` being a method that is
+    # NOT the overridden one.  `emit_slice` is declared by `Slice` alone, so
+    # `self._inner.emit_slice(writer)` has exactly one owner and lifts to
+    # `Slice_emit_slice`; `FancySlice` inherits the field (`attach_inherited_fields`
+    # puts a base's fields in the subclass's slots) and so `f.start = 5` writes
+    # the word `Slice.emit_slice` reads.  If the dispatch were withheld the build
+    # would REFUSE rather than print the wrong number — measured: the override
+    # row's twin with `extra` renamed to `emit_slice` refuses with
+    # "self.emit_slice() is a method call on a value" — so this row cannot pass
+    # on a mis-dispatch, and it cannot pass on a wrong layout either, because the
+    # number CPython prints is the base's view of a child.
+    ("a_derived_type_that_adds_no_field_inherits_the_layout",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct FancySlice(Slice):\n"
+     "\n"
+     "    def extra(self) -> Int:\n"
+     "        return 7\n"
+     "\n"
+     "struct Box:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def go(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var f = FancySlice()\n"
+     "    f.start = 5\n"
+     "    var b = Box(f)\n"
+     '    printf("v=%d", b.go(0))\n'
+     "    return 0\n",
+     "class Slice:\n"
+     "    def __init__(self, start=0):\n"
+     "        self.start = start\n"
+     "\n"
+     "    def emit_slice(self, writer):\n"
+     "        return self.start\n"
+     "\n"
+     "class FancySlice(Slice):\n"
+     "    def extra(self):\n"
+     "        return 7\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self, writer):\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main():\n"
+     "    f = FancySlice()\n"
+     "    f.start = 5\n"
+     "    b = Box(f)\n"
+     '    print("v=%d" % b.go(0), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
     # The SAME shape with the two methods spelled DIFFERENTLY, which is the
-    # control for the row above and says the fix is the dispatch rather than the
-    # collision: before it, this one got PAST the recogniser\'s reach and died in
+    # control for `field_receiver_method_call_dispatches_on_the_declared_type`
+    # and says the fix is the dispatch rather than the
+    # collision: before it, this one got PAST the recogniser's reach and died in
     # the emitter instead ("self.emit_slice() is a method call on a value … the
     # receiver is a name on this path"), so both spellings were refused and only
     # the WORDING differed.  It must now compute the same thing, and the one-word
@@ -690,13 +761,23 @@ DIFF_CASES = [
 # `formal/model.py`, so each is required to refuse identically on BOTH backends.
 REFUSALS = [
     # THE GUARD on the field-receiver dispatch, and the only observable thing
-    # about it: `FancySlice` DERIVES from `Slice` and declares the same method,
-    # so a field declared `Slice` may hold either, and the declared type names
-    # only the base.  Lifting to `Slice_emit_slice` would then run the BASE's
-    # body against a CHILD's frame — which builds, and computes the base's view
-    # of a value the source says is a child.  Measured: with
-    # `formal/build.py`'s `_receiver_field_types` guard removed, this program
-    # BUILDS on arm64.  With it, it refuses.
+    # about it: `FancySlice` DERIVES from `Slice` and REDECLARES the same method
+    # with a different body, so a field declared `Slice` may hold either and the
+    # declared type names only the base.  Lifting to `Slice_emit_slice` would
+    # then run the BASE's body against a value the source says is a child — it
+    # builds, and prints 5 where CPython prints 1000.
+    #
+    # `FancySlice` adds NO FIELD of its own, and that is the load-bearing detail
+    # rather than a simplification: an added field would make the child a FRAME
+    # where the base is one word, which is `model.struct_inherited_layout_conflicts`
+    # and `inherited_layout_refusal` — a declaration-level refusal raised before
+    # any dispatch is attempted, so it would PREEMPT this row's subject and the
+    # row would stop measuring the guard it exists for.  That shape is pinned
+    # separately and for its own message by
+    # `refuse_a_derived_override_that_adds_a_field_is_a_layout_conflict` below,
+    # and the shape the layout refusal's own remedy recommends is pinned as a
+    # BUILD by `a_derived_type_that_adds_no_field_inherits_the_layout` in
+    # DIFF_CASES.
     #
     # The refusal is the pre-existing one and that is deliberate: withholding
     # the entry puts the call back on the name-based path, where `emit_slice` is
@@ -705,6 +786,49 @@ REFUSALS = [
     # honest outcome — this is a limit, and the fix's job was to stop it firing
     # on programs it is not about.
     ("refuse_a_field_receiver_whose_declared_type_has_a_derived_override",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct FancySlice(Slice):\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "struct Box:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def go(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return 0\n",
+     "self.emit_slice() is a method call on a value"),
+
+    # THE SAME source shape WITH the added field, refused by a different and
+    # coarser rule, and pinned here because for years this program's needle was
+    # the row above's — i.e. the row asserted a message the build does not
+    # produce, and what it actually produced went unnamed in the test file.
+    #
+    # This is `formal/build.py::check_inherited_layouts` over
+    # `model.struct_inherited_layout_conflicts`: the base is one word, the
+    # subclass added a field, so a base method compiled against the one-word
+    # receiver convention would be handed a frame ADDRESS.  It is checked from
+    # the DECLARATIONS, at `_run_late_checks`, so it fires whatever the call
+    # sites do — `main` here constructs nothing at all, which is exactly why it
+    # is a property of the file rather than of the program.
+    #
+    # Two reasons this row is worth its own existence rather than being folded
+    # into the one above.  It is the sentence `inherited_layout_refusal` spells
+    # its REMEDY in ("Give FancySlice the same shape as Slice — a subclass that
+    # adds no field of its own inherits the layout exactly"), and the assertion
+    # that the remedy works is the BUILD row in DIFF_CASES; a refusal whose
+    # advice is never checked is half a fact.  And the two rows together are the
+    # ordering: an override alone is refused for being ambiguous, and an added
+    # field is refused before dispatch is even reached.
+    ("refuse_a_derived_override_that_adds_a_field_is_a_layout_conflict",
      "struct Slice:\n"
      "    var start: Int\n"
      "\n"
@@ -725,7 +849,7 @@ REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return 0\n",
-     "self.emit_slice() is a method call on a value"),
+     "the two do not agree on what a receiver IS"),
 
     # A GENUINE VALUE-POSITION METHOD REFERENCE — `checker.check_temporal_...`
     # passed as an ARGUMENT, not called.  This is the two remaining files of the
