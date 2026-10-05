@@ -3921,12 +3921,44 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             and isinstance(node.target, F.IdentExpr):
                         target, value = node.target.name, node.value
                     if target and isinstance(value, F.IdentExpr) \
-                            and value.name in hs and target not in hs:
+                            and value.name in hs:
                         # a copy: the same frame under a second name
-                        hs.add(target)
-                        hstruct[_fn_key(fn)][target] = \
-                            list(hstruct[_fn_key(fn)][value.name])
-                        changed = grew = True
+                        _known = hstruct[_fn_key(fn)].get(target)
+                        if _known is None:
+                            hs.add(target)
+                            hstruct[_fn_key(fn)][target] = \
+                                list(hstruct[_fn_key(fn)][value.name])
+                            changed = grew = True
+                        else:
+                            # …and the REBIND, which is the case
+                            # `target not in hs` used to skip and which made the
+                            # answer depend on which edge ran first: the
+                            # constructor seeding always runs first, so
+                            # `var q = Three()` fixed `q`'s layout before
+                            # `q = o` could contribute `Two`'s, and the second
+                            # layout was the one that disappeared.  Measured on
+                            # both architectures, `q.c` then read slot 2 of a
+                            # `Two` frame and the two machines disagreed (arm64
+                            # exit 0, x86-64 exit 208) because the word past the
+                            # end of the frame is whatever each machine's
+                            # scratch held.
+                            #
+                            # MERGE rather than decide, which is what the
+                            # pointer edge above already does and for the same
+                            # reason: the candidate list is a SET that only
+                            # grows, so the fixpoint stays monotone and
+                            # terminates, and the disagree-or-refuse decision
+                            # belongs to `model.struct_frame_slot_candidates` —
+                            # one place that already refuses `A` and `B`
+                            # disagreeing on a field.  A name whose two layouts
+                            # agree is unaffected, because one candidate and two
+                            # agreeing candidates answer a field read
+                            # identically.
+                            for _st in hstruct[_fn_key(fn)][value.name]:
+                                if _st in _known:
+                                    continue
+                                _known.append(_st)
+                                changed = grew = True
                     # A copy of a NESTED FRAME out of a field, which is the
                     # same edge one step along: the base is a holder, the field
                     # holds the ADDRESS of a frame of its own, and naming that
