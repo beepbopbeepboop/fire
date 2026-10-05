@@ -1684,23 +1684,15 @@ def _gen_stmt_AssignStmt(gen, node):
                 # stored key was an address — a later `d[b'x']` read built a
                 # different address and always missed, and two entries could
                 # never collide or compare equal.
-                if vtype == 'char *':
-                    gen._emit_call('void', '', 'mojo_dict_set_bytes_str',
-                                    [('MojoDict *', obj_v), ('MojoBytes *', idx_v), ('char *', v)])
-                else:
-                    gen._emit_dict_int_value_store(obj_v, 'MojoBytes *', idx_v,
-                                                    vtype, v, node.value)
+                gen._emit_dict_int_value_store(obj_v, 'MojoBytes *', idx_v,
+                                                vtype, v, node.value)
                 key_tmp = None
             else:
                 _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
-            if key_tmp is None:
-                pass
-            elif vtype == 'char *':
-                gen._emit_call('void', '', 'mojo_dict_set_str',
-                                [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
-            else:
-                # The ONE shared non-str dict store, `emit_dict_int_value_store`
-                # (whose docstring is this arm's spec: a float through the
+            if key_tmp is not None:
+                # THE store, for every value kind — `emit_dict_int_value_store`
+                # (whose docstring is this arm's spec: a `char *` through the
+                # str setter so the slot is `kind == 2`, a float through the
                 # double setter, a `None` through `mojo_dict_set_none`, a bool
                 # through `mojo_dict_set_bool` so THAT slot's repr says
                 # True/False, the stored callable's return type noted, the
@@ -1713,7 +1705,10 @@ def _gen_stmt_AssignStmt(gen, node):
                 # build failure), and the bytes-keyed sibling two lines up
                 # called a `gen.` name that was never a delegate and raised
                 # AttributeError instead. Both were this arm's bug, and both
-                # are gone now that there is one spelling of the store.
+                # are gone now that there is one spelling of the store — which
+                # is also what gave the `char *` value a `kind == 2` here and in
+                # the dict literal, where before it had one spelling in one
+                # place and none in the others.
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
                                               vtype, v, node.value)
         else:
@@ -1775,15 +1770,12 @@ def _gen_stmt_AssignStmt(gen, node):
                 # `__setitem__` override: store into the backing MojoDict.
                 _dsw_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
                 _dsw_kt, _dsw_kv = gen._char_to_cstr(it, idx_v, True, True)
-                if vtype == 'char *':
-                    gen._emit_call('void', '', 'mojo_dict_set_str',
-                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
-                                     ('char *', v)])
-                else:
-                    gen._note_container_callable_ret(_dsw_dp, v, vtype)
-                    gen._emit_call('void', '', 'mojo_dict_set_int',
-                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
-                                     (vtype, v)])
+                # The ONE store, like the two arms above (this one had its own
+                # `char *` line and its own `mojo_dict_set_int` for everything
+                # else, so a float here stored the integer 1 and a bool value
+                # lost its `kind == 3` tag).
+                gen._emit_dict_int_value_store(_dsw_dp, 'char *', _dsw_kv,
+                                              vtype, v, node.value)
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     # GIMPLE strict: raw pointer subscript write needs address in a register.

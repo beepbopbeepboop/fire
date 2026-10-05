@@ -4552,18 +4552,41 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
 def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     """Lower `<template> % <dict>` to the runtime dict-keyed formatter.
 
-    Both operands are lowered normally (side effects preserved), then the
-    LHS is coerced to `char *`: for a genuinely char*-typed template that
-    is a no-op cast, and for an int64_t-mistyped template (the pervasive
-    unknown-call-return fallback typing) the cast is still semantically
-    safe because `% dict` on a non-string LHS is a TypeError in real
-    Python — no VALID program ever reaches this call with a real integer
+    Both operands are lowered normally (side effects preserved), then EACH
+    is coerced to the parameter type its callee declares: the LHS to `char *`,
+    the RHS to `MojoDict *`. A no-op cast for a genuinely-typed operand, and
+    for an int64_t-mistyped one (the pervasive unknown-call-return fallback
+    typing, and what every CONTAINER global reads back as — see
+    `bare_global_read_plan`'s boxed-`int64_t` rule) the cast is still
+    semantically safe because `% dict` on a non-dict RHS is a TypeError in
+    real Python — no VALID program ever reaches this call with a real integer
     in the slot. The alternative (refusing / falling through) keeps
-    emitting invalid GIMPLE `%` on MojoDict*, which cannot link."""
+    emitting invalid GIMPLE `%` on MojoDict*, which cannot link.
+    The RHS cast is through its own temp and not inline in the argument list,
+    because that is the shape the LHS above already uses and the shape
+    GIMPLE has been shown to accept in a call argument (`_compr_list_loop`'s
+    `it_val` notes the same constraint for a different position, an
+    assignment RHS). Emitting the boxed word straight through was a build
+    failure: "passing argument 2 of 'mojo_str_format_dict' makes pointer from
+    integer without a cast", which is what stopped
+    `gimple_dict_repr_kinds_agree_with_cpython` from building at all — the
+    whole program, including the four lines above it that were already right."""
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     lvs = lv if lt == 'char *' else gen._new_val('char *', f"(char *){lv}")
-    t = gen._new_val('char *', f"mojo_str_format_dict ({lvs}, {rv})")
+    rvs = rv if rt == 'MojoDict *' else gen._new_val(
+        'MojoDict *', f"(MojoDict *){rv}")
+    # `_mojo_repr_dict`, the GENERATED per-TU dict walker, as the third
+    # argument: it is how an UNKEYED spec (`'%s' % d`) renders the mapping,
+    # which CPython defines as `str(d)`. It travels in because this runtime
+    # cannot render a dict — each slot's kind and the recorded `val_repr` are
+    # only in the generated block — which is the same bargain
+    # `MojoDict.val_repr` and `mojo_list_set_elem_repr` make, and the reason
+    # there is still one implementation of "what a dict looks like". A NULL
+    # is tolerated by the callee (it degrades to copying the spec through),
+    # so a caller in a TU with no reflection block is not made worse by this.
+    t = gen._new_val('char *',
+                     f"mojo_str_format_dict ({lvs}, {rvs}, _mojo_repr_dict)")
     return 'char *', t
 
 
@@ -5791,30 +5814,26 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
-    # A FLOAT is not handled here: `emit_dict_int_value_store` is the one store
-    # of a NON-STRING value, and a float is one of the kinds it owns (it used
-    # to be this site's own float arm, which was a second spelling of it and
-    # the only one of the six that got the `kind == 1` tag right).
-    if vt == 'char *':
-        if vv.startswith('_slit_'):
-            vv_tmp = gen._new_val('char *', f"{vv}")
-            vv = vv_tmp
-        if _kw_key:
-            gen._emit_call('void', '', 'mojo_dict_set_str',
-                           [('MojoDict *', t), ('char *', kv), ('char *', vv)])
-        else:
-            gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
-    else:
-        # The ONE shared non-str dict store: `emit_dict_int_value_store`
-        # picks the setter from the key's domain (`bytes_` or not) and from
-        # `is_python_bool_expr` — the one bool predicate every consumer uses —
-        # so a bool VALUE lands in a slot of its own (`mojo_dict_set_bool`,
-        # `kind == 3`) and this dict's OTHER values are untouched. This arm
-        # used to emit the whole-dict marker `mojo_mark_dict_bool_values`
-        # instead, which the runtime deleted with that per-slot replacement,
-        # so `{'k': True}` compiled to a call to a function that does not
-        # exist — a hard build failure on an ordinary literal.
-        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
+    # THE store, for every value kind — including a `char *`, whose setter arm
+    # used to live HERE and at two other sites and at neither of the other two
+    # consistently (see `emit_dict_int_value_store`'s own comment; the fourth
+    # site, an opaque-receiver `d[k] = v`, had none at all and stored a pointer
+    # with `kind == 0`). It picks the setter from the key's domain (`bytes_` or
+    # not), from `is_python_bool_expr` — the one bool predicate every consumer
+    # uses — and from the value's own type, so a bool VALUE lands in a slot of
+    # its own (`mojo_dict_set_bool`, `kind == 3`) and this dict's OTHER values
+    # are untouched. This arm used to emit the whole-dict marker
+    # `mojo_mark_dict_bool_values` instead, which the runtime deleted with that
+    # per-slot replacement, so `{'k': True}` compiled to a call to a function
+    # that does not exist — a hard build failure on an ordinary literal.
+    #
+    # `_kw_key` needs no spelling here: the shared store emits through
+    # `_emit_call`, which is what resolves the `_char_to_cstr` placeholder for
+    # a container key by swapping in the `_kw` twin. That is the reason IT
+    # uses `_emit_call` and not a raw emit, and it is why handing the `char *`
+    # case to it changed no generated text — the raw emit this arm used for a
+    # non-container key and `_emit_call` agree there.
+    gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

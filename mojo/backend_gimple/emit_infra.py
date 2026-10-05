@@ -5003,7 +5003,7 @@ def elem_repr_operand(gen, shim: str) -> str:
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
-    """The one dict store of a NON-STRING VALUE, shared by the dict literal
+    """The one dict store, for EVERY value kind, shared by the dict literal
     (`_emit_dict_pair_store`), the dict comprehension (`_gen_compr_append`), the
     subscript store `d[k] = v`, the same store under a bytes key, and the two
     `d[k] = v` shapes that reach a dict through an opaque int-typed receiver —
@@ -5012,8 +5012,9 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     `mojo_mark_dict_bool_values`, and the sixth called a
     `gen._emit_dict_int_value_store` that was never a delegate.
 
-    Three value shapes, three setters, and each one is chosen from something
-    the store site can still see:
+    Value kinds and their setters, each chosen from something the store site
+    can still see (a `char *` first — see that arm's comment for why it is here
+    and not at the three sites that used to carry it):
 
     `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
     `_DictSlot.keykind`), which is what the `bytes_` prefix below selects — so
@@ -5057,6 +5058,32 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
     gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
     _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    # A `char *` value, through `mojo_dict_set_str`, which tags the slot
+    # `kind == 2`. This arm is why the function is not named for the int case
+    # any more: it used to be documented as "the one dict store of a NON-STRING
+    # VALUE", and the three sites that had a `char *` value each hand-rolled
+    # that one line — so a FOURTH site, the one that reaches a dict through an
+    # OPAQUE int-typed receiver (a container global, which reads back as the
+    # boxed `int64_t`; `bare_global_read_plan` is the decision that types it),
+    # had no arm at all and stored the pointer through `mojo_dict_set_int`
+    # with `kind == 0`. The value was then indistinguishable from an integer,
+    # and every kind-aware consumer said so: `'%(s)s' % d` printed the pointer
+    # decimal where CPython prints the string. `print(d)` happened to survive,
+    # because a `kind == 0` word above 65536 goes to the generic reader, which
+    # renders a pointer-shaped word as a string — which is exactly why this hid
+    # behind a correct-looking dict repr.
+    #
+    # The `_slit_` load is the same one the hand-rolled arms did: a string
+    # LITERAL lowers to the bare name of a `static char *` pool entry, and the
+    # setter's parameter is read as a string, so the name goes through a real
+    # `char *` temp first.
+    if val_ctype == 'char *':
+        if val.startswith('_slit_'):
+            val = gen._new_val('char *', f"{val}")
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'str',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('char *', val)])
+        return
     if gen._is_none_literal(val_node):
         gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'none',
                        [('MojoDict *', dict_val), (key_ctype, key_val)])

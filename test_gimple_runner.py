@@ -8652,6 +8652,81 @@ bytes_keyed()
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
     # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
+    # slot's kind, because a pair slot is a raw int64_t and the pair is built by
+    # the runtime with nothing from the dict slot travelling with it. Without it
+    # the dict's own repr and the pair's repr disagreed about the SAME value:
+    # `print({'mid': 0})` printed `0` and `sorted({'mid': 0}.items())` printed
+    # `[('mid', None)]` — and a float did not merely print wrong, it SEGFAULTED,
+    # because the pair walker handed the IEEE-754 bits to the runtime type-tag
+    # reader, which dereferences them. `print(d.items())` is in this program
+    # rather than `sorted(...)` because it is the SEGFAULT that made the missing
+    # kinds row impossible to miss.
+    #
+    # The mechanism is the same one `mojo_list_set_kinds` and `MojoDict.val_repr`
+    # already use — the static type is known where the value is built and is
+    # unrecoverable later — and the renderer is `mojo_repr_slot_kind`, now the ONE
+    # place any walker asks what a slot of a given kind looks like.
+    #
+    # `print(d.items())` is not here: CPython prints a `dict_items([...])` VIEW,
+    # which is a different spelling of the same pairs, so a CPython comparison
+    # cannot use it. `sorted(d.items())` is the shape that did SEGFAULT (the
+    # float value's bits reaching the runtime type-tag reader), so it carries the
+    # same evidence. `list(d.items())` is separately broken — it reads each pair
+    # pointer as an integer, which is the element-type half of
+    # `list(<a boxed container>)` and is filed as
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    #
+    # `%(s)s` at the end is the SUBSCRIPT store's half: `d['s'] = 'q'` reached a
+    # dict through a container global, which reads back as a boxed `int64_t`, so
+    # it took the opaque-receiver store site — and that site had no `char *` arm,
+    # so the pointer went in through `mojo_dict_set_int` with `kind == 0` and
+    # `'%(s)s' % d` printed the pointer decimal. `print(d)` hid it: a `kind == 0`
+    # word above 65536 goes to the generic reader, which renders a pointer-shaped
+    # word as a string. The `char *` arm is now in `emit_dict_int_value_store`
+    # with the other four, so all four store sites agree.
+    test_gimple_matches_cpython("gimple_dict_items_pairs_keep_the_slot_kind", """\
+d = {}
+d['z'] = 0
+d['n'] = None
+d['b'] = True
+d['f'] = 1.5
+d['s'] = 'q'
+d['c'] = [1, 2]
+d['e'] = {}
+d['i'] = {'k': 1}
+print(d)
+print(sorted(d.items()))
+print('%s' % d)
+print('%(z)s %(n)s %(b)s %(f)s %(s)s' % d)
+""")
+
+    # The keyed spec of the same value kinds, and the unkeyed one, in one
+    # program. Two halves, and both were wrong in DIFFERENT ways:
+    #
+    #  * `'%s' % d` emitted the mapping as the bare `int64_t` a container global
+    #    reads back as, straight into a `MojoDict *` parameter — "passing
+    #    argument 2 of 'mojo_str_format_dict' makes pointer from integer
+    #    without a cast", a BUILD failure that took out the three correct lines
+    #    above it in `gimple_dict_repr_kinds_agree_with_cpython`. The LHS was
+    #    already coerced to `char *`; the RHS was not.
+    #  * an unkeyed spec against a mapping is `str(d)` in CPython (measured on
+    #    3.14.7: `'%s' % d` prints the dict; the TypeError is `'%s %s' % d`),
+    #    and the runtime copied the spec through and printed a bare `%s`. It
+    #    now takes the dict's own repr as a third argument rather than
+    #    re-deriving one, for the same reason `MojoDict.val_repr` travels on the
+    #    value: the runtime cannot render a dict.
+    test_gimple_matches_cpython("gimple_percent_of_a_dict_reads_the_mapping", """\
+d = {}
+d['z'] = 0
+d['n'] = None
+d['b'] = True
+d['f'] = 1.5
+d['s'] = 'v'
+print('%s' % d)
+print('%(z)s/%(n)s/%(b)s/%(f)s/%(s)s' % d)
+""")
+
     test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
 d = {}
 d['n'] = None

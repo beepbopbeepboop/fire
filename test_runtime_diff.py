@@ -627,6 +627,48 @@ BUILTIN_PROGRAMS = {
             d["j"] = 1
             print(d)
     """),
+    # The SAME value kinds, read back through `.items()` instead of through
+    # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
+    # PAIR does not, because a pair slot is a raw int64_t and the pair is built
+    # by the runtime with nothing from the dict slot travelling with it. So the
+    # two halves of one program disagreed: `print({'mid': 0})` printed `0` and
+    # `sorted({'mid': 0}.items())` printed `[('mid', None)]` — and a float value
+    # did not merely print wrong, it SEGFAULTED, because the pair walker handed
+    # the IEEE-754 bits to the runtime type-tag reader, which dereferences them.
+    # `mojo_dict_items` records a per-slot kinds row on each pair now (the same
+    # bargain `mojo_list_set_kinds` and `MojoDict.val_repr` make), and
+    # `mojo_repr_slot_kind` is the ONE renderer every walker asks.
+    #
+    # `list(d.items())` is deliberately NOT here: that spelling reads each pair
+    # pointer as an integer and segfaults, which is the element-type half of
+    # `list(<a boxed container>)` and is already filed as
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
+    # here would make this case a place where an unrelated red lives.
+    "dict_items_reads_each_slot_kind": textwrap.dedent("""\
+        def main():
+            d = {}
+            d["z"] = 0
+            d["n"] = None
+            d["b"] = True
+            d["f"] = 1.5
+            d["s"] = "q"
+            d["c"] = [1, 2]
+            d["d"] = {"x": 1}
+            print(d)
+            print(sorted(d.items()))
+            # `for k, v in d.items()` is deliberately NOT here: the loop\'s slot-1
+            # accessor comes from `_dict_items_val_elems`, ONE value type per
+            # dict, so a HETEROGENEOUS dict reads every value with that one
+            # accessor (a container prints as a pointer decimal, a float as its
+            # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
+            # what a subscript loop READS with, and that half is still open —
+            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
+            #
+            # The keyed spec of the SAME value kinds, which was already right and
+            # is the control that keeps this case from being satisfied by
+            # broadening something else.
+            print("%(z)s %(n)s %(b)s %(f)s" % d)
+    """),
     # `getattr(o, name, default)` computed the default-selection ternary
     # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
     # was emitted -- and then BOXED the whole expression as `int64_t`, so
@@ -1373,6 +1415,7 @@ CPYTHON_COMPARABLE = {
     "comprehension_target_does_not_outlive_its_own_loop",
     "comprehension_result_elem_type_across_a_branch",
     "dict_repr_zero_value_is_not_the_none_sentinel",
+    "dict_items_reads_each_slot_kind",
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
 }
