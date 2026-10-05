@@ -85,10 +85,15 @@ def _usage_text() -> str:
                                     Same, then run it (bare form = build and run)
   {tool} --no-prove <file> [...]     Formal backend only: skip proof generation/checking
   {tool} --check-contracts <file>    Formal backend only: lower every @requires/@ensures
-                                    into a run-time check and emit its f_contract
-                                    theorems; a contract found FALSE stops the build.
-                                    Without it a false contract is still REPORTED,
-                                    with the input that breaks it.
+                                    into a run-time check; on `build` it also emits
+                                    the f_contract theorems into the proof. A contract
+                                    found FALSE stops the build. Without the flag a
+                                    false contract is still REPORTED, with the input
+                                    that breaks it. On `dylib` the theorem half does
+                                    not apply -- that path's contract is derived from
+                                    the machine (lib/Contracts.lean), not from a
+                                    source model -- so the run-time check and the
+                                    reported verdicts are what you get.
   {tool} --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
   {tool} --backend=gimple ...        Select the gimple backend (default)
   {tool} dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
@@ -450,12 +455,24 @@ def _contract_note(result: dict, checked: bool) -> str:
         if "counterexample_inputs" in e:
             extra = f" at {e['counterexample_inputs']}"
         lines.append(f"  {head}{extra} — {e['why']}")
-    mode = ("checked in the image and in the proof; a REFUTED one fails the "
-            "build"
-            if checked else
-            "NOT checked in the image; pass --check-contracts for that, which "
-            "also makes a REFUTED one fail the build. The search below runs "
-            "either way, so a false promise is reported on every build")
+    # The mode line is DERIVED from the entries, not from the flag alone.  A
+    # flag says what was asked for and the entries say what was done, and on
+    # the library path the two differ -- `dylib --formal --check-contracts`
+    # checks at run time and emits no theorem -- so a line derived from the flag
+    # would claim "and in the proof" for a path that wrote none.
+    partial = any(e.get("status") == "not-applicable" for e in entries)
+    if not checked:
+        mode = ("NOT checked in the image; pass --check-contracts for that, "
+                "which also makes a REFUTED one fail the build. The search "
+                "below runs either way, so a false promise is reported on "
+                "every build")
+    elif partial:
+        mode = ("checked in the image; a REFUTED one fails the build. The "
+                "theorem half does not apply on this path -- the row below "
+                "says why")
+    else:
+        mode = ("checked in the image and in the proof; a REFUTED one fails "
+                "the build")
     return (f"contracts: {len(entries)} declared ({mode}):\n"
             + "\n".join(lines))
 

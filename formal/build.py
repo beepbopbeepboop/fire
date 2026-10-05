@@ -20663,6 +20663,25 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                      dylib_functions_by_source)
         if _why is not None:
             raise FormalBuildError(_why)
+        # The `f_contract` theorems are NOT emitted on this path, and the flag
+        # does not silently pretend they are.  `generate_dylib_proof` derives
+        # its contract from the MACHINE -- `lib/Contracts.lean`'s
+        # `ExportBody`/`agrees_of_body` over `arm64_go_exit` -- and emits no
+        # `<name>_go` source model for a theorem to be stated over.  Saying so
+        # here is the difference between a flag with a smaller scope and a flag
+        # that claims one it does not have.
+        dylib_contracts.append({
+            "name": "<theorem half>",
+            "status": "not-applicable",
+            "why": "`dylib --formal --check-contracts` lowers the contract into "
+                   "the image and reports the bounded search, but emits NO "
+                   "`f_contract` theorem: `generate_dylib_proof` derives this "
+                   "path's contract from the MACHINE (`lib/Contracts.lean`'s "
+                   "`ExportBody`/`agrees_of_body` over `arm64_go_exit`) and "
+                   "emits no `<name>_go` source model for one to be stated "
+                   "over. Use `build --formal --check-contracts` for the "
+                   "theorem half.",
+        })
 
     mod_init_addrs: list = []
     has_mod_init = bool(M.module_body_functions(ordered))
