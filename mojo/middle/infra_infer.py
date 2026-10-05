@@ -2458,6 +2458,26 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                 v, val = n.target.name, n.value
                 if isinstance(val, gimple_ctypes.ListExpr):
                     note_list_literal(v, val)
+                elif isinstance(val, gimple_ctypes.SetExpr):
+                    # The set twin of `note_list_literal`, and missing for the
+                    # same reason: this pre-pass replayed only LIST literals,
+                    # so a local `s = {'r', 'q'}` carried no element type into
+                    # the cross-call contract even though the codegen-time
+                    # `_lower_set_literal` records one for the same literal
+                    # (`gen._elem_types[<temp>]`). Same helper, so the two
+                    # cannot disagree about the set they describe.
+                    #
+                    # What that cost is the whole remaining half of the set
+                    # story: with the container KIND right (see
+                    # `gen_module_impl`'s container-kind contract and
+                    # `funcs_shared.param_binding_ctype`) but no element type,
+                    # a `for` over the parameter iterated a real `MojoSet *` in
+                    # insertion order and read each element through
+                    # `mojo_set_iter_val_int` — a pointer decimal per string.
+                    # The `None` guard inside `note_list_literal` is kept by
+                    # reuse rather than restated; it is the same question
+                    # about the same element list.
+                    note_list_literal(v, val)
                 elif (isinstance(val, gimple_ctypes.BinaryOp) and val.op == '*'
                         and isinstance(val.left, gimple_ctypes.ListExpr)):
                     # `gx = [0.0] * n` — a REPEAT is the literal's element

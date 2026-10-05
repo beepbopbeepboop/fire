@@ -7329,6 +7329,35 @@ def gen_module_impl(self, stmts):
     # collection time is what made `f({'x': '1'}); f({'x': 2})` resolve to
     # `char *` and read the integer through `mojo_dict_get_str`.
     self._param_dict_val_obs: dict[str, dict[str, set]] = {}
+    # The container-KIND twin of the three tables above: callee -> {pname ->
+    # the container C type every one of its call sites agrees on}, from the
+    # same walk and read by the same `param_binding_ctype` reconciliation.
+    #
+    # The element type and the container kind are separate questions and this
+    # tree only had one answer for the first. A `MojoSet`'s first two fields
+    # are `len` and `data` exactly as `MojoList`'s are, so a set parameter
+    # declared `MojoList *` reads the right words and produces a plausible
+    # answer -- which is what made it survive: a `for` over such a parameter
+    # went through `_gen_for_list` (insertion-order runtime iteration is the
+    # set path's whole reason to exist, so the hash-table order is what came
+    # out instead), and a set of strings printed
+    # `[4294967295, 0, 0]` for three elements before the process segfaulted.
+    # Nothing in this tree types a PARAMETER's container kind from its call
+    # sites: `_scalar_obs`'s container-literal arm records `'void *'`, which
+    # its own application loop rejects on purpose (see that comment), so a
+    # `f({'a'})` call site left the parameter at whatever its usage evidence
+    # guessed -- `MojoList *` for every iteration-shaped body.
+    #
+    # `''` means the call sites disagreed, which the reader treats exactly as
+    # "unknown", the same contract `_param_dict_val_types` carries. Read in
+    # `funcs_shared.param_binding_ctype`, NOT at a definition site: that table
+    # feeds the forward DECLARATION as well as the definition, so correcting
+    # one and not the other is `conflicting types` at every call site.
+    self._param_container_types: dict[str, dict[str, str]] = {}
+    # The raw per-call-site observations behind it, for the reason
+    # `_param_dict_val_obs` keeps its own: collapsing at collection time is
+    # what lets one observing site outvote a disagreeing sibling.
+    self._param_container_obs: dict[str, dict[str, set]] = {}
     _free_params: dict = {}
     for _fp_s in all_functions:
         if not isinstance(_fp_s, FunctionDef):
@@ -7422,6 +7451,121 @@ def gen_module_impl(self, stmts):
                     _dst[_pname] = _as_str(_sole[0])
                 else:
                     _dst[_pname] = ''      # disagreeing call sites → unknown
+
+    # The three container C types this runtime has a distinct struct for, and
+    # therefore the only answers a container-kind contract may give. Named
+    # once because both sides of this contract need the identical set and a
+    # second hand-written copy is how `param_binding_ctype`'s narrowness
+    # (`funcs_shared.py`) and the recorder below would drift apart.
+    _PARAM_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
+
+    def _record_param_container(callee, pname, ctype):
+        """Record ONE call site's container C type for one parameter.
+
+        The container-KIND twin of `_record_param_dict_val`, with the same
+        set-of-observations shape and the same reason for it: every observed
+        kind is positive evidence, so a disagreeing sibling has to be able to
+        say so rather than lose to whichever side was seen first. Resolution
+        happens in `_resolve_param_containers`, once both walks are done.
+        """
+        callee = _as_str(callee)
+        pname = _as_str(pname)
+        if _as_str(ctype) not in _PARAM_CONTAINER_CTYPES:
+            return
+        # Split the chained setdefault so the intermediate result has a static
+        # type -- the same trap the three sibling `_record_*` blocks in this
+        # pass already document.
+        _pc_inner = self._param_container_obs.setdefault(callee, {})
+        _pc_set = _pc_inner.setdefault(pname, set())
+        _pc_set.add(_as_str(ctype))
+
+    def _resolve_param_containers():
+        """Turn the collected container observations into the contract.
+
+        Same unanimity rule and the same `''`-means-disagreement marker as
+        `_resolve_param_dict_vals`, for the same reason, and the same
+        `sorted(...)` + index rather than `next(iter(...))` for the
+        self-hosted reason spelled there.
+        """
+        for _callee, _pm in self._param_container_obs.items():
+            _dst = self._param_container_types.setdefault(_callee, {})
+            for _pname, _types in _pm.items():
+                if len(_types) == 1:
+                    _sole = sorted(_types)
+                    _dst[_pname] = _as_str(_sole[0])
+                else:
+                    _dst[_pname] = ''
+
+    def _static_arg_container(a, caller_name):
+        """The container C type provable for one call argument, or None.
+
+        The container-kind twin of `_static_arg_dict_val`, over the same three
+        argument shapes in the same order of preference, and with the same
+        deliberate refusals. `caller_name` is required rather than defaulted
+        for the reason `funcs_shared._param_ctype`'s own `.get`-into-a-local
+        comment gives: this closure is compiled by the self-hosted backend on
+        the way to compiling the compiler, and a default-argument call across
+        that boundary is one of the shapes this file's headers warn about.
+
+        * a container LITERAL is decidable on the spot. A `SetExpr` is
+          provably `MojoSet *` and a `ListExpr`/`TupleExpr` provably
+          `MojoList *`, which is the evidence this whole contract exists for —
+          unlike the element type, the FIRST call site already settles it, so
+          there is no wait for a second observation.
+        * a bare name defers to the caller's own binding scan
+          (`_inferred_var_types`, which reads every binding of the name
+          through every branch), because that is where `s = {...}` is seen.
+        * a name that is a PARAMETER of the caller has no binding site at
+          all, so it defers to this table's own resolved answer for the
+          caller -- a forwarding chain (`def g(box): return f(box)`), which
+          is why the collection loop below runs twice for this table, exactly
+          as it does for the dict-value one.
+        * anything else contributes NOTHING rather than a guess, and that
+          silence is load-bearing rather than merely cautious: a set that
+          collapses to a single kind because one site observed one and the
+          rest contributed absence is the exact failure `_scalar_obs`'s
+          `IntLiteral` arm documents ("`f(1)` alongside `f("s")` yielded
+          `_scalar_obs['f']['x'] == {'char *'}` -- one OBSERVING call site,
+          vacuously unanimous"). Only an argument whose container kind is
+          genuinely decidable contributes, so the vote is never won by the
+          site that happened to be walked first.
+        """
+        if isinstance(a, gimple_ctypes.SetExpr):
+            return 'MojoSet *'
+        if isinstance(a, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+            return 'MojoList *'
+        if isinstance(a, gimple_ctypes.DictExpr):
+            return 'MojoDict *'
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _n = _gmi_as_str(a.name)
+            # Split the `getattr(...) or {}` from the `.get(...)` that consumes
+            # it: a call on the INTERMEDIATE result of an `or` has no static
+            # type on the self-hosted path, the same trap the three sibling
+            # `_record_*` blocks in this pass document.
+            _vts = getattr(self, '_inferred_var_types', None) or {}
+            _own = _vts.get(_as_str(caller_name))
+            _t = _own.get(_n) if _own is not None else None
+            if _t is not None:
+                # `_gmi_as_str` BEFORE the membership test, and that ordering is
+                # load-bearing rather than tidy. A `.get(...)` chain lowers to
+                # `mojo_dict_get_int`, so the value's static type here is the
+                # `int64_t` box -- and `box in <tuple of str>` then lowers to
+                # `mojo_list_contains_int`, which compares the boxed POINTER
+                # numerically and answers "no" for every real container ctype.
+                # Verified in the generated C of this very function, for both
+                # orderings: `mojo_list_contains_int` before, and
+                # `mojo_list_contains_str` after. The python3-interpreted
+                # reference gets the right answer either way, so this is a
+                # stage1-vs-stage2 divergence of the kind the compiled
+                # compiler's own self-host rules exist to prevent.
+                _ts = _gmi_as_str(_t)
+                if _ts in _PARAM_CONTAINER_CTYPES:
+                    return _ts
+            _fwd = self._param_container_types.get(_as_str(caller_name), {})
+            if _fwd.get(_n):
+                return _gmi_as_str(_fwd[_n])
+            return None
+        return None
 
     def _static_arg_dict_val(a, dict_val, caller_name=None):
         """The dict-VALUE ctype provable for one call argument, or None.
@@ -7706,6 +7850,10 @@ def gen_module_impl(self, stmts):
                 if _dv is not None:
                     _record_param_dict_val(callee, pnames[i], _dv)
 
+                _pc = _static_arg_container(a, caller_name)
+                if _pc is not None:
+                    _record_param_container(callee, pnames[i], _pc)
+
                 st = _arg_scalar_type(caller_name, a)
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -7807,6 +7955,9 @@ def gen_module_impl(self, stmts):
                         _kwdv = _static_arg_dict_val(_kw[1], dval, caller_name)
                         if _kwdv is not None:
                             _record_param_dict_val(callee, _kwn, _kwdv)
+                        _kwpc = _static_arg_container(_kw[1], caller_name)
+                        if _kwpc is not None:
+                            _record_param_container(callee, _kwn, _kwpc)
                         break
 
     # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
@@ -7924,7 +8075,34 @@ def gen_module_impl(self, stmts):
                 _dv = _static_arg_dict_val(a, dval, caller_name)
                 if _dv is not None:
                     _record_param_dict_val(callee, pnames[i], _dv)
+                _pc = _static_arg_container(a, caller_name)
+                if _pc is not None:
+                    _record_param_container(callee, pnames[i], _pc)
     _resolve_param_dict_vals()
+    # The container-kind contract, resolved and re-collected in the same two
+    # rounds as the dict-value one above and for the same reason: `g` can only
+    # forward a container kind that some call site of `g`'s already proved, so
+    # one extra pass settles every chain and a third would add nothing. Both
+    # resolutions run AFTER both collectors, so the second round of either sees
+    # the first round of the other.
+    _resolve_param_containers()
+    for caller_name, body in _caller_bodies:
+        _pcalls = []
+        self._calls_in_stmts(body, _pcalls)
+        for _pcall in _pcalls:
+            if not isinstance(_pcall.func, IdentExpr):
+                continue
+            _pcallee = _as_str(_pcall.func.name)
+            _ppnames = _free_params.get(_pcallee)
+            if not _ppnames:
+                continue
+            for _pi, _pa in enumerate(_pcall.args):
+                if _pi >= len(_ppnames):
+                    break
+                _pc2 = _static_arg_container(_pa, caller_name)
+                if _pc2 is not None:
+                    _record_param_container(_pcallee, _ppnames[_pi], _pc2)
+    _resolve_param_containers()
 
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
@@ -7971,6 +8149,32 @@ def gen_module_impl(self, stmts):
                     break
             if _isinst_elem:
                 _pm[_pn] = (None, None)
+
+    # ...and the same retraction for a parameter whose call sites disagree
+    # about which CONTAINER it is. A slot reached from `f({'a'})` and
+    # `f([1, 2])` provably holds two different containers, so nothing about
+    # its elements is decided either — and the element contract alone cannot
+    # see that, because `int64_t` is deliberately not positive evidence
+    # (`_informative_elem_ctype`), so the `char *` observed at the set site
+    # survives with nothing to contradict it.
+    #
+    # What that costs, measured, and why it is the honest trade rather than a
+    # re-roll: with the set-literal element type recorded on the caller's
+    # local (the `_scan_container_elems` set arm) and nothing retracting it,
+    # `f({'bb','aa'})` + `f([3, 1])` read the SET correctly and the LIST
+    # wrongly (`sorted` of `[3, 1]` printed `[3, 1]` — the ints read through
+    # the string accessor). Before either half of this existed the same
+    # program read the set as pointer decimals and the list correctly. Both
+    # states are wrong on one of the two shapes; this one is wrong on the
+    # shape whose answer is a PLAUSIBLE wrong value rather than an obvious
+    # one, which is the argument for the retraction — an int64_t element type
+    # is what the `f([3, 1])` site gets, and the default accessor is right
+    # for it.
+    for _mcallee, _mpm in list(self._param_elem_types.items()):
+        _mkinds = self._param_container_types.get(_mcallee, {})
+        for _mpn, _mv in list(_mpm.items()):
+            if _mkinds.get(_mpn) == '':
+                _mpm[_mpn] = (None, None)
 
     for callee in sorted(_scalar_obs):
         pmap = _scalar_obs[callee]

@@ -9253,6 +9253,112 @@ def main():
 main()
 """)
 
+    # The line above fixed the set literal's ELEMENT type across the call
+    # boundary and said nothing about which CONTAINER the parameter holds, so
+    # a set argument to a parameter whose body iterates it still took the LIST
+    # path. Nothing in this tree typed a parameter's container kind from its
+    # call sites: `_scalar_obs`'s container-literal arm records `'void *'`,
+    # which its own application loop rejects on purpose (a non-scalar member
+    # in the set drops the slot to the `int64_t` box), so the parameter kept
+    # whatever its USAGE evidence guessed -- and an iteration-shaped body is
+    # equally consistent with a list and a set, so that guess is always
+    # `MojoList *`.
+    #
+    # That was invisible for as long as it stayed a header detail: `MojoSet`'s
+    # first two fields are `len` and `data` exactly as `MojoList`'s are, so
+    # `mojo_list_len` and `mojo_list_get_str` read the right words. It stops
+    # being invisible at the two things the set runtime is FOR -- iteration in
+    # INSERTION order (`mojo_set_order_indices`, the runtime's own determinism
+    # requirement) and `sorted()` over string content -- and the four lines
+    # below are those: a set of strings printed `[4294967295, 0, 0]` for three
+    # elements (the hash-table order read as integers) and then the process
+    # segfaulted.
+    #
+    # `sorted_of(s)` with `s` a LOCAL and `sorted_of({'r','q'})` with the
+    # literal written in place are the two halves of the fix and are kept
+    # apart on purpose: the container kind comes from the argument either way,
+    # but the ELEMENT type of a local set is a second contract
+    # (`_scan_container_elems`'s set arm) and the literal's is
+    # `_literal_arg_elems`, so a fix that only handled the local would still
+    # print pointer decimals here. `forward` is the third shape: a
+    # forwarding chain, where the intermediate's parameter is itself a
+    # parameter, which the contract settles by iterating its collection twice
+    # (the dict-value twin's own arrangement).
+    #
+    # Every line is `sorted()`-ed, deliberately: a set's ITERATION order is a
+    # runtime detail on this side and PYTHONHASHSEED-dependent on CPython's,
+    # so an unsorted `for v in box: print(v)` could not be compared against
+    # CPython at all. `count_of` iterates without sorting, and asserts a sum.
+    #
+    # The dict rows are the same contract's other two answers and were already
+    # right (a subscript-usage parameter resolves to `MojoDict *` on its own);
+    # they are here so that re-pointing a container kind cannot quietly break
+    # the kind it is not about.
+    test_gimple_matches_cpython("gimple_set_param_container_kind_from_its_call_sites", """\
+def count_of(box):
+    n = 0
+    for v in box:
+        n = n + len(v)
+    return n
+
+def sorted_of(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def forward(box):
+    return count_of(box)
+
+def keys_of(d):
+    out = []
+    for k in d:
+        out.append(k)
+    return sorted(out)
+
+def val_of(d):
+    return d["a"]
+
+def main():
+    s = {"bb", "aa", "cc"}
+    print(sorted_of(s))
+    print(sorted_of({'r', 'q'}))
+    print(count_of(s))
+    print(forward(s))
+    print(keys_of({"b": 1, "a": 2}))
+    print(val_of({"a": 5}))
+main()
+""")
+
+    # The case the contract must NOT resolve, and the reason it is here: a
+    # parameter reached from two call sites that disagree about the container
+    # kind is a POLYMORPHIC slot, and a polymorphic slot's elements are not
+    # decided either. The element contract on its own cannot see this, because
+    # `int64_t` is deliberately not positive evidence there
+    # (`_informative_elem_ctype`: recording it would collide with a real
+    # `char *` observation and erase it), so `either`'s string-set site would
+    # hand the parameter an element type that its int-list site then reads
+    # wrongly -- `sorted([3, 1])` printed `[3, 1]`.
+    #
+    # Both rows are correct here because both sites agree on the ELEMENT
+    # domain (ints), which is exactly what makes them a test of the
+    # retraction rather than of the set path. The string-set version of the
+    # same disagreement is deliberately NOT asserted: it prints a pointer
+    # decimal, and freezing an ASLR-dependent wrong answer in a test is how a
+    # divergence stops being a report.
+    test_gimple_matches_cpython("gimple_multi_kind_container_param_stays_unknown", """\
+def either(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def main():
+    print(either([3, 1]))
+    print(either({7, 8}))
+main()
+""")
+
     # The STRING spelling of the line above, which is where the same program
     # was wrong. The OUTER loop already carried the nested element ctype
     # across the call boundary (`_param_elem_types` / `_nested_elem_types`
