@@ -10,8 +10,110 @@ a false theorem, so this is coverage, not soundness. What it costs is stated
 below and it is 7 of 40 programs on x86-64. **§"The next step"'s item 3 is
 ANSWERED and it is NO** — see §"Status 2026-10-04" at the end, which also
 corrects item 1's own experiment: the `simp_all (maxSteps 400000)` it measured
-never parsed, so the knob was never turned. The class is unchanged and the
-remaining work is items 1 and 2.
+never parsed, so the knob was never turned. **§"Status 2026-10-05" adds four more
+measured negatives AND corrects the attribution of §"Status 2026-10-04"'s
+headline row: the fatal heartbeat timeout is in the `eval_eq_mojo` TACTIC, not in
+`def ast`.** The class is unchanged and the remaining work is items 1 and 2 —
+and §"Status 2026-10-05" says which of the two levers is NOT one of them.
+
+## Status 2026-10-05 (`work/formal27-3`): four more negatives, and the row that
+## said "the AST literal, not the tactic" is a MISATTRIBUTION
+
+The class is still here and nothing was fixed. What is new is that the cost is
+now located more precisely than §"Status 2026-10-04" located it, and three
+plausible-looking levers are measured and **declined**. Reproduced on the
+fuzzer's own corpus, seed `formal-proof-fuzz`, x86-64, program 31 (six
+conditions, thirty statements — the largest `eval_eq_mojo` tactic body in the
+40):
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 tools/memslot.py --gb 8 --label ppfgen -- python3 -u \
+    tools/formal_proof_fuzz.py --count 40 --arch x86_64 --no-check --work .tmp/ppf/gen
+```
+
+**The library is a CAS HIT, so a light worker can make every one of these runs.**
+`formal/lean.py::ensure_library` publishes and looks up each `lib/*.olean` by
+content, and on this machine all six of `LIBRARY_MODULES` are present in
+`~/.gmojo/cas`: the run below copied them in and peaked at **0.0 GB**, against
+the 7.82 GB the table in `formal/lean.py` records for building `ProofLib`. That
+removes the reason this doc's earlier passes gave for not re-measuring
+("`lib/ProofLib.olean`'s build peaks at 7.82 GB, so a light worker with an 8 GB
+ceiling cannot rebuild the library at all") — **provided the change under test
+does not edit `lib/`**, which for this doc's remaining option it does not.
+
+**The correction.** §"Status 2026-10-04"'s third row reads "…`(deterministic)
+timeout at whnf, maximum number of heartbeats (20000000) has been reached` — **at
+line 38, which is `def ast`**, not the tactic", and concludes "**The centre is
+the AST LITERAL, not the tactic.**" On this tree that is not what line 38 is.
+In the generated file `def ast` is **line 36** and line 38 is the `eval_eq_mojo`
+declaration (its `/-- … -/` docstring, which is where Lean anchors the error);
+`def ast` elaborates cleanly, and it is the only thing in the file that
+elaborates cleanly at that size.
+
+**Measured, one Lean run each, through `formal/lean.py::check_proof`** (the
+uncached reader — `check_proof_cached` replays a verdict keyed on the proof's
+bytes, so a re-run of an unchanged file returns the old answer and prints
+`cached True`):
+
+| # | tactic | verdict | wall / CPU / peak |
+|---|---|---|---|
+| 0 | **the emitter's own, unchanged** | `` `simp` failed: maximum number of steps exceeded`` ×8 at 42:818 | 55.4 s / 208.8 s / 3.95 GB |
+| 1 | `simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]` **alone** | **`unsolved goals` — ONE goal, and the unfolding is not the cost** | **30.1 s / 174.6 s / 3.92 GB** |
+| 2 | #1 then `by_cases`×6 then `simp_all +decide` over the SAME set | maxSteps ×8 at 43:818 | 54.0 s / 216.9 s / 3.87 GB |
+| 3 | #1 then `by_cases`×6 then `simp_all +decide` with the six already-unfolded names **dropped** | maxSteps ×8 at 43:818 | 61.7 s / 197.9 s / 3.98 GB |
+| 4 | #0 with `simp_all (maxSteps := 4000000)` | maxSteps ×**3** (down from 8), then `timeout at whnf … heartbeats` at **38:0** | **595.9 s** / 727.9 s / 3.84 GB |
+| 5 | #1, `simp only [ast, …]`, then **`have h0/h2/h4 := by decide`** for the three CLOSED conditions instead of `by_cases`, then `by_cases`×3 then `simp_all (maxSteps := 4000000) +decide` | **8 leaves instead of 64** — no maxSteps error at all, and `timeout at whnf … heartbeats` at 38:0 | **547.3 s** / 736.8 s / 3.95 GB |
+
+**What the table says, and it is the useful part.**
+
+* **Row 1 is the finding.** The `ast` literal unfolds, once, inside the bound: a
+  30-statement body becomes one goal in 30 s at 3.9 GB, and the goal it leaves
+  is the fully-unrolled `evalBodyEnv` fold — the semantic environment as a
+  `fun n_1 => if (n_1 == "w1") = true then … else …` chain with the arithmetic
+  inlined. So "the AST LITERAL" is not a wall; **rewriting the unfolded term is.**
+* **Rows 2 and 3 are §"The next step"'s item 3 second half, measured again and in
+  both forms.** Separating the unfolding from the rewriting does not help
+  (row 2), and removing the six names that row 1 has already discharged does not
+  help either (row 3). Both still die at the same column with the same sentence.
+  §"Status 2026-10-04" had row 2 alone; **row 3 is new**, and it is the half
+  that could have rescued the idea — the second `simp` is not re-unfolding
+  anything, and it still runs out of steps.
+* **Row 4 is the knob, turned properly at last** (item 3's first half, which no
+  earlier pass had measured with a parseable spelling). It **works and does not
+  finish**: 8 → 3 maxSteps errors, 55 s → 596 s. Raising the step budget is what
+  moves the failure, and it moves it onto the declaration's 20 M heartbeat
+  budget, which row 5 shows is not about the branch count either.
+* **Row 5 is the lever nobody had pulled, and it is declined by the number.** Three
+  of this program's six conditions are CLOSED — `h0 : (n &&& 65535) =
+  (n &&& 65535)` is `rfl`, and `h2`/`h4` compare literal words — so `by_cases`
+  splits 64 leaves where 8 suffice, and `have h2 : … := by decide` replaces each
+  split with a fact. **8 leaves at `maxSteps := 4000000` produce no maxSteps
+  error at all, and still hit the heartbeat wall at 547 s.** So the per-leaf cost
+  is essentially independent of the leaf COUNT, and "reduce the branches" is not
+  the lever. (The `have`-the-closed-conditions shape is also the more honest
+  emission whatever else happens to it — a `by_cases` on a proposition `decide`
+  settles outright is two goals where one fact is the whole content — but it is
+  not a fix for this class and is not landed, because a change that makes no
+  difference to the verdict is not one to land under this project's rule.)
+
+**So the lever is the per-leaf TERM, whose size is a function of the program's
+statement count, and the only shape in this file's own vocabulary that does not
+grow with it is §"Status 2026-10-04"'s item 2 — the chain of per-statement
+`have`s.** Item 1 (a library induction on the AST body) and item 2 (the
+emitter's version of it) are now the only two options left, item 3 is measured
+dead in four forms, and this pass did not attempt either. What the next one
+should know before starting: **the per-step goal it has to beat is row 1's** —
+one `simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]`, which
+already fits in 30 s / 3.9 GB — so the chain's *k*-th step is a `simp only` over
+a **prefix** of that same fold, and the sizes to beat are `ceil` and not the
+whole.
+
+**One thing this class is NOT, recorded because it is measurable and would
+otherwise be re-derived:** the failure direction is unchanged and still the safe
+one. Rows 0-5 are all *coverage* — the file does not typecheck, no `sorry` moves,
+and the census arithmetic in §"Why this is coverage and not soundness" is
+untouched. `formal_proof_fuzz.py`'s `MISMATCH`-under-`pass` cell is still 0.
 
 ## What was run
 
@@ -245,13 +347,29 @@ that the cheap option is not cheap, and the expensive one is the only one left:
 
 **Reproducing the measurement** (the generation step is cheap and the Lean runs
 are the four rows above; each is content-addressed in `formal/lean.py`'s CAS, so
-a re-run is a file read):
+a re-run is a file read — **with the one caveat the table's own note gives: a
+re-run of an UNCHANGED file replays the verdict, so a re-measurement needs a
+changed tactic**):
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 -u tools/formal_proof_fuzz.py \
-    --count 40 --arch x86_64 --no-check --work .tmp/ppf/x86-gen
+    --count 40 --arch x86_64 --no-check --work .tmp/ppf/gen
 python3 tools/memslot.py --gb 8 --label t -- python3 -c \
-    'import sys; sys.path.insert(0, "."); from formal.lean import check_proof_cached; \
-     print(check_proof_cached(".tmp/ppf/x86-gen/p22.6124220416_proof.lean", repo_root=".")[:2])'
+    'import sys, os; sys.path.insert(0, "."); from formal.lean import check_proof; \
+     print(check_proof(".tmp/ppf/gen/p22.6124220416_proof.lean", repo_root=os.getcwd())[:2])'
 ```
+
+**The harness for the five rows is scratch and is described here so it can be
+rebuilt**, because it is 30 lines and because the two things it has to get right
+are the two the table is about. `.tmp/trybridge.py <proof.lean> <tactic-file>`:
+read the proof, find the line ending `:= by` after `theorem eval_eq_mojo`, drop
+everything up to the next blank line, indent the replacement tactic's EVERY line
+by two spaces (a multi-line tactic whose second line is unindented ends the `by`
+block and the file fails to parse — which cost this pass one run and is the
+reason the row-2 measurement above was taken twice), write to a fresh path under
+`.tmp/ppfrun/`, and call `check_proof_cached` with `repo_root=os.getcwd()` and
+`FORMAL_LEAN_TRACE=1` for the wall / CPU / peak columns. `repo_root` must be
+ABSOLUTE: `_run_lean` sets `cwd` to the proof's own directory, so a relative
+`lib_dir` resolves `./lib` against the proof's directory and the run reports
+`unknown module prefix 'ProofLib'` with a search path that looks correct.
