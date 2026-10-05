@@ -1521,6 +1521,32 @@ def unclassified_report(pairs, total, say=print, other_classify=None,
     return loud
 
 
+def unclassified_rows(rows):
+    """`[(path, terminal message)]` for the printed rows this table cannot name.
+
+    Over the sweep's own printed rows, `(rel, class, reason, detail)`. Two
+    things are decided here and not in the report, because both are
+    classifications and not presentation: a row counts only when its class is
+    one of the two codegen classes (`not-answerable/host-import`'s own reason
+    matches no family and must not be counted as an unclassified REFUSAL), and
+    the message is the terminal one with the chain peeled (`_split_chain` /
+    `_terminal_reason`, so a refusal three modules deep is the message that
+    carries the clause the markers key on).
+
+    One function rather than a comprehension in `main`, because
+    `formal_sweep_causes.py` reports the same rows against ITS table and the
+    test that pins the loud finding needs the same reader both tools use.
+    """
+    out = []
+    for path_, cls, _reason, detail in rows:
+        if cls not in (CLASS_CODEGEN, CLASS_CODEGEN_DEP):
+            continue
+        msg = _terminal_reason(_split_chain(detail)[1]).strip()
+        if _refusal_family(msg) == _REFUSAL_OTHER:
+            out.append((path_, msg))
+    return out
+
+
 def _loud_enough(n: int, total: int) -> bool:
     """The threshold itself, in one place: over the file count OR the share."""
     if total <= 0:
@@ -4572,18 +4598,10 @@ def main():
     # name in either ranking table. A summary that buries either one under the
     # per-module breakdowns is a summary in which the finding that matters is the
     # one you scroll past.
-    # The unclassified pairs are built here rather than inside the two reports,
-    # because BOTH reports are shared with `formal_sweep_causes.py` and the
-    # CLASSIFICATION is this file's: which rows are codegen findings at all is a
-    # decision this table makes, and it is the same decision the per-family
-    # breakdown below makes. One list, two readers.
-    unclassified = []
-    for r, c, _reason, d in rows:
-        if c not in (CLASS_CODEGEN, CLASS_CODEGEN_DEP):
-            continue
-        msg = _terminal_reason(_split_chain(d)[1]).strip()
-        if _refusal_family(msg) == _REFUSAL_OTHER:
-            unclassified.append((r, msg))
+    # One list, two readers: the loud finding below and the baseline's
+    # "kept their class and lost their name" group both read it, and
+    # `formal_sweep_causes.py` reports the same rows against ITS table.
+    unclassified = unclassified_rows(rows)
     regressed = report_baseline(baseline_file, prev_baseline, verdicts, rows,
                                 total, [p for p, _m in unclassified])
     loud = unclassified_report(unclassified, total)

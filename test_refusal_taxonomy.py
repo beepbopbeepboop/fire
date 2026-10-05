@@ -53,6 +53,9 @@ protecting, and they are not the same thing:
 
 Run:  python3 test_refusal_taxonomy.py
 """
+import contextlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -62,6 +65,8 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import formal_sweep as S  # noqa: E402
 import formal_sweep_causes as C  # noqa: E402
+import formal_sweep_parity as P  # noqa: E402
+import formal_sweep_rounds as R  # noqa: E402
 import formal.model as FM  # noqa: E402
 import fire_compiler as F  # noqa: E402
 
@@ -1245,6 +1250,10 @@ def main() -> int:
     # sweep files actually import it, so the table cannot claim a reach the
     # corpus does not have.
     checks += _host_rank_checks(failures)
+    # …and the two honesty instruments, both tested over synthetic logs: the
+    # loud unclassified shape, and the committed baseline's regression alarm.
+    checks += _unclassified_alarm_checks(failures)
+    checks += _baseline_alarm_checks(failures)
     # The failures are printed AFTER every group has run, and that ordering is
     # the fix rather than the tidiness: the loop used to sit above the three
     # `checks += …` lines, so a failure raised by any of them was counted in
@@ -1926,6 +1935,480 @@ def _host_rank_checks(failures):
               f". `_module_scope_bindings` stops at `def` and `class` bodies "
               f"precisely so this cannot happen — a `def`'s locals are not "
               f"module attributes")
+    return n[0]
+
+
+# ── the two honesty instruments: the loud unclassified shape, and the
+#    committed baseline's regression alarm ─────────────────────────────────────
+#
+# Both exist because of the same round. On 2026-10-04 b12 the corpus's largest
+# row was `other refusal` at 236 files, with no row in EITHER ranking table, and
+# it was 229 files behind one module that one edit had broken — so the table
+# printed a correct count of refusals and nothing a reader could act on, and the
+# round was diagnosed from a work map written afterwards rather than by running
+# the sweep. What is below pins the two things that make that impossible to
+# repeat silently, and both are tested over SYNTHETIC LOGS rather than a
+# recorded one: a committed log is an artifact whose contents change under
+# every `formal/` edit, so a test built from one would keep passing for the
+# wrong reason and then fail on a reword instead of on the mechanism.
+#
+# The fixtures below are built from `formal/model.py`'s own emitted messages
+# where the shape matters (`_string_composition_messages` above is one) and
+# hand-written where the point is that NOTHING classifies them — which is the
+# case under test and cannot be produced by a message the tables do name.
+
+# The corpus's biggest NAMELESS refusal, verbatim from the b12 arm64 log and
+# still unnamed in `_REFUSAL_FAMILIES` on this tree: it has a row in `CAUSES`
+# ("a call to a name the defining module does not export"), so it is the case
+# that proves the two tables are checked independently — one row in each, and a
+# message can be missing from both.
+_EXPORT_RULE = (
+    "`FormatStruct` is called, and it is imported from `std.format._utils`, so "
+    "the call has to bind a symbol `std.format._utils` exports. That module does "
+    "not export it, and the reason is `doc/ABI.md`'s export rule rather than "
+    "anything about this call: a name with a leading `_` is private")
+_EXPORT_RULE_OTHER = _EXPORT_RULE.replace("FormatStruct", "dealloc").replace(
+    "std.format._utils", "std.memory.alloc")
+
+# A message the SWEEP's family table names ("cannot be lowered") and `CAUSES`
+# does not — measured on the b12 log's `std/builtin/float_literal.mojo` row, and
+# the shape that proves the two tables are read independently rather than one
+# being a synonym for the other.
+_LOWERABLE = ("FloatLiteral___int__: `self.__int_literal__().__int__(...)` "
+              "cannot be lowered: `self.__int_literal__()` is a `IntLiteral`, "
+              "and that IS established — this is not a missing-type refusal")
+
+# A message NOBODY names, which is the b12 failure itself and cannot be built
+# from any one function because there is no function for it: it is what a new
+# refusal looks like for the day it lands.
+_NAMELESS = ("hostmods/os/_syscalls.mojo: `len(s)` is refused: this module's "
+             "own text is not ASCII, so on this path it would answer in BYTES "
+             "where CPython answers in CHARACTERS, and no statement here says "
+             "which")
+
+
+def _synthetic_log(rows, arch="arm64", files=None, passed=None):
+    """A sweep log's own text: per-file rows, then the summary line.
+
+    Shaped exactly like a real one — the summary line LAST, the rows in arrival
+    order — because `formal_sweep_parity.read_log` deliberately looks for the
+    summary first and a fixture that put it first would not exercise that.
+    """
+    lines = [f"{cls.upper()}: {path}  ({detail})" for cls, path, detail in rows]
+    n = files if files is not None else len(rows) + (passed or 0)
+    p = passed if passed is not None else 0
+    lines.append(f"[{arch}] {n} files: PASS={p} not-pass={n - p}")
+    return "\n".join(lines) + "\n"
+
+
+def _write(tmp, name, text):
+    path = os.path.join(tmp, name)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
+def _unclassified_alarm_checks(failures):
+    """The loud unclassified-shape finding, from both instruments' side."""
+    n = [0]
+
+    def check(ok, message):
+        n[0] += 1
+        if not ok:
+            failures.append(message)
+
+    def report(pairs, total, **kw):
+        out = []
+        loud = S.unclassified_report(pairs, total, say=out.append, **kw)
+        return loud, "\n".join(out)
+
+    # ── the SHAPE is what makes the bar reachable at all ────────────────────
+    # Two messages that differ only in the names they name are ONE shape. If
+    # grouping were by whole text they would be two shapes of one file each and
+    # the bar of ten files would never be crossed by anything the corpus has
+    # ever produced.
+    shape_a = S.unclassified_shape(_EXPORT_RULE)
+    shape_b = S.unclassified_shape(_EXPORT_RULE_OTHER)
+    check(shape_a == shape_b,
+          f"two wordings of one refusal did not reduce to one shape "
+          f"({shape_a!r} vs {shape_b!r}); grouping by the whole message makes "
+          f"every shape one file long and the honesty bar unreachable")
+    check("FormatStruct" not in shape_a and "format" not in shape_a,
+          f"the shape still carries the names that vary between copies: "
+          f"{shape_a!r}")
+    check(S.unclassified_shape(_NAMELESS) != shape_a,
+          "two different constructs reduced to one shape, so the finding would "
+          "merge rows a reader has to tell apart")
+    check(S.unclassified_shape("a 12 b 34 c") == S.unclassified_shape("a 56 b 78 c"),
+          "a count that varies between copies of one message survived into its "
+          "shape, so the wordings of one refusal read as several shapes — the "
+          "same invisibility as above, one field narrower")
+
+    # ── the bar: a COUNT and a SHARE, and both of them tested on the side
+    #    that must NOT fire as well as the side that must ──────────────────
+    pairs = [(f"m{i}.py", _EXPORT_RULE) for i in range(S.UNCLASSIFIED_MIN_FILES)]
+    check(not report(pairs, 100000)[0],
+          f"{S.UNCLASSIFIED_MIN_FILES} files of one shape in a 100000-file "
+          f"corpus was reported LOUD; the count bound is 'over', not 'at or "
+          f"over', and a bar that fires at the boundary fires on everything "
+          f"above it too")
+    pairs.append((f"m{S.UNCLASSIFIED_MIN_FILES}.py", _EXPORT_RULE))
+    loud, text = report(pairs, 100000)
+    check(loud,
+          f"{S.UNCLASSIFIED_MIN_FILES + 1} files of one shape did not report "
+          f"LOUD, so the file-count half of the bar is not wired up")
+    check("LOUD FINDING" in text and "m0.py" in text and _EXPORT_RULE[:40] in text,
+          "the loud block does not name the shape, its count and an example "
+          f"file, which is the whole content of the finding:\n{text}")
+    # The SHARE half, which is what catches a shape that is small in files and
+    # large in the corpus it was measured against.
+    small = [(f"s{i}.py", _NAMELESS) for i in range(3)]
+    loud, text = report(small, 100)
+    check(loud,
+          "3 files of one shape in a 100-file corpus (3%) did not report LOUD; "
+          "the share half of the bar is the one that catches a shape which is "
+          "small in absolute terms and huge in proportion")
+    quiet = [(f"s{i}.py", _NAMELESS) for i in range(2)]
+    check(not report(quiet, 1000)[0],
+          "2 files of one shape in a 1000-file corpus (0.2%) reported LOUD, "
+          "so the bar fires on everything and means nothing")
+    loud, text = report([], 1000)
+    check(not loud and "live and unfired" in text,
+          "a run with nothing unclassified did not say the rule is live and "
+          "unfired, so a reader cannot tell an unfired rule from a missing "
+          f"one:\n{text}")
+
+    # ── the OTHER table's opinion, which is the actionable half ─────────────
+    # On this corpus the biggest nameless shape has a row in CAUSES and none in
+    # _REFUSAL_FAMILIES, so the finding must say so: that is a one-row fix in
+    # one table, not a new construct.
+    loud, text = report([(f"m{i}.py", _EXPORT_RULE) for i in range(12)], 1000,
+                        other_classify=C.classify_message,
+                        other_name="formal_sweep_causes.py")
+    check(loud and "a call to a name the defining module does not export" in text,
+          "the loud finding does not report what the other ranking table calls "
+          "the shape, so the reader is told a hole exists and not which table "
+          f"has it:\n{text}")
+    loud, text = report([(f"m{i}.py", _NAMELESS) for i in range(12)], 1000,
+                        other_classify=C.classify_message,
+                        other_name="formal_sweep_causes.py")
+    check(loud and "UNNAMED" in text,
+          "a shape NEITHER table names is not reported as such — which is the "
+          "2026-10-04 b12 case, 236 files, and the one a reader's first "
+          f"instinct assumes the other table has:\n{text}")
+    loud, text = report([(f"m{i}.py", _EXPORT_RULE) for i in range(12)], 1000)
+    check(loud and "tools/formal_sweep_causes.py" in text,
+          "the sweep's own finding does not point at the second table to check, "
+          f"so 'nobody has looked' names one place instead of two:\n{text}")
+
+    # ── which rows are unclassified, read off a SYNTHETIC LOG ───────────────
+    # The class filter and the chain peel are both load-bearing: a
+    # `not-answerable/host-import` row's own reason matches no family and must
+    # not be counted as an unclassified REFUSAL, and a refusal three modules
+    # deep carries its clause only at the end of the chain.
+    tmp = tempfile.mkdtemp(prefix="loud_log_")
+    log = _write(tmp, "sweep.log", _synthetic_log([
+        ("CODEGEN/DEPENDENCY", "deep.py",
+         "build: a.mojo imports 'b', which cannot be built either: "
+         "b.mojo: build: c.mojo imports 'd', which cannot be built either: "
+         f"d.mojo: {_NAMELESS}"),
+        ("NOT-ANSWERABLE/HOST-IMPORT", "host.py",
+         "host module (CPython standard library) 'os'"),
+        ("CODEGEN", "named.py", _FSTRING_REFUSAL),
+        ("CODEGEN/DEPENDENCY", "plain.py", _EXPORT_RULE),
+    ], files=5, passed=1))
+    arch, rows, _counts, swept, _pass = P.read_log(log)
+    printed = [(path, row.cls, row.reason, row.reason)
+               for path, row in rows.items()]
+    unclassified = S.unclassified_rows(printed)
+    got = sorted(p for p, _m in unclassified)
+    check(got == ["deep.py", "plain.py"],
+          f"the rows this table cannot name are {got}, expected "
+          f"['deep.py', 'plain.py']: a `not-answerable` row's own reason "
+          f"matches no family and is not a refusal, a chain must be peeled to "
+          f"its end, and a named message must stay named")
+    check(unclassified and "is refused: this module's own text is not ASCII" in
+          unclassified[0][1],
+          "the unclassified message is not the TERMINAL one, so the clause the "
+          "markers key on is the one two refusals further out")
+
+    # And the whole path from that log through the CAUSES tool's own CLI, which
+    # is where a reader meets this finding in practice.
+    # Two fixtures through the CLI, and they are the two halves of the b12
+    # lesson seen from this table: a message the CAUSE table cannot name but
+    # `_REFUSAL_FAMILIES` can (which today is the corpus's biggest nameless
+    # shape — the export-rule refusal), and a message NEITHER can name.
+    half = _write(tmp, "half.log", _synthetic_log(
+        [("CODEGEN/DEPENDENCY", f"m{i}.py", _LOWERABLE) for i in range(12)],
+        files=200, passed=180))
+    out, rc = _run_tool(["tools/formal_sweep_causes.py", half])
+    check("LOUD FINDING" in out and "`cannot be lowered` for 12 of them" in out,
+          "the cause table does not print the loud unclassified finding, or does "
+          "not say that the SWEEP's table names this shape — which is the "
+          f"one-row-fix reading:\n{out[-900:]}")
+    neither = _write(tmp, "neither.log", _synthetic_log(
+        [("CODEGEN/DEPENDENCY", f"m{i}.py", _NAMELESS) for i in range(12)],
+        files=200, passed=180))
+    out, _rc = _run_tool(["tools/formal_sweep_causes.py", neither])
+    check("LOUD FINDING" in out and "UNNAMED for 12 of them too" in out,
+          "a shape neither table names is not reported as that, which is the "
+          f"2026-10-04 b12 case exactly:\n{out[-900:]}")
+    check(rc == 0,
+          f"the cause table exits {rc} on a log with a loud unclassified row; "
+          f"its own docstring promises 0 whenever the log was read, because it "
+          f"reports on another tool's output — the SWEEP that produced the log "
+          f"is what exits 4")
+    return n[0]
+
+
+def _run_tool(argv):
+    """`(stdout+stderr, exit code)` for one tools/ script, run as a subprocess.
+
+    A subprocess rather than a call into `main()` because the finding has to
+    survive the path a reader takes: argument parsing, the `--min` filter that
+    can hide the table above it, and the exit status this module's docstring
+    promises. An in-process call would pass with any of those broken.
+    """
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable] + argv, cwd=HERE, capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=os.path.join(HERE, "tools")))
+    return proc.stdout + proc.stderr, proc.returncode
+
+
+def _baseline_alarm_checks(failures):
+    """The committed baseline: the ratchet, the ladder, and the naming."""
+    n = [0]
+
+    def check(ok, message):
+        n[0] += 1
+        if not ok:
+            failures.append(message)
+
+    tmp = tempfile.mkdtemp(prefix="baseline_")
+
+    # ── the schema round-trips, and a wrong one is REFUSED ──────────────────
+    path = os.path.join(tmp, "arm.baseline.json")
+    S.write_baseline(path, "arm64", {"a.py": S.CLASS_PASS, "b.py": S.CLASS_CODEGEN},
+                     source="bugs/sweeps/sweep-arm-12.txt",
+                     unnamed=["b.py"], summary_pass=1)
+    back = S.load_baseline(path)
+    check(isinstance(back, dict) and back["tag"] == S.BASELINE_TAG,
+          "a baseline written by `write_baseline` does not read back as one")
+    check(back["verdicts"] == {"a.py": S.CLASS_PASS, "b.py": S.CLASS_CODEGEN}
+          and back["unnamed"] == ["b.py"] and back["summary_pass"] == 1,
+          f"the round trip lost fields: {sorted(back)} / {back.get('verdicts')}")
+    check(not [f for f in os.listdir(tmp) if f.startswith(".baseline-")],
+          f"the atomic write left a temporary file behind: {os.listdir(tmp)}")
+    for name, body in (("wrong-tag.json", '{"tag": "something-else"}'),
+                       ("not-json.json", "{oh dear"),
+                       ("no-verdicts.json",
+                        '{"tag": "%s", "classes": {}}' % S.BASELINE_TAG)):
+        bad = _write(tmp, name, body)
+        code, said = None, io.StringIO()
+        try:
+            with contextlib.redirect_stderr(said):
+                S.load_baseline(bad)
+        except SystemExit as exc:
+            code = exc.code
+        check(code == S.EXIT_DID_NOT_RUN and bad in said.getvalue(),
+              f"{name} was read as a baseline, or refused without saying why "
+              f"(exit {code!r}, stderr {said.getvalue()!r}); a baseline read as "
+              f"'nothing regressed' when it is not one is the quietest way to "
+              f"disable the alarm, so a wrong tag is a refusal with the run's "
+              f"own 'did not run' status")
+    check(S.load_baseline(os.path.join(tmp, "absent.json")) is None,
+          "a missing baseline is not None, so a run on a tree with no ratchet "
+          "would refuse to sweep at all")
+    check(S.baseline_path("arm64").endswith(
+              os.path.join("bugs", "sweeps", "sweep-arm.baseline.json"))
+          and S.baseline_path("x86_64").endswith("sweep-x86.baseline.json"),
+          f"the default baseline paths are {S.baseline_path('arm64')} and "
+          f"{S.baseline_path('x86_64')}, which should sit beside the logs they "
+          f"come from")
+
+    # ── THE LADDER, boundary by boundary ───────────────────────────────────
+    # Every one of these is a judgement about what "worse" means, so each is
+    # asserted rather than described. The one to read twice is host-import ->
+    # codegen/dependency: it counts as an IMPROVEMENT (the backend reached a
+    # file it could not reach) while the coverage rate falls, because the file
+    # entered the denominator and failed there.
+    for before, after, want in (
+            (S.CLASS_PASS, S.CLASS_ADMITTED, True),
+            (S.CLASS_PASS, S.CLASS_CODEGEN, True),
+            (S.CLASS_ADMITTED, S.CLASS_CODEGEN_DEP, True),
+            (S.CLASS_CODEGEN, S.CLASS_CODEGEN_DEP, True),
+            (S.CLASS_CODEGEN_DEP, S.CLASS_CODEGEN, False),
+            (S.CLASS_CODEGEN, S.CLASS_HOST, True),
+            (S.CLASS_HOST, S.CLASS_CODEGEN_DEP, False),
+            (S.CLASS_HOST, S.CLASS_CODEGEN, False),
+            (S.CLASS_CODEGEN, S.CLASS_TARGET, True),
+            (S.CLASS_CODEGEN, S.CLASS_TOOL, True),
+            (S.CLASS_CODEGEN, S.CLASS_CRASH, True),
+            (S.CLASS_HOST, S.CLASS_UNRESOLVED, False),
+            (S.CLASS_UNRESOLVED, S.CLASS_SYSCALL, False),
+            (S.CLASS_CODEGEN, "a-class-this-tool-does-not-know", True),
+            (S.CLASS_HOST, S.CLASS_HOST, False)):
+        check(S.worse_class(before, after) is want,
+              f"worse_class({before!r}, {after!r}) is "
+              f"{S.worse_class(before, after)}, expected {want}")
+
+    # ── the alarm, on a synthetic baseline and a synthetic run ──────────────
+    out = []
+
+    def compare(prev, verdicts, rows, total, unnamed=()):
+        out.clear()
+        got = S.report_baseline("b.json", prev, verdicts, rows, total,
+                                unnamed, say=out.append)
+        return got, "\n".join(out)
+
+    prev = {"tag": S.BASELINE_TAG, "arch": "arm64", "total": 4, "when": "then",
+            "source": "old.log", "summary_pass": 1, "unnamed_passes": 0,
+            "unnamed": [],
+            "classes": {S.CLASS_PASS: 1, S.CLASS_CODEGEN: 2, S.CLASS_HOST: 1},
+            "verdicts": {"a.py": S.CLASS_PASS, "b.py": S.CLASS_CODEGEN,
+                         "c.py": S.CLASS_CODEGEN, "d.py": S.CLASS_HOST}}
+    # `a.py` stopped building (the b12 wall behind a file that passed), `c.py`
+    # got fixed (a pass, so an improvement the alarm must count), and `d.py`
+    # crossed from `host-import` into a codegen row — which `CLASS_SEVERITY`
+    # calls an improvement while the coverage rate falls, so both directions of
+    # that one fact have to be printed.
+    rows = [
+        ("a.py", S.CLASS_CODEGEN_DEP, "", "build: a.mojo imports 'w', which "
+         f"cannot be built either: w.mojo: {_NAMELESS}"),
+        ("b.py", S.CLASS_CODEGEN_DEP, "", f"build: b.mojo: {_NAMELESS}"),
+        ("d.py", S.CLASS_CODEGEN_DEP, "", f"build: d.mojo: {_LOWERABLE}"),
+    ]
+    verdicts = {"a.py": S.CLASS_CODEGEN_DEP, "b.py": S.CLASS_CODEGEN_DEP,
+                "c.py": S.CLASS_PASS, "d.py": S.CLASS_CODEGEN_DEP,
+                "new.py": S.CLASS_PASS}
+    loud, text = compare(prev, verdicts, rows, len(verdicts))
+    check(loud and "REGRESSION" in text,
+          f"a file that stopped building behind a wall did not report a "
+          f"regression:\n{text}")
+    check("1 file(s)  pass -> codegen/dependency" in text,
+          f"the regressed file is not named with the move it made:\n{text}")
+    check("refused in w.mojo" in text,
+          f"the group does not say which module is refusing, which is half of "
+          f"what the group is for:\n{text}")
+    check("1 file(s)  codegen -> codegen/dependency" in text,
+          f"the refusal that landed in front of a file already refused is not "
+          f"grouped as its own move — a class that moves from one codegen "
+          f"class to the other is the b12 round's 110 files:\n{text}")
+    check("not in the baseline" in text,
+          f"a file the baseline has never heard of is not accounted for, so a "
+          f"scope that grew reads as an unexplained movement:\n{text}")
+    check("codegen coverage" in text and "ENTERED the answerable denominator" in text,
+          f"the coverage rate and the two counts that explain it are missing, "
+          f"so a round that moves files into the denominator reads as nothing "
+          f"happened:\n{text}")
+    # An improvement is counted, never listed as a regression.
+    check("2 moved the other way" in text,
+          f"the improvements are not counted ({text[-400:]}), so the alarm "
+          f"cannot be checked against the direction it is claiming")
+
+    # A file that was refused on a NAMED row and now sits on the nameless
+    # refusal, with its class UNCHANGED — 110 of the b12 229, and invisible to
+    # every class count.
+    wall = [(f"m{i}.py", S.CLASS_CODEGEN, "", _NAMELESS) for i in range(4)]
+    base2 = dict(prev, verdicts={f"m{i}.py": S.CLASS_CODEGEN for i in range(4)},
+                 unnamed=[])
+    loud, text = compare(base2, {f"m{i}.py": S.CLASS_CODEGEN for i in range(4)},
+                         wall, 4, [f"m{i}.py" for i in range(4)])
+    check(loud and "lost their NAME" in text,
+          f"four files that swapped a named row for the nameless refusal "
+          f"without changing class reported nothing, and a class-only rule "
+          f"misses every one of the b12 round's 110:\n{text}")
+    check("m0.py" in text and S.unclassified_shape(_NAMELESS) in text,
+          f"the same-class group does not name the files, or names them "
+          f"without the shape they share:\n{text}")
+
+    # A `pass-unnamed` file's direction is UNKNOWN and must not be guessed.
+    base3 = dict(prev, verdicts={"u.py": S.BASELINE_UNNAMED_PASS},
+                 unnamed_passes=1, summary_pass=1,
+                 classes={S.BASELINE_UNNAMED_PASS: 1})
+    loud, text = compare(base3, {"u.py": S.CLASS_PASS}, [], 1)
+    check(loud and "does not say what this file was" in text
+          or loud and "cannot put a direction on" in text,
+          f"a file this baseline cannot speak for is reported as a "
+          f"regression in some direction, which is the one thing it must not "
+          f"do:\n{text}")
+
+    loud, text = compare(None, {"a.py": S.CLASS_PASS}, [], 1)
+    check(not loud and "none at b.json" in text,
+          f"a run with no baseline does not say so:\n{text}")
+    loud, text = compare(prev, dict(prev["verdicts"]), [], 4)
+    check(not loud and "REGRESSION CHECK" in text,
+          f"a run identical to the baseline reports something:\n{text}")
+
+    # ── the exit status is a function, so it can be checked without a sweep ──
+    check(S.exit_status(False, False) == 0, "a clean run is not 0")
+    check(S.exit_status(True, False) == 1, "a finding is not 1")
+    check(S.exit_status(True, True) == S.EXIT_UNCLASSIFIED
+          and S.exit_status(False, True) == S.EXIT_UNCLASSIFIED,
+          "the loud unclassified shape does not exit 4, which is the only "
+          "status that says a fact about the INSTRUMENT rather than the corpus")
+    check(S.EXIT_UNCLASSIFIED not in (0, 1, 2, 3),
+          "exit 4 collides with a status the sweep already uses")
+
+    # ── the whole chain, from a SYNTHETIC LOG through banking and comparison ─
+    log = _write(tmp, "round-1.log", _synthetic_log([
+        ("CODEGEN/DEPENDENCY", "b.py",
+         f"build: b.mojo imports 'w', which cannot be built either: w.mojo: "
+         f"{_NAMELESS}"),
+        ("CODEGEN", "c.py", _FSTRING_REFUSAL),
+        ("NOT-ANSWERABLE/HOST-IMPORT", "d.py",
+         "host module (CPython standard library) 'os'"),
+    ], files=6, passed=3))
+    arch, banked_n, out_path = R.bank_baseline(
+        log, os.path.join(tmp, "banked.json"),
+        ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"])
+    banked = json.load(open(out_path))
+    check(arch == "arm64" and banked_n == 6,
+          f"banking a log reported [{arch}] {banked_n} file(s), expected "
+          f"[arm64] 6")
+    check(banked["verdicts"] == {
+              "b.py": S.CLASS_CODEGEN_DEP, "c.py": S.CLASS_CODEGEN,
+              "d.py": S.CLASS_HOST, "a.py": S.BASELINE_UNNAMED_PASS,
+              "e.py": S.BASELINE_UNNAMED_PASS, "f.py": S.BASELINE_UNNAMED_PASS}
+          and banked["summary_pass"] == 3 and banked["unnamed"] == ["b.py"],
+          f"a baseline banked from a log must record the rows it printed and "
+          f"mark the rest `{S.BASELINE_UNNAMED_PASS}` — a log records the COUNT "
+          f"that passed and never their names — and it recorded "
+          f"{banked['verdicts']}")
+    # The second round: the wall lands on `e.py`, which the baseline cannot name,
+    # and on `f.py`, which passed and is a real regression.
+    rows2 = [("b.py", S.CLASS_CODEGEN_DEP, "", banked["verdicts"]["b.py"]),
+             ("c.py", S.CLASS_CODEGEN, "", _FSTRING_REFUSAL),
+             ("d.py", S.CLASS_HOST, "", "host module (CPython standard library) 'os'"),
+             ("e.py", S.CLASS_CODEGEN_DEP, "", f"w.mojo: {_NAMELESS}"),
+             ("f.py", S.CLASS_CODEGEN_DEP, "", f"w.mojo: {_NAMELESS}")]
+    verdicts2 = {"a.py": S.CLASS_PASS, "b.py": S.CLASS_CODEGEN_DEP,
+                 "c.py": S.CLASS_CODEGEN, "d.py": S.CLASS_HOST,
+                 "e.py": S.CLASS_CODEGEN_DEP, "f.py": S.CLASS_CODEGEN_DEP}
+    loud, text = compare(banked, verdicts2, rows2, len(verdicts2), ["e.py"])
+    check("f.py" in text and "pass-unnamed" in text,
+          f"the file that stopped building is not named:\n{text}")
+    check("now codegen/dependency: 2 file(s)" in text,
+          f"the file whose direction this baseline cannot say is not reported "
+          f"as a population with its new class:\n{text}")
+    # And the same log through the rounds tool's CLI, which is how a baseline
+    # gets banked without re-running a sweep.
+    root = os.path.join(tmp, "scope")
+    for name in ("a.py", "b.py", "c.py", "d.py", "e.py", "f.py"):
+        _write(root, name, "x = 1\n")
+    code = os.path.join(tmp, "cli.json")
+    _out, rc = _run_tool(["tools/formal_sweep_rounds.py", "--write-baseline",
+                          log, "--out", code,
+                          "--baseline-paths-from", root])
+    check(rc == 0 and os.path.exists(code),
+          f"`formal_sweep_rounds.py --write-baseline` did not bank the log "
+          f"(exit {rc}); refreshing the ratchet must not cost a sweep")
+    _out, rc = _run_tool(["tools/formal_sweep_rounds.py", "--write-baseline", log])
+    check(rc != 0 and "FILE LIST" in _out,
+          f"banking without the file list did not refuse with the reason "
+          f"(exit {rc}):\n{_out[-400:]}")
     return n[0]
 
 
