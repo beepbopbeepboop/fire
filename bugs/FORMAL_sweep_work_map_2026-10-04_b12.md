@@ -1,10 +1,12 @@
 # FORMAL_sweep_work_map_2026-10-04_b12: a fresh, complete sweep of this repository and the stdlib, both architectures — and a 229-file regression, named
 
 **Claim** `sweep30:sweep-b12` on `work/formal30-sweep-b12`. **This tree is
-`master` at `77b24183`** — the commit the branch was cut from, `master..HEAD`
-was empty when the sweep launched at 22:36, and `master` has not moved since, so
-every number here is a measurement of `77b24183` and of nothing else. Both arms
-ran to completion over the whole **735-file** scope with **no file left
+`master` at `77b24183`** — the commit the branch was cut from, and `master..HEAD`
+was empty when the sweep launched at 22:36, so **every number here is a
+measurement of `77b24183` and of nothing else.** **`master` has since moved 8
+commits, and 5 of them are `formal/` changes plus two test files**, so a re-run
+on today's master is expected to differ — §6 says which way and why. Both arms ran
+to completion over the whole **735-file** scope with **no file left
 unclassified** and **no `tool` row**, so every number is over the whole scope and
 every file has a verdict.
 
@@ -737,6 +739,23 @@ line.** **§3.2's 31 docstrings and the `ZZDOCSTRINGPROBEZZ` / `ZZFNDOCPROBEZZ`
 measurement are three commands**, in §3.2 and §5.1. **§4.2's parse error is
 `bugs/PARSE_FAIL_fire_compiler_cannot_lex_a_multiline_f_string.md`**, which has
 its own six-shape measurement.
+
+**`master` HAS MOVED 8 COMMITS SINCE, so a re-run differs — and here is where.**
+`git diff 77b24183..master` over the files this sweep sweeps:
+
+| file | Δ | what it is |
+|---|---|---|
+| `formal/model.py` | 8 lines, **all of them comments** | a docstring rewrite naming `dict_literal_key_value_kind`. **The one file that decides every verdict is behaviourally unchanged**, which is why §2's numbers are still worth reading. |
+| `formal/build.py` | +83 | a nested typed-frame improvement (`_typed_nested_frame` grows a frame holder through a `MemberExpr`), and `borrowed_structs` — a LIBRARY that applies another module's template instantiation now builds (`60c49ae7`) |
+| `formal/imports.py` | +95 | the module-set side of the same two features |
+| 2 test files, `tools/suite.py`, `test_suite.py`, `bugs/**` | — | not swept, or swept as a host-import row |
+
+So the expected deltas on a re-run are the **export-gate / borrowed-template
+rows** (`60c49ae7` makes `Pair[Int]()` written in an importing module bind), the
+**frame-holder family** (`7d5898e7`), and the scope — `test_formal_per_struct_asks.py`
+is registered now. **`_syscalls.mojo` and this round's regression are not among
+them**, because the fix for that is on this branch and not on `master`: a re-run
+on `master` alone reproduces the 229-file wall.
 
 **≤ 36 minutes of wall for both arms together** at `-j 4` each, on a box at load
 16.3. The CAS is content-addressed and machine-wide, so a re-run with nothing
