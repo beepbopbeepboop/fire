@@ -1359,6 +1359,16 @@ def test_a_proved_dylib_is_an_arm64_artifact_and_says_so(tmpdir, shared):
     So: the refusal has to be at the function (every caller goes through it, and
     `formal/imports.py`'s `build_module_dylib` does), and the CLI's own check is
     only there because its message is better. Both are exercised.
+
+    The CLI's second guard, which refused `dylib --backend=arm64` with no
+    `--formal`, is GONE as of 2026-10-05 (`work/formal30-interop`) and the case
+    below asserts what replaced it.  The reason it existed was that a `--backend`
+    on this command could mean the gimple path, which has no backend at all and
+    compiles for the HOST's architecture -- so `--backend=arm64` without
+    `--formal` was "right only by coincidence on an arm64 host".  A `--backend`
+    now names a formal library's architecture and nothing else can mean by it,
+    which is also what makes the arm64 refusal's own sentence true: it recommends
+    `dylib --no-prove`, and that command now builds the x86-64 library it names.
     """
     from formal.build import compile_formal_dylib, FormalBuildError
     src = os.path.join(tmpdir, "archproof.mojo")
@@ -1416,13 +1426,35 @@ def test_a_proved_dylib_is_an_arm64_artifact_and_says_so(tmpdir, shared):
     check("generate_dylib_proof" in (p.stderr or ""),
           f"the CLI's refusal does not name the missing generator: "
           f"{p.stderr[-300:]}")
-    # And the plain path, which has no formal backend to select at all.
-    p = cli("dylib", "--backend=arm64", "-o", os.path.join(tmpdir, "cli_g"),
-            src)
-    check(p.returncode != 0,
-          "dylib --backend=arm64 (no --formal) exited 0: the gimple path "
-          "compiles for the HOST's architecture, so that request is right only "
-          "by coincidence on an arm64 host")
+    # And the plain path, which is where the recommendation above has to be
+    # TRUE for it to be a recommendation.  This used to assert that
+    # `dylib --backend=arm64` with no `--formal` is REFUSED, because the gimple
+    # path compiles for the HOST's architecture and so that request was "right
+    # only by coincidence on an arm64 host" -- and it also asserted, two lines
+    # above, that the x86-64 refusal names `dylib --no-prove` as the way to get
+    # an x86-64 library.  Those two could not both hold: the guard fired on the
+    # `--backend` value alone, so `dylib --no-prove --backend=x86_64` was
+    # refused BY the message recommending it, and there was no command line at
+    # all that produced an x86-64 formal library.  A `--backend` on this command
+    # now names a formal library's architecture and `--formal` alone asks for
+    # the contract, so both are asserted here by the ARCHITECTURE OF THE IMAGE,
+    # which is the claim that matters and the one "it exited 0" is not.
+    for backend, want in (("arm64", CPU_TYPE_ARM64), ("x86_64", CPU_TYPE_X86_64)):
+        out_path = os.path.join(tmpdir, "cli_" + backend)
+        p = cli("dylib", "--no-prove", "--backend=" + backend, "-o", out_path,
+                src)
+        check(p.returncode == 0 and "Built:" in p.stdout,
+              f"dylib --no-prove --backend={backend} did not build: "
+              f"{(p.stderr or p.stdout).strip()[-300:]}")
+        with open(out_path, "rb") as f:
+            head = f.read(16)
+        got = struct.unpack_from("<I", head, 4)[0]
+        check(struct.unpack_from("<I", head, 0)[0] == MH_MAGIC_64
+              and got == want,
+              f"dylib --no-prove --backend={backend} wrote cputype {got:#x}, "
+              f"so the flag reached nothing that could have been the gimple "
+              f"path by coincidence and it did not reach the formal one "
+              f"either")
 
 
 def test_dylib_is_built_for_the_requested_arch(tmpdir, shared):
