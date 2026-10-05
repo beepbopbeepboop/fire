@@ -2297,6 +2297,159 @@ print(j())
 print(k())
 """)
 
+    # The MATERIALIZED flavour, which is a different emission path and was
+    # measured wrong independently of the rows above: a lambda that is
+    # RETURNED as a value is lifted into its own C function taking a heap env
+    # struct, so the captured `double` crosses a struct field, a `malloc`'d env
+    # and a `mojo_bound_method_new` box on the way, and the lifted body's
+    # result crosses an `int64_t` on the way back. Before, the store, the env
+    # field declaration and the read all said `double` and the answer was still
+    # 1.0/2.0 — two different wrong values, which is what an uninitialised
+    # env looks like rather than a zeroed one.
+    #
+    # The three rows are the three ways the capture reaches the env: a local
+    # (`n`), an ANNOTATED `float` PARAMETER (`k` — so this is not the
+    # unannotated-parameter inference gap), and the INLINED shape as a control
+    # that must not move (`m`, identical to `n` except the lambda is called in
+    # the same statement list and never materialized).
+    test_gimple_matches_cpython("gimple_materialized_lambda_double_env_survives_the_call", """\
+def m():
+    q = 2.5
+    fn = lambda: q + 1
+    return fn()
+
+def n():
+    q = 2.5
+    fn = lambda: q + 1
+    return fn
+
+def k(p: float):
+    fn = lambda: p * 2
+    return fn()
+
+print(m())
+print(n()())
+print(k(2.5))
+""")
+
+    # Same env, a capture that is NOT added to (so the lifted body returns the
+    # captured value itself rather than arithmetic on it), and an `int`
+    # capture as the control: an `int64_t` env field has always round-tripped,
+    # so a regression that homogenised the env would show up here first.
+    test_gimple_matches_cpython("gimple_materialized_lambda_capture_kinds_survive_the_call", """\
+def n():
+    q = 2.5
+    fn = lambda: q
+    return fn
+
+def k(p: float):
+    fn = lambda: p
+    return fn
+
+def i():
+    q = 7
+    fn = lambda: q + 1
+    return fn
+
+def s():
+    q = 'ab'
+    fn = lambda: q + '!'
+    return fn
+
+print(n()())
+print(k(2.5)())
+print(i()())
+print(s()())
+""")
+
+    # A NESTED DEF is the same defect through a different door, and the one
+    # this doc listed as still open. Its body is its own function with its own
+    # `return`s, so return inference answers it exactly as it answers any other
+    # function -- but nothing WAS asking, because the enclosing function's
+    # signature is written before any nested def is emitted, and a call to
+    # `inner` is an unknown callee until something says otherwise. So
+    # `a1` inferred `int64_t` and the `char *` it returned printed as
+    # 4378056936.
+    #
+    # Three capture kinds (string / dict / list) because the inference has to
+    # see the CAPTURED local as a pointer, which is what
+    # `_prebound_local_ctypes` does and what the nested def's own body needs;
+    # two nesting levels because the nested def's return type is computed
+    # through the same public entry point and so has to compose with itself;
+    # and an `int` row that was already right and must stay right.
+    test_gimple_matches_cpython("gimple_nested_def_return_type_is_inferred_from_its_own_returns", """\
+def a1():
+    p = 'mm'
+    def inner():
+        return p
+    return inner()
+
+def a2():
+    d = {'k': 'v'}
+    def inner():
+        return d
+    return inner()
+
+def a3():
+    L = [1, 2]
+    def inner():
+        return L
+    return inner()
+
+def a4():
+    n = 5
+    def inner():
+        return n * 2
+    return inner()
+
+print(a1())
+print(a2())
+print(a3())
+print(a4())
+""")
+
+    # Two levels, and the inner def captures a `double` from the OUTERMOST
+    # body -- so the value has to survive both the inner return inference and
+    # the middle one's, and `3` where CPython prints `3.5` is the truncation
+    # this table exists to prevent.
+    test_gimple_matches_cpython("gimple_nested_def_return_type_composes_through_two_levels", """\
+def outer():
+    q = 2.5
+    def mid():
+        def deep():
+            return q + 1
+        return deep()
+    return mid()
+
+def two():
+    x = 5
+    def g():
+        def h():
+            return x
+        return h()
+    return g()
+
+print(outer())
+print(two())
+""")
+
+    # The case the new table's docstring says it deliberately does NOT handle:
+    # two MUTIVELY recursive nested defs, where neither can be typed from the
+    # other's returns. Both stay at the `int64_t` default, which is what they
+    # inferred before the table existed, so this is pinned as "unchanged"
+    # rather than as correct -- what it protects is that the table does not
+    # start FOLLOWING CALLS and recursing.
+    test_gimple_execution("gimple_mutually_recursive_nested_defs_do_not_recurse_inference", """\
+def outer_fn(n):
+    if n == 0:
+        return 0
+    def inner_fn(k):
+        return outer_fn(k - 1)
+    return inner_fn(n)
+
+print(outer_fn(3))
+""", expected_return=0)
+
     test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
 def ident(x):
     return x
