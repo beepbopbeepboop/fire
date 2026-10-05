@@ -90,8 +90,11 @@ than the one handed to the dict.
 
 ### The exact next step (three lldb commands, no rebuild)
 
-The binary is at `.tmp/shkeep/mojo_selfhost` on the worktree that measured this,
-and `.tmp` does not survive a reboot, so this is worth doing in one sitting:
+The binary these were read off was built into `.tmp/shkeep/` on the worktree that
+measured this and was deleted when that worktree finished; `.tmp` does not
+survive a reboot either, so step 1 is "rebuild it once, into a directory you
+keep" — the two-line `build(td)` recipe in "The exact next step" item 1 below,
+which is ~9 minutes — and steps 2 and 3 are seconds each after that:
 
 1. `breakpoint set -n mojo_mark_as_tuple` and `breakpoint set -n
    mojo_dict_key_for`, `continue` to the second. If the pointer `x0` at the
