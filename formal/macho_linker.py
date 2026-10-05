@@ -1430,7 +1430,40 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # dylib there is — one with externs and no globals — and produced an image
     # whose load commands ran off the end of a 31-byte file.
     linkedit_file = text_size + (data_size if n else 0) + g_size
-    file = bytearray(linkedit_file + len(trie) + len(bind))
+    # The export trie is a byte stream of arbitrary length, so the bind stream
+    # that follows it lands on whatever offset the trie's length happens to
+    # leave — and Apple's linker REFUSES the whole library when that is not
+    # eight-byte aligned:
+    #
+    #   ld: mis-aligned LINKEDIT content 'bind opcodes',
+    #       fileOffset=0x0000C22A in 'libinterop.arm64.dylib'
+    #
+    # so `clang foo.c lib.dylib` — the one thing anyone does with a formal
+    # dylib — failed to link, with no diagnostic naming anything a person could
+    # act on. It is size-dependent and therefore invisible on the small corpora
+    # the tree tests with: this corpus's trie is 554 bytes and 554 % 4 == 2,
+    # while a three-function library's is a multiple of four. The EXECUTABLE
+    # path could never hit it, because its `bind_file` is a sum of page-sized
+    # segments and so is aligned by construction; only the dylib builder had a
+    # byte-length blob in front of the bind data.
+    #
+    # The padding is inside __LINKEDIT and inside its declared filesize, so
+    # `_assert_no_unclaimed_bytes` still sees every byte claimed, and the code
+    # signature `codesign` appends after this lands where it always did.
+    #
+    # With no externs there IS no bind stream, so the trie is the whole of
+    # __LINKEDIT's content and `bind_off` is 0 as it was: a `linkedit_len`
+    # computed from the (empty) bind stream would be negative and every byte of
+    # the trie past `linkedit_file` would be unclaimed, which is the invariant
+    # `_assert_no_unclaimed_bytes` exists to catch — as it did, here, in the four
+    # x86-64 dylib cases that build a library with no externs.
+    if n:
+        bind_file = _align_up(linkedit_file + len(trie), 8)
+        linkedit_len = bind_file + len(bind) - linkedit_file
+    else:
+        bind_file = 0
+        linkedit_len = len(trie)
+    file = bytearray(linkedit_file + linkedit_len)
 
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
@@ -1491,7 +1524,10 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
     patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
-    linkedit_len = len(trie) + len(bind)
+    # `linkedit_len` was computed where the bind stream's ALIGNED offset was
+    # decided, and is not recomputed here: recomputing it from `len(trie)` is
+    # exactly the drift that put the bind data at an offset the linker rejects
+    # (see the `bind_file` comment above).
     patch(o + 32, "<Q", ((linkedit_len + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
     patch(o + 40, "<Q", linkedit_file)
     patch(o + 48, "<Q", linkedit_len)
@@ -1535,7 +1571,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # rebase_off/rebase_size stay zero (see the noextern builder).
     patch(o + 8, "<I", 0)
     patch(o + 12, "<I", 0)
-    patch(o + 16, "<I", linkedit_file + len(trie) if n else 0)
+    patch(o + 16, "<I", bind_file)
     patch(o + 20, "<I", len(bind))
     o += 48
 
@@ -1559,7 +1595,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     if init_blob:
         file[init_file : init_file + len(init_blob)] = init_blob
     file[linkedit_file : linkedit_file + len(trie)] = trie
-    file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
+    file[bind_file : bind_file + len(bind)] = bind
     _assert_no_unclaimed_bytes(
         file,
         [(0, text_size)]
