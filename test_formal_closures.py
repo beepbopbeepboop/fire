@@ -19,6 +19,17 @@ x86-64 image — and the three stdouts must be identical. The Mojo subset used i
 lambda, decorator and generator questions are made of; nothing here needs a
 `printf` spelling CPython cannot run.
 
+ONE divergence found while building this table is deliberately ABSENT from it,
+and is filed instead: a comprehension whose element is a container
+(`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) aliases every outer
+iteration's element to the LAST one and answers 93 where CPython answers 63, on
+both backends, with exit 0. An answered row would have to assert that number, and
+this file's premise is that an answered row EQUALS CPython's; a refusal row
+would have to be a refusal, and this is not one. See
+`bugs/FORMAL_a_comprehension_element_container_aliases_every_iteration.md` for the
+signature (it is not B1, B2 or B4 in `bugs/OPEN_WORK.md`) and for why pinning it
+here would be the wrong kind of test.
+
     python3 test_formal_closures.py [-v] [case ...]
 
 A refusal case is a different assertion and has a different shape: both
@@ -461,6 +472,38 @@ REFUSALS = [
      "    print(f(6))\n"
      "    return 0\n",
      ["`m`", "a lambda has no environment to be given them"]),
+
+    # ── a nested `def` capturing a LOOP variable ──
+    #
+    # CPython answers 3 (`get()` is called inside the iteration that defined it,
+    # so it reads the current `i`) and the by-value capture ABI answers exactly
+    # this for an ordinary local — so the shape "should" work and does not. The
+    # root cause is one arm missing from a loop in
+    # `mojo/middle/closures.py::discover_closures`: a `ForStmt` target never
+    # enters `enriched_scope`, which is the map every inferred capture is
+    # filtered against, so the capture is dropped and the lifted body reads a
+    # name with no home.
+    #
+    # The needle is that name in the ALLOCATOR's spelling, which is not the right
+    # sentence — it is a fact about the closure pass, not about the register
+    # allocator — and pinning it deliberately: the row fails loudly the moment
+    # the pass learns the loop target, so whoever fixes it moves this row into the
+    # ANSWERED group instead of re-deriving what it should say. Filed as
+    # `bugs/FORMAL_a_nested_def_capturing_a_for_target_is_not_a_capture.md`, which
+    # also records why the fix was not landed in the round that measured it (the
+    # file is shared with the compiled backend and owes a full gate) and the
+    # late-binding hazard a by-value capture would introduce for the STORED
+    # spelling of the same construct.
+    ("a_nested_def_capturing_a_loop_variable",
+     "def main():\n"
+     "    s = 0\n"
+     "    for i in range(3):\n"
+     "        def get():\n"
+     "            return i\n"
+     "        s = s + get()\n"
+     "    print(s)\n"
+     "    return 0\n",
+     ["'i'", "main_get"]),
 
     # ── a callable stored in a container and read back ──
     # The result is BOUND before it is printed, and that is not incidental:
