@@ -3,14 +3,51 @@
 
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py`'s
 `audit_step_table`, and the census it was hiding.
-**Status: the AUDIT is fixed (same commit). Of the twelve examples it was
-hiding, ELEVEN now generate and one (`sum_range`) still refuses — and that
-refusal belongs to another worker's claim (§4.1).** The eleven are re-measured
-ONE AT A TIME below, each of the four signatures now carrying the obligation
-that fails, named from the generated file rather than from a truncated tail;
-nine of the ten that were re-measured on master are still red and still
-undiagnosed beyond that, and one (`wdiff`) is fixed there, so this doc's count
-was stale. Filed 2026-10-03 on `work/formal16-2`, refreshed 2026-10-04.
+**Status: the AUDIT is fixed, `sum_range` now generates too, and what is LEFT
+is eleven LEAN RUNS — which is §4.1's own verdict about itself, and it is not
+work this tree can do.** The eleven are re-measured ONE AT A TIME below, each
+of the four signatures now carrying the obligation that fails, named from the
+generated file rather than from a truncated tail. Filed 2026-10-03 on
+`work/formal16-2`, refreshed 2026-10-04.
+
+**Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
+no Lean.** Two things moved since §4's table was written, and neither is a fix
+here:
+
+* **`sum_range` is the last refuser and it no longer refuses.** §4's table and
+  §5's row 4 both record it as the one example still stopping at a generator
+  `ValueError` out of `emit_block`, and §4 called that refusal "another
+  worker's claim". It is fixed — a `for`-range loop lowers with its test at the
+  BOTTOM of its body, so its back edge is a conditional branch and the
+  loop-discovery scan only asked the unconditional-`b` question (`cbf00b9f`).
+  Measured here: `test_formal_call_proof_gen.py::
+  TestTheRecursionFamiliesStillGenerate` is **4 tests / 0.329 s / OK**, and
+  `audit_step_table('lib/ProofLib.lean')` returns exactly the three shadow
+  notes §"Reproducing" records (`entry 3 shadows entry 5`, `entry 4 shadows
+  entry 47`, `entry 48 shadows entry 50`), so the audit is still the de-
+  duplicated reader and not a comment that was reworded.
+* **So all TWELVE generate, and §4.1's question is now the whole of what is
+  left: does LEAN accept each one.** Generation is not proof — families 1–3
+  failed exactly at typecheck — and §4.1 already names the cost and the rule:
+
+      python3 tools/memslot.py --gb 8 --label tf -- python3 test_formal.py -j 1 <stem>
+
+  one stem at a time, because `test_formal.py` with NO stem at `-j 2` breaches
+  an 8 GB reservation (peak observed 8.0 GB, killed) while a single stem peaked
+  at 3.2 GB. **That is a sequence of bounded Lean runs, and the eight
+  Lean-checking `formal` gate tests are disabled on this tree, so a claim of
+  "it proves" from here could not be checked by anything — this is stated as
+  the reason the work is left rather than as a judgement that it is hard.**
+  A stem that FAILS gets an `EXPECTED_FAILURES` entry naming its own failure;
+  a stem that PASSES needs no entry.
+
+**What is NOT claimed here:** that any of the eleven proves. §5 says "the
+`rfl` failure is the FIRST error … the five examples' remaining obligations have
+never been observed with it discharged", and §5.1 measures that family 1's
+peel removes four of five layers and leaves one write at a computed global
+address that needs a disjointness fact between a global's address and the
+stack — a new kind of argument for this walk. None of that changed in this
+pass, and nothing in it was re-verified beyond the generation half.
 
 ## 1. What was wrong, and why it is a hole rather than a red test
 
@@ -120,13 +157,20 @@ generate, which they could not do against a library that does not typecheck, and
 
 **The census is pinned rather than recorded**, in
 `test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate`: each of
-the eleven still generates AND writes a file carrying the arm64 end-to-end
-theorem `<fn>_compiles_correctly_universal`; `sum_range` still refuses and its
-message still carries the PREMISE (`cbz taken continuation`) rather than the
-layout's address; and every pinned refusal has a bug doc naming it, because a row
-that pins a refusal without naming its owner keeps a stale claim alive after the
-fix lands. That file's rule is GENERATION ONLY, no Lean, so the pin costs 0.5 s
-and runs every time.
+the twelve generates AND writes a file carrying the arm64 end-to-end
+theorem `<fn>_compiles_correctly_universal`, and every pinned refusal has a bug
+doc naming it, because a row that pins a refusal without naming its owner keeps
+a stale claim alive after the fix lands. That file's rule is GENERATION ONLY,
+no Lean, so the pin costs 0.5 s and runs every time.
+
+**This paragraph was written when `sum_range` still refused and its refusal
+still carried the PREMISE (`cbz taken continuation`) rather than the layout's
+address. That is no longer true and the pin moved with it** — the refusal is
+gone (`cbf00b9f`), so `sum_range` is a positive row in the same test and the
+"every pinned refusal has a bug doc" clause now has nothing to say about this
+family. Measured 2026-10-05: 4 tests / 0.329 s / OK. **The clause itself is
+kept** rather than deleted, because it is a rule about the census and the next
+refusal this walk reaches will be pinned the same way.
 
 ### 4.1 What is left, and it is a sequence of Lean runs
 
@@ -165,7 +209,7 @@ what made family 1 read as an ADRP page computation when it is not.
 | 1 | `count`, `fact`, `pow2`, `sqsum`, `sum` | 5 red, one shared first error | `sum_proof.lean:5903:16: error: Tactic 'rfl' failed` inside `have hx30fr_5 : (sum_b5_qS4 (({s_4 with pc := 4294968088}))).x30 = (st).x30` | the walk's "x30 survives from the initial state to the epilogue's reload" fact. Its goal is a `mem_read_u64` over a FIVE-deep `mem_write_u64` chain at `st.sp - 16`, `- 8`, `- 32`, …, and the fact's tactic is `simp +decide only [_VALUE_SIMP] ; all_goals rfl`. The separation rewrite IS in that simp set (`mem_read_after_write_u64_slot`), but its side conditions (`j < 2^64`, `k + j + 8 ≤ 2^64`, `j + 8 ≤ k`) are inequalities in the SYMBOLIC `st.sp`, so `decide` cannot discharge them, `simp` skips the rewrite, and `rfl` is left holding the chain. **B6's shape with the peel missing**, and the fix is already written down elsewhere: `formal/x86_64_endtoend_test.py`'s closing `hrip` peels the same shape with an explicit `key : ∀ m a v b, a + 8 ≤ b → …` and `repeat rw [key _ _ _ _ (by first | decide | omega)]` — "`repeat` in front of it peels every layer, and each layer's side condition is closed over literals" is that file's own sentence. The write offsets are already computed on this path (`ctx["stores"]`, from `_sp_stores`). Everything after line 5903 in these five files is cascade. **And the peel alone is NOT the fix — measured, see §5.1.** |
 | 2 | `sgt8`, `sle8`, `ug8` | 3 red, one shared shape | `sgt8_proof.lean:4745:43: error: unsolved goals` on `FrameBound 131120 (let __src := Arm64State.init n 4294967968; {x0 := …, x29 := …}) n` | the universal theorem's FRAME-BOUND obligation, over the TYPED model's initial state — the 30-field literal this doc's author read as "the truncator shape". The next diagnostic is `The prover found a potentially spurious counterexample … abstracted … [3, t8s n, arm64_matches_condition 2 nzcv✝¹, arm64_reg 16 …]`: `bv_decide` gave up on the typed truncator terms inside that obligation. Nothing here is a codegen claim. It is the `t8s`/`t8u` half of `formal/types.py::lean_trunc_defs` meeting `FrameBound`, and the fix is to teach the bound's obligation those truncators. |
 | 3 | `both`, `either` | 2 red, identically | `both_proof.lean:5517:8: error: (kernel) excessive memory consumption detected`, at `theorem both_compiles_correctly_universal`, 7.5 GB peak | **the "is it the library?" question above is answered: it is not.** One `formal/lean.py::ensure_library` later, with a freshly built `lib/*.olean`, both still fail, and they fail at the FINAL universal theorem of the file — every per-block certificate above it (`both_blk_0` … `both_blk_6`) is accepted. So this is the arm64 kernel-memory class (`BLOW.md` §0, `bugs/CODEGEN_bootstrap_resource_blowup.md`) at one declaration, and it is the only one of the twelve that costs more than 3 GB to observe. |
-| 4 | `sum_range`, `wdiff` | **both fixed** | — | `wdiff`'s back edge is the unconditional `b` that `test_formal_call_proof_gen.py::TestLoopContractBlocks` pins, and that discovery worked all along. `sum_range` was the one this doc's "a missing `loop_test` or `cond_branches` entry" does not describe: for `sum_range` the loop contract was never built at all, because the caller's loop-test rule asked for a `b` block whose target is a `cbz` block and this loop's back edge is the `cbz` block's own taken edge. Commit `cbf00b9f` asks the conditional question too and adds `while_lt_exit_contract_bottom` to the library. Family 4 is two fixed examples now. |
+| 4 | `sum_range`, `wdiff` | **both fixed** | — | `wdiff`'s back edge is the unconditional `b` that `test_formal_call_proof_gen.py::TestLoopContractBlocks` pins, and that discovery worked all along. `sum_range` was the one this doc's "a missing `loop_test` or `cond_branches` entry" does not describe: for `sum_range` the loop contract was never built at all, because the caller's loop-test rule asked for a `b` block whose target is a `cbz` block and this loop's back edge is the `cbz` block's own taken edge. Commit `cbf00b9f` asks the conditional question too and adds `while_lt_exit_contract_bottom` to the library. Family 4 is two fixed examples now — and §2026-10-05's status above re-measures it: all twelve generate. |
 
 **What this changes for the next session, and what it does not.** It closes none
 of the ten: a named obligation is not a fix. What it does is make step 1 of §4

@@ -1,10 +1,12 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
 **Area:** FORMAL (module classification — `formal/imports.py`'s
-`HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED`, and the wording of
-`unresolvable_import_error`). **Status: the FALSE SENTENCE is fixed for all 223
-and the 222 judgements are still to do — with the coverage question answered, and
-the answer is ZERO.**
+`HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED` / `HOST_NOT_A_MODULE`,
+and the wording of `unresolvable_import_error`). **Status: the FALSE SENTENCE is
+fixed for all 223, §"The next step"'s THIRD-ANSWER bullet is LANDED with an
+oracle and two corrections (§0.3, 2026-10-05), and the rest of the per-name
+judgements are still to do — with the coverage question answered, and the answer
+is ZERO.**
 
 Found while fixing that one name, 2026-10-02, on `work/formal8-10`.
 
@@ -134,12 +136,93 @@ would be a red suite rather than a discipline. The docstring now says what the
 function returns, says why the other half cannot exist, and points at the test
 above as the place the "neither" question is actually kept.
 
-**What is still not done, unchanged:** the 217 per-name judgements. §0.1's
-reason still stands — nothing imports them, so there is no measurement to tell a
-right entry from a plausible one, and filling them by category from a distance is
-the failure `formal/imports.py:101` warns about. The census test is what makes
-that deferral safe rather than merely convenient: the work is now queued by the
-consumer that arrives, not by a reader's guess about which names matter.
+## 0.3 The "third answer" is LANDED, and it is the FOURTH tier — and it corrected
+## the doc's own list (2026-10-05, `work/formal25-5-r2`)
+
+§"The next step"'s last bullet said the "neither tier, deliberately" group —
+"a name whose only spelling is a documentation or test artefact (`this`,
+`antigravity`, `turtledemo`, `idlelib`), or a Windows-only / POSIX-only module
+that is not this host's (`msvcrt`, `winreg`, `nt*`, `posix`, `genericpath`,
+`nturl2path`)" — "want[s] a third answer or an explicit exclusion list, which is
+a decision about the table rather than a classification — and **it should be
+recorded as one, not left to look like an oversight**." That is what landed, and
+landing it turned out to be THREE answers rather than one, because the doc's
+single group does not have a single reading.
+
+**THE MEASUREMENT IS CPython's OWN `find_spec`, on the interpreter that runs
+this tree, and that is what splits it.** The table's rule is stated once at the
+top of `formal/imports.py` — "does implementing it need an object a
+freestanding image that links libSystem and nothing else does not have?" — and
+a name is "not this host's" when the OBJECT is missing, which is a fact about
+the target and therefore `importlib`'s to answer, not a remembered list's:
+
+| the doc's group | `find_spec` here | so | tier |
+|---|---|---|---|
+| `this`, `antigravity`, `turtledemo` | **a spec EXISTS**, and what is behind it is not code | nothing to implement AND nothing missing, so neither claim tier is true | **`HOST_NOT_A_MODULE`** — new, `'not-a-module'` |
+| `msvcrt`, `winreg`, `winsound`, `nt` | **no spec AT ALL** — CPython cannot find them on this host either | the object (the Windows C runtime, the registry, the sound API, `nt`'s Windows `os`) is missing from the target | `HOST_UNREACHABLE`, the existing row applied |
+| `ntpath`, `nturl2path`, `genericpath`, `posix` | **a spec DOES exist** | they are frozen or arithmetic-over-strings modules CPython ships everywhere and only ever *uses* on Windows; `posix` needs the libSystem calls `formal/hostmods/os/_syscalls.mojo` already makes, because THIS is a POSIX target | `HOST_MODELLED`, existing row applied |
+
+**So the last four are a CORRECTION of this document, and for `posix` it is
+outright.** `posix` is the POSIX low-level module; calling it "not this host's"
+was true of `msvcrt` and false of `posix` on the machine this tree runs on.
+
+**And `idlelib` is in NONE of the three, which is also a correction.** This
+document lists it twice — once as "a documentation or test artefact" and once
+under `unreachable`. The second is right: IDLE is an interactive editor, so it
+needs a terminal, and `HOST_UNREACHABLE`'s existing "A terminal" heading is
+exactly that fact. Giving it `not-a-module` would claim there is nothing to
+implement when there is a whole editor, so it is left in the queue rather than
+given a tier that is false of it.
+
+**It is the FOURTH answer and not the third**, because `HOST_ADMITTED` took that
+slot on 2026-10-02 — a reader counting tiers off `formal/imports.py` should not
+have to re-derive the numbering. `host_module_tier` now answers four values plus
+`''`, and it tests `not-a-module` LAST, because that tier asserts the LEAST:
+a name in two tiers must answer with the one that says something. The partition
+check `_host_tier_conflicts` now includes the new tier's overlap with the other
+three, since that is the pair most worth checking.
+
+**The WORDING is the load-bearing half and it is why the tier exists at all.** A
+member is in the host union, so `_is_host_module` fires and the old arm would
+say *"a host module (CPython standard library), which has no Mojo source for
+this backend to compile"* — **true, and it tells the reader to go and implement
+a module that has no API.** So `unresolvable_import_error`'s new arm is tested
+FIRST and says there is no content to compile.
+
+**No build outcome changes.** Every one of the eleven is refused exactly as
+before, which is the same property the seven names of 2026-10-03 had: `_is_host_module`
+consults the union, so a member is refused by the tier-agnostic host-import
+refusal either way, and what moves is the WORDING and the reach accounting.
+Public unclassified standard-library names: **114 → 103.**
+
+The three instruments that read the tier all move with it:
+`tools/formal_sweep.py`'s reach line names the fourth bucket rather than
+letting these files vanish from both halves of it (the reason `HOST_ADMITTED`
+is named there is the same one), `tools/formal_sweep_causes.py`'s `tier` legend
+says what the value asserts, and `test_formal_link_accounting.py::
+HOST_SET_ADDED_TIERS` — which is the ledger, and which correctly failed on both
+of my additions — carries all eleven with the tier and the reason.
+
+Verified: `test_formal_imports.py` PASS=76 FAIL=0 (was 75/0 — this pass's one
+test, `test_a_name_with_nothing_to_implement_gets_its_own_tier`),
+`test_formal_link_accounting.py` 285/285, `test_formal_sweep.py` 124/124,
+`test_refusal_taxonomy.py` 264/264.
+
+**What is still not done, unchanged:** the rest of the per-name judgements.
+§0.1's reason still stands for them — nothing imports them, so there is no
+measurement to tell a right entry from a plausible one, and filling them by
+category from a distance is the failure `formal/imports.py:101` warns about.
+**This section does not change that**, and the difference is that the eleven it
+did classify were decided by a measurement rather than by a reading: the doc's
+own list named them, and `find_spec` said which of three readings each one
+takes. That oracle is available for the rest too, and is the next step for
+anyone who takes them — a name whose spec CPython cannot find here is
+`unreachable` by the rule, and a name whose spec it can is `modelled` unless
+the content is not code. That is 103 per-name judgements with an oracle rather
+than a judgement, which is a materially different piece of work from the 222
+this document describes.
+
+
 
 ## 0.3 What landed 2026-10-05 (`work/formal27-6`): the AMBIGUOUS `''` is gone,
 ## and the queue is a named answer rather than an absence

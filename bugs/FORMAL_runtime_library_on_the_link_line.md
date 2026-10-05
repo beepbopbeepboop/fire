@@ -1,4 +1,57 @@
-# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; two measured ceilings are open
+# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
+
+**Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
+was found and fixed here, and it is the one the document itself recorded and
+did not chase — a `void`-RETURNING entry point whose result was bound.**
+`bugs/FORMAL_runtime_library_on_the_link_line.md` §0.3's last paragraph says, in
+one line, that `mojo_async_schedule_ready(0)` "now builds and crashes where it
+used to be refused", and then says why nothing caught it: *"No test here calls
+one: the four async names are asserted through the table (`entry['word']`),
+not by execution, and that is the reason."* That reason was the defect. **The
+table's assertion was `entry['word']`, and `word` cannot see a `void` return.**
+
+`'void'` is in `_WORD_SCALARS`, and it is there for a POINTER's sake —
+`MojoFileHandle` and `mojo_coro_handle` are both `typedef void*`, and §0.3's
+whole ninth-row correction is that reading either as the bare spelling `void`
+made nine entry points look like by-value aggregates. Carrying that membership
+into RETURN position made **68** entry points word-shaped whose callee writes
+nothing to the return register. Measured here, both architectures, before the
+fix:
+
+```
+a = mojo_async_init()
+b = mojo_async_schedule_ready(0)
+c = mojo_async_shutdown()
+printf("a=%d b=%d c=%d\n", a, b, c)
+
+arm64    a=-1          b=13582400   c=-1     exit 0
+x86-64   a=0           b=20463624   c=0      exit 0
+```
+
+Neither run crashed, so nothing downstream could tell — and §0.3's word is
+"crashes", which is why this looked like a different finding from the row it
+sits under. **It is not a crash; it is the same class as the `mojo_div_double`
+row below, one step further out**, and it arrived through a rule that was RIGHT
+about every call it admitted: the CALL is right (the effects happen, nothing is
+read back) and only the READ is wrong.
+
+Fixed by `formal/model.py::check_runtime_void_results`, asked from
+`formal/build.py::_run_late_checks` — the one pass both front ends share — with
+`statement_call_ids` as the position test, so a `void` call **as a statement
+still builds, links and runs** on both architectures. Taking `void` out of
+`_WORD_SCALARS` would have been the one-line version and would have BROKEN
+§0.3; it is not there for that reason. `test_formal_runtime_link.py` gained 18
+checks; its 4 failures are pre-existing and unrelated (the two
+published-count rows: `FORMAL.md §6 phase 2 publishes 206` against a measured
+210), verified identical with this reverted — 155/4/159 before, 173/4/177
+after.
+
+**What this does NOT do, and it is the honest shape of the remaining work:
+the three ceilings below are unchanged.** This was a defect in the admission
+rule for calls that were ALREADY admitted, so it moves no ceiling and closes no
+row of §0.1's table.
+
+---
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
@@ -33,7 +86,9 @@ of them since. This records what that link line now carries, and — more to the
 point — what it still does not.
 
 **Status: ceiling 2 is CLOSED — all of it, and one of its two halves was closed
-by a defect in the model's TYPE READER rather than by a declaration.**
+by a defect in the model's TYPE READER rather than by a declaration. Ceilings 1
+and 3 are unchanged, and a FOURTH defect — in the admission rule, not in any
+ceiling — was found and fixed 2026-10-05; see the head of this file.**
 `runtime/fire_runtime.h` declares `mojo_open` and `mojo_close` (§0.2's decision,
 §0.3's edit), and `formal/model.py` now resolves the headers' `typedef` aliases,
 which is what made `mojo_close` word-shaped at all: `MojoFileHandle` is

@@ -2359,12 +2359,122 @@ def _spell(node) -> str:
     return type(node).__name__
 
 
-def multi_index_refusal(kind: str, spelled: str) -> str:
+def _comptime_param_element_kind(node, structs_by_name=None) -> str:
+    """`'type'` / `'literal'` / `'name'` — what one bracket element IS here.
+
+    **Only claims this call can actually keep.** `'type'` is a positive claim
+    backed by a table in this file (`type_constructor_kind`,
+    `POINTER_TYPE_CTORS`, the `structs_by_name` this unit compiled, or a
+    subscript that is itself a type application), and `'literal'` is one backed
+    by the node being an `IntLiteral` / `BoolLiteral` / `StringLiteral` or
+    arithmetic over those. Everything else is `'name'`, which is deliberately
+    the WEAKEST answer and deliberately means "a bare name this image cannot
+    resolve to a declaration" — **not** "not a type".
+
+    That direction is the whole point, and it is the opposite of the reader's
+    first guess. `Span[StaticString, ImmStaticOrigin]` has a first element that
+    IS a type and a second that is a bare name, and a message that said "the
+    second is not a type" would be a claim this call cannot make — it never
+    resolved `StaticString` either, it only knows the name is not in a table it
+    holds. So `'name'` says what is knowable, and the refusal that uses it says
+    which of the two shapes a name can be: a type this image could not resolve,
+    or a `comptime` alias whose initializer does not fold — and
+    `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
+    measured the second, on the second element of exactly this bracket list.
+    """
+    if isinstance(node, F.SubscriptExpr):
+        # `subscript_is_a_type_application` is the right QUESTION and the wrong
+        # CALLER here: it is asked with `structs_by_name` because its callers
+        # need to know whether the WHOLE subscript is compile-time, which
+        # depends on a base this unit has to have declared. An ELEMENT of
+        # somebody else's parameter list does not: `List[Int]` is a type
+        # application whoever asks, and `List` is in `type_constructor_kind`'s
+        # table, so this asks the base name against the tables the same way the
+        # bare-name arm below does rather than through a predicate whose answer
+        # depends on state this call does not have.
+        _bn = _base_name(node.obj)
+        if (_bn is not None
+                and (type_constructor_kind(_bn) is not None
+                     or _bn in POINTER_TYPE_CTORS
+                     or (structs_by_name and _bn in structs_by_name))):
+            return "type"
+    if isinstance(node, (F.IntLiteral, F.BoolLiteral, F.StringLiteral)):
+        return "literal"
+    if isinstance(node, F.BinaryOp):
+        # Foldable arithmetic over literals: the only arithmetic on this path
+        # that has a value without running anything, and the shape
+        # `size_of[type, target]`-style code spells.
+        if all(isinstance(p, (F.IntLiteral, F.BoolLiteral, F.StringLiteral))
+               for p in (node.left, node.right)):
+            return "literal"
+    name = _base_name(node)
+    if (name is not None
+            and (type_constructor_kind(name) is not None
+                 or name in POINTER_TYPE_CTORS
+                 or (structs_by_name and name in structs_by_name))):
+        return "type"
+    # A `Self.X` attribute is a type PARAMETER reference — the stdlib spells
+    # `_DequeIter[Self.ElementType, origin_of(self), False]` — and a parameter
+    # reference is a type by construction, so it is claimed as one rather than
+    # left to be reported as a name this image cannot resolve.
+    if isinstance(node, F.MemberExpr) and _base_name(node.obj) == "Self":
+        return "type"
+    return "name"
+
+
+def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
+    """Which bracket element has no word, as one sentence — or `''`.
+
+    **The sentence is emitted only when it can name a culprit**, which is the
+    condition that keeps it from being a guess. It fires when at least one
+    element is a `'name'` AND at least one is positively classified, because
+    only then is the contrast informative: a list of two names says the reader
+    has to resolve both, and a list of two types says the refusal is about the
+    LIST and not about an element (which is the `size_of[type, target]` case the
+    old sentence already served correctly, and it is still served).
+    """
+    els = list(getattr(getattr(e, "index", None), "elements", ()) or ())
+    kinds = [_comptime_param_element_kind(x, structs_by_name) for x in els]
+    if not kinds or "name" not in kinds:
+        return ""
+    if all(k == "name" for k in kinds):
+        return (f" None of its {len(kinds)} element(s) names something this "
+                f"image can resolve to a declaration "
+                f"({', '.join(_spell(x) for x in els)}), so there is no word "
+                f"to bind for any of them.")
+    shown, cls = [], []
+    for i, (x, k) in enumerate(zip(els, kinds), 1):
+        if k == "type":
+            cls.append(f"element {i} `{_spell(x)}` is a type this image knows")
+        elif k == "literal":
+            cls.append(f"element {i} `{_spell(x)}` is a literal that folds")
+    named = [f"element {i} `{_spell(x)}`" for i, (x, k)
+             in enumerate(zip(els, kinds), 1) if k == "name"]
+    return (f" Of its {len(kinds)} element(s): {'; '.join(cls)}; and "
+            f"{' and '.join(named)} {'is a bare name' if len(named) == 1 else 'are bare names'}"
+            f" this image cannot resolve to a declaration. That is where the "
+            f"missing word is, and it has two shapes: a TYPE this unit does not "
+            f"declare, or a `comptime` ALIAS whose initializer does not fold "
+            f"(measured on `std/sys/arg.mojo`'s "
+            f"`Span[StaticString, ImmStaticOrigin]` — see "
+            f"`bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template"
+            f".md`, which is what this sentence exists for).")
+
+
+def multi_index_refusal(kind: str, spelled: str, elements_note: str = "") -> str:
     """The refusal text for a multi-element subscript, identical on both paths.
 
     `spelled` is how the source wrote the construct, so the message points at
     something the reader can find (`size_of[type, target]`,
-    `__mlir_attr[...]`, `a[i, j]`)."""
+    `__mlir_attr[...]`, `a[i, j]`).
+
+    `elements_note` is the per-element diagnosis, computed by
+    `_comptime_param_element_sentence` and passed in rather than derived here —
+    this function is handed a KIND and a SPELLING and has no node, and the one
+    caller that does have a node is `multi_index_refusal_for`. It is empty for
+    every kind but the comptime-parameter list, and empty means "nothing to add",
+    which is the answer for the MLIR-template and tuple-index cases where every
+    element's role is already covered by the sentence below."""
     if kind == MULTI_INDEX_MLIR_TEMPLATE:
         return (
             f"{spelled} assembles an MLIR attribute from a template of "
@@ -2381,10 +2491,11 @@ def multi_index_refusal(kind: str, spelled: str) -> str:
             "generic, not a subscript: the brackets name types and comptime "
             "values, none of which is a runtime word. This path has no type "
             "or comptime parameter to bind, so what the call means depends "
-            "entirely on which parameters were passed. Refused rather than "
-            "read as an index — a binding for `size_of[type, target]` would "
-            "have to come from a target description this backend does not "
-            "have, and a plausible constant is a fabricated answer."
+            f"entirely on which parameters were passed.{elements_note} "
+            "Refused rather than read as an index — a binding for "
+            "`size_of[type, target]` would have to come from a target "
+            "description this backend does not have, and a plausible constant "
+            "is a fabricated answer."
         )
     return (
         f"{spelled} is a subscript whose index is a tuple. A value here is "
@@ -2461,7 +2572,13 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
                             callee_defs=callee_defs)
     if kind is None:
         return None
-    return multi_index_refusal(kind, multi_index_spelling(e))
+    # The per-element diagnosis, and ONLY for the kind it is about: which
+    # bracket element has no word is a question about a compile-time parameter
+    # list, and for the MLIR-template and tuple-index kinds every element's role
+    # is already stated by the sentence they share.
+    note = (_comptime_param_element_sentence(e, structs_by_name)
+            if kind == MULTI_INDEX_COMPTIME_PARAMS else "")
+    return multi_index_refusal(kind, multi_index_spelling(e), note)
 
 
 # ── `external_call["sym", RetType](args…)` ─────────────────────────────────
@@ -9272,28 +9389,206 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+def interpolated_literal_segments(spelled: str) -> list:
+    """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
+
+    **The source token, split into the chunks and the `{…}` fields it is made
+    of, with `{{` and `}}` honoured as the escapes they are.** That is the whole
+    of what this answers, and it is asked of the TOKEN because that is what the
+    parser preserved: an interpolated literal's `value` is `f"n={n}"` including
+    the prefix and the quotes (`fire_compiler.py`'s
+    `_strip_string_prefix_and_quotes`), so the fields are text inside a string
+    rather than a parsed structure, and nothing else in the tree has read them.
+
+    A `field` is `(expr, spec, conv)` rather than one string because those
+    three are three different questions and this is the place that can tell them
+    apart: `expr` is a value, `:spec` is a FORMAT (`>3`, `04d`) and `!conv` is a
+    CONVERSION (`!r`, `!s`) — and neither of the latter two is a value on this
+    path in any case, which is what
+    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
+    to say rather than answering them as if they were an f-string's field.
+
+    Brace-depth tracked, so `f"{d['k']}"` and `f"{ {'a': 1}['a'] }"` split
+    correctly — a naive `find('}')` truncates the first one at the dict literal.
+
+    **It refuses rather than guesses** on the two shapes it cannot read: a
+    triple-quoted body whose closing delimiter it cannot confirm, and a nested
+    `{` inside a field's own text at depth it cannot close. Both raise
+    `CodegenError` with a message that says what it saw, because a segment
+    reader that returned a plausible wrong split would feed a lowering the wrong
+    literal text — and a composed string with a chunk boundary in the wrong
+    place is a wrong answer, not a refusal.
+    """
+    if not isinstance(spelled, str) or len(spelled) < 3:
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it is not "
+            f"even a quoted token, so there are no parts to compose")
+    # The prefix is ONE character and it is still there — that is the whole of
+    # why this is readable at all (`is_interpolated_literal` tests it), so the
+    # quote is at index 1 and every test below is from THERE and not from 0.
+    quote = spelled[1]
+    if quote not in ('"', "'"):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: the "
+            f"character after the prefix is not a quote")
+    if spelled[1:4] == quote * 3:
+        term = quote * 3
+    elif spelled[1:2] == quote:
+        term = quote
+    else:
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: its "
+            f"opening delimiter does not close")
+    if not spelled.endswith(term):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it opens "
+            f"with {term} and does not end with {term}, so where its text "
+            f"stops is not knowable from the token")
+    body = spelled[1 + len(term):-len(term)]
+    out: list = []
+    lit: list = []
+    i, n = 0, len(body)
+    while i < n:
+        two = body[i:i + 2]
+        if two == '{{':
+            lit.append('{')
+            i += 2
+            continue
+        if two == '}}':
+            lit.append('}')
+            i += 2
+            continue
+        c = body[i]
+        if c == '}':
+            # A lone `}` with nothing to escape. CPython 3.14's tokenizer
+            # REFUSES `f"}"` ("single '}' is not allowed"), and this is asked
+            # after that has already run, so reaching here means the text was
+            # built rather than parsed — and a reader that silently dropped it
+            # would compose a string with a character missing from it.
+            raise CodegenError(
+                f"cannot read the interpolated literal {spelled!r}: a single "
+                f"'}}' is not allowed in an f-string — CPython's own tokenizer "
+                f"refuses it — so this is not source text a program could have "
+                f"written, and guessing where it was meant to end would "
+                f"compose a string with a character missing from it")
+        if c == '{':
+            if lit:
+                out.append(('lit', ''.join(lit)))
+                lit = []
+            j, depth = i + 1, 1
+            while j < n and depth:
+                if body[j] == '{':
+                    depth += 1
+                elif body[j] == '}':
+                    depth -= 1
+                j += 1
+            if depth:
+                raise CodegenError(
+                    f"cannot read the interpolated literal {spelled!r}: the "
+                    f"'{{' opened at character {i} is never closed, so the "
+                    f"field's text is not knowable")
+            inner = body[i + 1:j - 1]
+            # `!conv` binds tighter than `:spec`, and both may be absent, and a
+            # `!` or `:` INSIDE a bracket (`d['a:b']`) must not be mistaken for
+            # either — so the split is done at bracket depth zero.
+            k, bdepth, spec_at, conv_at = 0, 0, None, None
+            while k < len(inner):
+                ch = inner[k]
+                if ch in '([{':
+                    bdepth += 1
+                elif ch in ')]}':
+                    bdepth -= 1
+                elif bdepth == 0 and ch == '!' and conv_at is None:
+                    conv_at = k
+                elif bdepth == 0 and ch == ':' and spec_at is None:
+                    spec_at = k
+                k += 1
+            # The EXPRESSION ends at whichever comes first, so `!conv` is cut
+            # off as well as read off — `inner[:spec_at]` alone would leave the
+            # expression spelled `y !s`, which is neither a value nor what the
+            # source wrote, and a lowering that tried to evaluate it would be
+            # answering a different question.
+            first = len(inner)
+            for at in (conv_at, spec_at):
+                if at is not None and at < first:
+                    first = at
+            expr = inner[:first].strip()
+            if conv_at is None:
+                conv = ""
+            elif spec_at is not None and conv_at < spec_at:
+                conv = inner[conv_at + 1:spec_at].strip()
+            else:
+                conv = inner[conv_at + 1:].strip()
+            spec = inner[spec_at + 1:].strip() if spec_at is not None else ""
+            out.append(('field', expr, spec, conv))
+            i = j
+            continue
+        lit.append(c)
+        i += 1
+    if lit:
+        out.append(('lit', ''.join(lit)))
+    return out
+
+
 def interpolated_literal_refusal(node, where: str = "") -> str:
     """Why an f-string/t-string literal is refused on this path.
 
     `where` is the line the literal is on when the caller has it, so the
     message can point at the source rather than at the construct: two f-strings
     in one program are two refusals a reader has to tell apart.
+
+    **It says what the literal is MADE OF, and it no longer gives advice that
+    produces different text.** Both halves are measurements:
+
+      * the parts, read by `interpolated_literal_segments` above — how many
+        fields, what each one interpolates, and whether any carries a format
+        spec or a conversion, since those are three questions and the old
+        sentence merged them into one;
+      * the `print` advice, which was wrong and is gone.
+        `bugs/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
+        the fix** … the message's own advice is wrong", and it is: CPython's
+        `print` puts a `sep` between its operands, so following "Print the parts
+        as separate operands" on `f"n={n}"` with `n = 7` gives
+
+            CPython f"n={n}"      ->  n=7
+            CPython print("n=", n) ->  n= 7
+
+        — measured here on both this path and `python3`, which agree on
+        `print` and differ on the f-string. A reader who followed the advice got
+        a program that builds, runs, exits 0 and prints something else, which is
+        the outcome this backend exists to prevent. A fix DELETED the sentence
+        (the map's §5.1 records that the instrument rows are keyed on "no
+        buffer to compose one in" and not on the advice, precisely so that
+        deleting it could not take 115 files silently back to `other refusal`),
+        so nothing is lost by its absence and the diagnostic ends on the fact.
     """
     spelled = node.value if isinstance(node, str) else getattr(node, "value", "")
     # The article is spelled out rather than derived from the first letter:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    kind = "an f-string" if spelled[:1] in ("f", "F") else "a t-string"
+    is_t = spelled[:1] in ("t", "T")
+    kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
-    return (
-        f"{kind} literal{at} is refused on this path: its value is "
-        f"its INTERPOLATED text, and this path has no buffer to compose one "
-        f"in. The parser keeps the whole source token (`{spelled}`) as the "
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError as e:
+        # The reader refused, and the right thing to report is ITS reason: a
+        # generic "this path has no buffer" would be true and would hide the
+        # fact that the shape is not one this reader can even take apart.
+        return f"{kind} literal{at} is refused on this path, and its text could "\
+               f"not be taken apart either: {e}"
+    fields = [s for s in segs if s[0] == 'field']
+    chunks = [s for s in segs if s[0] == 'lit']
+    made = _interpolated_shape_sentence(segs)
+    tail = (
+        f"{kind} literal{at} is refused on this path: its value is its "
+        f"INTERPOLATED text, and this path has no buffer to compose one in. "
+        f"{made} The parser keeps the whole source token (`{spelled}`) as the "
         f"literal's value, so what this build would have printed is the "
         f"spelling: with `n = 7`, `print(f\"n={{n}}\")` printed "
-        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string "
-        f"here is a bare `char *` interned into read+execute __TEXT, so "
+        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string here "
+        f"is a bare `char *` interned into read+execute __TEXT, so "
         f"`\"n=\" + decimal(n)` has nowhere to be laid down at compile time "
         f"(the field may be a runtime value) or at run time (there is no "
         f"heap); this is the same missing buffer that keeps string "
@@ -9304,6 +9599,53 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         f"path lowers; `print(\"n=\", n)` is NOT the same program, because "
         f"`print` inserts a space between its operands, and building the text "
         f"with `+` is the same missing buffer refused under another name.")
+    if is_t:
+        # §7.3 of the doc, landed rather than left as a note for a future
+        # lowering: a t-string's `{name}` is a TEMPLATE and `text.format`
+        # evaluates it, so it is not a field to be interpolated and refusing it
+        # as though it were one describes a construct this path does not have.
+        tail += (
+            f" A t-string is refused for a further reason that has nothing to "
+            f"do with the buffer: its `{{name}}` is a TEMPLATE, which is "
+            f"`str.format`/`text.format` evaluating an argument against a "
+            f"format string, so the answer is not the field's value and no "
+            f"lowering that composes an f-string's fields would be right here.")
+    return tail
+
+
+def _interpolated_shape_sentence(segs: list) -> str:
+    """What an interpolated literal is MADE OF, in one sentence.
+
+    The fields are named because they are the thing a reader has to look up in
+    their own source, and the count of chunks and their byte lengths is the
+    thing that decides the §7.1 bound — `formal/
+    FORMAL_string_composition_has_no_buffer.md` §7.1 asks for "a buffer with a
+    compile-time-known bound", and the bound IS the chunk bytes plus the widest
+    each field's declared type can render. So the diagnostic now prints the half
+    of that arithmetic a reader can check without running anything.
+    """
+    fields = [s for s in segs if s[0] == 'field']
+    chunks = [s for s in segs if s[0] == 'lit']
+    if not fields:
+        return (f"This one has NO field at all — {len(chunks)} literal chunk(s) "
+                f"of {sum(len(c[1]) for c in chunks)} byte(s) — so its value is "
+                f"a CONSTANT and this refusal is over a missing buffer rather "
+                f"than a run-time value.")
+    shown = ", ".join(f"`{f[1]}`" for f in fields[:4])
+    if len(fields) > 4:
+        shown += f", and {len(fields) - 4} more"
+    chunk_bytes = sum(len(c[1]) for c in chunks)
+    out = (f"It is made of {len(fields)} field(s) — {shown} — and "
+           f"{len(chunks)} literal chunk(s) totalling {chunk_bytes} byte(s).")
+    specs = [f for f in fields if f[2]]
+    convs = [f for f in fields if f[3]]
+    if specs:
+        out += (f" {len(specs)} of the field(s) carries a FORMAT SPEC "
+                f"(`:`), which is a rendering rather than a value.")
+    if convs:
+        out += (f" {len(convs)} of the field(s) carries a CONVERSION (`!`), "
+                f"which is a rendering rather than a value.")
+    return out
 
 
 def refuse_interpolated_literals(stmts) -> None:
@@ -17439,7 +17781,31 @@ def _runtime_abi_entry(scan: dict) -> dict:
                 boxes.append((ordinal, p, base, depth))
     return {'name': scan['name'], 'signature': scan['signature'],
             'ret': scan['ret'], 'params': scan['params'],
-            'word': not boxes, 'boxes': boxes}
+            'word': not boxes, 'boxes': boxes,
+            # A `void` RETURN is a different fact from an un-word-shaped one, and
+            # it is recorded beside `word` rather than inside it because the two
+            # rules answer different questions. `word` asks "can a formal image
+            # make this CALL at all", and a `void` call can be made — the effects
+            # happen and nothing is read back. `returns_void` asks "does this call
+            # produce a value to bind", and the answer is no.
+            #
+            # `'void'` is in `_WORD_SCALARS`, and it is there for a POINTER's
+            # sake: `MojoFileHandle` and `mojo_coro_handle` are both `typedef
+            # void*`, and reading either as the bare spelling `void` is what made
+            # nine entry points look like by-value aggregates. Carrying `void`
+            # into `_WORD_SCALARS` therefore also made a `void`-RETURNING entry
+            # point word-shaped, which is right for the call and wrong for the
+            # result, and the 68 such names could each be bound to whatever
+            # happened to be in the return register. Measured, both
+            # architectures, `a = mojo_async_init(); b = mojo_async_schedule_
+            # ready(0); c = mojo_async_shutdown(); printf("%d %d %d", a, b, c)`:
+            #
+            #     arm64   a=-1          b=13582400   c=-1
+            #     x86-64  a=0           b=20463624   c=0
+            #
+            # and neither run crashed, so nothing downstream could tell. See
+            # `gimple_runtime_void_result_refusal` and `check_runtime_void_results`.
+            'returns_void': scan['ret'].strip() == 'void'}
 
 
 # C's own scalar vocabulary — NOT this runtime's entry points, and not a list of
@@ -17730,6 +18096,95 @@ def gimple_runtime_callable(name: str, provided: bool = False) -> bool:
     if entry is None:
         return False        # no declaration anywhere: no shape, so not callable
     return entry['word'] and provided
+
+
+def gimple_runtime_void_result_refusal(name: str, signature: str = "") -> str:
+    """Why a `void`-RETURNING runtime entry point cannot be a value.
+
+    **A `void` call is a legal call and an illegal VALUE, and the two are
+    different questions, which is why this is beside
+    `gimple_runtime_callable` rather than inside it.** `gimple_runtime_callable`
+    asks whether a formal image can make the call at all, and it must keep
+    answering YES for these: `mojo_async_init()` as a statement of its own does
+    the work the source wrote and reads nothing back, so refusing it would
+    refuse a program that is correct. What cannot be right is `x =
+    mojo_async_init()` — the callee writes nothing to the return register, so
+    the read is whatever was there, and on this path that is a number the source
+    never wrote.
+
+    **The direction this moves is the same one the float rule moved and for the
+    same reason.** `'float'`/`'double'` are not in `_WORD_SCALARS` because a
+    value here holds an INTEGER and a callee would read an integer's bit pattern
+    as a `double` (`_box_why`'s float arm quotes the measurement: `2.5` returned
+    `2`). `void` is a member of `_WORD_SCALARS` for a POINTER's sake —
+    `MojoFileHandle` and `mojo_coro_handle` are `typedef void*` — and carrying
+    that membership into RETURN position is the same mistake one step further
+    out: the word is real, the value behind it is not.
+
+    `formal/imports.py`'s own `HOST_UNREACHABLE` row records the same reasoning
+    about a neighbouring shape ("a name LEAVES this set by being WRITTEN"), and
+    the difference in direction is what makes this a refusal rather than a
+    deletion: taking `void` out of `_WORD_SCALARS` outright would break the
+    `void *` spellings that section 0.3 of
+    `bugs/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
+    stays and this rule reads `returns_void` instead.
+
+    **It is asked about the POSITION, not the callee**, so the negative is
+    pinned by `test_formal_runtime_link.py`: a `void` call whose result is
+    discarded builds, runs, and its effects happen.
+    """
+    entry = runtime_abi_entry(name)
+    sig = signature or (entry['signature'] if entry else "")
+    return (
+        f"{name} returns nothing — `{sig}` — and its result is used as a value "
+        f"here. That is not a shape this path can give one: the callee writes "
+        f"nothing to the return register, so what a read of it returns is "
+        f"whatever the call sequence happened to leave there, and on this path "
+        f"that is a number the source never wrote. Measured on both "
+        f"architectures, `a = mojo_async_init(); b = mojo_async_schedule_"
+        f"ready(0); c = mojo_async_shutdown()` printed `-1 13582400 -1` on "
+        f"arm64 and `0 20463624 0` on x86-64, and both runs exited 0 — which "
+        f"is the class this backend's refusals exist for. This is not the "
+        f"word rule and it is not ceiling 3: every argument and the return of "
+        f"this call is a single word, so the CALL is right and only the READ "
+        f"is not. Call {name} as a statement of its own, which is where a "
+        f"`void` call belongs.")
+
+
+def check_runtime_void_results(functions) -> None:
+    """Refuse a `void`-returning runtime entry point whose RESULT is used.
+
+    The late check, asked once per function over both architectures from
+    `formal/build.py::_run_late_checks` — the one place the two front ends agree,
+    so this cannot be a per-emitter copy that answers differently about one
+    source file.
+
+    **`statement_call_ids` is the predicate and the reason it is not a search
+    for "a call with an unused result".** An `ExprStmt` is a statement, so the
+    call it owns has nowhere to put a result and the return register is
+    genuinely unobserved; a call inside an expression (`x = f()`, `sink(f())`)
+    is a value position and the read is the defect. That distinction is the
+    same one `mutating_receiver_value_refusal` is built on, for the same
+    reason, and it is why this check is about POSITION rather than about the
+    callee.
+
+    The names are read from `runtime_abi()` rather than from a list, so a
+    header that adds a `void` entry point is covered without editing anything,
+    and a name no header declares is left to `gimple_runtime_refusal` — which
+    is the refusal that is true of it.
+    """
+    for fn in functions or ():
+        discarded = statement_call_ids(fn)
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = node.func
+            name = getattr(callee, "name", None) or getattr(callee, "id", None)
+            if not isinstance(name, str) or id(node) in discarded:
+                continue
+            entry = runtime_abi_entry(name)
+            if entry is not None and entry.get('returns_void'):
+                raise CodegenError(gimple_runtime_void_result_refusal(name))
 
 
 def _box_why(where: str, spelling: str, base: str, depth: int) -> str:

@@ -1650,6 +1650,156 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
               f"module: {text[-300:]}")
 
 
+def test_a_name_with_nothing_to_implement_gets_its_own_tier(tmpdir, _shared):
+    """The FOURTH answer, and the two corrections that earned it.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
+    named the gap exactly: its "neither tier, deliberately" group — "a name
+    whose only spelling is a documentation or test artefact (`this`,
+    `antigravity`, `turtledemo`, `idlelib`), or a Windows-only / POSIX-only
+    module that is not this host's (`msvcrt`, `winreg`, `nt*`, `posix`,
+    `genericpath`, `nturl2path`)" — "want[s] a third answer or an explicit
+    exclusion list, which is a decision about the table rather than a
+    classification — and it should be recorded as one, not left to look like an
+    oversight."
+
+    **It is the FOURTH and not the third**, because `HOST_ADMITTED` took that
+    slot, and `host_module_tier` now answers four values plus `''`.
+
+    **The premise each name rests on is CPython's own `find_spec`, not a
+    remembered list**, which is what splits the doc's single group into three
+    with different answers:
+
+      * `this`, `antigravity`, `turtledemo` — a spec EXISTS and what is behind
+        it is not code. `this` is the Zen of Python as a module-level string,
+        `antigravity` opens a browser, `turtledemo` is a directory of example
+        scripts. Nothing to implement and nothing missing, so neither
+        `unreachable` ("needs an object this target lacks") nor `modelled`
+        ("nothing is missing and the work is undone") is true of them, and
+        `HOST_NOT_A_MODULE` says the one thing that is.
+      * `msvcrt`, `winreg`, `winsound`, `nt` — **no spec AT ALL** on the
+        interpreter that runs this tree. CPython cannot find them here either,
+        so the object is missing from the target and `unreachable` is the
+        table's own rule applied, not a new category.
+      * `ntpath`, `nturl2path`, `genericpath`, `posix` — a spec EXISTS here,
+        because they are frozen or arithmetic-over-strings modules CPython
+        ships everywhere and only ever *uses* on Windows. **These are the
+        CORRECTION**: the doc listed them with `msvcrt` as "not this host's",
+        and for `posix` that is false outright — this is a POSIX target, and
+        `formal/hostmods/os/_syscalls.mojo` already makes every libSystem call
+        `posix` would need. So they are `modelled`.
+
+    And `idlelib` is in NEITHER new tier and that is also a correction: the doc
+    lists it twice, once as a documentation artefact and once under
+    `unreachable`. The second is right — IDLE is an interactive editor, so it
+    needs a terminal — and `HOST_UNREACHABLE`'s existing "A terminal" heading is
+    that fact, so it is left in the queue rather than given the wrong tier.
+
+    **The Wording half is the point of the tier.** A member of
+    `HOST_NOT_A_MODULE` is in the union, so the arm that says "a host module …
+    which has no Mojo source" would fire — true, and it tells the reader to go
+    and implement a module that has no API. So the new arm is tested FIRST.
+    """
+    import sys as _sys
+    import formal.imports as I
+
+    not_a_module = {
+        "this": "the Zen of Python, one module-level string",
+        "antigravity": "importing it opens a browser window",
+        "turtledemo": "a directory of turtle-graphics demonstration scripts",
+    }
+    # Measured, not remembered: CPython itself cannot find these here, so the
+    # object is missing from the target and the EXISTING `unreachable` row is
+    # the rule applied rather than a fourth category invented for them.
+    foreign = ("msvcrt", "winreg", "winsound", "nt")
+    # …and the four the doc grouped with them, which a spec here contradicts.
+    pure = {
+        "posix": "the POSIX low-level module, and THIS is a POSIX target",
+        "genericpath": "the platform-independent base `os.path` builds on",
+        "ntpath": "the Windows path parser, which is string manipulation",
+        "nturl2path": "`url2pathname`/`pathname2url`, string in, string out",
+    }
+    check(not I._host_tier_conflicts(),
+          "a name in two tiers is a partition bug: %s"
+          % I._host_tier_conflicts())
+    check(not (I.HOST_NOT_A_MODULE
+               & (I.HOST_UNREACHABLE | I.HOST_MODELLED | I.HOST_ADMITTED)),
+          "HOST_NOT_A_MODULE asserts the LEAST of the four tiers, so a name in "
+          "two of them is a claim that contradicts itself")
+
+    for name, why in sorted(not_a_module.items()):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module")
+        got = I.host_module_tier(name)
+        check(got == "not-a-module",
+              f"host_module_tier({name!r}) is {got!r}, not 'not-a-module' — "
+              f"{why}. In either other tier it would assert something false "
+              f"about the module")
+    for name, why in sorted(pure.items()):
+        got = I.host_module_tier(name)
+        check(got == "modelled",
+              f"host_module_tier({name!r}) is {got!r}, not 'modelled' — "
+              f"{why}, so nothing is missing from the target and only the "
+              f"module is unwritten. Calling it unreachable would be a "
+              f"permanent-fact claim about the target and it is not one")
+    for name in foreign:
+        got = I.host_module_tier(name)
+        check(got == "unreachable",
+              f"host_module_tier({name!r}) is {got!r}, not 'unreachable' — it "
+              f"needs an object this target does not have")
+    check(not I.host_module_tier("idlelib"),
+          "idlelib is in no tier: it is a TERMINAL (an interactive editor), so "
+          "`unreachable` is right and giving it 'not-a-module' would claim "
+          "there is nothing to implement when there is a whole editor")
+
+    # …and the SPEC measurement itself, so the three groups cannot drift apart
+    # from the interpreter the next time one of them is questioned.
+    import importlib.util
+    for name in sorted(not_a_module):
+        spec = importlib.util.find_spec(name)
+        check(spec is not None and spec.origin,
+              f"precondition: CPython finds source for {name!r} here, which is "
+              f"what makes it 'nothing to implement' rather than 'not this "
+              f"host's' — measured {spec!r}")
+    for name in foreign:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            spec = None
+        check(spec is None,
+              f"precondition: CPython cannot find {name!r} on this host at "
+              f"all, which is the measurement the `unreachable` placement rests "
+              f"on — measured {spec!r}")
+
+    # The WORDING, which is the load-bearing half: a name in this tier must not
+    # be sent to implement a module that has no API.
+    for name in sorted(not_a_module):
+        one = os.path.join(tmpdir, "notamodule", name)
+        os.makedirs(one, exist_ok=True)
+        prog = os.path.join(one, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(f"import {name}\ndef main():\n  return 1\n")
+        fresh_cas()
+        result = run_fire(["build", "--formal", "--no-prove", "-o",
+                           os.path.join(one, "prog.aout"), prog], cwd=one)
+        check(result.returncode != 0,
+              f"import {name} built. A module with a Mojo source would "
+              f"resolve, which is a different (and better) finding")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("no content to compile" in text,
+              f"import {name} does not say there is nothing to implement, so "
+              f"the reader is sent to write a module with no API: "
+              f"{text[-300:]}")
+        check("host module" not in text,
+              f"import {name} is refused as a host module awaiting a Mojo "
+              f"source, which is the sentence the new tier exists to replace: "
+              f"{text[-300:]}")
+        check("not a stdlib or sibling module" not in text,
+              f"import {name} is still refused as a name that does not exist, "
+              f"which is false of a CPython standard-library module: "
+              f"{text[-300:]}")
+
+
 def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     """The refusal's second half: what to write here instead, where the reader is.
 
@@ -3320,6 +3470,117 @@ def test_reexported_type_reaches_the_importer(tmpdir, _shared):
 
 
 
+# ── a name a package FORWARDS, filed by what DEFINES it ────────────────────
+#
+# The row above is the same defect one hop further out, and it is the
+# `declared_kinds` half rather than the `imported_struct_defs` half:
+# `test_reexported_type_reaches_the_importer` walks to the defining module so
+# the importer can CONSTRUCT the type, and nothing walked for the KIND. So a
+# name reached through the PACKAGE (`from pkg import Shape`, where `pkg/__init__`
+# forwards it from `pkg/sub.mojo`) had no kind at all — `"unknown"` — and
+# `"unknown"` is not `"type"`, so `formal/build.py::_namespace_library` put it in
+# the set that must be provided AS A SYMBOL and refused the module.
+#
+# Measured on the tree's own stdlib, where it is `std/hashlib/hasher.mojo`'s
+# `from std.collections import Span`: 221 import sites name a struct or trait
+# through a package that re-exports it, and every one of them reached the symbol
+# check as `"unknown"`. The message was false in every clause — "a real gap in
+# that module's public API — a private, generic or overloaded definition" — on a
+# name that is public, is not generic, and is not overloaded, and is a TYPE: a
+# type has no symbol to be missing.
+#
+# So `declared_kinds` now follows the forwarding edge, with the build's own
+# resolver and a hop bound. It can only turn `"unknown"` into a real kind, and
+# the only kind that leaves the symbol check is `"type"`, so it can remove a
+# refusal and cannot add one — which is what the negative beside it pins.
+
+FORWARDED_SUB = ("struct Shape:\n"
+                 "  var a: Int\n"
+                 "\n"
+                 "def keep() -> Int:\n"
+                 "  return 1\n")
+FORWARDED_PKG = "from .sub import Shape, keep\n"
+FORWARDED_MID = ("from pkg import Shape\n"
+                 "\n"
+                 "trait Sized:\n"
+                 "  fn area(self, s: Shape) -> Int:\n"
+                 "    ...\n")
+FORWARDED_PROG = "from pkg2.mid import Sized\n\ndef main():\n  return 1\n"
+
+
+def test_declared_kinds_files_a_forwarded_name_by_its_definition(
+        tmpdir, _shared):
+    """The table itself, with no build: a forwarded name carries its kind.
+
+    The cheapest possible statement of the rule, and the one that cannot rot
+    with a layout change: `pkg/__init__.mojo` declares nothing at all, so
+    before the fix every name it forwards was absent.
+    """
+    sys.path.insert(0, HERE)
+    from formal.imports import declared_kinds
+    root = os.path.join(tmpdir, "fwd")
+    os.makedirs(root)
+    write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
+                      "pkg/__init__.mojo": FORWARDED_PKG,
+                      "pkg2/mid.mojo": FORWARDED_MID})
+    kinds = declared_kinds(os.path.join(root, "pkg", "__init__.mojo"))
+    check(kinds.get("Shape") == "type",
+          f"a struct the package forwards is not filed as a type: {kinds!r}")
+    check(kinds.get("keep") == "function",
+          f"a function the package forwards must keep being filed as one, or "
+          f"the missing-symbol check stops protecting a real gap: {kinds!r}")
+    check("Ghost" not in kinds,
+          f"a name nothing declares must stay absent: {kinds!r}")
+
+
+def test_a_forwarded_type_is_not_demanded_as_a_symbol(tmpdir, _shared):
+    """A module that imports a TYPE through a package builds, both arches.
+
+    `pkg2/mid.mojo` is `hasher.mojo`'s shape: no free function, so it is built
+    as a NAMESPACE library, and its API names a struct it reached through the
+    package. Before the fix the build refused it with the missing-symbol message
+    and every clause of that message was false. Both architectures, because the
+    kind table is shared and the two emitters consult it separately — the same
+    reason `test_aliased_reexport_runs_on_both_architectures` gives.
+    """
+    for arch in ("arm64", "x86_64"):
+        root = os.path.join(tmpdir, f"fwd_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"pkg/sub.mojo": FORWARDED_SUB,
+                          "pkg/__init__.mojo": FORWARDED_PKG,
+                          "pkg2/mid.mojo": FORWARDED_MID,
+                          "prog.mojo": FORWARDED_PROG})
+        fresh_cas()
+        build(root, "prog.aout", arch=arch)
+
+
+def test_a_forwarded_name_nothing_defines_is_still_refused(tmpdir, _shared):
+    """The guard on the guard: following an edge must not forgive a real gap.
+
+    `Ghost` is declared nowhere, so it stays absent, so it is still demanded as a
+    symbol and still refused BY NAME. A change that resolved kinds more
+    liberally — or that swallowed an unresolvable one as `"type"` — would let a
+    package publish a name nothing defines, and the consumer's call would reach
+    dyld unbound, which is the outcome `formal/build.py`'s message exists to
+    prevent.
+    """
+    root = os.path.join(tmpdir, "fwdghost")
+    os.makedirs(root)
+    write_tree(root, {"pkg/sub.mojo": "def keep() -> Int:\n  return 1\n",
+                      "pkg/__init__.mojo": "from .sub import keep, Ghost\n",
+                      "prog.mojo": "from pkg import keep\n\n"
+                                   "def main():\n  return keep()\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "`Ghost` is declared nowhere and the package published it anyway; "
+          "the missing-symbol check has been widened past its evidence")
+    text = result.stderr or result.stdout
+    check("Ghost" in text,
+          f"the refusal does not name the gap: {text.strip()[-300:]}")
+
+
+
 # ── the "exports nothing" family: 33 of the sweep's 578 files ────────────────
 #
 # These five pin the LIMIT, and each one is a pin in the anti-rot direction: it
@@ -3459,6 +3720,66 @@ def test_a_generic_template_is_not_exported_under_its_base_name(tmpdir,
           f"the same module with one CONCRETE function exported {got}, not "
           f"['widen'] — so the difference between the two cases is genericity "
           f"and nothing else")
+
+
+def test_a_constants_only_module_is_not_told_nothing_could_be_added(
+        tmpdir, _shared):
+    """A module of nothing but constants is not told "nothing this backend
+    could add".
+
+    The fourth message-accuracy guard on `no_public_api_reason`, and the one
+    `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6 item 2
+    filed as a dead end: the branch's text ended "There is nothing an importer
+    could bind, and nothing this backend could add." — and the second clause
+    is **false**, which is why that document said of it "the sentence is a dead
+    end for whoever reads the 6 files first".
+
+    The constants are already inlined at their use sites by the
+    module-constant substitution; what is absent is a RULE that a module with
+    nothing to export needs no dylib at all, so an importer reading the
+    constant directly needs no library. That is one feature, and
+    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
+    it is written down — so the message now says which feature it is and where
+    it lives, rather than telling a reader that nothing would help.
+
+    **The assertion is on the false clause and on the owner being named**, and
+    both directions matter: a message that merely stopped saying the false thing
+    would leave the 6 files with no next step, which is the same dead end in a
+    quieter form.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "constants_only.mojo")
+    with open(path, "w") as f:
+        f.write('comptime ALPHA: Int = 7\ncomptime BETA: String = "x"\n')
+    reason = no_public_api_reason([path])
+    check("declares no function and no type at all" in reason,
+          f"the constants-only branch did not fire: {reason}")
+    check("nothing this backend could add" not in reason,
+          "the refusal still tells the reader that nothing could be added, "
+          f"which is false — the constants are already inlined at their use "
+          f"sites and the missing thing is a rule, not an implementation: "
+          f"{reason}")
+    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
+          "the refusal does not name the feature that would remove it, so the "
+          f"6 files behind this row still have no next step: {reason}")
+    check("BACKEND" in reason,
+          "the refusal does not say the missing thing is a backend RULE "
+          f"rather than work on the module, which is the part a reader acts "
+          f"on: {reason}")
+    # …and the branch's own judgement is untouched: there really is nothing an
+    # importer could bind, and the refusal is still correct.
+    check("nothing an importer could bind" in reason,
+          f"the refusal stopped saying why the refusal is correct: {reason}")
+    # The private sibling is a DIFFERENT branch and must not have been edited.
+    priv = os.path.join(tmpdir, "private_only.mojo")
+    with open(priv, "w") as f:
+        f.write("def _hidden() -> Int:\n  return 1\n")
+    other = no_public_api_reason([priv])
+    check("every declaration in it is private" in other
+          and "BACKEND" not in other,
+          f"the constants-only wording leaked into the private branch, whose "
+          f"reason is a different fact: {other}")
 
 
 def test_a_clib_named_definition_is_refused_not_blamed_on_privacy(tmpdir,
@@ -4136,6 +4457,8 @@ TESTS = [
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
     ("no standard-library module is left in neither tier",
      test_no_standard_library_module_is_left_in_neither_tier),
+    ("a name with nothing to implement gets its own tier",
+     test_a_name_with_nothing_to_implement_gets_its_own_tier),
     ("a host-module refusal says what this target offers instead",
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
@@ -4176,6 +4499,12 @@ TESTS = [
      test_the_library_path_names_the_compiler_too),
     ("a re-exported type reaches the importer",
      test_reexported_type_reaches_the_importer),
+    ("a forwarded name is filed by what defines it",
+     test_declared_kinds_files_a_forwarded_name_by_its_definition),
+    ("a forwarded type is not demanded as a symbol, both arches",
+     test_a_forwarded_type_is_not_demanded_as_a_symbol),
+    ("a forwarded name nothing defines is still refused",
+     test_a_forwarded_name_nothing_defines_is_still_refused),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
     ("a host-module refusal carries its measured next step",
@@ -4188,6 +4517,8 @@ TESTS = [
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
+    ("a constants-only module is not told nothing could be added",
+     test_a_constants_only_module_is_not_told_nothing_could_be_added),
     ("a C-library-named definition is not blamed on privacy",
      test_a_clib_named_definition_is_refused_not_blamed_on_privacy),
     ("a concrete and a generic of one name are told apart",

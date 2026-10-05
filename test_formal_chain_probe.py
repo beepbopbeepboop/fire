@@ -35,13 +35,16 @@ in the tree at 123 files — names it in prose instead, and fell into the
 catch-all.
 
 Nothing here builds a program or runs Lean. The units are the two message shapes,
-the resolution, and the choice of which group to rewrite next.
+the resolution, the choice of which group to rewrite next, and the stub step's
+own source edit — the last of which is asked of THIS repository's parser rather
+than of a build, because what it must guarantee is that the copy still parses.
 
     python3 test_formal_chain_probe.py [-v]
 """
 import importlib.util
 import os
 import pathlib
+import re
 import shutil
 import sys
 import unittest
@@ -54,6 +57,8 @@ _spec = importlib.util.spec_from_file_location(
     "formal_chain_probe", os.path.join(HERE, "tools", "formal_chain_probe.py"))
 P = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(P)
+
+import fire_compiler as F
 
 STDLIB = pathlib.Path(
     os.environ.get("MOJO_STDLIB")
@@ -326,6 +331,197 @@ class TestMangledCopy(unittest.TestCase):
 
     def test_a_timeout_is_not_a_mangled_copy(self):
         self.assertFalse(P.mangled_copy(f"TIMEOUT after {P.BUILD_TIMEOUT}s"))
+
+
+@unittest.skipUnless(STDLIB.is_dir(), f"no stdlib at {STDLIB}")
+class TestStubbedImportEdit(unittest.TestCase):
+    """The stub step must not leave the copy unparseable.
+
+    Neutering is a source edit, and this is the shape that edit had: dropping the
+    import line DELETES it, and a parenthesised `from x import (` is ONE line the
+    walk's pattern matches while the names under it are on the lines after it.
+    What is left behind is at an indentation no header introduces, which is how
+    the walk's own damage became 43 of 46 files reporting
+    `build: 32:0: Unexpected INDENT('')` and three of this scope's links never
+    being measured (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`
+    §6 item 3).
+
+    So the edit REPLACES the import — all of it, continuation lines included —
+    with `pass` (`NEUTRALISED`), which is what this dialect's own
+    `_parse_block` inserts for an empty suite (`fire_compiler.py`: *"Empty
+    block: comment-only body produces DEDENT with no INDENT"*, `return
+    [PassStmt()]`). The substitution therefore introduces no construct the tree
+    does not already lower, and the emptied-block half of the old doc's premise
+    is measured NOT to be a parse error at all (see
+    `test_an_emptied_block_is_not_what_this_guards_against`).
+
+    Every case here is asked of `fire_compiler`'s parser — the parser that raised
+    the message above, not a build of the result.
+    """
+
+    # The measured shape, with the names a reader recognises.
+    PARENTHESISED = """\
+from .constants import (
+    CONTAINER_SIZE,
+    POWERS_OF_10,
+)
+from .parsing_integers import to_integer
+"""
+    ONLY_STATEMENT = """\
+if _chain_probe_flag:
+    from .constants import POWERS_OF_10
+"""
+    IN_A_BODY = """\
+def helper() -> Int:
+    from .constants import POWERS_OF_10
+    return POWERS_OF_10
+"""
+
+    def _pat(self, stem):
+        return re.compile(r"^\s*(from|import)\s+[\w.]*\b" + re.escape(stem)
+                          + r"\b.*$")
+
+    def _parses(self, src):
+        return F.Parser(F.py_tokenize_named(src, "t.mojo")).with_filename(
+            "t.mojo").parse_module()
+
+    def _assert_parses(self, src, why):
+        try:
+            self._parses(src)
+        except SyntaxError as exc:
+            self.fail(f"{why}: {exc}")
+
+    def test_a_parenthesised_import_is_replaced_whole(self):
+        """The measured shape: the names under the `(` go with it.
+
+        Dropping only the matched line is the bug, and this case fails loudly if
+        the continuation is left behind — the leftover lines are at an indentation
+        no header introduces.
+        """
+        new, n = P.stubbed_import_edit(self.PARENTHESISED, self._pat("constants"))
+        self.assertEqual(n, 1, "one logical import, one replacement")
+        self.assertNotIn("CONTAINER_SIZE", new)
+        self.assertNotIn("POWERS_OF_10", new)
+        self.assertIn("from .parsing_integers import to_integer", new,
+                      "an import of ANOTHER module is not this walk's edit")
+        self._assert_parses(new, "the substituted file must parse")
+
+    def test_the_deletion_this_replaces_really_was_a_parse_error(self):
+        """Pin the DEFECT, so the substitution cannot be judged unnecessary.
+
+        The old edit was `keep = [l for l in lines if not pat.match(l)]`, and on
+        the parenthesised source it produces a file the parser rejects. A test
+        that only showed the new behaviour passing would be satisfied by a
+        rewrite that stopped mangling files for a different reason; this one
+        fails if the shape stops being a shape.
+        """
+        pat = self._pat("constants")
+        deleted = "\n".join(l for l in self.PARENTHESISED.split("\n")
+                            if not pat.match(l))
+        with self.assertRaises(SyntaxError):
+            self._parses(deleted)
+
+    def test_an_emptied_block_is_not_what_this_guards_against(self):
+        """A CORRECTION, measured: the empty-block half is not a parse error.
+
+        The old doc named two shapes, and this is the one that turns out not to
+        be a shape in this dialect — `_parse_block` substitutes a `PassStmt` for
+        an empty suite rather than refusing it, so deleting an import that was a
+        block's only statement leaves a file that still parses. Pinned because a
+        reader who is told "the stub step can leave a block empty" will otherwise
+        go looking for a second defect that is not there.
+
+        The substitution is still what the walk does, uniformly: it is the parser's
+        own answer for that case, spelled out, and one mechanism for both shapes is
+        worth more than two rules with one of them unmeasured.
+        """
+        pat = self._pat("constants")
+        deleted = "\n".join(l for l in self.ONLY_STATEMENT.split("\n")
+                            if not pat.match(l))
+        self._assert_parses(deleted,
+                            "an emptied block must still parse, so the premise "
+                            "this correction replaces was wrong")
+
+    def test_an_import_inside_a_body_keeps_its_indentation(self):
+        """The replacement lands at the import's own indentation.
+
+        The `pass` replaces a statement in a block, so at the wrong indentation it
+        would answer the parse error the parenthesised case answers.
+        """
+        new, n = P.stubbed_import_edit(self.IN_A_BODY, self._pat("constants"))
+        self.assertEqual(n, 1)
+        self.assertIn("    pass\n", new)
+        self.assertIn("    return POWERS_OF_10\n", new)
+        self.assertNotIn("from .constants import", new)
+        self._assert_parses(new, "the substituted function body must parse")
+
+        new, n = P.stubbed_import_edit(self.ONLY_STATEMENT,
+                                       self._pat("constants"))
+        self.assertEqual(n, 1)
+        self.assertIn("    pass\n", new)
+        self._assert_parses(new, "the emptied block must have kept a statement")
+
+    def test_the_substituted_statement_is_a_no_op_of_THIS_dialect(self):
+        """`NEUTRALISED` is chosen, not spelled.
+
+        `pass` parses to a `PassStmt` in `fire_compiler.py::_parse_pass` and
+        lowers to nothing on both formal backends, which is why it is safe at
+        module, class, function and arm scope alike. A substitution that merely
+        PARSED would put a `var` (or a call) where a body used to be, and the
+        walk would be measuring that.
+        """
+        stmts = self._parses(f"def f() -> Int:\n    {P.NEUTRALISED}\n"
+                             f"    return 0\n")
+        self.assertEqual(len(stmts), 1)
+        body = stmts[0].body
+        self.assertTrue(any(isinstance(s, F.PassStmt) for s in body),
+                        f"{P.NEUTRALISED!r} must be this dialect's no-op "
+                        f"statement, not something that only happens to parse")
+
+    def test_a_bracket_in_a_comment_or_a_string_does_not_eat_the_file(self):
+        """The continuation is bounded by BRACKETS, and a bracket that only looks
+        like one would make the substitution delete the rest of the file.
+
+        An import line carrying an unbalanced `(` in a trailing comment or in a
+        quoted alias must consume exactly itself.
+        """
+        src = ("from .constants import A  # (see note\n"
+               "def helper() -> Int:\n"
+               "    return 1\n")
+        new, n = P.stubbed_import_edit(src, self._pat("constants"))
+        self.assertEqual(n, 1)
+        self.assertIn("def helper() -> Int:", new)
+        self.assertIn("    return 1\n", new)
+        self._assert_parses(new, "a comment bracket must not swallow the file")
+
+    def test_a_file_with_nothing_to_neuter_is_returned_unchanged(self):
+        """The walk rewrites every `.mojo` in the copy; most match nothing."""
+        src = "def helper() -> Int:\n    return 1\n"
+        new, n = P.stubbed_import_edit(src, self._pat("constants"))
+        self.assertEqual(n, 0)
+        self.assertEqual(new, src)
+
+    @unittest.skipUnless(STDLIB.is_dir(), f"no stdlib at {STDLIB}")
+    def test_the_measured_file_is_repaired_rather_than_left_broken(self):
+        """`parsing_floats.mojo`, which is what the measured run mangled.
+
+        Round 2 of the run stubbed `constants.mojo`; this file's
+        `from .constants import (` is the one that stopped the walk, and the
+        error the walk reported for 43 of 46 files was this file's line 32. It
+        is here so the regression net is the real file, not only the synthetic
+        shapes above.
+        """
+        real = (STDLIB / "std/collections/string/_parsing_numbers"
+                / "parsing_floats.mojo")
+        self.assertTrue(real.is_file(), f"the real stdlib must be at {real}")
+        src = real.read_text()
+        pat = self._pat("constants")
+        new, n = P.stubbed_import_edit(src, pat)
+        self.assertGreaterEqual(n, 1)
+        self._assert_parses(new, f"{real.name} after substitution")
+        with self.assertRaises(SyntaxError):
+            self._parses("\n".join(l for l in src.split("\n")
+                                   if not pat.match(l)))
 
 
 if __name__ == "__main__":

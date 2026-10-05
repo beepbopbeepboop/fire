@@ -4803,6 +4803,31 @@ def main():
               "above: the point is to size the work, not to improve the "
               "number")
 
+        # The FOURTH tier, in neither count above, and named for the same reason
+        # the admitted one is: a file importing one of these would drop out of
+        # both halves of this line with nothing to say where it went.
+        # `HOST_NOT_A_MODULE` is a name with nothing to IMPLEMENT (`this`,
+        # `antigravity`, `turtledemo`), so it is neither work nor a permanent
+        # fact about the target — it is the absence of a question, and this
+        # report's first half is built out of questions about reachability.
+        # A file that imports one is still refused (the tier is in the host
+        # union), so the count above still contains it; what changes is that the
+        # `…and {N} one that needs a host process` half is not the right
+        # description of it, and printing nothing would leave the reader to
+        # assume it was.
+        try:
+            from formal.imports import HOST_NOT_A_MODULE
+            notamodule = sorted(n for n in HOST_NOT_A_MODULE
+                                if n.split(".")[0] in host_modules)
+        except Exception:
+            notamodule = []
+        if notamodule:
+            print(f"    neither, because there is nothing to implement and "
+                  f"nothing missing: {', '.join(notamodule)} — a name whose "
+                  f"only content is documentation or a demonstration, so it is "
+                  f"in NEITHER count above and a file importing one is refused "
+                  f"for that reason rather than for a missing capability")
+
     # ── A codegen finding in a file no backend change can make build ────────
     # A construct refusal is `codegen` and that is right: the construct is in
     # the file and the backend cannot lower it. What the class does not say is

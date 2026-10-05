@@ -2253,6 +2253,16 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
+    # …and the one that catches a `void`-returning runtime entry point whose
+    # RESULT is read. `mojo_async_init()` as a statement is a correct program and
+    # builds; `x = mojo_async_init()` reads a return register nothing wrote, and
+    # measured on both architectures that answered `-1 13582400 -1` and
+    # `0 20463624 0` with exit 0. It is HERE rather than in an emitter because
+    # the decision is one rule both architectures must apply identically, and
+    # this is the one pass they share — `formal/model.py::
+    # gimple_runtime_void_result_refusal` has the measurement and the reason
+    # `'void'` is a word for `void *` and not for a value.
+    M.check_runtime_void_results(functions)
     check_construction_shapes(functions, by_name, link_line)
     check_frame_return_shapes(functions)
     # …and the one hole the returned-frame convention opens in premise (B1),
@@ -18839,8 +18849,17 @@ def no_public_api_reason(source_paths: list) -> str:
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
                 f"constants, which are inlined at their use site and cross no "
-                f"boundary. There is nothing an importer could bind, and "
-                f"nothing this backend could add.")
+                f"boundary. There is nothing an importer could bind, so the "
+                f"refusal itself is correct. What would remove it is not more "
+                f"work on the module but a decision about the BACKEND: those "
+                f"constants are already inlined at their use sites by the "
+                f"module-constant substitution, and what is absent is a rule "
+                f"that a module with nothing to export needs no dylib at all — "
+                f"an importer reading the constant directly instead of linking "
+                f"a library for it. That is one feature, and "
+                f"`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib"
+                f".md` is where it is written down, so nothing here is waiting "
+                f"on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and

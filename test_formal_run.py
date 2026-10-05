@@ -2729,6 +2729,66 @@ CASES = [
      "    printf(\"[%s][%s]\\n\", a, b)\n"
      "    return 0\n", 0, "[f\"n\"][t'x']"),
 
+    # ── the refusal now says WHAT the literal is made of ──────────────────
+    #
+    # `formal/model.py::interpolated_literal_segments` reads the token into its
+    # chunks and fields, and the refusal prints the count of each — which is
+    # the half of §7.1's "a buffer with a compile-time-known bound" a reader can
+    # check without running anything (the bound IS the chunk bytes plus the
+    # widest each field renders). One row per thing the sentence can now say,
+    # because each is a different claim about a different literal.
+    ("fstring_refusal_names_the_fields_it_composes",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k} tail\")\n"
+     "    return 0\n",
+     "refuse:It is made of 1 field(s) — `k` — and 2 literal chunk(s) "
+     "totalling 7 byte(s)", None),
+    # A FORMAT SPEC and a CONVERSION are three questions and the old sentence
+    # merged them, so each is named separately. Neither is a value on this path,
+    # which is §7.3's point: whatever answers an f-string has to say what it
+    # does with these rather than treating them as fields.
+    ("fstring_refusal_names_a_format_spec",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k:04d}\")\n"
+     "    return 0\n",
+     "refuse:1 of the field(s) carries a FORMAT SPEC (`:`), which is a "
+     "rendering rather than a value", None),
+    ("fstring_refusal_names_a_conversion",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k!r}\")\n"
+     "    return 0\n",
+     "refuse:1 of the field(s) carries a CONVERSION (`!`), which is a "
+     "rendering rather than a value", None),
+    # A t-string is refused for a SECOND reason that has nothing to do with the
+    # buffer: its `{name}` is a TEMPLATE, so the answer is not the field's
+    # value. `f"-and-a-t-string-would-be-answered-as-an-f-string"` is the row
+    # this used to share with the f-string refusal.
+    ("tstring_refusal_says_its_field_is_a_template",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", t\"n={k}\")\n"
+     "    return 0\n",
+     "refuse:its `{name}` is a TEMPLATE, which is `str.format`", None),
+    # The advice is GONE, and this row is why: it was measured wrong, not
+    # merely unhelpful. CPython's `print` puts a `sep` between its operands, so
+    # "Print the parts as separate operands" on `f"n={n}"` with `n = 7` gives
+    # `n= 7` where the f-string means `n=7` — a program that builds, runs,
+    # exits 0 and prints something else. Both advice sentences are forbidden by
+    # ONE row, and the positive needle after the `:` is the load-bearing half
+    # of `refuse_without:`: without it the row would pass on a refusal that had
+    # been dropped altogether, which is what the runner's own message names.
+    ("fstring_refusal_no_longer_offers_the_wrong_advice",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k}\")\n"
+     "    return 0\n",
+     "refuse_without:this path has no buffer to compose one in:Print the "
+     "parts as separate operands|build the text with `+` once that is "
+     "lowered", None),
+
     # ── the class: every operator that reached the integer path ────────────
     #
     # All of these BUILT, RAN and returned a number the source never wrote.
@@ -12612,6 +12672,70 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # The refusal NAMES WHICH ELEMENT has no word, and this is the row for the
+    # shape `std/sys/arg.mojo:51` has: a first element this image can resolve to
+    # a declaration and a second it cannot. Before, the one sentence merged both
+    # cases and a reader could not tell which bracket element to look at — and it
+    # cannot be told from the type either, because `static_string.mojo`'s
+    # `__mlir_type.`!kgen.string`` initializer is itself an MLIR template
+    # (measured on that tree's `lib/ProofLib.lean`-adjacent `formal/types.py`:
+    # `int64_t` is `{ kgen.int_t<Si> }` for the same reason). The sentence
+    # therefore names the two SHAPES a bare name can have, which is the honest
+    # answer: this call cannot distinguish them.
+    ("sub_multi_index_comptime_params_names_the_unresolvable_element",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[Int, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:element 1 `Int` is a type this image knows; and element 2 "
+     "`ImmStaticOrigin` is a bare name this image cannot resolve to a "
+     "declaration", None),
+    # …and the OTHER case, where NO element resolves. Saying "element 2 is the
+    # problem" there would be a guess, so the sentence says the reader has two
+    # to resolve instead — and this row exists to pin that it does NOT accuse
+    # one of them, which is the direction that could produce a false claim.
+    ("sub_multi_index_comptime_params_with_nothing_resolvable_says_so",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:None of its 2 element(s) names something this image can resolve "
+     "to a declaration (StaticString, ImmStaticOrigin)", None),
+    # A BRACKETED type as an element — `List[Int]` — is a type, and it is the
+    # case a first version of the classifier got wrong by asking
+    # `subscript_is_a_type_application`, which answers about the WHOLE
+    # subscript and needs `structs_by_name` for its base. `List` is in
+    # `type_constructor_kind`'s table, so the element is a type whoever asks.
+    # Pinned as an element of a list that ALSO has a bare name, because that is
+    # the only arrangement in which the answer is visible in the message.
+    ("sub_multi_index_comptime_params_names_a_bracketed_type_an_element",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[List[Int], ImmStaticOrigin]\n"
+     "    return 0\n",
+     # `List[…]` rather than `List[Int]`: `_spell` is the message's own
+     # renderer for a subscript and it abbreviates the index, which is right
+     # for a diagnostic — the reader is being told WHICH element, not asked to
+     # re-read the source back. The needle uses what the renderer emits.
+     "refuse:element 1 `List[…]` is a type this image knows; and element 2 "
+     "`ImmStaticOrigin` is a bare name", None),
+    # …and the case where every element IS bindable, where the sentence must be
+    # ABSENT: `size_of[type, target]` is the sentence's own worked example in
+    # `formal/model.py`, and adding a note there would be a diagnosis about a
+    # construct that has none. Asserted with `refuse_without:`, so the row also
+    # pins that the refusal itself is still there.
+    ("sub_multi_index_comptime_params_of_literals_says_nothing_extra",
+     "def pick[type: Int, origin: Int]() -> Int:\n"
+     "    return type + origin\n\n"
+     "def main(n):\n"
+     "    v = pick[1, 2]\n"
+     "    return 0\n",
+     "refuse_without:is a compile-time explicit-parameter list on a generic:"
+     "is a bare name this image cannot resolve|None of its 2 element(s) names",
+     None),
     # A bracket list NESTED INSIDE another subscript's index, where the outer
     # one is a runtime index. This is the boundary of `model.type_position_nodes`
     # and it is here because that function exempts a bracket list from the
@@ -21641,6 +21765,310 @@ _CENSUS_PROBES = [
 ]
 
 
+def check_interpolated_segments_against_cpython(verbose=False):
+    """`interpolated_literal_segments` against CPython's OWN parse of the token.
+
+    Returns `(passed, failures)`. The oracle is `ast.parse` of the very token the
+    reader is handed, so the two answers cannot come apart by construction —
+    CPython is the language this dialect tracks, and a hand-written expected
+    list would be an assertion about a person rather than about a reading.
+
+    **The comparison is by SEGMENTATION and by each piece's meaning, not by
+    whitespace or by `ast.unparse`'s spelling**, because CPython re-spells three
+    things this reader reports as source text: it reprints an inner expression
+    (`{1:2}` → `{1: 2}`), and it renders a format spec as a nested f-string
+    (`:>3` → `f'>3'`). Those are unparse artefacts and comparing them literally
+    would have produced four false failures and taught nothing. The unwrapping
+    is in the comparison, with the reason, rather than in the reader.
+
+    The shapes chosen are the ones a naive reader gets wrong: a `:` inside a
+    subscript (`d['a:b']`) is not a format spec, a `!` inside one is not a
+    conversion, a nested `{1:2}[1]` closes at the right brace, a `{{`/`}}` escape
+    is one character and not a field, and an adjacent pair of fields has no
+    chunk between them at all.
+    """
+    import ast as _ast
+    cases = [
+        'f"a={n}b"',            # chunk, field, chunk
+        'f"{{lit}}"',           # the brace escape, and no field
+        'f"{x!r:>3}"',          # a conversion AND a spec
+        'f"no fields"',         # one chunk and nothing else
+        'f"{a}{b}"',            # adjacent fields: no chunk between them
+        "f\"{d['a:b']}\"",      # `:` inside a subscript is not a spec
+        "f\"{d['a!b']}\"",      # …and `!` inside one is not a conversion
+        'f"pre{x}"',
+        'f"{ y !s:^7 }"',       # whitespace around all three parts
+        'f"{ {1:2}[1] }"',      # a nested brace closes at the right place
+        'f"mid{d}dle{x}end"',   # chunks either side of two fields
+        'f"{n:04d}"',
+        'f"{a!r}{b!s}"',
+        'f"trail{x}"',
+        'f"{x}lead"',
+        'f"{ x + 1 }"',
+        "f\"{d['k']}{e}\"",
+        'f"a{{b{c}d}}e"',       # escapes either side of a field
+        'f"{f(1, 2)}"',
+        'f"{x:{w}}"',           # a spec that is itself an interpolated field
+    ]
+    passed, failures = 0, []
+    for tok in cases:
+        try:
+            got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
+        except Exception as e:
+            failures.append(f"{tok}: the reader refused a token CPython "
+                            f"accepts: {type(e).__name__}: {e}")
+            continue
+        mine = []
+        for g in got:
+            if g[0] == 'lit':
+                mine.append(g[1])
+            else:
+                s = g[1] + (('!' + g[3]) if g[3] else '') + \
+                    ((':' + g[2]) if g[2] else '')
+                mine.append(s)
+        node = _ast.parse(f"v = {tok}").body[0].value
+        theirs = []
+        for v in node.values:
+            if isinstance(v, _ast.Constant):
+                theirs.append(v.value)
+            else:
+                s = _ast.unparse(v.value)
+                if v.conversion != -1:
+                    s += '!' + chr(v.conversion)
+                if v.format_spec is not None:
+                    spec = _ast.unparse(v.format_spec)
+                    if len(spec) > 3 and spec[0] == 'f' and spec[-1] == "'":
+                        spec = spec[2:-1]      # unparse wraps a spec in an
+                    s += ':' + spec            # f-string; the reader does not
+                theirs.append(s)
+        squash = lambda xs: [str(x).replace(' ', '') for x in xs]
+        if len(mine) == len(theirs) and squash(mine) == squash(theirs):
+            passed += 1
+        else:
+            failures.append(f"{tok}: read {mine!r}, CPython parses "
+                            f"{theirs!r} — the segmentation or a piece differs")
+    # …and the shapes the reader must REFUSE, because a reader that guessed at
+    # either would compose a string with a character missing from it. CPython
+    # 3.14's own tokenizer rejects `f"}"` outright ("single '}' is not
+    # allowed"), so it cannot be compared against a parse — only against the
+    # fact that there is nothing to parse.
+    #
+    # Each case names WHICH check must fire, and the reason it matters is that
+    # they are different checks: `f"{unclosed` is caught by the DELIMITER test
+    # (the token does not end with the quote it opened with), so to reach the
+    # brace-depth test the token has to close its quotes around an unclosed
+    # field — `f'{ {1'"`, whose `{` is still open when the body ends.
+    for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
+                          ('f"{unclosed', "does not end with"),
+                          ("f'{ {'", "never closed"),
+                          ('f"', "not even a quoted token")):
+        try:
+            got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
+        except _TYPE_VALUE_MODEL.CodegenError as e:
+            if must_say not in str(e):
+                failures.append(f"{tok}: refused, but not for the reason it "
+                                f"names: {e}")
+            else:
+                passed += 1
+        except Exception as e:
+            failures.append(f"{tok}: raised {type(e).__name__} rather than "
+                            f"CodegenError: {e}")
+        else:
+            failures.append(f"{tok}: returned {got!r} — it must say {must_say!r}, "
+                            f"so a guessing reader would compose a string with "
+                            f"a character missing from it")
+    if verbose:
+        print(f"      interpolated segments: {passed} shape(s) agree with "
+              f"CPython's own parse, {len(failures)} disagreement(s)")
+    return passed, failures
+
+
+def check_interpolated_literal_census(verbose=False):
+    """What the corpus's interpolated literals are MADE OF, over every file here.
+
+    Returns `(passed, failures)`. This is the measurement
+    `bugs/FORMAL_string_composition_has_no_buffer.md` took with a throwaway
+    script, and the reason it is committed is §7.1's own instruction: *"Do not
+    start with an f-string … Start with the ONE case that has a decidable answer
+    and no lifetime question … Then measure the residue with the same method as
+    §5 … Do not project it."* A projection cannot be re-run, so the shape of the
+    corpus is asked of the corpus, through
+    `formal/model.py::interpolated_literal_segments` — the same reader the
+    refusal uses, so a number here and a sentence in a diagnostic cannot come
+    apart.
+
+    **These are DIRECTIONS, not thresholds, and that is the only honest kind of
+    assertion over a corpus that grows every week.** Every row is a comparison
+    that a growth in the corpus can only move in the direction it already is,
+    and the one that could move the WRONG way is a hard equality — the counts of
+    the two shapes §6 and §7.3 name as absent, which are the two that would make
+    a future lowering's scope claim false:
+
+      * **no literal with NO field**: §6's first "NOT the fix" bullet measured
+        this at 0 of 114 and said folding one "is worth 0 files here even
+        though it is correct in itself". If a non-zero count appeared, the
+        "fold what interpolates nothing" half of the feature would have become
+        worth something, and this row is what would say so.
+      * **no `t` prefix**: §7.3 says "0 corpus files are affected today (no
+        `t"` literal appears in any of the 114)", and the t-string refusal's
+        second reason exists because of it. A non-zero count makes that reason
+        load-bearing rather than hypothetical.
+
+    Both are asserted EXACTLY, and both are `== 0` for the same reason: the
+    reader is asked of every file, so a non-zero count is a fact about the
+    corpus rather than an estimate, and a fact that can be re-measured is worth
+    a hard assertion where a drifting proportion would only be worth a
+    direction.
+    """
+    import os as _os
+    build = __import__("formal.build", fromlist=["build"])
+    passed, failures = 0, []
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    roots = [here]
+    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
+    if _os.path.isdir(stdlib):
+        roots.append(stdlib)
+    scanned, rows, unquotable = 0, [], []
+    for root in roots:
+        for dirpath, dirnames, filenames in _os.walk(root):
+            dirnames[:] = [d for d in sorted(dirnames)
+                           if d not in (".git", "build", "__pycache__",
+                                        ".tmp", "output")]
+            for fname in sorted(filenames):
+                if not fname.endswith((".py", ".mojo")):
+                    continue
+                path = _os.path.join(dirpath, fname)
+                try:
+                    src = open(path, encoding="utf-8").read()
+                    stmts = build.parse_module(src, path)
+                except Exception:
+                    continue      # a file this parser cannot read is a sweep fact
+                scanned += 1
+                for node in _TYPE_VALUE_MODEL.iter_nodes(stmts):
+                    if not _TYPE_VALUE_MODEL.is_interpolated_literal(node):
+                        continue
+                    spelled = getattr(node, "value", "")
+                    try:
+                        segs = _TYPE_VALUE_MODEL.interpolated_literal_segments(
+                            spelled)
+                    except _TYPE_VALUE_MODEL.CodegenError:
+                        # A literal `is_interpolated_literal` accepted that the
+                        # reader cannot take apart at all — on this tree, an
+                        # ORDINARY string whose text happens to begin with `f"`
+                        # or `t`, which the prefix test cannot tell from a real
+                        # one. That is a counted row rather than a failure,
+                        # because the predicate that admitted it is the one at
+                        # fault and the reader's refusal is the correct answer
+                        # about it; the defect itself is filed
+                        # (`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts
+                        # _with_an_f_prefix.md`) and the row below is the
+                        # tripwire that goes quiet when the parser's own flag
+                        # lands. Failing here instead would report the same
+                        # thing 5 times and say less.
+                        unquotable.append((path, spelled))
+                        continue
+                    fields = [s for s in segs if s[0] == 'field']
+                    rows.append(dict(
+                        path=path, spelled=spelled,
+                        is_t=spelled[:1] in ('t', 'T'),
+                        nfield=len(fields),
+                        specs=sum(1 for f in fields if f[2]),
+                        convs=sum(1 for f in fields if f[3])))
+    n = len(rows)
+    # The FOLD question, which is §6's first "NOT the fix" bullet, and the
+    # assertion is over FILES rather than literals because that is the unit the
+    # refusal is asked in: `refuse_interpolated_literals` is asked over a
+    # module's whole body, so folding helps a file only when EVERY interpolated
+    # literal in it interpolates nothing.
+    #
+    # **Measured here, and it is 0 — over this repository AND the stdlib, not
+    # over the 114-file scope the doc measured.** 375 literals interpolate
+    # nothing (e.g. `f"✅ No type violations"`) and 320 files carry at least one
+    # literal with a field, so no file's whole set is foldable. That CONFIRMS
+    # §6's "worth 0 files here even though it is correct in itself" over a
+    # corpus twenty times the one it was measured on, and it is asserted
+    # exactly rather than as a direction because a non-zero count would be a
+    # fact about the corpus that a reader could act on.
+    foldable = sorted({r['path'] for r in rows if r['nfield'] == 0}
+                      - {r['path'] for r in rows if r['nfield'] > 0})
+    ts_files = sorted({r['path'] for r in rows if r['is_t']})
+    ts = [r for r in rows if r['is_t']]
+    specs = sum(r['specs'] for r in rows)
+    convs = sum(r['convs'] for r in rows)
+    one_field = [r for r in rows if r['nfield'] == 1]
+    step1 = [r for r in one_field if not r['specs'] and not r['convs']]
+    if foldable:
+        failures.append(
+            f"{len(foldable)} file(s) have EVERY interpolated literal "
+            f"interpolating nothing (e.g. {foldable[:2]}), so folding is no "
+            f"longer worth 0 files: §6's first 'NOT the fix' bullet measured "
+            f"that at 0 of 114 over the sweep's scope and this census "
+            f"re-measures it over the whole corpus")
+    else:
+        passed += 1
+    # …and the CORRECTION to §7.3, which is a direction and goes the other way.
+    # The doc says "0 corpus files are affected today (no `t\"` literal appears
+    # in any of the 114)" — true of ITS 114-file scope, and false of the
+    # repository: t-strings are in 23 stdlib files, 40 literals. So the
+    # t-string refusal's SECOND reason (its `{name}` is a template, not a
+    # value) is load-bearing rather than a note for a future lowering, which is
+    # why that reason is now in the message.
+    if len(ts_files) >= 1:
+        passed += 1
+    else:
+        failures.append(
+            "no t-string literal is in the corpus; §7.3 recorded 0 and this "
+            "census measured 40 in 23 stdlib files, so a zero here means they "
+            "were all removed — worth knowing, because the t-string refusal's "
+            "second reason exists for them")
+    # Directions, not thresholds, for the four that grow with the corpus.
+    for label, got, floor, why in (
+            ("literals with exactly one field", len(one_field), 100,
+             "§7.1's shape is 'literal chunk, one integer-shaped field, "
+             "literal chunk', and the doc's own scope rests on there being "
+             "many of them"),
+            ("carrying at least one FORMAT SPEC", specs, 100,
+             "§7.3's correctness note: a spec is a rendering, not a value, so "
+             "a lowering has to say what it does with it"),
+            ("carrying at least one CONVERSION", convs, 100,
+             "…and the same for `!r`/`!s`"),
+            ("of the one-field literals, carrying neither", len(step1), 10,
+             "§7.1's bound is over a literal that is chunks and plain fields, "
+             "so a spec or a conversion puts one out of scope")):
+        if got >= floor:
+            passed += 1
+        else:
+            failures.append(f"{label}: {got}, expected at least {floor} — {why}")
+    print(f"      interpolated census: {scanned} file(s), {n} literal(s) in "
+          f"{len({r['path'] for r in rows})} file(s); {len(one_field)} "
+          f"one-field, {specs} spec(s), {convs} conversion(s); "
+          f"{len(foldable)} file(s) wholly foldable; {len(ts)} t-string(s) in "
+          f"{len(ts_files)} file(s)")
+    # `unquotable` is REPORTED and not asserted, and the reason is that every
+    # one of them is the filed prefix-test defect rather than anything about
+    # composition: `is_interpolated_literal` tests the PREFIX of `value`, so an
+    # ordinary string whose text begins with `f"` reads as an f-string — and
+    # this repository's own `INTERPOLATED_LITERAL_PREFIXES` tuple is four of
+    # them (`'f"'`, `"f'"`, `'t"'`, `"t'"`). Measured on this tree: all of them
+    # in `formal/model.py` and `myinterpreter.py`, and 0 anywhere else. An
+    # assertion would need a baseline count, and a baseline is a number that
+    # rots the moment the parser's own flag lands
+    # (`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`
+    # — which is where the fix belongs, and the reader here is already the
+    # shape that fix wants: it refuses the token rather than composing it).
+    # Printed unconditionally because it is the count a reader of this census
+    # needs and no assertion should carry it.
+    if unquotable:
+        where = {}
+        for path, _t in unquotable:
+            where[os.path.relpath(path, here)] = \
+                where.get(os.path.relpath(path, here), 0) + 1
+        print(f"      interpolated census: {len(unquotable)} literal(s) "
+              f"`is_interpolated_literal` admits that are not quoted tokens at "
+              f"all — the filed prefix-test defect, {where}")
+    return passed, failures
+
+
 def check_comptime_alias_census(verbose=False):
     """The four census answers above, against `formal.model` and nothing else.
 
@@ -22479,6 +22907,21 @@ def main():
           f"FAIL={len(census_failures)}")
     passed += census_passed
     failed += len(census_failures)
+    il_passed, il_failures = check_interpolated_literal_census(args.verbose)
+    for detail in il_failures:
+        print(f"  FAIL  interpolated-census: {detail}")
+    print(f"formal run: interpolated-census PASS={il_passed} "
+          f"FAIL={len(il_failures)}")
+    passed += il_passed
+    failed += len(il_failures)
+    seg_passed, seg_failures = check_interpolated_segments_against_cpython(
+        args.verbose)
+    for detail in seg_failures:
+        print(f"  FAIL  interpolated-segments: {detail}")
+    print(f"formal run: interpolated-segments PASS={seg_passed} "
+          f"FAIL={len(seg_failures)}")
+    passed += seg_passed
+    failed += len(seg_failures)
     at_passed, at_failures = check_assigned_type_evidence(args.verbose)
     for detail in at_failures:
         print(f"  FAIL  assigned-type: {detail}")
