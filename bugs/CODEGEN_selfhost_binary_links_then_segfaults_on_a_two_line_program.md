@@ -8,18 +8,32 @@ regression".
 
 ## Where this doc stands against the other `CODEGEN_selfhost_*` docs
 
-The GCC-era docs are GONE, and this paragraph is the reconciliation they owed:
-six of them — the ones about a selfhost build red on the branch base, about
-"157 distinct gcc errors" on a merged tree, about 13 still remaining, and three
-siblings — were consolidated and deleted in `2e9349ed`, because the generated C
-now COMPILES AND LINKS and every one of their error counts stopped reproducing.
-The survivor is `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md`,
-which carries the same measurement this doc does (the closure builds, the
-two-line run is `exit=-11`) from a different tree; this file is the earlier
-filing and is kept for the two things that one does not say: the A/B against
-master that shows the shape is not a merge regression, and the module-by-module
-bisect plan below. Neither cites the deleted names, which is why
-`tools/dangling_doc_refs.py --ratchet` is clean on this file.
+Every one of those describes the SAME job failing in the GCC era, and that
+shape is GONE. The three this doc cited by name — the one about the job being
+red on the branch base, the "red on the merged tree, 149 gcc errors" one, and
+the one whose last measurement was "13 errors remain" — were DELETED with their
+fixes, because their gcc-error counts reached zero; what is left in `bugs/` with
+this prefix is the post-GCC generation (`CODEGEN_selfhost_binary_links…` is this
+one, `CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults`,
+`CODEGEN_selfhost_actual_types_identifier_field_key`,
+`CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform`,
+`CODEGEN_selfhost_tokenize_region_eq_quadratic`, and the module-level
+`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`).
+There is no doc anywhere in `bugs/` whose subject is the state the job is
+in NOW, which is that the generated C compiles, links, and produces a binary
+that **crashes on the first program it is given**. A reader who runs the job and
+sees a SIGSEGV has no document that describes it, which is the whole reason
+this one is filed.
+
+The reconciliation the GCC-era docs owed is the census in the paragraph above,
+made from `ls bugs/CODEGEN_selfhost*` on this tree rather than from a list
+carried in prose: those six were consolidated and deleted in `2e9349ed`
+("Six selfhost docs -> one"), because their gcc-error counts reached zero. The
+survivor of that consolidation carries the same measurement this doc does (the
+closure builds, the two-line run is `exit=-11`) from a different tree; this file
+is the earlier filing and is kept for the two things that one does not say: the
+A/B against master that shows the shape is not a merge regression, and the
+module-by-module bisect plan below.
 
 ## What I ran, and what I saw
 
@@ -86,11 +100,16 @@ the crash is in.
    two-line program" — and `test_selfhost.py` already builds a named artifact,
    so a bisect harness over its own output is cheaper than a commit bisect over
    a 522-second job.
-2. ~~Reconcile the eight `CODEGEN_selfhost_*` docs.~~ DONE in `2e9349ed`: the
-   GCC-error docs are deleted and
+2. ~~Reconcile the `CODEGEN_selfhost_*` docs.~~ DONE in `2e9349ed` ("Six
+   selfhost docs -> one"): the GCC-error docs are deleted with their fixes and
    `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md` carries
-   the state, so the only doc-level work left is deleting THIS one when the
-   bisect above lands, and its citations with it.
+   the state. What is left is the count in this doc's own heading, which says
+   "eight ... already do" where the census in the paragraph above now lists
+   five — so that sentence is re-measured from `ls bugs/CODEGEN_selfhost*`, not
+   from a list carried in prose, and the only doc-level work remaining is
+   deleting THIS one when the bisect above lands, and its citations with it.
+   `tools/dangling_doc_refs.py --ratchet` is the check for the citations they
+   leave behind.
 3. **Then decide the registration.** A `selfhost` that cannot run its own
    output is either `expect=`'d with the reason this doc gives (cheap — 0.2 GB
    measured for the sibling, ~4.4 GB here) or fixed. It must not stay

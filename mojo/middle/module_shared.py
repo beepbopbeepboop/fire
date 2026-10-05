@@ -75,6 +75,11 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.closures import (
     _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
 )
+# NO module-level `import gimple_codegen` here: `_selfhost_parsed_modules`
+# below is this module's only reader of `gimple_codegen._selfhost_impl_py_files`
+# and it imports inside the function instead. The edge middle-tier ->
+# `gimple_codegen` -> the gimple backend -> middle-tier is an import CYCLE — see
+# `mojo/middle/methods_shared.py`'s header comment for the whole rule.
 from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
@@ -153,9 +158,10 @@ def _selfhost_parsed_modules(sd: str) -> list:
     extra-field scans). A file that fails to parse is cached as a FAILURE and
     contributes an empty statement list.
     """
-    # Qualified, for the reason `funcs_shared._selfhost_extracted_fn_index`
-    # states in full: a function-level `from gimple_codegen import name` binds
-    # an int64_t on the self-hosted path, and this name is a FUNCTION value.
+    # FUNCTION-LOCAL (per the note at the top of this file) and QUALIFIED, for
+    # the reason `funcs_shared._selfhost_extracted_fn_index` states in full: a
+    # function-level `from gimple_codegen import name` binds an int64_t on the
+    # self-hosted path, and this name is a FUNCTION value.
     import gimple_codegen
     _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in

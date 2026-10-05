@@ -5247,8 +5247,14 @@ def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
     whole-struct derivation and the free functions are the majority: the asks
     scale with the function count, which is the regression
     `test_formal_bracketed_method_field_set.py`'s `module table` group asserts is
-    gone (`bugs/PERF_struct_field_split_asked_once_per_function.md`). The guard
-    is what puts it back.
+    gone — measured on 2026-10-04, wrapping all four of the partition's
+    predicates around `formal.build.compile_formal` on four sources: `myinterpreter.py`,
+    `formal/build.py`, `gimple_codegen.py` and `formal/arm64_codegen.py` ask
+    `struct_is_one_field`, `struct_fits_one_word`, `struct_field_count` and
+    `struct_is_framed` **zero** times each, and derive `_split_declaration` once
+    per struct (224 / 135 / 123 / 104). `formal/arm64_codegen.py`, the file the
+    2026-10-02 pass measured at 40.3 s CPU, builds in 2.17 s. The guard is what
+    puts the free functions back out of the count.
     """
     if owner is None:
         return
@@ -10246,8 +10252,11 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
         declaration THIS IMAGE can see
 
     with the `if`/`else` twin of the same program building and computing the
-    right answer. `self` is the field; the arm is the whole of it. See
-    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+    right answer. `self` is the field; the arm is the whole of it. (Fixed in
+    `model._rewrite_self_fields`, `work/formal8-5`; the doc that tracked the
+    four `elif` walks is deleted, so this names the defect instead — it is a
+    `refuse_*` sentence that should not be reachable for a field the `if` arm
+    of the same shape accepts.)
 
     The replacement is handed back and not descended into, which is
     `rewrite_tree`'s rule rather than a decision here: it is `F.IdentExpr(root)`,
@@ -11954,8 +11963,11 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
     assigned into). So this walk reached the arms by an accident of ANOTHER
     pass's traversal, with nothing recording the dependency — and `_rewrite_self_fields`
-    is still tuples by then and still misses every arm
-    (`bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`).
+    is still tuples by then and still misses every arm — so this walk is
+    reached by an accident of another pass's traversal and depends on it
+    continuing to normalise. That is worth a case of its own
+    (`test_formal_run.py`'s `elif` group pins the three walks that were
+    rewritten, not this dependency).
 
     A store's TARGET and a call's CALLEE are the two positions a name must not be
     rewritten in, and each is a node the walk HANDLES rather than descends:

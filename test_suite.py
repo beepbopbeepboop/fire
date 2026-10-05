@@ -1135,6 +1135,56 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'four markers in the registry describe a condition rather than a set '
           'of cases, and inventing a number for them would be a fiction')
 
+    # …and the FANOUT shape, which is the one count in the registry that has
+    # no summary line to read: `bootstrap-stage2-dumps` is 46 `./mojo --dump`
+    # processes, and its marker's count is checked against the per-item
+    # verdicts. Before this the count was read out of the LONGEST item's
+    # output — one file's compiler diagnostic, which has no "N passed, M
+    # failed" line in it — so a count-checked marker on a fanout reported
+    # UNCHECKED and therefore FAILED, which is the marker being unusable
+    # rather than the rule being strict.
+    ITEMS = ['a', 'b', 'c', 'd', 'e']
+
+    def fanout_verdict(expect, statuses):
+        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
+                           mem='tiny', expect=expect)
+        with Sandbox(m=fan):
+            spec = suite.REGISTRY['m']
+            state = {'m': suite.FAIL}
+            res = {f'm:{it}': suite.Result(st, 0.0, output='')
+                   for it, st in zip(ITEMS, statuses)}
+            suite._apply_expectations({'m': len(ITEMS)}, state,
+                                      suite.Log(None), res)
+            return state['m']
+
+    def fanout_count(statuses):
+        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
+                           mem='tiny')
+        with Sandbox(m=fan):
+            spec = suite.REGISTRY['m']
+            res = {f'm:{it}': suite.Result(st, 0.0, output='')
+                   for it, st in zip(ITEMS, statuses)}
+            return suite.observed_fanout_failures(spec, res)
+
+    check('expect count: a fanout marker is checked against its item verdicts',
+          fanout_verdict('2 of 5: a thing',
+                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
+                          suite.PASS]) == suite.EXPECTED,
+          'the control, on the shape the one fanout marker in the registry has')
+    check('expect count: …and a NEW failing item in a marked fanout is a '
+          'FAILURE',
+          fanout_verdict('2 of 5: a thing',
+                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
+                          suite.FAIL]) == suite.FAIL,
+          'the same anti-rot as a single-process marker: three items failed '
+          'against a marker that claims two')
+    check('expect count: a fanout marker counts FAIL and ERROR items and '
+          'neither a RESOURCE nor a TIMEOUT one',
+          fanout_count([suite.PASS, suite.FAIL, suite.ERROR, suite.RESOURCE,
+                        suite.TIMEOUT]) == 2,
+          'those two are facts about the machine: a marker never forgives '
+          'them, so it must not count them as its cases either')
+
     # …and the real registry, so the rule cannot rot into matching nothing.
     counted = {n: suite.marker_failures(getattr(s, 'expect', '') or '')
                for n, s in suite.REGISTRY.items()
@@ -1148,7 +1198,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
-                     'async-with-lock-guard': 2, 'coro-detached-async': 2,
+                     'async-with-lock-guard': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1156,15 +1207,16 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
     # wrong. `formal-x86-machine-model` is theirs and is real: it is the count
-    # for the job they registered. `formal-receiver-position` is the FOURTH
-    # drop, and it is the one this table's own history is about: the check
+    # for the job they registered. `formal-receiver-position` is a FOURTH
+    # drop, and it is the only one of the four that is interesting: the check
     # below was BUILT because that marker's count understated what its file
-    # reported, and the marker then outlived even the correction — the job went
-    # 38/38 green (measured on this tree) and an `expect=` on a passing test is
-    # reported as a FAILURE ("marked expect=… but it PASSES"). The marker is
-    # gone, which is why its entry is gone here, and this is the same "a census
-    # that still states them fails on the registry's own state" the two above
-    # name.
+    # reported, and the marker then outlived even the correction — the three
+    # cases it forgived stopped failing, the job went 38/38 green (its count was
+    # 3 of 33 when it was written and the file has 38 cases now), and an
+    # `expect=` on a passing test is reported as a FAILURE ("marked expect=…
+    # but it PASSES"). The count was never the problem; the marker was. Its
+    # entry is gone here for the reason the two above name: a census that still
+    # states a removed marker fails on the registry's own state.
                      'coro-future-await': 17,
                      'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
@@ -1174,7 +1226,11 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `gimplerunner` is the merge worker\u0027s 3 of 376 — the '
+          f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
+          f'(40 of its 46 items exit non-zero), and it is checked against the '
+          f'per-item verdicts rather than against a summary line \u2014 see '
+          f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
+          f'4 of 380 \u2014 the '
           f'compile-and-execute rows that are interactions between the ten '
           f'branches rather than a bug in any one of them; the count was 4 '
           f'until 2026-10-04, when the dict-value-kind row it named was '
@@ -1987,7 +2043,9 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_tempfile.py': 3,
     'test_formal_x86_64_dylib.py': 3,
     'test_general_mutable_closure_capture.py': 2,
-    'test_gimple.py': 51,
+    'test_gimple.py': 57,  # +6 on 2026-10-04: the merge of work/bugs6-1 and
+                                  # work/bugs6-2 (two-module build+run harnesses and a
+                                  # 120 s whole-closure compile)
     'test_gimple_async_runner.py': 11,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
@@ -2000,7 +2058,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python_source_mut_capture.py': 1,
     'test_re_formal.py': 1,
     'test_runtime_dylib.py': 1,
-    'test_selfhost.py': 1,
+    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
+                                       # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
     'test_struct_formal.py': 1,
@@ -2848,6 +2907,15 @@ def test_the_compiler_imports_from_every_real_entry_point():
         `mojo/backend_gimple/module_gen.py` -> `module_shared` ->
         `funcs_shared` -> `gimple_codegen`.
 
+    The exemption list this used to carry is now EMPTY (2026-10-04). All
+    eight `mojo/middle/*` modules opened with a module-level `import
+    gimple_codegen`, and only three of them read anything from it —
+    `_SELFHOST_DIR` and `_selfhost_impl_py_files` — so those three now import
+    inside the function that uses them. That is the whole fix: `import X`
+    binds a module object and survives a half-initialised X (its attribute
+    reads happen later, at call time), while `from X import NAME` resolves
+    EAGERLY and does not. Every other middle-tier module's copy was dead code.
+
     Each module that can be a process's FIRST `mojo.*` import is therefore
     probed in a FRESH interpreter. Checking from inside this process would
     prove nothing: by the time this test runs, `sys.modules` already holds
@@ -2907,6 +2975,16 @@ def test_the_compiler_imports_from_every_real_entry_point():
             last = [l for l in r.stderr.strip().splitlines() if l.strip()]
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
+
+    # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
+    # which imports the gimple backend, which imports them back. That list is
+    # now EMPTY: the middle tier no longer imports `gimple_codegen` at module
+    # level at all, so there is nothing to exempt. Kept as a named declaration
+    # rather than deleted because the check that reads it is checked in BOTH
+    # directions, and a list that can silently reappear is the point.
+    # No `mojo/backend_gimple/*` module is exempt: the backend sits
+    # downstream of `gimple_codegen`, so every one of them is reachable first
+    # and a new cycle among them would be caught here.
     declared: set = set()
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
@@ -2917,6 +2995,68 @@ def test_the_compiler_imports_from_every_real_entry_point():
     check('imports: the probe actually probed something', len(entries) >= 30,
           f'only reached {len(entries)} modules — the glob or the list went '
           f'stale and this check is vacuous')
+    # The exemption list is now EMPTY, which means the check above is
+    # currently `not bad`. Assert that it is not vacuous by construction: an
+    # empty list with a non-empty failure set is the state this whole test
+    # exists to prevent, and `failed <= declared` alone would pass it.
+    check('imports: no middle-tier module needs an exemption any more',
+          not (declared or failed),
+          f'exempt={sorted(declared)} failing={sorted(failed)} — the middle '
+          f'tier must not import gimple_codegen at module level (see '
+          f'mojo/middle/methods_shared.py\'s header comment for the rule)')
+
+
+def test_every_backend_call_of_a_gen_method_has_the_delegate():
+    """`mojo/backend_gimple/*` calls the codegen's methods as `gen.X(...)`,
+    and every one of them has to be a method `GimpleGen` actually has.
+
+    The backend is a set of module-level functions that take the generator as
+    their first argument, so `gimple_codegen.py`'s `GimpleGen` is nothing but
+    the delegating half of one API — and the two halves are edited separately.
+    A merge that takes `gimple_codegen.py` from one side and `emit_stmts.py`
+    from the other produces a call to a method nobody defined, and the only
+    symptom is an `AttributeError` raised during codegen, on the four test
+    cases that happen to reach that store. It is invisible to `gcc`, to the
+    linker and to every exit code: the failure never gets far enough to have
+    an artifact. That is how a doc could sit open describing a one-line fix —
+    `'GimpleGen' object has no attribute '_emit_dict_int_value_store'`, on
+    four bytes-dict tests — while every gate stayed green.
+
+    Checked statically over CALLS only. A bare `gen._registry` read of an
+    attribute `__init__` assigns is not this defect — and there are ~330 of
+    them, so including reads would drown the ~2 real ones in noise.
+    `mojo/backend_gimple/spec_gen.py` is excluded because its `gen` is the
+    spec generator's own object, not a `GimpleGen`; it is the only backend
+    module whose `gen` is not one.
+    """
+    import glob
+
+    import gimple_codegen
+    cls = gimple_codegen.GimpleGen
+    known = set(vars(cls))
+    tree = ast.parse(open(os.path.join(HERE, 'gimple_codegen.py')).read())
+    cdef = next(n for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == 'GimpleGen')
+    for n in ast.walk(cdef):
+        # `self.x = ...` inside any method, plus the class-level constants.
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                and n.value.id == 'self':
+            known.add(n.attr)
+        if isinstance(n, ast.Name):
+            known.add(n.id)
+    bad = []
+    for path in sorted(glob.glob(os.path.join(HERE, 'mojo/backend_gimple/*.py'))):
+        if os.path.basename(path) == 'spec_gen.py':
+            continue
+        for n in ast.walk(ast.parse(open(path).read())):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id in ('gen', 'gen0')
+                    and n.func.attr not in known):
+                bad.append(f'{os.path.relpath(path, HERE)}:{n.lineno} '
+                           f'gen.{n.func.attr}')
+    check('the backend never calls a gen method GimpleGen does not have',
+          not bad, '; '.join(bad))
 
 
 # Every `.py` and `.mojo` whose text can end up in a refusal a test pins, and
@@ -3767,11 +3907,30 @@ UNREGISTERED = {
     # Since 2026-10-04 even the KEYS are gone for the members that had nothing
     # of their own to say: the family is `_DECLARED_BY_RULE` below, which
     # carries every `test_formal_*.py` and so makes the next member of it cost
-    # nobody an edit here. The three formal suites still listed in this block
-    # are listed because each says something the family's sentence cannot (and
-    # two of them say the family reason is the WRONG one for them), which is
+    # nobody an edit here. The formal suites still listed in this block are
+    # listed because each says something the family's sentence cannot, which is
     # the rule's own rule: an entry beats a rule.
-                                    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
+    #
+    # `test_formal_returned_frame.py` is one of them and its reason is further
+    # down, where the row that survives lives — a duplicate key here would win
+    # by assignment order, not by which sentence is the better one, and the
+    # estate check below is what says so.
+    #
+    # `test_formal_bracketed_method_field_set.py` was here too, under the same
+    # reason, and was REGISTERED instead (2026-10-04, as
+    # `formal-bracketed-method-field-set`, in `check` and `proofs`): 3.7 s and
+    # 0.05 GB measured, 26 rows, no Lean — `_FORMAL_SUITE_REASON`'s "minutes per
+    # job" is a measurement of the suites that build and RUN a program per group,
+    # and this file does that for its last two rows out of twenty-six. It was also
+    # the file whose four ask-COUNT rows had been red in no bucket, which is the
+    # cost argument and the coverage argument agreeing.
+    'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
+    'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
+    'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
+    'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
+    'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
+    'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
     # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
     # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls
     # of the stdlib, one per class, and it asserts on the list of paths

@@ -1143,6 +1143,78 @@ def _lower_struct_attr_call(gen, method, node):
                             f'struct.Struct.{method}() — raises at runtime')
 
 
+# A `M.<fn>` call on a module THIS compile cannot resolve, where `M.<fn>` is a
+# libm symbol. `import math` binds a module MARKER (an `int64_t` global
+# initialised to 0) because there is no Mojo source for `math` under this
+# checkout's stdlib — but every member below is a C library function, `<math.h>`
+# is already in every generated preamble (module_gen's preamble block), and
+# `_LIBC_SIGS` already pins most of these symbols' signatures for argument
+# coercion. So the call is a libc call wearing a module's name, and lowering it
+# as one is not a shortcut: it is the whole implementation.
+#
+#   member -> (C symbol, result C type, argument C types, truncate to int?)
+#
+# The last flag is `math.floor` / `math.ceil` and nothing else: Python's two
+# return an `int` and C's two return a `double`, so without the truncation
+# `print(math.floor(1.5))` prints `1.0` where CPython prints `1`. The other
+# members return a float in both languages and go through unchanged.
+#
+# NOT here, deliberately, and each for its own reason rather than by omission:
+# a module CONSTANT (`math.pi` — a value, not a call, and it needs a
+# different mechanism than a lowered call); the INTEGER members (`math.gcd`,
+# `math.factorial`), which are not libm at all; and anything with a non-libm
+# implementation. A member absent from this table is a named failure, which is
+# what `mojo_module_not_compiled` says, and is the correct answer for a member
+# this table cannot honour.
+_MODULE_MEMBER_LIBC: dict[str, dict[str, tuple]] = {
+    'math': {
+        'floor': ('floor', 'int64_t', ['double'], True),
+        'ceil': ('ceil', 'int64_t', ['double'], True),
+        'trunc': ('trunc', 'int64_t', ['double'], True),
+        'sqrt': ('sqrt', 'double', ['double'], False),
+        'fabs': ('fabs', 'double', ['double'], False),
+        'pow': ('pow', 'double', ['double', 'double'], False),
+        'exp': ('exp', 'double', ['double'], False),
+        'log': ('log', 'double', ['double'], False),
+        'log2': ('log2', 'double', ['double'], False),
+        'log10': ('log10', 'double', ['double'], False),
+        'log1p': ('log1p', 'double', ['double'], False),
+        'expm1': ('expm1', 'double', ['double'], False),
+        'sin': ('sin', 'double', ['double'], False),
+        'cos': ('cos', 'double', ['double'], False),
+        'tan': ('tan', 'double', ['double'], False),
+        'asin': ('asin', 'double', ['double'], False),
+        'acos': ('acos', 'double', ['double'], False),
+        'atan': ('atan', 'double', ['double'], False),
+        'atan2': ('atan2', 'double', ['double', 'double'], False),
+        'sinh': ('sinh', 'double', ['double'], False),
+        'cosh': ('cosh', 'double', ['double'], False),
+        'tanh': ('tanh', 'double', ['double'], False),
+        'hypot': ('hypot', 'double', ['double', 'double'], False),
+        'copysign': ('copysign', 'double', ['double', 'double'], False),
+        'fmod': ('fmod', 'double', ['double', 'double'], False),
+        'erf': ('erf', 'double', ['double'], False),
+        'erfc': ('erfc', 'double', ['double'], False),
+    },
+}
+
+
+def module_member_libc(module: str, member: str):
+    """`(symbol, result ctype, arg ctypes, truncate)` for a libm-backed member
+    of an uncompiled module marker, or None.
+
+    None is the answer for every member this table does not carry, and the
+    caller then raises — which is the behaviour that was right for all of them
+    before the table existed, and is still right for the ones it cannot
+    honour. The ARITY is checked by the caller, not here, because a member
+    spelled with the wrong number of arguments is a different error (a Python
+    TypeError at run time) and not a licence to call the C function anyway."""
+    _mods = _MODULE_MEMBER_LIBC.get(_as_str(module))
+    if _mods is None:
+        return None
+    return _mods.get(_as_str(member))
+
+
 def _uncompiled_module_marker(gen, node) -> str:
     """The module name behind `mod.member(...)` when `mod` is a bare-import
     marker for a module THIS COMPILE never compiled, else `''`.
@@ -3823,6 +3895,29 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # the module is missing rather than answer about the integer 0.
         _marker_mod = _uncompiled_module_marker(gen, node)
         if _marker_mod:
+            _lc = module_member_libc(_marker_mod, method)
+            if _lc is not None and len(_lc[2]) == len(node.args):
+                # A libm symbol behind a module marker: lower it as the libc
+                # call it always was. `os.environ` / `os.path.isdir` /
+                # `os.unlink` already work for the same reason — ast_rewriter
+                # handles those, and this is the shape for the members it has
+                # no rule for. See `_MODULE_MEMBER_LIBC` for what is in the
+                # table and, more usefully, for what is NOT and why.
+                _sym, _ret, _params, _trunc = _lc
+                _largs = []
+                for _pi, _pa in enumerate(node.args):
+                    _at, _av = gen.lower_expr(_pa)
+                    _largs.append((_params[_pi],
+                                   gen._coerce_to_type(_at, _params[_pi], _av)))
+                # `_emit_call` writes into a result NAME (it does not return
+                # the value), so the temp is made here and coerced after —
+                # never a cast applied inline to the call's own operand, which
+                # `-fgimple` refuses as "invalid operand in unary operation".
+                _raw = gen._new_temp(_ret)
+                gen._emit_call(_ret, _raw, _sym, _largs)
+                if _trunc:
+                    return 'int64_t', gen._coerce_to_type(_ret, 'int64_t', _raw)
+                return _ret, _raw
             for _ea in node.args:
                 gen.lower_expr(_ea)
             gen._emit_call(

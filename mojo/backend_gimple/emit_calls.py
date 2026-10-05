@@ -40,6 +40,7 @@ import mojo.middle.lambdareduce as _gld
 import gimple_codegen
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.calls_shared via explicit imports.
@@ -2763,21 +2764,37 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             sp = gen._coerce_to_type('int64_t', 'MojoSet *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_set_len ({sp})')
         if actual == 'MojoList *':
+            # A statically RECORDED kind, so this is the fast path and not the
+            # question `mojo_list_len` used to be answering by accident: no
+            # registry query is needed for a slot whose kind `_actual_types`
+            # already knows, and the three arms above it are the same fast path
+            # for the other two. Only the arm BELOW this one is the query.
             lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
-        # NO recorded kind: the slot really is polymorphic, so ASK. A
-        # parameter whose call sites are a list AND a string, a conditional
-        # that assigns two kinds, a value forwarded from either — for all of
-        # them `_actual_types` has nothing (there is no single store to
-        # record: the slot is one C type and several kinds), and the previous
-        # unconditional `mojo_list_len` was a header read out of whatever the
-        # word addressed — non-deterministically, since that is whatever
-        # follows the bytes (bugs/CODEGEN_len_of_a_param_called_with_both_a_
-        # list_and_a_str.md). `mojo_len_of_word` is `mojo_cstr_or_int_str`'s
-        # discriminator asked the length question, and `print` has used that
-        # shape for its operand all along.
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_len_of_word',
-                                         [('int64_t', av)])
+        # NO recorded kind: the slot really is polymorphic, so ASK — and ask
+        # the same way `repr` does. A parameter whose call sites are a list AND
+        # a string, a conditional that assigns two kinds, a value forwarded from
+        # either: for all of them `_actual_types` has nothing (there is no
+        # single store to record — the slot is one C type and several kinds),
+        # and committing to `mojo_list_len` was a header read out of whatever
+        # the word addressed, non-deterministically, since that is whatever
+        # follows the bytes. That defect's doc is deleted with its fix, so it is
+        # named here by the mechanism: `len()` had no type-erasure
+        # discriminator at all, and its lowering committed to the one accessor
+        # the slot's DECLARED C type implied.
+        #
+        # `emit_infra._len_of_boxed` is `mojo_cstr_or_int_str`'s discriminator
+        # asked the length question, and it is the SAME chain
+        # `emit_infra._repr_boxed_container` already walks for the repr side, so
+        # `len` and `print` cannot disagree about what a boxed word holds. Its
+        # last arm is this very `mojo_list_len`, so an input none of the
+        # registries recognise keeps exactly the answer it had — which is what
+        # makes it a strict improvement rather than a change of behaviour for
+        # everything else. Its `_ensure_local` fetch is what makes it compile
+        # under `-fgimple` when the slot is declared as some other scalar
+        # (`mojo/middle/coro.py`'s `int pininfo`); `_new_val` casts literals
+        # only and emits a non-trivial conversion gcc rejects outright.
+        return 'int64_t', ginf._len_of_boxed(gen, av)
     return 'int64_t', gen._new_val('int64_t', f'(int64_t)0  /* len() on unsupported type {at} */')
 
 

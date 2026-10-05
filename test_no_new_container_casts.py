@@ -64,9 +64,11 @@ def strip_prose(src: str) -> str:
     `int64_t f(MojoList *)`), `_carry_elem_types`'s docstring (which names the
     bare cast whose missing element typing that function exists to carry), and
     `emit_exprs.py`'s `_literal_slot_kinds` docstring (the `(MojoList *)1`
-    that `mojo_repr_list_kinds`'s `'l'` arm rendered a slot's integer through,
-    in the account of
-    `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md`).
+    that `mojo_repr_list_kinds`'s `'l'` arm rendered a slot's integer through).
+    That cast came out of the `*expr`-spread-in-a-display family, whose doc is
+    deleted with its fix, so it is named here by the mechanism rather than by a
+    path: the spread's OPERAND was not lowered through the slot-kind walk, so a
+    literal that should have been a value arrived as a bare address.
 
     The rule is "a LOGICAL LINE that is a lone STRING token", not "a string
     literal", because the two pull in opposite directions here. An
@@ -287,7 +289,30 @@ def strip_prose(src: str) -> str:
 # So: 19 is again a mix, and again recorded rather than pretended away. The
 # difference from the 19 above is the mix's composition -- nothing here is
 # PROSE, so `strip_prose` is not what these two survived.
-BASELINE_COUNT = 19
+#
+# 19 -> 17 (2026-10-05, the merge of `work/merge-gate28` and
+# `work/merge-formal27b`). THREE casts left, and the direction matters: the tree
+# this merge started from measured 20 against this same ledger, so it was RED by
+# one before anything here ran, and the merge is a net reduction rather than a
+# move. What left:
+#
+#   * `emit_calls.py`'s `_lower_builtin_len`, TWO of them. The boxed-value
+#     length question now goes through `emit_infra._len_of_boxed`, which
+#     fetches its subject with `gen._ensure_local` -- the existing chokepoint
+#     for "give me this value in a temp of MY type" -- instead of building the
+#     temp by casting the word at a `(MojoList *)`. That is the same
+#     consolidation `_ensure_local` was added for, and it is also a BUILD fix
+#     rather than a taste one: `_new_val` casts bare integer literals only, so
+#     a boxed value declared as some other scalar (`coro.py`'s `int pinfo`)
+#     emitted a non-trivial conversion that `-fgimple`'s verifier rejects.
+#   * `module_gen.py`'s generated `_mojo_repr_dict`: its six-arm value chain is
+#     gone, so the `(MojoDict *)`/`(MojoList *)` coercions that chain spelled at
+#     each arm are calls to `mojo_dict_slot_repr` instead.
+#
+# Nothing was re-spelled to escape the scanner: the count is read out of the
+# source with `strip_comments`, and a cast that moved to another line would move
+# to another line in this number too.
+BASELINE_COUNT = 17
 
 
 def count_casts() -> int:

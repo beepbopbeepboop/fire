@@ -203,12 +203,20 @@ the number it was assigned when it was filed.
   generator. Two docs were filed rather than fixed from what those turned up:
   `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
   `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
-  A merge in the same batch also left `gimple_codegen.GimpleGen` carrying the
+  A merge in the same batch left `gimple_codegen.GimpleGen` carrying the
   `emit_dict_int_value_store` delegation TWICE — the merge was resolved file by
   file, and `gimple_codegen.py` is the aggregator both copies of the shared
   file fed. Python keeps the last, both bodies were identical, and no test could
-  see it. Deduplicated, with an `ast`-based check in `test_gimple.py` that no
-  class in the codegen tiers defines a name twice.
+  see it, which is why another branch's doc read the same name as DROPPED and
+  filed four `bytes`-dict tests against `'GimpleGen' object has no attribute
+  '_emit_dict_int_value_store'` — an `AttributeError` during codegen that no
+  exit code anywhere reports. Deduplicated (so the doc's subject was never real
+  on this tree) and both halves closed: `test_gimple.py`'s `ast`-based
+  `no_name_is_defined_twice_in_a_codegen_class` reads the SOURCE rather than
+  the class object, which is exactly where the evidence is gone, and
+  `test_suite.py`'s "the backend never calls a gen method GimpleGen does not
+  have" now checks the whole delegation family rather than the one name. The
+  doc is deleted with the dedup.
 - **The nested-`def` closure environment is freed**
   (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
   OPEN 2, the `{mut}` capture box, is still open and is now the only thing in

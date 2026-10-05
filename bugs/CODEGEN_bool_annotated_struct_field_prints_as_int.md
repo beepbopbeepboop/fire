@@ -77,10 +77,17 @@ bytes-dict tests) was missing. All of it is back, and `emit_dict_int_value_store
 has exactly the five callers its own docstring names.
 
 The merge damage was measured rather than inferred: the missing delegate and
-the same four test failures were filed independently by another worker and are
-fixed, along with the duplicate copy of that delegation the same merge left
-behind (`gimple_codegen.py` is the aggregator both copies of the shared file
-fed, and the merge was resolved file by file).
+the same four test failures were filed independently by another worker, and
+this change fixes that doc's subject — its doc is deleted with it. The same
+merge also left a DUPLICATE copy of that delegation behind (`gimple_codegen.py`
+is the aggregator both copies of the shared file fed, and the merge was
+resolved file by file), so the name was simultaneously reported missing and
+present twice; the duplicate is gone too, and
+`test_gimple.py`'s `no_name_is_defined_twice_in_a_codegen_class` reads the
+source with `ast` to keep it gone. `test_suite.py` now checks the other half
+— every `gen.X(...)` the backend calls must be a method `GimpleGen` has —
+because a missing delegate is an `AttributeError` during codegen that no exit
+code anywhere reports, and one name is not a family.
 
 ## What is STILL wrong
 

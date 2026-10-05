@@ -2325,6 +2325,18 @@ _KW_DICT_FNS = frozenset([
     'mojo_dict_contains', 'mojo_dict_pop_int', 'mojo_dict_pop_str',
     'mojo_dict_pop_double', 'mojo_dict_setdefault_int',
     'mojo_dict_setdefault_str',
+    # The bool / None / struct setters. Absent from this set they were not
+    # refused — `_apply_kw_keys` fell through to the "build the decimal string
+    # now" arm, which stores the entry in the plain char* key DOMAIN while the
+    # matching `_kw` READ looks it up in the content-keyed one. So
+    # `d[("a",)] = True; print(d[("a",)])` stored under the tuple's address as
+    # text and read the content key: two entries for one assignment, and the
+    # read saw neither. Every setter `emit_dict_int_value_store` can emit has
+    # to be here; a list and a membership test are how the next one gets
+    # noticed, and `test_runtime_header_scan.py` walks the header against this
+    # set's spelling.
+    'mojo_dict_set_bool', 'mojo_dict_set_none', 'mojo_dict_set_struct',
+    'mojo_dict_set_other_struct',
 ])
 
 
@@ -5224,7 +5236,15 @@ def _repr_boxed_container(gen, value: str):
     replaces.
     """
     _res = gen._new_temp('char *')
-    _it64 = gen._new_val('int64_t', value)
+    # `_ensure_local`, not `_new_val`: this helper's whole subject is a value
+    # whose C type is NOT statically known, so the expression it is handed is
+    # regularly declared as something that is not `int64_t` (see
+    # `_boxed_word_input` below). `_new_val` casts only a bare integer
+    # LITERAL, so it emits `_tN = <that var>;` with no cast, which is
+    # `non-trivial conversion in 'var_decl'` under `-fgimple`'s strict
+    # verifier. `_ensure_local` is the chokepoint that already answers "load
+    # this into a temp of MY type, casting if its declared type differs".
+    _it64 = gen._ensure_local('int64_t', value)
     bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
     bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
     bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
@@ -5253,6 +5273,103 @@ def _repr_boxed_container(gen, value: str):
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_list)
     gen._emit(f'  {_res} = mojo_str_from_int ({_it64});')
+    gen._emit_label(bb_after)
+    return _res
+
+
+def _len_of_boxed(gen, value: str) -> str:
+    """`len()` of a container or string held in an `int64_t` box, as an
+    `int64_t` temp.
+
+    The same question `_repr_boxed_container` above answers, for the same
+    reason and by the same mechanism — the box is this codegen's answer for a
+    value with no single C type, and one C type per parameter means a
+    genuinely polymorphic parameter gets ONE of them. `def lst(x): return
+    len(x)` called as both `lst([1, 2, 3])` and `lst("abcd")` declares `int64_t
+    x`, and the answer then depends entirely on which kind the lowering
+    commits to: `mojo_list_len` read the string's own bytes as a `MojoList`
+    header and printed `7308325556857761645` where CPython prints `4`.
+
+    That was not a value comparison anyone could have caught: it is whatever
+    heap bytes follow the pointer, so it is stable per run and arbitrary
+    across runs.
+
+Order matters and is the same one `_repr_boxed_container` uses: the live
+    container registries first — list, dict, set AND bytes, because
+    `mojo_boxed_is_str` calls a boxed bytes value a string (it is
+    pointer-shaped and is none of a list, dict, set or box) and `mojo_strlen`
+    over a bytes object walks its payload for a NUL, answering a length right
+    only by the accident that `MojoBytes.len` sits at `MojoList.len`'s offset
+    — and then the model's own `mojo_boxed_is_str` discriminator, and
+    `mojo_list_len` LAST as the unconditional fallback. That last arm is what
+    keeps this a strict improvement rather than a change of behaviour for
+    everything else: the previous lowering was `mojo_list_len`
+    unconditionally, so every input the registries do not recognise still gets
+    exactly the answer it got before.
+
+    The boxed word is fetched with `_ensure_local`, not `_new_val`, and that
+    is not a style choice — it is what makes the closure compile. This
+    helper's subject is a value whose C type is NOT statically known, so the
+    expression handed to it is regularly declared as something else:
+    `mojo/middle/coro.py`'s `_visit_call` declares `int pinfo` (from
+    `pinfo = None`) and then assigns a boxed dict into it, so `len(pinfo)`
+    arrives here as the expression `pinfo`, declared `int`. `_new_val` casts
+    only a bare integer LITERAL, so it emitted `int64_t _tN = pinfo;` — and
+    under `-fgimple`'s strict verifier that is `non-trivial conversion in
+    'var_decl'`, a hard gcc error with no binary at all: measured, four of
+    them in that function plus one in `myinterpreter.py`'s `MojoString`, i.e.
+    `fire.py build fire.py` stopped building (see
+    `bugs/CODEGEN_a_local_declared_from_None_holds_a_boxed_pointer.md`).
+    `_ensure_local` is the existing chokepoint for exactly this question —
+    "give me this value in a temp of MY type, casting when its DECLARED type
+    is a different scalar" — and it emits nothing extra when there is no
+    mismatch, so every input that compiled before compiles the same.
+    """
+    _res = gen._new_temp('int64_t')
+    _it64 = gen._ensure_local('int64_t', value)
+    bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
+    bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+    bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
+    bb_byt = gen._new_bb(); bb_not_byt = gen._new_bb()
+    bb_str = gen._new_bb(); bb_not_str = gen._new_bb()
+    bb_after = gen._new_bb()
+    isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _it64)])
+    gen._emit(f'  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};')
+    gen._emit_label(bb_dict)
+    _dp = gen._coerce_to_type('int64_t', 'MojoDict *', _it64)
+    gen._emit(f'  {_res} = mojo_dict_len ({_dp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_dict)
+    iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', _it64)])
+    gen._emit(f'  if ({iss}) goto {bb_set}; else goto {bb_not_set};')
+    gen._emit_label(bb_set)
+    _sp = gen._coerce_to_type('int64_t', 'MojoSet *', _it64)
+    gen._emit(f'  {_res} = mojo_set_len ({_sp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_set)
+    isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', _it64)])
+    gen._emit(f'  if ({isl}) goto {bb_list}; else goto {bb_not_list};')
+    gen._emit_label(bb_list)
+    _lp = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
+    gen._emit(f'  {_res} = mojo_list_len ({_lp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_list)
+    isb = gen._call_expr('int', 'mojo_is_registered_bytes', [('int64_t', _it64)])
+    gen._emit(f'  if ({isb}) goto {bb_byt}; else goto {bb_not_byt};')
+    gen._emit_label(bb_byt)
+    _bp = gen._coerce_to_type('int64_t', 'MojoBytes *', _it64)
+    gen._emit(f'  {_res} = mojo_bytes_len ({_bp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_byt)
+    ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _it64)])
+    gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
+    gen._emit_label(bb_str)
+    _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
+    gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_str)
+    _lp2 = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
+    gen._emit(f'  {_res} = mojo_list_len ({_lp2});')
     gen._emit_label(bb_after)
     return _res
 

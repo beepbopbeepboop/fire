@@ -6812,7 +6812,7 @@ def outer():
     # pipeline actually produces, and its own docstring spelled a third prefix.
     # It is now the intersection of the two artifacts' own symbol names, which
     # is what makes it un-rot-able: a rename on the emitting side moves both
-    # halves together. Fixed in 5f131392 ("_refuse_dropped_companion asks the
+# halves together. Fixed in 5f131392 ("_refuse_dropped_companion asks the
     # two artifacts which symbols they share"), which also closed the guard
     # doc — it existed to record that this condition could never fire, and it
     # does now, so the doc went with the fix rather than leaving a citation
@@ -7345,6 +7345,69 @@ def main():
             return
         print(f"PASS  {name}")
         _PASS += 1
+
+    def test_no_name_is_defined_twice_in_a_codegen_class():
+        """No class in the codegen tiers defines the same name twice.
+
+        `GimpleGen` is the aggregator every backend module's body hangs off as
+        a one-line delegation, so it is where a merge collision lands: the
+        conflict is resolved FILE BY FILE, one side keeps `gimple_codegen.py`
+        whole and the other keeps `mojo/backend_gimple/emit_stmts.py` whole,
+        and the two copies of the shared file end up contributing the SAME
+        delegation at two different places in the class body.
+
+        Python does not complain. The second definition silently replaces the
+        first, so the duplicate is invisible to every test that exercises the
+        method — and to a reader, because the two bodies are identical and
+        there is nothing to disagree about. What it costs is the ledger: a name
+        that appears twice cannot be counted, so the "one delegate per
+        extracted helper" rule stops being checkable, and the next edit to
+        either copy is a coin flip about which one it changed.
+
+        This parses the SOURCE with `ast` rather than reflecting on the class,
+        because the class object is exactly where the evidence is gone: one
+        name, one function, no trace of the loser. Reading it back off
+        `gimple_codegen.GimpleGen.__dict__` would pass on the tree that has the
+        bug.
+        """
+        global _PASS, _FAIL
+        name = "no_name_is_defined_twice_in_a_codegen_class"
+        import ast
+        import glob as _glob
+        import os as _os
+
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        paths = [_os.path.join(here, 'gimple_codegen.py')]
+        for pat in ('mojo/middle/*.py', 'mojo/backend_gimple/*.py'):
+            paths += sorted(_glob.glob(_os.path.join(here, pat)))
+
+        problems = []
+        for p in paths:
+            with open(p, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=p)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                first = {}
+                for stmt in node.body:
+                    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if stmt.name in first:
+                        problems.append(
+                            f"{_os.path.relpath(p, here)}:{node.name}."
+                            f"{stmt.name} is defined twice, at lines "
+                            f"{first[stmt.name]} and {stmt.lineno} — the "
+                            f"second silently replaces the first")
+                    else:
+                        first[stmt.name] = stmt.lineno
+        if problems:
+            print(f"FAIL  {name}")
+            for pr in problems:
+                print(f"      {pr}")
+            _FAIL += 1
+        else:
+            print(f"PASS  {name}  ({len(paths)} modules)")
+            _PASS += 1
 
     def test_every_funcptr_initializer_has_a_definition():
         """Every `_funcptr_X = (void *)X` initializer in the output must have a
@@ -7939,6 +8002,93 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable():
+        """Six `static` repr helpers, into every module, whatever the module can
+        reach — and the gate that withdrew them.
+
+        `_mojo_dispatch_repr`, `_mojo_generic_elem_repr`, `_mojo_repr_list`,
+        `_mojo_repr_dict`, `_mojo_repr_pair` and `_mojo_repr_set` were appended
+        into EVERY module: `module_gen.py`'s forward declarations, again in
+        `gen_module_impl`'s ungated four, and the definitions themselves. Nothing
+        outside the translation unit can name them (`static`), nothing registers
+        one by address (there is no repr-function-pointer table), and the only
+        references are mutual inside the cluster plus the per-struct shims and
+        `emit_infra.py`'s `_mojo_repr_set` call sites. Hand-deleting them from a
+        small client compiled and linked with no undefined reference at 5208
+        bytes against 8760; measured on `test_module_cache.py`'s two clients the
+        gate is 8264 -> 4080 and 10432 -> 6296.
+
+        So `module_gen.py::_drop_unreachable_repr_cluster` withdraws the cluster
+        from any module whose own EMITTED text names none of the six — counted
+        after emission, on the parts already built, because that is the only
+        question a source-text heuristic cannot answer: a struct stored in a
+        container reaches `_mojo_generic_elem_repr` through the struct's own
+        `__repr__`, and the module that never spells "list" is the one that
+        needs it.
+
+        Both directions are asserted, because the gate's two failure modes are
+        opposite and one of them is silent. Withdrawing what IS reachable is a
+        LINK error the suite would catch anywhere. Withdrawing what is NOT
+        reachable is invisible: the module still builds and still answers
+        correctly, having simply never carried the helpers. The counter-test is
+        the second program — it asserts the cluster is PRESENT for a module that
+        needs it, so a gate that degenerated into "always drop" fails here
+        rather than passing every other case in the tree.
+        """
+        global _PASS, _FAIL
+        name = "the_generic_repr_cluster_is_emitted_only_where_it_is_reachable"
+        # Neither program mentions a container: one is arithmetic, one holds a
+        # struct whose OWN `__repr__` is what routes a container into
+        # `_mojo_generic_elem_repr`.
+        plain = '''\
+def main():
+    var x = 1
+    x = x + 2
+    print(x)
+main()
+'''
+        needs = '''\
+struct P:
+    var x: Int
+    def __init__(out self):
+        self.x = 7
+    def __repr__(self) -> String:
+        return "P<" + str(self.x) + ">"
+def main():
+    print([P()])
+main()
+'''
+        for src, want_cluster, label in ((plain, False, 'plain'),
+                                         (needs, True, 'struct-in-list')):
+            try:
+                c_src = gimple_codegen._run_pipeline(
+                    src, filename=f'{label}.mojo',
+                    **{'do_imports': True})[0]
+            except Exception as e:
+                print(f"FAIL  {name} [{label}]: codegen raised {e!r}")
+                _FAIL += 1
+                return
+            has_defs = 'static char * _mojo_repr_list (MojoList *lst) {' in c_src
+            has_fwd = 'static char * _mojo_repr_list (MojoList *);' in c_src
+            if has_defs != want_cluster or has_fwd != want_cluster:
+                print(f"FAIL  {name} [{label}]: definitions present={has_defs}, "
+                      f"forward declaration present={has_fwd}; the cluster is "
+                      f"{'kept' if want_cluster else 'withdrawn'} for this "
+                      f"module")
+                _FAIL += 1
+                return
+            # A half-gated cluster — a declaration without its definition or the
+            # reverse — is the link error the gate's own docstring names, and it
+            # is invisible to a string count. Both halves must move together.
+            if has_defs != has_fwd:
+                print(f"FAIL  {name} [{label}]: the gate dropped one half of the "
+                      f"cluster (definitions={has_defs}, decl={has_fwd}) — that "
+                      f"is a link error waiting to happen")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_print_of_a_function_value_is_not_a_decimal_address():
         """`print(f)` on a function object is a `str()` spelling, and it used
         to be undefined behaviour.
@@ -8288,6 +8438,97 @@ print("%r" % p)
                        else {'link_mode': True}))[0]
                 c_file = os.path.join(td, f'aliased_{mode}.c')
                 exe = os.path.join(td, f'aliased_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          f"{cc.stderr[:1200]}")
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                if run.stdout != want:
+                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
+                          f"CPython printed {want!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype():
+        """A module reached by TWO importers gets a `(void)` prototype under
+        link mode, and every call through it is then "too many arguments".
+
+        The link-mode extern preamble types an imported symbol from the
+        IMPORTER's snapshot (`module_loader`'s text scan of the import). In a
+        diamond that snapshot comes back with no resolved parameter list, so
+        the extern read `extern int64_t p_lister_hits_2dbb98 (void);` — beside
+        the DEFINING module's own forward declaration,
+        `int64_t p_lister_hits_2dbb98 (int64_t, int64_t)`, emitted from the
+        definition's inferred parameter types and emitted by the same
+        translation unit. Two independent inferences about one prototype, and
+        gcc rejects the unit:
+
+            p/checker.py: error: conflicting types for 'p_lister_hits_2dbb98';
+                have 'int64_t(void)'
+            p/lister.py: note: previous definition ... with type
+                'int64_t(int64_t, int64_t)'
+            p/main.py: error: too many arguments to function
+                'p_lister_hits_2dbb98'; expected 0, have 2
+
+        So the trigger is a module with two importers, not a name collision
+        and not a return type: the fixture below is three modules with no
+        homonyms at all, and the single-TU half of the same fixture already
+        compiled and printed CPython's answer. Both pipelines are asserted
+        against CPython on the same text, so this is a real two-pipeline
+        assertion rather than a new expectation.
+
+        The second `print` is the control that makes it a DIAMOND: without it
+        `p.lister` has exactly one importer and the defect does not fire."""
+        global _PASS, _FAIL
+        name = "a_diamond_import_does_not_give_an_imported_function_a_void_prototype"
+        files = {
+            'p/lister.py': 'def hits(items, name):\n    return len(items)\n',
+            'p/checker.py': ('from p.lister import hits\n'
+                             'def found(items, name):\n'
+                             '    return hits(items, name) + 1\n'),
+            'p/main.py': ('from p.checker import found\n'
+                          'from p.lister import hits\n'
+                          '\n'
+                          'def main():\n'
+                          '    print(found([1, 2, 3], "a"))\n'
+                          '    print(hits([4, 5], "b"))\n'
+                          'main()\n'),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            for rel, body in files.items():
+                fp = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with open(fp, 'w') as fh:
+                    fh.write(body)
+            entry = os.path.join(td, 'p', 'main.py')
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60,
+                                env=dict(os.environ, PYTHONPATH=td))
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:400]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            for mode in ('single-TU', 'link-mode'):
+                c_src = gimple_codegen._run_pipeline(
+                    files['p/main.py'], filename=entry,
+                    **({'do_imports': True} if mode == 'single-TU'
+                       else {'link_mode': True}))[0]
+                c_file = os.path.join(td, f'diamond_{mode}.c')
+                exe = os.path.join(td, f'diamond_{mode}.exe')
                 with open(c_file, 'w') as fh:
                     fh.write(c_src)
                 cc = subprocess.run(
@@ -9702,6 +9943,137 @@ relay('hi')
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_forwarded_container_argument_takes_the_callees_kind():
+        """An unannotated parameter whose ONLY use is to be FORWARDED must take
+        the container kind of the callee's corresponding parameter.
+
+        The container-axis twin of
+        `a_forwarded_string_argument_keeps_its_type` above (that one is the
+        scalar axis, fixed by `_gmi_apply_call_site_param_evidence`'s belief in
+        unanimous literal call sites; the struct-pointer axis is
+        `gimple_struct_ptr_param_forwarded_through_two_free_functions` in
+        test_gimple_runner.py). This is the axis neither of them covers:
+
+            def leaf(d): print(d["x"])
+            def middle(d): return leaf(d)
+            middle({"x": "1"})          ->  None, want 1
+
+        `middle`'s body mentions `d` exactly once, as an argument, so
+        `_infer_param_types` has nothing to read and falls to its name-based
+        container guess: `void middle(MojoList * d)`. That is a hard
+        wrong-pointer coercion, not a missing type — `MojoList *` where
+        `MojoDict *` is meant compiles clean and the callee reads whatever is
+        at that offset. `leaf`'s own inference already says `MojoDict *` (the
+        subscript is enough), so the evidence existed and nothing read it.
+
+        ORDER-DEPENDENT, and that is why it survived: `_infer_param_types` is
+        per-function and runs in source order, so with `middle` defined BEFORE
+        `leaf` the same program printed `1`, correctly and for no reason
+        anyone designed. Both orders are in the program below for that reason
+        alone, and `test_gimple_runner.py` pins the same pair.
+
+        The forward-as-a-statement (no `return`) shape is in there too,
+        because it is the same defect and not a return-type question. The list
+        and set chains and the two-hop chain are the transitive and
+        other-kind versions of the same observation, applied to a fixpoint
+        rather than once. Asserted against CPython's stdout, on BOTH
+        pipelines — the inference is whole-program, not per-function."""
+        global _PASS, _FAIL
+        name = "a_forwarded_container_argument_takes_the_callees_kind"
+        src = '''\
+def leaf(d):
+    print(d["x"])
+
+def middle(d):
+    return leaf(d)
+
+def middle_first(d):
+    return leaf_late(d)
+
+def leaf_late(d):
+    print(d["x"])
+
+def mid1(d):
+    return mid2(d)
+
+def mid2(d):
+    return leaf(d)
+
+def leaf_v(v):
+    print(len(v), v[0])
+
+def relay_v(v):
+    return leaf_v(v)
+
+def leaf_s(s):
+    print(len(s))
+
+def relay_s(s):
+    return leaf_s(s)
+
+def stmt_forward(d):
+    leaf(d)
+
+stmt_forward({"x": "s"})
+middle({"x": "1"})
+middle_first({"x": "2"})
+mid1({"x": "3"})
+relay_v([10, 20])
+relay_s({7})
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'forwarded_container.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'fwdc_{mode}.c')
+                exe = os.path.join(td, f'fwdc_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_list_sort_in_a_method_body_is_gimple_legal():
         """`self.<field>.sort()` inside a METHOD must compile.
 
@@ -10236,19 +10608,18 @@ print({'p': 1} | {'q': 2})
         what decides a key collision, so a merge that reorders is a wrong
         answer), a spread whose operand is a dict COMPREHENSION (the shape
         `_reset_func` uses), and a spread that overwrites a literal key.
-        Returns are inline for the same reason as the test above, and the
-        one literal value is `7` rather than `0` because a ZERO integer read
-        # back out of a dict USED TO print `None` on this backend — a separate
-        # defect with no spread anywhere in it, which made this case red for the
-        # wrong reason and so had to be written around. It is FIXED: the
-        # runtime's one `mojo_repr_slot_kind` renderer answers a zero word under a
-        # stated int kind with `0`, and `mojo_dict_items` records that kind on the
-        # pairs it builds. This case is therefore STRONGER than its comment used
-        # to claim it could be — the zero and the pair kinds are pinned by
-        # `gimple_dict_items_pairs_keep_the_slot_kind` and
-        # `dict_items_reads_each_slot_kind` — so leaving it on `7` keeps a second,
-        # unrelated red out of a spread test rather than adding coverage of a
-        # shape two other cases already own."""
+The `0` literals below are the load-bearing part of that list: a
+        ZERO integer read back out of a dict used to print `None` on this
+        backend — `.items()` discarded the slot's value kind, so the pair's
+        value slot was read by the generic element repr whose `val == 0`
+        arm answers `None` for a NULL pointer. Both halves are FIXED now, so
+        this row is written against the defect rather than around it:
+        `mojo_dict_items` records the slot kind on each pair
+        (`mojo_list_set_elem_repr`), and every value kind renders through the
+        runtime's one implementation, `mojo_dict_slot_repr` — whose zero answer
+        comes from `mojo_repr_slot_kind` under a stated int kind. It used to sit
+        on `7` to keep this spread test from going red for an unrelated reason;
+        that reason is gone, so the row now pins the shape that reproduces it."""
         global _PASS, _FAIL
         name = "dict_literal_star_star_pair_merges_instead_of_storing"
         src = '''\
@@ -10259,7 +10630,7 @@ def b(x: dict) -> dict:
     return {**x, 'b': 2}
 
 def c(x: dict, y: dict) -> dict:
-    return {**x, 'mid': 7, **y}
+    return {**x, 'mid': 0, **y}
 
 def d(x: dict) -> dict:
     return {**{k: v for k, v in x.items() if k != 'skip'}}
@@ -11085,6 +11456,7 @@ print(run('x/y.txt'))
     test_walk_ast_dataclass_cache_is_transparent()
     test_scalar_arity_min_max_params_are_not_containers()
     test_a_forwarded_string_argument_keeps_its_type()
+    test_a_forwarded_container_argument_takes_the_callees_kind()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
     test_dict_literal_star_star_pair_merges_instead_of_storing()
@@ -11112,11 +11484,13 @@ print(run('x/y.txt'))
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype()
     test_two_modules_one_same_named_function_keep_their_own_return_types()
     test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
+    test_no_name_is_defined_twice_in_a_codegen_class()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
     test_callable_return_type_survives_its_carrier()
@@ -11125,7 +11499,57 @@ print(run('x/y.txt'))
     test_ctor_of_a_container_reaches_the_comprehension()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
+    test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
+
+    # `len()` of a value the codegen could not type, where that value is a
+    # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
+    # `selfhost` and `bootstrap-stage2-cc` together.
+    #
+    # `_len_of_boxed` (the `len()`-of-a-boxed-value lowering, which asks the
+    # runtime registries which container it holds) used to read its subject
+    # with `_new_val('int64_t', value)`, and `_new_val` casts a bare integer
+    # LITERAL and nothing else. So when the subject is a variable declared as
+    # any other scalar, the emitted line is `int64_t _tN = <that var>;` with
+    # no cast, which is `non-trivial conversion in 'var_decl'` under
+    # `-fgimple`'s strict verifier — a hard gcc error and no binary.
+    #
+    # The declaration is the whole reason this program exists. `info = None`
+    # types a local `int`, and a NESTED `def`'s local takes that path (the
+    # same source at module level declares `int64_t` and compiles), so
+    # `mojo/middle/coro.py`'s `_visit_call` — `pinfo = None` then
+    # `pinfo = gen_params[gname]` then `len(pinfo)` — is four of them, plus one
+    # in `myinterpreter.py`'s `MojoString`. `_ensure_local` is the chokepoint
+    # that already answers "this value in a temp of MY type, casting when its
+    # DECLARED type is a different scalar", and it emits nothing extra when
+    # there is no mismatch.
+    #
+    # Asserted as the emitted TEXT and not only as "it compiles": a `len()`
+    # that stopped routing through the registries at all would also compile,
+    # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
+    # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
+    # must-have list for that reason, and `(int64_t)info` is the exact text
+    # whose absence is the bug.
+    test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
+def outer(names, table):
+    def visit(node, caller):
+        info = None
+        key = names
+        if key in table:
+            info = table[key]
+        if info is None:
+            return 0
+        n = len(info)
+        return n
+    return visit(names, table)
+
+def main():
+    t = {"a": [1, 2, 3]}
+    print(outer("a", t))
+main()
+""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info"],
+       ["int64_t _t = info;"])
+
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

@@ -1738,6 +1738,96 @@ def module_struct_defs(path: str, project_root: str = None) -> list:
     return out
 
 
+def template_closure(roots, project_root: str = None) -> tuple:
+    """`({path: [template name, …]}, {path: [direct re-export, …]})` for the
+    closure of `roots` — ONE walk, with ONE `visited` set, for all of them.
+
+    The second half is what makes the first one reusable. A single-root
+    `module_templates_by_path` walk re-derives every module of its closure every
+    time it is asked, and the askers are per-DEPENDENCY: `imported_instantiations`
+    loops over a consumer's imports and calls `instantiation_demands` once per
+    `dep`, so a file with 16 imports paid 16 whole-closure walks. Measured on
+    `std/math/math.mojo` (2026-10-04): **16 calls, 1.56 s of a 4.6 s build, 34%**
+    — the largest single residue left in this file's cost profile, and
+    `bugs/PERF_formal_import_asks_are_products_of_the_closure.md` §4a is its
+    measure. The per-module ANSWER is already memoised
+    (`formal/monomorph.py`'s `_derived_from_source`); the WALK is the product,
+    and §2 of that doc is what made the walk the whole of what is left.
+
+    Recording each module's DIRECT re-exports is what turns the product into a
+    sum: every root's own closure is a subset of this closure, so each `dep`'s
+    answer is a reachability slice of the one table, and
+    `_closure_template_slice` reproduces it — in the SAME ORDER a standalone
+    walk from that root would produce, which matters because
+    `imported_instantiations`'s `demap.setdefault((base, args), mangled)` keeps
+    the FIRST owner's body for a name two owners declare.
+
+    Why the subset property holds rather than being hoped for: the walk
+    resolves each module's imports with `project_root or p`, `p` being the
+    module being collected, so a module's edges depend on that module and on the
+    `project_root` argument and on nothing about which root reached it. Walking
+    from a set of roots therefore explores each root's edges exactly as a
+    standalone walk from that root would.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    templates, edges, visited = {}, {}, set()
+
+    def collect(p):
+        key = os.path.abspath(p)
+        if key in visited:
+            return
+        visited.add(key)
+        names = MM.template_names(module_source_text(p))
+        if names:
+            templates[key] = names
+        deps = []
+        edges[key] = deps
+        for st in module_statements(p):
+            if not isinstance(st, F.FromImportStmt):
+                continue
+            dep = resolve_module_path(st.module, relative_to=p,
+                                      project_root=project_root or p)
+            if dep:
+                deps.append(os.path.abspath(dep))
+                collect(dep)
+
+    for root in roots or ():
+        collect(root)
+    return templates, edges
+
+
+def _closure_template_slice(templates: dict, edges: dict, root: str) -> dict:
+    """`templates` restricted to what `root` reaches, in standalone-walk order.
+
+    A DEPTH-FIRST walk of the recorded edges rather than a filter over the
+    table's insertion order, and that is the whole of the fidelity argument:
+    `imported_instantiations` keeps the first owner it meets for a
+    `(base, args)` pair, so a slice assembled in a different order would
+    silently instantiate a different module's body for the same name.
+
+    `edges` must contain an entry for every module of `root`'s closure, which
+    `template_closure` guarantees for every root it was given — `root` is always
+    one of them.
+    """
+    root = os.path.abspath(root)
+    out, seen = {}, set()
+    if root not in edges:
+        return out
+    stack = [root]
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        names = templates.get(p)
+        if names:
+            out[p] = names
+        for dep in reversed(edges.get(p) or ()):
+            if dep not in seen:
+                stack.append(dep)
+    return out
+
+
 def module_templates_by_path(path: str, project_root: str = None) -> dict:
     """`{module path: [generic template name, …]}` for `path`'s re-export closure.
 
@@ -1753,33 +1843,19 @@ def module_templates_by_path(path: str, project_root: str = None) -> dict:
     answered there by `reflect.export_exclusions` — the same rule the export
     table is filtered through, so the set instantiated and the set excluded
     cannot drift apart.
+
+    A ONE-root view of `template_closure` + `_closure_template_slice`, and it
+    stays that way rather than becoming the walk itself because three callers
+    ask about ONE module at a time and one (`imported_instantiations`) asks
+    about a whole set: the walk is shared, the slices are per root.
     """
-    from formal import monomorph as MM            # lazy — pulls the middle tier
-    out, visited = {}, set()
-
-    def collect(p):
-        key = os.path.abspath(p)
-        if key in visited:
-            return
-        visited.add(key)
-        names = MM.template_names(module_source_text(p))
-        if names:
-            out[key] = names
-        for st in module_statements(p):
-            if not isinstance(st, F.FromImportStmt):
-                continue
-            dep = resolve_module_path(st.module, relative_to=p,
-                                      project_root=project_root or p)
-            if dep:
-                collect(dep)
-
-    collect(path)
-    return out
+    templates, edges = template_closure([path], project_root)
+    return _closure_template_slice(templates, edges, path)
 
 
 def instantiation_demands(module_path: str, consumer_src: str,
                            project_root: str = None,
-                           own_templates=()) -> dict:
+                           own_templates=(), closure=None) -> dict:
     """`{module path: {template: [(type arg, …), …]}}` — what `consumer_src`
     asks of `module_path`'s re-export closure.
 
@@ -1796,14 +1872,27 @@ def instantiation_demands(module_path: str, consumer_src: str,
     module, which is also why the intersection is a plain set test rather than a
     re-walk: `formal/monomorph.py::demands` is the one place that reads call
     sites, and it reads them for the filtered set too.
+
+    **`closure` is the same product, once.** It is the `(templates, edges)` pair
+    `template_closure` returns for a SET of roots, and passing it turns the
+    re-export walk from a per-call thing into a reachability slice of a table
+    somebody else already built. `imported_instantiations` loops over a
+    consumer's imports, so it asks this question once per `dep`; without it, N
+    imports meant N whole-closure walks (measured on `std/math/math.mojo`
+    2026-10-04: 16 calls, 1.56 s of a 4.6 s build — 34%). `None` keeps the
+    standalone walk, which is what the three single-module callers want and what
+    makes this a keyword a caller can leave alone.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     found = MM.all_instantiation_calls(consumer_src)
     if not found:
         return {}
+    if closure is None:
+        templates = module_templates_by_path(module_path, project_root)
+    else:
+        templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
-    for p, names in module_templates_by_path(module_path,
-                                            project_root).items():
+    for p, names in templates.items():
         got = MM.demands_from_calls(found, names, own=own_templates
                                     if os.path.abspath(p) ==
                                     os.path.abspath(module_path) else ())
@@ -3743,11 +3832,33 @@ def imported_template_instantiations(source_path: str, stmts: list,
         if dep:
             paths.append(dep)
     paths.extend(linked_paths or ())
+    # NO `if not paths: return {}` here, and that is not an omission: this
+    # function's LAST act is `out.update(_own_instantiations(...))`, and a
+    # module that declares AND applies its own struct template imports
+    # NOTHING — `struct Box[T]` beside `Box[Int]()` in one file — so an early
+    # return here skips the one demand set no other caller can see and the
+    # build is refused by name again
+    # (`Box[…](…) calls a name this unit does not compile`). It is cheap with
+    # no paths, which is what the guard was for: `template_closure(())` walks
+    # nothing and returns two empty dicts, and the `for dep in paths` below is
+    # a no-op over an empty list. 43aba821 removed the guard for exactly this
+    # reason and it must not come back.
+    #
+    # ONE re-export closure for every `dep` below, walked from the dep SET.
+    # The loop asks `instantiation_demands` once per dep and that used to walk
+    # the whole closure per ask, so the cost of this function was the product of
+    # the import count and the closure size — measured on `std/math/math.mojo`
+    # (2026-10-04) at 16 walks and 1.56 s of a 4.6 s build, 34% of it. Each dep's
+    # answer is a reachability slice of this one table instead
+    # (`_closure_template_slice`, which reproduces the standalone walk's ORDER,
+    # which is what `demap.setdefault` below depends on).
+    closure = template_closure(paths, project_root=project_root or source_path)
     demap: dict = {}
     out: dict = {}
     for dep in paths:
         for owner, wanted in instantiation_demands(
-                dep, consumer, project_root=project_root or source_path).items():
+                dep, consumer, project_root=project_root or source_path,
+                closure=closure).items():
             made, _failed = MM.instantiate_all(module_source_text(owner), wanted)
             for base, mangled, args, gen_path in made:
                 demap.setdefault((base, args), mangled)

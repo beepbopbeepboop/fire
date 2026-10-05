@@ -416,7 +416,82 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 573),
+    # 565 -> 578 (2026-10-04, the merge of `work/gatefix9`, `work/bugs6-1`
+    # and `work/bugs6-2`). ONE row for THIRTEEN names, because the five this ledger had been short by
+    # were RECOVERED rather than rounded off. What each is for:
+    #   +4  `mojo_str_count_from`, `mojo_str_endswith_from`,
+    #       `mojo_str_rfind_from`, `mojo_str_startswith_from` — the
+    #       `[start[, end]]` WINDOW of `str.count`/`endswith`/`rfind`/
+    #       `startswith` (`a35765a0`). The codegen half is one argument
+    #       threaded through four `print`-dispatch arms, so nothing else in
+    #       the header answers to it.
+    #   +1  `mojo_regex_split` — a COMPILED pattern's `.split()` (`d8cdca63`).
+    #       Public because the compiled-pattern methods are a runtime table,
+    #       and a `split` with no entry was a refusal at compile time.
+    #       (These five are the gap `bugs4-9`'s row left behind, and they were
+    #       found by MEASURING rather than by arithmetic: walking
+    #       `git log master -- runtime/fire_runtime.h` and counting
+    #       `reflect.collect_runtime_exports_h` per commit gives 565 at
+    #       24f1e5e8, 569 at a35765a0 and 570 at d8cdca63, and those are the
+    #       two commits whose names are the difference.)
+    #   +1  `mojo_id` — the identity token (`gatefix9`). The codegen half is a
+    #       change to the `id` STUB rather than a new entry point: the stub
+    #       `static int64_t id (int64_t x)` that every generated program emits
+    #       used to return its argument, which for a container is the live
+    #       handle, so the container registries read an `id()` token as that
+    #       container (`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`).
+    #   +1  `mojo_dict_slot_repr` — the ONE implementation of "what a dict
+    #       slot's value looks like", from the (word, kind) pair the store
+    #       recorded (`work/bugs6-1`). The codegen's emitted `_mojo_repr_dict`
+    #       had its own six-arm chain and `mojo_dict_items`' pairs had NO
+    #       reader at all, so `.items()` of a zero printed `None` and of a
+    #       float SIGSEGV'd.
+    #   +4  `mojo_dict_set_bool_kw` / `_none_kw` / `_struct_kw` /
+    #       `_other_struct_kw`. `_KW_DICT_FNS` tests the setter's NAME, so a
+    #       setter with no `_kw` twin was not refused — it fell through to the
+    #       plain-char*-key arm and wrote the entry in a different key DOMAIN
+    #       from the `_kw` read that looks it up, so `d[("a",)] = True` was one
+    #       source-level assignment and two dict entries.
+    #
+    # The total is written as MEASURED (578) rather than as this merge's own
+    # arithmetic, because a count that reads as a formula when it is an
+    # observation is the failure this file exists to prevent.
+    #
+    #   +1  `mojo_is_registered_bytes` — the fourth and last member of the
+    #       container-registry family (`work/bugs6-2`). A boxed
+    #       `MojoBytes *` is pointer-shaped and is none of a list, dict, set or
+    #       box, so `mojo_boxed_is_str` classified it as a STRING — harmless
+    #       until `len()` on a polymorphic parameter read the answer through
+    #       that classification (`emit_infra._len_of_boxed`), where
+    #       `mojo_strlen` walked the bytes payload for a NUL and got a length
+    #       right only because `MojoBytes.len` sits at `MojoList.len`'s
+    #       offset. One name, taken from the call; the codegen half
+    #       (`_len_of_boxed`'s block layout) adds no runtime entry point, and
+    #       the registry entry itself is file-local.
+    #
+    # 573 -> 572 (2026-10-05, this merge), MINUS ONE: `mojo_len_of_word` is
+    # gone, because `mojo_len_of_word` and `emit_infra._len_of_boxed` were two
+    # implementations of one question -- "what is this type-erased word, and
+    # therefore how long is it?" -- and the difference between them was not a
+    # difference in the answer. `_len_of_boxed` emits the same registry chain
+    # the repr side (`_repr_boxed_container`) already walks, so `len` and
+    # `print` cannot disagree about what a boxed word holds, and it adds the
+    # BYTES arm that `mojo_boxed_is_str` makes load-bearing (`mojo_strlen` over
+    # a bytes object answers a length right only by the accident that
+    # `MojoBytes.len` sits at `MojoList.len`'s offset). Its last arm is the same
+    # `mojo_list_len` the pre-fix lowering used unconditionally, so an input no
+    # registry recognises keeps the answer it had -- which is what makes it a
+    # strict improvement rather than a change of behaviour. The runtime helper
+    # had the opposite last arm (0), so deleting it puts the unrecognised-word
+    # path back on the conservative answer.
+    # The defect this replaces is `len()` on a type-erased slot, whose doc is
+    # deleted with its fix, so it is named here by the mechanism: every static
+    # spelling of `len` was a direct call to the one accessor the codegen picked
+    # for the operand's DECLARED C type, and a slot whose call sites disagree
+    # got exactly one of them.
+    # `gimple_len_of_param_called_with_list_and_str` is the row that is run
+    # REPEATED, because the old answer was heap-dependent.
+    for header, want in (('fire_runtime.h', 580),   # --fix writes the live figure
     # 571 -> 573 (2026-10-04, `work/bugs7-1`), TWO names, and both are the
     # consolidation this file exists to make possible:
     #   +1  `mojo_repr_slot_kind`, THE renderer for "a slot of kind `kind` holds
@@ -433,14 +508,6 @@ def test_every_declaration_is_seen():
     # Neither adds behaviour to a program, which is why the census figures that
     # follow are a pure renumbering: `--fix` wrote 573, 676, 269 and 503 into
     # every sentence that quotes them, from this scan and not from arithmetic.
-    # 570 -> 571: `mojo_len_of_word`, the LENGTH discriminator the `len()`
-    # lowering asks when the operand's slot is type-erased and no single kind
-    # was recorded for it -- `bugs/CODEGEN_len_of_a_param_called_with_both_a_
-    # list_and_a_str.md`. It is the `mojo_cstr_or_int_str` family member
-    # `len` was missing: a parameter called with both a list and a string had
-    # its length measured as `mojo_list_len` over a `char *`, which reads a
-    # header out of string bytes and so answers differently run to run.
-    #
     # 565 -> 570 (2026-10-04), FIVE names over two commits, neither of which
     # touched this ledger — which is the point of `--fix`, added with this
     # entry:

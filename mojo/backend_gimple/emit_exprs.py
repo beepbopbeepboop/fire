@@ -3971,6 +3971,54 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 ip = gen._new_val('int64_t', f'(int64_t){_v}')
                 cp = gen._new_val('char *', f'(char *){ip}')
                 return cp
+
+            def _is_undecided_word(typ, var, is_other_str_lit):
+                """True for the int64_t slot whose REPRESENTATION is undecided
+                here: not statically a char, not tracked as holding a pointer,
+                and with no string LITERAL on the other side (a literal already
+                forces the pointer cast above, which is the BUG-2026-048 fix).
+
+                Such a slot holds either a boxed string pointer or a byte code,
+                and the difference decides the comparison completely -- which is
+                why the two are asked at RUN time instead of guessed here."""
+                if typ not in ('int', 'int64_t'):
+                    return False
+                actual = gen._actual_types.get(_as_str(var))
+                if actual == 'char' or (actual and actual.endswith(' *')):
+                    return False
+                return not is_other_str_lit
+
+            lw = _is_undecided_word(lt, lv, rv_is_str_lit)
+            rw = _is_undecided_word(rt, rv, lv_is_str_lit)
+            if lw != rw and (lt == 'char *' or rt == 'char *'):
+                # Exactly one side is an undecided word and the other a string
+                # VALUE (`char *`): `mojo_str_eq_word` answers it from the word
+                # itself. `_to_char_star`'s char-code path used to answer it by
+                # truncating the word to a byte, so a boxed string compared
+                # equal only to whichever 1-character string shares its low
+                # byte -- and `fire_compiler.py`'s `_strip_inline_comment` /
+                # `_split_on_separators` leave a single-quoted string open on
+                # exactly that comparison, so the `;` after ``in_str !='`'``
+                # read as string content and the self-hosted parser refused
+                # the file with `Unexpected SEMICOLON(';')`. The byte-code arm
+                # of the runtime helper is the SAME answer this path used to
+                # give for a real char (and it answers with `mojo_cstr_cmp`'s
+                # own convention, 0 = equal), so nothing that was right here
+                # changes.
+                if lw:
+                    s_side = _to_char_star(rt, rv, True)
+                    eq_t = gen._call_expr(
+                        'int', 'mojo_cstr_cmp_word',
+                        [('char *', s_side), ('int64_t', _as_str(lv))])
+                else:
+                    s_side = _to_char_star(lt, lv, True)
+                    eq_t = gen._call_expr(
+                        'int', 'mojo_cstr_cmp_word',
+                        [('char *', s_side), ('int64_t', _as_str(rv))])
+                t = gen._new_temp('_Bool')
+                cmp = '== 0' if op == '==' else '!= 0'
+                gen._emit(f'  {t} = {eq_t} {cmp};')
+                return '_Bool', t
             ls = _to_char_star(lt, lv, rv_is_str_lit)
             rs = _to_char_star(rt, rv, lv_is_str_lit)
             eq_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])

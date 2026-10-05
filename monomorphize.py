@@ -524,13 +524,37 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # and the caller that most needs it (`_ensure_generic_struct`, which
         # elaborates a struct into a constructor call) turned it into a
         # silently different program. See that function's own comment.
-        _cc = subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile],
-                             capture_output=True, text=True)
+        #
+        # …and it is RETRIED, because this one step is the only impure thing
+        # in `elaborate_generic_struct` and it is impure in a way that has
+        # produced a one-off: on an 18-worker sweep every worker spawns gcc for
+        # every instantiation it needs, and a `gcc -c` that loses its output
+        # file to the OS is not the same failure as a `gcc -c` that rejected
+        # the source. A retry is defensible here precisely because the build is
+        # CONTENT-KEYED and DETERMINISTIC (`cas.instantiation_key` covers the
+        # template source, the type args, the gcc and the flags): a second
+        # attempt either succeeds — which is the transient, caught — or fails
+        # with the SAME stderr, which is a real defect and still raised. So the
+        # retry cannot turn a red into a green; it can only catch a signal.
+        #
+        # Every failed attempt's stderr is kept and printed with the final
+        # exception, so "it worked on the third try" is visible to whoever
+        # reads the next occurrence rather than being silently smoothed over.
+        _OBJ_ATTEMPTS = 3
+        _cc = None
+        _seen_err: list = []
+        for _attempt in range(_OBJ_ATTEMPTS):
+            _cc = subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile],
+                                 capture_output=True, text=True)
+            if _cc.returncode == 0:
+                break
+            _seen_err.append(f"attempt {_attempt + 1} of {_OBJ_ATTEMPTS}: "
+                             + (_cc.stderr or _cc.stdout or '<no output>')[-1200:])
         if _cc.returncode != 0:
             raise RuntimeError(
                 f"gcc -c failed for the monomorphized {mangled} "
-                f"(exit {_cc.returncode}); generated C is at {cfile}\n"
-                + (_cc.stderr or _cc.stdout or '')[-2000:])
+                f"(exit {_cc.returncode}, {_OBJ_ATTEMPTS} attempts); generated C "
+                f"is at {cfile}\n" + '\n---\n'.join(_seen_err))
         if gen.generated_cpp:
             gxx = find_gxx()
             cppfile = os.path.join(wd, mangled + '_async.cpp')
