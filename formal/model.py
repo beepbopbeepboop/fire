@@ -26022,6 +26022,427 @@ def value_call_keyword_refusal(spelling: str, what: str) -> str:
     )
 
 
+# ── Is the WORD a call branches through a code ADDRESS?  The decidable half ──
+#
+# A function value on this path is a CODE ADDRESS (`_load_var`'s last home in
+# both backends), so `f(i)` through a word is one `BLR` / `CALL r64` and every
+# word that is not an address is a branch to whatever those bits say.  Measured
+# on both architectures before any of this existed, for the four shapes below
+# and no others:
+#
+#     def apply(size: Int, f):            # the callee
+#         var t = 0
+#         var i = 0
+#         while i < size:
+#             t += f(i)
+#             i += 1
+#         return t
+#     def main(n: Int) -> Int32:
+#         return apply(3, 17)              # arm64 SIGBUS (138), x86-64 SIGSEGV (139)
+#
+# …and `formal/build.py`'s function-value pre-pass already refuses the OTHER
+# direction — a function NAME handed to a parameter declared `Int` — because
+# there the value is definitionally an address.  `bugs/
+# FORMAL_function_value_calls_are_not_proved_to_be_calls.md` is the document for
+# the whole of the residual, and it is right that closing it in general is a
+# whole-module dataflow: the callee cannot see its call sites and the call sites
+# cannot see the callee's body across a dylib boundary.
+#
+# What is in here is that document's own two halves, restricted to the part each
+# reader can DECIDE, and it is the same restriction the two existing checks
+# already make: refuse on EVIDENCE, say nothing on silence.  The two halves are
+# the two ends of one call, which is why they are two readers and ONE message:
+#
+#   * the CALLING end (`callee_word_is_not_an_address`) — every statement of the
+#     calling function that binds the callee name writes something that cannot
+#     be an address.  `ValueKinds` already decides that, flow-insensitively and
+#     with unanimity, and a name it cannot decide is not in `locals` at all, so
+#     the reader has no new imprecision to introduce;
+#   * the PASSING end (`value_argument_is_not_an_address`) — the callee CALLS
+#     that parameter through a word (`parameters_called_through_a_value`) and
+#     the argument expression is, from its own shape, not an address.  This end
+#     is asked from `formal/build.py`'s name-placement walk because that is the
+#     only pass holding both ends of a call at once, which is the same reason
+#     `function_value_argument_refusal` is raised there.
+#
+# Both are permissive on silence and loud on evidence, and that is the whole of
+# the direction: the cost of a wrong answer here is a program that traps
+# instead of being refused, so every rule below has to be one the SOURCE
+# contradicts rather than one the analysis failed to follow.
+
+# The kinds that cannot hold a code address, and the list is deliberately
+# CLOSED rather than "any kind this file knows".  A new kind added to the value
+# model is a decision about how a value PRINTS or how a container LAYS OUT, and
+# neither says anything about being a branch target; admitting one by omission
+# would make every future kind a silent trap.  `None` — "the source does not
+# say" — is outside the list for the same reason and is the answer that keeps
+# every uncertain call exactly where it was.
+#
+# A container is here for the reason it is a blob and not a number: a list's
+# word is the ADDRESS OF ITS BLOB, and the code of this image is in a different
+# segment from the frame and the heap, so branching to a container is branching
+# to a header word.  `is_list_kind` rather than a spelling, so a byte blob and
+# a list of lists are both in it without a second list.
+CODE_ADDRESSLESS_KINDS = frozenset({
+    INT_KIND, STR_KIND, FLOAT_KIND, TYPE_KIND, FRAME_KIND,
+})
+
+
+def kind_cannot_hold_a_code_address(kind) -> bool:
+    """Whether a value of this KIND is provably not a function's entry address.
+
+    One predicate for both halves above and both architectures, so the four
+    questions the callers actually ask ("is this callee name's word an
+    address", "is this argument's word an address") cannot be answered by four
+    private copies that drift.  `None` answers False — the permissive direction,
+    and the one that matters, because a wrong True here refuses a program that
+    works and a wrong False emits a branch to a number.
+    """
+    if kind is None:
+        return False
+    return kind in CODE_ADDRESSLESS_KINDS or is_list_kind(kind)
+
+
+def parameters_called_through_a_value(fn) -> set:
+    """The parameters of `fn` its own body CALLS through the word.
+
+    The predicate half of the passing end, and it is asked of a `FunctionDef`
+    rather than of a call because the question belongs to the CALLEE: whether a
+    parameter is ever branched through is a fact about the body that receives
+    it, and a reader at the call site would have to re-derive it once per call
+    site — which is how two call sites of one function come to disagree about
+    whether the parameter is callable.
+
+    Deliberately narrow about what counts as "calls it": `call_callee_name`, the
+    ONE recogniser of a call's name, and only a name `fn` binds.  So `f(i)` and
+    `f[2, 5](i)` — the bare and the specialized spelling, the second of which is
+    `stdlib/std/algorithm/backend/tile.mojo`'s whole construct — both count, and
+    `recv.f(i)`, a method call, does not: that is a dispatch on a receiver, and
+    `sole_field_call_refusal` is the reader for the value-in-a-field shape
+    rather than this one.  A name merely READ (`t = f`) is not a call and does
+    not count, which is the difference between this and
+    `callee_is_a_bound_value`'s question and the reason the two cannot be one
+    function.
+    """
+    bound = set()
+    for p in (getattr(fn, "params", None) or []):
+        pname = p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
+        if isinstance(pname, str):
+            bound.add(pname)
+    out = set()
+    for call in iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(call, F.CallExpr):
+            continue
+        name = call_callee_name(call.func)
+        if name in bound:
+            out.add(name)
+    return out
+
+
+def functions_calling_a_parameter_through_a_value(functions: list) -> dict:
+    """`{function name: {the parameters its body branches through}}`, per unit.
+
+    The unit-level table for `parameters_called_through_a_value`, and the reason
+    it exists is arithmetic rather than semantics: that reader walks a body, and
+    `formal/build.py`'s name-placement walk already holds one loop over every
+    call of every function, so asking it per CALL SITE would walk the same body
+    once per call of that callee. A file with a hundred call sites of one
+    helper would walk its body a hundred times.
+
+    One entry per function and not one per `(callee, parameter)` because every
+    use here is a membership test — "is this parameter one this callee branches
+    through" — and the pair would have to be built again at every call site. It
+    is computed once per unit for the same reason
+    `functions_returning_containers` is: the answer is the same for every call
+    site of a callee.
+    """
+    out: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        called = parameters_called_through_a_value(fn) if name else ()
+        if called:
+            out[name] = frozenset(called)
+    return out
+
+
+def _binding_values(fn, name: str) -> list:
+    """What every statement of `fn` that binds `name` writes into it.
+
+    The sites of the bug doc's own list — "an assignment, an augmented
+    assignment, a loop target, a `with … as`, a container store, a `return`" —
+    read as EXPRESSIONS where the source states one and as `None` where it does
+    not, and the `None` is the point rather than a gap in the walk:
+
+      * a bare `f = 17` states the value, so the site carries `17`;
+      * a `f = g` where `g` is an unannotated PARAMETER states nothing, because
+        `ValueKinds` seeds an unannotated parameter as a word and a word is an
+        integer here (its own header).  That is the leak this function exists to
+        stop: `test_formal_specialization.py`'s `via_local` is `var g = f;
+        return g(x, 100)`, the CORRECT program, and a reader that asked
+        `ValueKinds` alone refused it;
+      * an UNPACK target (`a, b = t`), a loop target, a `with … as`, and an
+        augmented assignment all write a word this reader cannot state.  A loop
+        target in particular binds an ELEMENT, and an element can be a function
+        — a list of them is `map.mojo`'s own shape — so "the iterable is a
+        container" says nothing about the element.
+
+    `iter_nodes` rather than a second statement walk, for the reason every
+    shared walk in this file is shared: the shapes that bind a name are
+    `mojo/middle/boundnames.py`'s to own, and a private copy is how a 1-tuple
+    target and a parenthesised name came to be indistinguishable.  What is read
+    here is the TARGET — `fire_compiler.for_target_names`, the parser's own
+    representation reader — and nothing about the walk itself.
+
+    **The residual is stated rather than implied**: a site shape this walk does
+    not name is a site this walk does not see, and a name bound at one of those
+    and at an integer elsewhere would be refused on the strength of the integer
+    alone.  That is the conservative direction (the program would trap on the
+    integer path anyway), it is the same imprecision `formal/build.py`'s
+    `_names_bound_in` documents about the allocator's own table, and the caller
+    below requires the value model's UNANIMITY as well, which is what catches
+    the disagreement rather than the missed shape.
+    """
+    sites = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.AssignStmt):
+            sites += _one_target_site(node.target, name, node.value)
+        elif isinstance(node, F.MultiAssignStmt):
+            for target in node.targets or ():
+                sites += _one_target_site(target, name, node.value)
+        elif isinstance(node, F.AugAssignStmt):
+            # `f += 1` writes `f + 1`, so what lands in the name depends on what
+            # was there — the one site whose result no single expression states.
+            if name in _target_leaves(node.target):
+                sites.append(None)
+        elif isinstance(node, F.VarDecl):
+            if node.name == name:
+                sites.append(node.value)
+        elif isinstance(node, (F.ForStmt, F.ComptimeForStmt, F.Comprehension)):
+            if name in _target_leaves(getattr(node, "target", None)):
+                sites.append(None)
+        elif isinstance(node, F.WithStmt):
+            for item in node.items or ():
+                if name in _target_leaves(getattr(item, "alias", None)):
+                    sites.append(None)
+    return sites
+
+
+def _target_leaves(target) -> list:
+    """The NAMES a binding target binds, through the parser's own reader."""
+    try:
+        return [n.lstrip("*").strip() for n in F.for_target_names(target)]
+    except Exception:
+        return []
+
+
+def _one_target_site(target, name: str, value) -> list:
+    """`[value]` when `target` binds `name` to it outright, `[]` otherwise.
+
+    A target that binds SEVERAL names binds ELEMENTS, so the whole value is not
+    what any one of them receives and the site is undecided — which is why the
+    unpack case records nothing rather than recording the container.
+    """
+    leaves = _target_leaves(target)
+    if name not in leaves or len(leaves) != 1:
+        return []
+    return [value]
+
+
+# The shapes whose ELEMENT is a value the container itself was not: a subscript
+# of a container LITERAL and a subscript of a module-level name the slot says is
+# a container.  A subscript of an ordinary NAME is deliberately absent — `d[k]`
+# on a dict can hand back a function and `xs[i]` on a list cannot, and nothing
+# about the spelling says which, so the narrow reading is the only honest one.
+def _element_of_a_literal_container(arg) -> bool:
+    if not isinstance(arg, F.SubscriptExpr) or isinstance(arg.index,
+                                                          F.SliceExpr):
+        return False
+    obj = arg.obj
+    if isinstance(obj, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
+                        F.StringLiteral)):
+        return True
+    if isinstance(obj, F.IdentExpr):
+        # `global_slot_kind` rather than a table of this function's own: a
+        # module global's value's shape is stated at module level and a use site
+        # has nothing else to go on, which is that reader's own stated reason
+        # for existing.
+        return is_list_kind(global_slot_kind(obj.name))
+    return False
+
+
+def value_argument_is_not_an_address(arg, caller=None) -> str | None:
+    """What the argument's OWN SHAPE says it holds, when that is not an address.
+
+    The PASSING end of the section's subject, asked from
+    `formal/build.py`'s name-placement walk — the one pass that has the callee
+    and the call site at once — and asked only when `parameters_called_through_a
+    _value` has already said the callee BRANCHES through this parameter.  Without
+    that conjunct the check would refuse `f(17)` for every `f`, which is the
+    ordinary program; with it, it refuses exactly the program that traps.
+
+    Every rule is one the source CONTRADICTS, and the set is small on purpose:
+
+      * a literal of any kind — an integer, a string, a double, `True`;
+      * a container literal, and a subscript OF a container literal (an element
+        is a word the container was holding, never the container);
+      * arithmetic over either of those, which is the same word computed, and a
+        comparison, which is `0`/`1`;
+      * a TYPE read as a value — one 64-bit tag, and `type_value_name` is the
+        one reader of that, so this asks the same function both backends' member
+        arms ask;
+      * a PARAMETER of the CALLER whose own declaration cannot hold a function,
+        which is `value_callee_can_hold_a_function` again — the same reader the
+        calling end asks about the callee, so the two ends of one call cannot
+        disagree about what its declaration means. The same declaration decides
+        a subscript of that parameter, whose element is a word the container was
+        holding.
+
+    What is deliberately NOT here, because each would be a guess rather than a
+    contradiction: a LOCAL of the caller (`f = dbl; apply(3, f)` is correct and
+    the shape is decided by flow this reader has no table for — that is the
+    calling end's `ValueKinds`, asked in the other function); a subscript of a
+    NAME; and anything whose kind is undecided.  Silence claims nothing, so a
+    missed case is the residual the bug doc names and never a false refusal.
+    """
+    if arg is None:
+        return None
+    kind = _kind_of_simple(arg)
+    if kind is not None:
+        return {INT_KIND: "an integer", STR_KIND: "a string",
+                FLOAT_KIND: "a double", TYPE_KIND: "a type tag"}.get(
+                    kind, f"a value of kind {kind}")
+    if isinstance(arg, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
+        return "a container"
+    if _element_of_a_literal_container(arg):
+        return "an element read out of a container"
+    if isinstance(arg, F.UnaryOp):
+        return value_argument_is_not_an_address(arg.operand, caller)
+    if isinstance(arg, F.BinaryOp):
+        # `and`/`or` HAND BACK ONE OF THEIR SIDES, so one side being a number
+        # says nothing about the other; every other operator computes.  A
+        # comparison is `0`/`1` by definition, which is why it is named rather
+        # than left to the operands.
+        if arg.op in ("and", "or"):
+            left = value_argument_is_not_an_address(arg.left, caller)
+            right = value_argument_is_not_an_address(arg.right, caller)
+            return left if left and right else None
+        if arg.op in _COMPARISON_OPS:
+            return "the result of a comparison"
+        return (value_argument_is_not_an_address(arg.left, caller)
+                or value_argument_is_not_an_address(arg.right, caller))
+    if isinstance(arg, F.CompareChain):
+        return "the result of a comparison"
+    if isinstance(arg, F.SubscriptExpr) and caller is not None:
+        base = arg.obj
+        if isinstance(base, F.IdentExpr) and not isinstance(
+                arg.index, F.SliceExpr):
+            ann = param_annotation(caller, base.name)
+            if ann and not value_callee_can_hold_a_function(ann):
+                return f"an element read out of `{ann.strip()}`"
+    if isinstance(arg, F.IdentExpr) and caller is not None:
+        ann = param_annotation(caller, arg.name)
+        if ann and not value_callee_can_hold_a_function(ann):
+            return f"a value declared `{ann.strip()}`"
+    return None
+
+
+def callee_word_is_not_an_address(fn, name: str, vkinds=None) -> str | None:
+    """What the calling function's own statements say the callee WORD holds.
+
+    The CALLING end of the section's subject, asked from both backends at the
+    line that has already decided the call goes through a value, and it returns
+    a PHRASE (`"an integer"`, `"a container"`) or None rather than a boolean
+    because the phrase is what the one message needs and a boolean here would
+    mean each backend composing its own sentence out of a kind string — the same
+    drift `callee_value_refusal` and its x86-64 reader exist to prevent.
+
+    **It takes TWO kinds of evidence and needs both**, and neither alone is
+    right, which is what `_binding_values`'s own paragraph is about:
+
+      * the VALUE MODEL's agreed kind (`vkinds.locals[name]`), which is the walk
+        that sees every statement and records a name two statements disagree
+        about as undecidable — the completeness leg;
+      * every SYNTACTIC write site, which is the leg that stops the model
+        propagating its own default.  `ValueKinds` seeds an unannotated
+        parameter as an integer, so `var g = f` inside a function that received
+        `f` is an integer as far as the model is concerned, and
+        `test_formal_specialization.py`'s `via_local` — `var g = f; return
+        g(x, 100)`, the correct program and this construct's own positive row —
+        was refused by the model alone, measured on both architectures before
+        this conjunct was added.
+
+    Two guards, and each of them is a case that would otherwise be a false
+    refusal rather than a wrong answer:
+
+      * **a PARAMETER is not asked about.**  Same default, one level out: the
+        declaration is the evidence for a parameter, and
+        `value_callee_can_hold_a_function` is the reader that already has it;
+      * **an UNANNOTATED parameter stays permissive** for the same reason, so
+        the only parameter case this can reach is one the declaration already
+        refuses.
+
+    `vkinds` is the caller's own `ValueKinds` and `None` means "no answer",
+    which is the permissive direction: a caller that has not built one yet
+    behaves exactly as it did before this reader existed.
+    """
+    if vkinds is None or not name:
+        return None
+    if name in {p[0] if isinstance(p, (list, tuple)) else p
+                for p in _param_list(fn)}:
+        return None
+    kind = (vkinds.locals or {}).get(name)
+    if not kind_cannot_hold_a_code_address(kind):
+        return None
+    for value in _binding_values(fn, name):
+        if value_argument_is_not_an_address(value, fn) is None:
+            return None
+    if is_list_kind(kind):
+        return "a container"
+    return {INT_KIND: "an integer", STR_KIND: "a string",
+            FLOAT_KIND: "a double", TYPE_KIND: "a type tag",
+            FRAME_KIND: "a frame address"}.get(kind, f"a value of kind {kind}")
+
+
+def not_a_code_address_refusal(spelling: str, holds: str, where: str = None,
+                               passed: str = None) -> str:
+    """The one message for a call through a word the source says is not code.
+
+    ONE function for both ends of the analysis, and the reason is that they are
+    one construct: the same word, read by two passes because each holds one end
+    of the call.  Two messages would be two families in
+    `test_refusal_taxonomy.py` and two causes in `tools/formal_sweep_causes.py`
+    for a defect a sweep would report as one, and the sweep's row is what a
+    planner reads.
+
+    `passed` is what makes it the passing end rather than the calling one, and
+    it is a CLAUSE rather than a separate sentence: "`17`, passed to `apply()`
+    as parameter `f`, which apply() calls through a value".  The wording
+    discipline is `string_concat_refusal`'s and `returnless_value_refusal`'s:
+    name the construct, say what CPython answers, say what this path would have
+    done (with the measurement), and say what to do instead.  A reader told only
+    "not an address" has no way to know which of the two ends the build stopped
+    at, and the fix is different at each.
+    """
+    where = f"{where}: " if where else ""
+    clause = (f", {passed}" if passed else
+              f", and every statement of the function that binds it writes "
+              f"that")
+    return (
+        f"{where}`{spelling}` is called as a FUNCTION and the source says it "
+        f"holds {holds}{clause} — a formal value is one 64-bit word, and a "
+        f"function value is the ADDRESS of a function's entry, so there is no "
+        f"instruction at a number the program wrote as {holds}. CPython raises "
+        f"`TypeError` on this program, and this path used to build it, branch "
+        f"to whatever the word was, and die of SIGBUS on arm64 / SIGSEGV on "
+        f"x86-64 (measured, both architectures). Refused at build time "
+        f"instead. Pass a FUNCTION — a name of this unit, whose value is its "
+        f"address — or declare the parameter with the function type, and take "
+        f"what the operation DOES rather than the operation (`apply(size, "
+        f"kind: Int)` with one arm per operation is the same program with a "
+        f"representation)"
+    )
+
+
 def list_element_structs(fn, structs_by_name: dict, decls: dict,
                          owner=None) -> dict:
     """`{name: ONE-FIELD struct}` for every name in `fn` holding a LIST of them.

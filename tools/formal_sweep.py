@@ -863,6 +863,13 @@ _REFUSAL_FAMILIES = (
      "value call: bracket unreadable"),
     ("no declaration to bind it by NAME",
      "value call: keyword unreadable"),
+    # The same construct from the other two ends: the word is not an address
+    # because the SOURCE says what it holds, rather than because a declaration
+    # says what it could hold. One message for both ends on purpose — see
+    # `formal/model.py::not_a_code_address_refusal` — so one marker and one
+    # family, and it sits with the three above rather than below them.
+    ("is called as a FUNCTION and the source says it holds",
+     "value call: the word is not an address"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),

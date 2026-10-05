@@ -187,6 +187,59 @@ def main() -> Int32:
 """
 GLOBAL_SHADOW_CPYTHON = "global-call-ok"
 
+# A word the SOURCE says is not a function's address, at both ends of one call —
+# the decidable half of `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
+#
+# All three programs below built, branched to whatever word they held, and died
+# of SIGBUS on arm64 / SIGSEGV on x86-64 with nothing on either stream, while
+# CPython raised `TypeError` on the same text. That is the loud end of this
+# backend's range rather than a silent wrong answer, so the cost of it was a
+# diagnostic the KERNEL delivered — and the three shapes are the three sources of
+# evidence the analysis reads, one per row, which is why they are three programs
+# and not one:
+#
+#   * `passing/literal`  — the argument's own SHAPE is an integer;
+#   * `passing/declared` — the argument is a parameter of the CALLER and the
+#     caller's own annotation says `Int`, which is `value_callee_can_hold_a_
+#     function` asked about the other end of the same call;
+#   * `calling/local`    — the callee name is a LOCAL the calling function
+#     bound to an integer, and there is no annotation anywhere to refuse on.
+#
+# `passing/local` — a local list's element — is deliberately NOT here: nothing
+# about the spelling says whether `xs[0]` is a number or a function, so it is
+# the residual the doc names rather than a row this can hold.
+NOT_AN_ADDRESS_PASSING_LITERAL = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    return apply_arg(3, 17)
+"""
+
+NOT_AN_ADDRESS_PASSING_DECLARED = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main(n: Int) -> Int32:
+    return apply_arg(3, n)
+"""
+
+NOT_AN_ADDRESS_CALLING_LOCAL = """\
+def main(n: Int) -> Int32:
+    var f = 17
+    return f(n)
+"""
+
 # The same fact as `CALL_THROUGH_A_PARAMETER`, one position out: a function of
 # THIS UNIT read as a WORD rather than called by name. It is this program's
 # `plain` that used to be the first name with nowhere to live, and it is the
@@ -1076,6 +1129,79 @@ def test_a_global_shadowed_name_is_still_a_call_to_the_c_library(tmpdir):
               f"name declared `global` stopped being a call to the C library")
 
 
+
+def test_a_word_the_source_says_is_not_an_address_is_refused(tmpdir):
+    """Both ends of one call, on both architectures, with CPython as the oracle.
+
+    The other half of §5b, and the one that is a REFUSAL rather than a lowering.
+    A function value is a code address, so `f(i)` through a word is one
+    `BLR`/`CALL r64` — and nothing proved the word IS an address. Where the
+    source itself says what the word holds, the build can say so at build time,
+    which is the difference between a diagnostic the author reads and a SIGBUS
+    the kernel delivers.
+
+    Three shapes because there are three sources of evidence, and each is asked
+    by a different reader so a fix to one cannot make the other two pass:
+
+      * the CALLING end is asked by both emitters, from the calling function's
+        own `ValueKinds` AND from every statement that binds the callee name
+        (`model.callee_word_is_not_an_address`) — the second conjunct is what
+        stops the model's own "a word is an integer" default from refusing the
+        `via_local` row above, so both directions are pinned here;
+      * the PASSING end is asked from `formal/build.py`'s name-placement walk,
+        which is the only pass holding the callee and the call site at once.
+
+    **The oracle is checked, not assumed.** CPython raises `TypeError` on all
+    three programs, so "this path used to build and trap" is a measurement of a
+    real disagreement rather than a preference; and the two architectures are
+    required to produce the SAME sentence, because the whole point of the
+    readers being in `formal/model.py` rather than in a backend is that they
+    cannot answer one construct differently.
+    """
+    shapes = (
+        ("passing/literal", NOT_AN_ADDRESS_PASSING_LITERAL,
+         "passed to `apply_arg()` as parameter `f`"),
+        ("passing/declared", NOT_AN_ADDRESS_PASSING_DECLARED,
+         "a value declared `Int`"),
+        ("calling/local", NOT_AN_ADDRESS_CALLING_LOCAL,
+         "and every statement of the function that binds it writes that"),
+    )
+    seen = {}
+    for label, src, needle in shapes:
+        root = os.path.join(tmpdir, f"notaddr_{label.replace('/', '_')}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(src)
+        # The interpreter, not bare `cpython`: `fire.py run` resolves a
+        # multi-file program and this row's oracle is the sentence both engines
+        # agree on for a program they both reject.
+        oracle = interpreter(root)
+        check(oracle.startswith("TypeError:") or "TypeError:" in oracle,
+              f"[{label}] the interpreter answered "
+              f"{oracle.strip()[:200]!r} on a program whose only wrongness is "
+              f"calling a word that is not a function, so the oracle for this "
+              f"row is not saying what the row is about")
+        for arch in ARCHES:
+            arch_root = os.path.join(root, arch)
+            os.makedirs(arch_root)
+            with open(os.path.join(arch_root, "prog.mojo"), "w") as f:
+                f.write(src)
+            text = text_of(build(arch_root, expect_ok=False,
+                                 arch=arch)).strip()
+            check("is called as a FUNCTION and the source says it holds"
+                  in text,
+                  f"[{arch}] the {label} case did not refuse with the "
+                  f"not-an-address message: {text[-300:]}")
+            check(needle in text,
+                  f"[{arch}] the {label} case refused without naming which "
+                  f"end of the call it stopped at ({needle!r}): {text[-300:]}")
+            seen.setdefault(label, []).append(text)
+    for label, texts in seen.items():
+        check(texts[0] == texts[1],
+              f"the two architectures refused the {label} case differently:\n"
+              f"  arm64:  {texts[0][:200]}\n  x86-64: {texts[1][:200]}")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -1107,6 +1233,8 @@ TESTS = [
      test_the_specialization_reaches_into_another_module_on_both),
     ("two brackets through a value pass both, on both",
      test_two_brackets_through_a_value_pass_both_on_both),
+    ("a word the source says is not an address is refused, on both",
+     test_a_word_the_source_says_is_not_an_address_is_refused),
     ("the two remaining refusals of a value call",
      test_the_two_remaining_refusals_of_a_value_call),
     ("a `global`-shadowed name is still a call to the C library",

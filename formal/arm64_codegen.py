@@ -8727,6 +8727,21 @@ ctor_field_value=self._ctor_field_value_for(name),
             if not M.value_callee_can_hold_a_function(ann):
                 raise CodegenError(M.callee_value_refusal(
                     name, self._cur_fn, M.member_chain_text(e.func), ann))
+            # The word is an integer / a container / a string, because this
+            # function's own STATEMENTS say so — the other end of the same
+            # analysis as `formal/build.py`'s pre-pass, and asked here because
+            # `self._vkinds` is what decides it and this is where that table
+            # lives. `value_callee_can_hold_a_function` above reads the
+            # DECLARATION; this reads the FLOW, and neither can see the other:
+            # a local bound to `17` has no annotation to refuse on, and
+            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # is the doc for what is left when neither has an answer.
+            holds = M.callee_word_is_not_an_address(
+                self._cur_fn, name, self._vkinds)
+            if holds is not None:
+                raise CodegenError(M.not_a_code_address_refusal(
+                    M.receiver_shape_text(e.func), holds,
+                    where=self._cur_fn.name))
             if isinstance(e.func, F.SubscriptExpr):
                 # A bracketed callee through a value: a specialization, or an
                 # index into a container. Only the parameter's declared type

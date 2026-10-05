@@ -12728,6 +12728,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # not. Measured once per unit rather than per function: the answer is the same
     # for every function in the module and it costs a walk of every body.
     returns_container = M.functions_returning_containers(functions)
+    # …and WHICH PARAMETERS of this unit's own functions their bodies BRANCH
+    # THROUGH, for `model.parameters_called_through_a_value`'s reason: it is the
+    # conjunct that makes the passing end of the value-call analysis a statement
+    # about the CALLEE rather than about every call in the file, and one walk per
+    # unit rather than one per call site — the same arithmetic as the three
+    # tables above.
+    value_called_params = M.functions_calling_a_parameter_through_a_value(
+        functions)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -12810,6 +12818,55 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         arg.name, fdef.name, shape.positional[i],
                         M.param_annotation(fdef, shape.positional[i]),
                         fn.name))
+            # The OTHER end of the same analysis, and the one this pass is the
+            # only place to ask: the callee CALLS this parameter through the
+            # word, and the argument the call site put there is not a function.
+            # `apply(3, 17)` built, branched to the number 17 and died of
+            # SIGBUS on arm64 / SIGSEGV on x86-64, with CPython raising
+            # `TypeError` on the same program — so the word is provably not an
+            # address and the build can say so at the one place holding both
+            # ends of the call. The emitters ask the CALLING end (what the
+            # calling function's own statements bound the callee name to, which
+            # needs its `ValueKinds`) and cannot see the call site at all; this
+            # asks the PASSING end, whose evidence is the argument's own shape,
+            # and needs the callee's body — which it has only because the callee
+            # is a function of THIS unit.
+            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # is the doc for what is left of the whole-module half, and the
+            # words in that sentence are load-bearing: a callee in another image
+            # is not in `callee_defs` at all, so no position here is checked.
+            #
+            # Guarded on the three shapes whose POSITION is not `args[i]`, each
+            # for the reason `string_parameters_by_call_site` gives for the same
+            # one: a comptime SPECIALIZATION passes its brackets FIRST as leading
+            # arguments, a `*args` spread shifts everything after it, and a
+            # receiver is parameter 0 of the signature and is never bound by an
+            # argument list (`_positional_parameter_names`'s own paragraph). A
+            # call whose position cannot be established is left alone, which is
+            # the permissive direction and costs only the generics and the
+            # methods.
+            called_words = value_called_params.get(fdef.name) or ()
+            if isinstance(call.func, F.SubscriptExpr) or not called_words:
+                continue
+            if any(isinstance(a, F.UnaryOp) and a.op in ("*", "**")
+                   for a in (call.args or ())):
+                continue
+            if shape.positional and shape.positional[0] in M.struct_receivers(fdef):
+                continue
+            slots, _err = M.bind_call_arguments(
+                fdef.name, fdef, call.args or [], call.kwargs or [])
+            if slots is None:
+                continue
+            for pname, value in zip(shape.positional, slots):
+                if pname not in called_words or value is None:
+                    continue
+                holds = M.value_argument_is_not_an_address(value, fn)
+                if holds is not None:
+                    raise CodegenError(M.not_a_code_address_refusal(
+                        M.receiver_shape_text(value), holds, where=fn.name,
+                        passed=(f"passed to `{fdef.name}()` as parameter "
+                                f"`{pname}`, which `{fdef.name}()` calls "
+                                f"through a value")))
         frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a

@@ -504,6 +504,12 @@ CAUSES = (
      (("is a bracketed call through a VALUE",),)),
     ("a keyword argument in a call through a value",
      (("no declaration to bind it by NAME",),)),
+    # …and the two ends that need no DECLARATION: the source's own statements
+    # say what the word holds. One cause and one marker, because the two ends
+    # share a message (`formal/model.py::not_a_code_address_refusal`), and a
+    # planner reading a file blocked by this wants the one row.
+    ("a call through a word the source says is not an address",
+     (("is called as a FUNCTION and the source says it holds",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",
