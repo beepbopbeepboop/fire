@@ -547,10 +547,11 @@ def test_file_level_global_is_refused(tmpdir, verbose):
 def test_file_level_yield_is_refused(tmpdir, verbose):
     """A `yield` at file level makes the MODULE a generator.
 
-    Nothing on this path iterates a module, and the backend lowers a
-    generator as an ordinary function — so the value would be left in a
-    register the program never reads. That is a wrong answer, not an
-    error, which is why this is refused rather than wrapped."""
+    Nothing on this path iterates a module, and a generator function itself is
+    refused by name (`model.generator_function_refusal`), so a file-level one
+    would be reached only by the wrapper this check runs BEFORE \u2014 and the
+    value it would leave is the same wrong answer either way. A wrong answer,
+    not an error, which is why this is refused rather than wrapped."""
     return case_refused(
         "file_yield", "def g():\n    yield 1\n\ng()\nyield 2\n",
         "a `yield` at file level makes the MODULE a generator", tmpdir,
