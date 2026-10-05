@@ -337,6 +337,17 @@ MIX_MUST_REACH = {
     "strings": ("str_subscript",
                 "`s[i]` is a byte rather than a one-character string, and the "
                 "corpus has to produce it for the row to stay live"),
+    "noreturn": ("no_return_call",
+                 "a `def` with no `return` yields a word where CPython yields "
+                 "None, so `f() == 0` takes this path's arm and CPython's takes "
+                 "the other. This row is only legitimate BECAUSE the mix "
+                 "generates the construct: `bugs/FORMAL_a_function_with_no_"
+                 "return_yields_a_word_where_cpython_yields_None.md` §3 requires "
+                 "it (\"a row nothing can trigger is a row that has stopped "
+                 "measuring\"), and until this mix existed the minimiser reached "
+                 "the class constantly with no way to name it — 21 of the 27 "
+                 "`MISMATCH-X86` rows in the `strings` sweep at scale were it "
+                 "(bugs/FORMAL_fuzz_ledger.md §4.11)"),
 }
 
 
@@ -853,6 +864,95 @@ def check_record(verbose=False):
     return failures
 
 
+def check_attribution(verbose=False):
+    """A return-less call's disagreement is NAMED, not reported unexplained.
+
+    No compiler: what is pinned is that `features_of` marks the program and that
+    `neutralise` can take the construct out, which between them are the two
+    halves `blame` needs before it will attribute anything. The build half is the
+    `--mix noreturn` row of the ledger's own table.
+
+    **This is the check that says the ledger's §4.11 measurement is over.** That
+    section read all 27 `MISMATCH-X86` rows of the `strings` sweep at scale by
+    hand and found 21 of them to be one class — a `def` with no `return`, reached
+    only because `shrink` deletes statements — with `blame` unable to name it,
+    and it said the cheap improvement is a second marker on that shape. The
+    marker's precondition is a corpus that PRODUCES the shape, which is why the
+    row is `_check_features` and not a table entry here: this check would pass
+    for a construct no mix emitted.
+
+    Three rows and the third is the one that could have been got wrong: a helper
+    that DOES return must not be marked, because a marker that fires on ordinary
+    programs forgives the next real disagreement that happens to contain one.
+    """
+    with_return = (
+        'def nf1(a):\n'
+        '    w = a + 1\n'
+        '    return w\n'
+        '\n'
+        'def main():\n'
+        '    if nf1(2) == 0:\n'
+        '        print(1111)\n'
+        '    else:\n'
+        '        print(2222)\n'
+        '    return 0\n')
+    no_return = with_return.replace("    w = a + 1\n    return w\n",
+                                    "    w = a + 1\n")
+    # The nesting the corpus actually emits: two and three levels of argument,
+    # which is what a `[^()]*` argument class misses (measured on this
+    # generator's own output: 4 of 7 programs marked).
+    nested = (
+        'def nf2(r):\n'
+        '    w = (r) & 0xFFFF\n'
+        '\n'
+        'def main():\n'
+        '    w5 = 3\n'
+        '    if nf2(((w5 & 0xFFFF) << 1)) == 0:\n'
+        '        print(1111)\n'
+        '    else:\n'
+        '        print(2222)\n'
+        '    return 0\n')
+    # …and the construct with nothing observing it: a return-less helper that is
+    # never compared is not a divergence, and marking it would forgive one.
+    unobserved = (
+        'def nf3(a):\n'
+        '    w = a + 1\n'
+        '\n'
+        'def main():\n'
+        '    print(nf3(2))\n'
+        '    return 0\n')
+    cases = (
+        ("a_return_less_helper_compared_with_a_literal_is_marked",
+         no_return, True),
+        ("a_helper_that_returns_is_not_marked", with_return, False),
+        ("a_nested_argument_is_marked_too", nested, True),
+        ("a_return_less_helper_nothing_observes_is_not_marked",
+         unobserved, False),
+    )
+    failures = 0
+    for name, src, want in cases:
+        got = "no_return_call" in F.features_of(src)
+        if got != want:
+            failures += _fail(f"no_return_call_{name}",
+                              f"marked {got}, expected {want}:\n{src}", verbose)
+        if not want:
+            continue
+        out = F.neutralise(src, "no_return_call")
+        if out is None or out == src:
+            failures += _fail(f"no_return_call_{name}_cannot_be_neutralised",
+                              "the neutraliser could not take the construct "
+                              "out, so `blame` falls through to unexplained on "
+                              "every program the mix exists to produce", verbose)
+            continue
+        if "no_return_call" in F.features_of(out):
+            failures += _fail(f"no_return_call_{name}_survives_neutralising",
+                              f"the neutralised program is still marked:\n{out}",
+                              verbose)
+    print(f"formal fuzz: attribute  {'PASS' if not failures else 'FAIL'} "
+          f"{len(cases)} attribution rows (no compiler)")
+    return failures
+
+
 def check_reduction_tally(verbose=False):
     """A reduction that STOPPED reproducing is a tally line, not a field.
 
@@ -1253,6 +1353,7 @@ def main():
     failures = check_classifier(args.verbose)
     failures += check_audit(args.verbose)
     failures += check_record(args.verbose)
+    failures += check_attribution(args.verbose)
     failures += check_reduction_tally(args.verbose)
     failures += check_shrink_predicate(args.verbose)
     failures += check_frame_budget(args.verbose)
