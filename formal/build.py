@@ -5820,6 +5820,123 @@ def _erase_identity_intrinsics(node):
     return node
 
 
+def _rewrite_literal_attribute_reads(functions, stmts) -> None:
+    """`getattr(o, "name")` → `o.name`, where the SOURCE wrote the name.
+
+    The same shape of rewrite, in the same place, for the same measured reason
+    as `_rewrite_identity_intrinsic_calls`: every check downstream of this point
+    reads the AST, so a lowering in an emitter would leave `getattr(p, "a")` in
+    the tree the field-read analysis has already classified, and a call node is
+    not a `MemberExpr` to any of them.
+
+    **What it buys, and what the refusal said instead.** `model.
+    UNIMPLEMENTED_BUILTINS["getattr"]` said "the attribute it names is a STRING
+    at run time … a run-time-indexed read is not an address arithmetic question
+    this backend can answer", and refused this program:
+
+    ```
+    struct Pt:  a, b
+    def main(k): var p = Pt(); p.a = 7; p.b = 5
+                 var v = getattr(p, "a"); printf("%d", v)
+    ```
+
+    on both architectures. The name in that program is a LITERAL, so there is
+    nothing run-time about it: `v` is `p.a`, the slot index comes from `Pt`'s own
+    field list, and the answer is a load from `base + 8`. The refusal named four
+    things — a frame has no element width, no length, the index is not known
+    until the program runs — and not one of them is true of this source. That is
+    the failure mode this family of messages documents itself as existing to
+    prevent: a reader with a two-word program this path can answer is sent
+    looking for a limitation that is not there.
+
+    **Everything the rewrite does NOT touch keeps the refusal, and that is the
+    point.** `model.literal_attribute_read` accepts a bare string literal and
+    nothing else, so `getattr(p, f.name)`, `getattr(p, k)` and
+    `getattr(p, "a" + b)` all still refuse — and those are the shapes the
+    `dataclasses.fields()` loops in `ownership_check.py` and
+    `mojo/backend_gimple/cpp_core.py` actually write, which is why
+    `bugs/FORMAL_dataclass_runtime_reflection.md`'s answer is unchanged: the
+    field to read is not known until the loop runs. Widening the rewrite to keep
+    the table small is what leaves the real cases refused.
+
+    **A `getattr` this module DEFINES is not the builtin**, and the rewrite is
+    gated on that: `def getattr(o, n)` in the same file is an ordinary function
+    the source may call with whatever it likes, including a computed name.
+    `test_formal_run.py`'s `byref_a_local_getattr_is_not_the_builtin` is the row
+    that pins it, and this gate is what keeps it green.
+    """
+    if not M.LITERAL_ATTRIBUTE_READ_CALLS:
+        return
+    shadowed = _shadowing_attribute_read_names(stmts)
+    if not shadowed:
+        for fn in functions:
+            _erase_literal_attribute_reads(getattr(fn, "body", None))
+
+
+def _shadowing_attribute_read_names(stmts) -> set:
+    """The `getattr` spellings this module does NOT mean as the builtin.
+
+    `_defined_names` for `FunctionDef`/`StructDef` at the top level, plus
+    everything a `from … import …` binds — because `from m import getattr` is
+    the same hazard from the other side, and neither reader resolves imports at
+    this point in the pipeline (`_prepare_functions` runs before
+    `_resolve_imports`), so both are read off the AST. An `import getattr` is
+    not a thing that can bind a bare name, so it is not here.
+    """
+    from formal import imports as _I
+    names = {getattr(st, "name", None)
+             for st in (stmts or [])
+             if isinstance(st, (F.FunctionDef, F.StructDef))}
+    names.discard(None)
+    try:
+        names |= set(_I.imported_bound_names(stmts))
+    except Exception:
+        # A malformed import must not take the rewrite down with it: the
+        # rewrite only ever REMOVES work, and the refusal it prevents is the
+        # one thing a reader has to see.
+        pass
+    return names & M.LITERAL_ATTRIBUTE_READ_CALLS
+
+
+def _erase_literal_attribute_reads(node):
+    """`node` with every `getattr(o, "name")` in it replaced by `o.name`.
+
+    The `_erase_identity_intrinsics` traversal, unchanged and for the same
+    reasons: functional rather than in-place, because a statement tree's
+    children live in lists; nothing allocated unless something moved; and the
+    operand is recursed into so a nested `getattr(getattr(p, "a"), "b")` is
+    both of them.
+    """
+    if isinstance(node, (list, tuple)):
+        moved = None
+        for i, x in enumerate(node):
+            replacement = _erase_literal_attribute_reads(x)
+            if replacement is x:
+                continue
+            if moved is None:
+                moved = list(node)
+            moved[i] = replacement
+        if moved is None:
+            return node
+        return tuple(moved) if isinstance(node, tuple) else moved
+    if isinstance(node, F.CallExpr):
+        read = M.literal_attribute_read(node)
+        if read is not None:
+            receiver, member = read
+            return _erase_literal_attribute_reads(
+                F.MemberExpr(obj=receiver, member=member))
+    for fname in getattr(node, "__dataclass_fields__", ()):
+        if fname in ("line", "col"):
+            continue
+        value = getattr(node, fname, None)
+        if value is None or isinstance(value, (int, float, str, bool)):
+            continue
+        replacement = _erase_literal_attribute_reads(value)
+        if replacement is not value:
+            setattr(node, fname, replacement)
+    return node
+
+
 def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> int:
     """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
 
@@ -15707,6 +15824,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `_rewrite_identity_intrinsic_calls`'s docstring has the two programs that
     # say what the ordering is worth.
     _rewrite_identity_intrinsic_calls(functions)
+    # …and `getattr(o, "a")` → `o.a`, for the same reason and in the same place:
+    # the name is a LITERAL there, so the read is the field read the analysis
+    # below already knows how to classify (or refuse), and leaving the call in
+    # the tree meant every one of those checks saw a call nothing classifies.
+    # Gated on this module not DEFINING `getattr`, and on the name being a bare
+    # string literal — `bugs/FORMAL_dataclass_runtime_reflection.md`'s three
+    # `fields()` loops all name a field with `f.name`, and those keep refusing.
+    _rewrite_literal_attribute_reads(functions, stmts)
     # …and a target query IN a body, which the constant substitution cannot
     # reach: `__mlir_attr[...]` is an expression, not a name, and a function
     # that asks the build what it is compiling for has to get the answer

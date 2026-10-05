@@ -3341,6 +3341,45 @@ BYREF_CASES = [
      "    p.a = 3\n"
      "    p.b = 4\n"
      "    return getattr(p, 0)\n", 7, None),
+    # `getattr(p, "a")` with a LITERAL name is `p.a`, and `p.a` is the read this
+    # backend has always lowered. The refusal it used to get said "the attribute
+    # it names is a STRING at run time … a run-time-indexed read is not an
+    # address arithmetic question this backend can answer", which is FALSE of
+    # this source: the name is written here, so the slot comes from `P`'s own
+    # field list and the read is `base + 8`. A reader with a three-line program
+    # the path can answer was sent looking for a limitation that is not there,
+    # which is the failure mode the wide-receiver family documents itself as
+    # existing to prevent.
+    #
+    # Two fields and the read is the SECOND slot, not the first: 3 + 4 = 7 with
+    # `a` read says a read at offset 0 happened to be right.
+    ("getattr_of_a_literal_name_is_the_field_read",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    var v = getattr(p, \"b\")\n"
+     "    return v * 10\n", 40, None),
+    # A `getattr` this module DEFINES is an ordinary function and must keep
+    # being one — the row above is a name test, and a name test is exactly the
+    # kind of change that can be wrong in this direction silently. The module's
+    # own function takes an Int name and sums both fields, so the answer 7 is
+    # the FUNCTION's and not `p.b`'s (4). `byref_a_local_getattr_is_not_the_builtin`
+    # above is the same guard for the frame hand-off; this one is the rewrite.
+    ("getattr_defined_here_is_not_erased_to_a_field_read",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def getattr(o: P, name: Int) -> Int:\n"
+     "    return o.a + o.b\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return getattr(p, 0)\n", 7, None),
     # The cheapest width, and the whole design in one program: two fields, a
     # constructor, a write through the receiver, a read back through a
     # DIFFERENT method. 3 + 4 = 7.
@@ -3844,6 +3883,47 @@ RETURNED_FRAME_CASES = [
 # opposite of the truth. It is a demonstration in
 # `test_formal_returned_frame.py` now, beside the rest of the family.
 BYREF_REFUSALS = [
+    # The NEGATIVE half of `getattr_of_a_literal_name_is_the_field_read`: the
+    # name here is a VALUE, so there is nothing at compile time to compute a slot
+    # index from, and the refusal is the right answer. The needle is the clause
+    # that says so — "a LITERAL name is not this case" — because that clause is
+    # what tells a reader whose `getattr` the build CAN answer that the two
+    # spellings differ, and a reword that dropped it would leave this row
+    # refusing the right program with the wrong sentence and nothing failing.
+    #
+    # `names[0]` rather than `k`, so the name is a value read out of a blob and
+    # not an `Int` parameter: this is the shape
+    # `ownership_check.py`/`mojo/backend_gimple/cpp_core.py` write
+    # (`getattr(node, f.name)`) and the one
+    # `bugs/FORMAL_dataclass_runtime_reflection.md` is about.
+    ("byref_refuse_getattr_of_a_computed_name",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    var names = [\"a\", \"b\"]\n"
+     "    var v = getattr(p, names[0])\n"
+     "    return v\n",
+     "refuse:A LITERAL name is not this case", None),
+    # A literal name that is not a FIELD, which is the boundary the rewrite
+    # creates and the one that decides whether it is a rewrite or a hole: the
+    # call becomes `p.zz`, and the FIELD refusal is the accurate answer about it
+    # — it names `p`, quotes the struct's real field list, and says the program
+    # is very likely already raising. A `getattr` message here would be a reader
+    # sent to look for a run-time string this source does not have.
+    ("byref_refuse_getattr_of_a_name_that_is_not_a_field",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    var v = getattr(p, \"zz\")\n"
+     "    return v\n",
+     "refuse:its 2 field(s): a, b", None),
     # Into a container: a list blob has no layout for a frame address.
     ("byref_refuse_stored_in_a_list",
      "struct P:\n"

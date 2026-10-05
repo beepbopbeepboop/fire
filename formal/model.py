@@ -15504,11 +15504,17 @@ UNIMPLEMENTED_BUILTINS = {
         "there is no answer to hand back whatever the receiver is, and the "
         "receiver's layout is not the question here"),
     "getattr": (
-        "the attribute it names is a STRING at run time, and a field read on "
-        "this path is a load from `[base, #8k]` with a slot index the build "
-        "computed from the struct's own field list; a frame has no element "
-        "width and no length, so a run-time-indexed read of one is not an "
-        "address arithmetic question this backend can answer"),
+        "the attribute it names is a run-time STRING — the name is an "
+        "argument, so the build does not know which field is being asked for "
+        "until the program runs, and a field read on this path is a load from "
+        "`[base, #8k]` with a slot index computed from the struct's own field "
+        "list; a frame has no element width and no length, so a run-time-indexed "
+        "read of one is not an address arithmetic question this backend can "
+        "answer. **A LITERAL name is not this case and is not refused**: "
+        "`getattr(p, \"a\")` is `p.a`, and `LITERAL_ATTRIBUTE_READ_CALLS` below "
+        "erases it to that before any of this is asked — so the sentence you are "
+        "reading applies to `getattr(p, f.name)` and to `getattr(p, k)`, which "
+        "are the shapes this build cannot answer"),
     "setattr": (
         "the same run-time string, and a store rather than a load — which also "
         "means the write's target is not a slot the build established, so "
@@ -15523,6 +15529,67 @@ UNIMPLEMENTED_BUILTINS = {
         "field list the build compiled against is not something a call can "
         "change"),
 }
+
+
+#: Calls whose answer is an attribute read the build can compute, because the
+#: SOURCE wrote the name.  `getattr(o, "a")` is `o.a`: the name is a literal, so
+#: the slot index comes from the struct's own field list exactly as it does for
+#: the `MemberExpr` spelling, and there is nothing run-time about it.
+#:
+#: **The refusal in `UNIMPLEMENTED_BUILTINS` above says the name is "a STRING at
+#: run time", and for this spelling that is FALSE** — which is the whole reason
+#: this table exists, and the failure mode is the one the wide-receiver family
+#: documents itself as existing to prevent: a reader with a two-word program
+#: that this path could answer is told the question is unanswerable in principle.
+#: Measured, before the rewrite existed:
+#:
+#:     struct Pt:  a, b
+#:     var v = getattr(p, "a")
+#:
+#: refused with that paragraph, on both architectures, naming four things that
+#: are none of them the problem.
+#:
+#: `getattr` only, and the three siblings stay refused for the reasons their own
+#: entries give: `hasattr` asks whether the attribute is THERE (a frame's slots
+#: are its whole layout, so there is no absent case), `setattr` is a store whose
+#: target is not a slot the build established, and `delattr` removes one.
+LITERAL_ATTRIBUTE_READ_CALLS = frozenset({"getattr"})
+
+
+def literal_attribute_read(call):
+    """`(receiver, member)` for `getattr(o, "name")` with a LITERAL name, or
+    None.
+
+    The one consumer is the REWRITE in `formal/build.py`, beside
+    `_rewrite_identity_intrinsic_calls`, and it is a rewrite for the same
+    measured reason that one is: every check downstream of this point reads the
+    AST, so lowering the call in an emitter would leave `getattr(p, "a")` in the
+    tree the field-read analysis has already classified, and a name nothing
+    classifies is what the frame walk then walks straight through.
+
+    **Only a bare string literal.** A concatenation, an f-string, a `+`, a
+    constant read, a `String()` construction or anything with a keyword
+    argument is a name the build cannot fold, and each of those keeps the
+    refusal — which is the right answer, so the rewrite must not widen the set
+    of programs that build past the analysis to keep the table small.
+
+    `hasattr`/`setattr`/`delattr` are not asked here at all; see
+    `LITERAL_ATTRIBUTE_READ_CALLS`.
+    """
+    func = getattr(call, "func", None)
+    if not isinstance(func, F.IdentExpr):
+        return None
+    if func.name not in LITERAL_ATTRIBUTE_READ_CALLS:
+        return None
+    if getattr(call, "kwargs", None):
+        return None
+    args = getattr(call, "args", None) or ()
+    if len(args) != 2:
+        return None
+    name = args[1]
+    if not isinstance(name, F.StringLiteral) or not name.value:
+        return None
+    return args[0], name.value
 
 
 def frame_undefined_callee_refusal(callee: str, struct_names,
