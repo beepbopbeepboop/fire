@@ -5,11 +5,12 @@ case each, and each case a filter that is what separates.
     python3 test_formal_host_import_wall.py [-v]
 
 `tools/formal_host_import_wall.py` answers "what is left of the
-`not-answerable/host-import` row, and what would each name take", which three
-bug docs had each described in prose before it was promoted out of scratch
-(`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5 and
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`'s own
-re-measurement). A measurement whose readers are unpinned reports its own
+`not-answerable/host-import` row, and what would each name take", which had been
+described in prose three times over — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
+§5, and the thirteen-row `terminal`-vs-`closure` walk whose doc is deleted with
+this promotion, whose finding (eleven of thirteen names were CLOSURE rather than
+work, and a ranking that reads `reach` alone cannot tell the two) is what the
+`alone` column below exists for. A measurement whose readers are unpinned reports its own
 blindness as a fact about the corpus, so what is pinned here is the SET OF
 READERS, not the numbers they produce — a number that moves with the tree is the
 instrument working, and a snapshot of one would be red within a week and mean
@@ -96,20 +97,44 @@ class TestTheReadersAreTheBackends(TempTree):
     def test_a_file_the_backend_cannot_read_is_none_and_not_empty(self):
         """The distinction the header prints a count for.
 
-        This is not a hypothetical shape: `test_formal_libc_symbol.py` is a file
-        in this repository whose own source this tokenizer refuses — an f-string
-        replacement field with a newline in it, which CPython has accepted since
-        PEP 701 and `fire_compiler.py`'s tokenizer does not. A `[]` here would
-        make that file contribute no walls and look like a file that imports
-        nothing.
+        The unreadable file is a SYNTAX ERROR, and it has to be: this case used
+        to stand on `test_formal_libc_symbol.py`, a real file in this
+        repository whose own source the tokenizer refused because of an f-string
+        replacement field spanning a newline — which CPython has accepted since
+        PEP 701 and which the lexer now reads. That fix retired the premise
+        (see the case below), and with it this case's only example of an
+        unreadable file: `module_imports` answered `[]`, which is the narrower
+        answer wearing the same word and exactly what this case exists to catch.
         """
-        path = self.path("broken.py", "s = f\"a {1 +\n 2} b\"\n")
+        path = self.path("broken.py", "def f(:\n    return 1\n")
         self.assertIsNone(W.module_imports(path),
                           "an unreadable file must not read as 'imports "
                           "nothing' — that is the narrower answer wearing the "
                           "same word")
         ok = self.path("fine.py", "import pwd\n")
         self.assertEqual(W.module_imports(ok), ["pwd"])
+
+    def test_a_replacement_field_may_span_lines_so_that_shape_is_readable(self):
+        """The premise the case above rested on, retired and pinned.
+
+        `s = f"a {1 +\\n 2} b"` is the corpus's only PEP 701 disagreement with
+        CPython and it is FIXED: the lexer takes a replacement field across
+        lines, so the file parses and `module_imports` answers `[]` — which is
+        the right answer for a file that imports nothing, and the wrong one to
+        have been asserting `None` about.
+
+        It is a case rather than a comment because the two are the same reader
+        read from both sides: `None` is "this walk knows nothing about the file"
+        and `[]` is "the walk read it and it imports nothing", and the shape
+        that separates them is a file that PARSES. A repair that made
+        `module_imports` swallow a parse failure into `[]` would pass the first
+        case's readable file and fail here.
+        """
+        path = self.path("multiline_field.py", 's = f"a {1 +\n 2} b"\n')
+        self.assertEqual(W.module_imports(path), [],
+                         "a replacement field may span lines, so this file is "
+                         "readable and imports nothing — which is a different "
+                         "answer from the one the case above pins")
 
     def test_the_closure_is_transitive_because_the_build_links_it(self):
         """A file that never spells the wall is still refused on it.
@@ -360,8 +385,9 @@ class TestTheRankingOrder(unittest.TestCase):
     """`alone` first, because that is the column a module landing converts.
 
     A row with a large `reach` and no `alone` file is closure: 235 files reach
-    `abc` and writing it moves none of them, which is the whole reading
-    `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` gave.
+    `abc` and writing it moves none of them. That reading is the finding of the
+    thirteen-row `terminal`-vs-`closure` walk this tool was promoted out of
+    (doc deleted with the promotion), and `abc` was its worked example.
     """
 
     def test_the_json_rows_are_sorted_by_alone_then_reach(self):

@@ -193,9 +193,10 @@ a difference between two checkouts:
 Three files left the wall entirely, named: `test_memslot.py`, `tools/memcap.py`
 and `tools/procrun.py` — each wanted `signal` and nothing else unmodelled.
 
-**And one file appeared**, which is the effect
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` is about and
-which is worth one sentence because it is the reason the table cannot be read as
+**And one file appeared**, which is the effect the thirteen-row
+`terminal`-vs-`closure` walk measured (doc deleted with
+`tools/formal_host_import_wall.py`, which is that measurement now) and which is
+worth one sentence because it is the reason the table cannot be read as
 "what is left, ranked": `test_formal_sweep.py` imports **both** `signal`
 (line 22) and `unittest` (line 27), so it was never `signal`-alone and is now
 `unittest`-alone. A module landing **unmasks the row behind it**, and the
@@ -206,8 +207,8 @@ unmasked row is larger than the one that was measured.
 `reach` = files whose closure names it. `alone` = files for which it is the
 **only** name in that set, i.e. the files "writing this module makes this file
 build" is a true statement about — the `alone` column of
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`, which this
-table is the same measurement of four waves later.
+`tools/formal_host_import_wall.py`, which this table is the same measurement of
+four waves later.
 `sweep` = files the 2026-10-04 sweep reported **on this name specifically**.
 
 **The three numeric columns are RE-MEASURED (2026-10-05, `work/formal27-6`) by

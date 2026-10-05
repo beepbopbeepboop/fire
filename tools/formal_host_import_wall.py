@@ -7,12 +7,14 @@ name would TAKE rather than by how many files mention it.
     python3 tools/formal_host_import_wall.py --sweep bugs/sweeps/sweep-arm-11.txt
     python3 tools/formal_host_import_wall.py --unmodelled glob --unmodelled fnmatch
 
-**Why this is a tool and not a fourth document.** Three bug docs have described
-this same measurement in prose — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
-§5, `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`'s own
-re-measurement, and `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §6's closing
-judgement — and the last of them says the scratch "should have become a second
-tool rather than a fourth description of one". This is that tool.
+**Why this is a tool and not a fourth document.** Three documents described this
+same measurement in prose — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
+§5, the thirteen-row `terminal`-vs-`closure` walk whose doc is deleted with this
+promotion (its numbers were 2026-10-03, and every one of its four reachable
+names has since landed: `glob`, `shlex`, `signal`, `fnmatch`), and
+`bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §6's closing judgement — and the
+last of them says the scratch "should have become a second tool rather than a
+fourth description of one". This is that tool.
 
 ## The three columns, and why they are three and not one
 
