@@ -400,7 +400,22 @@ def _lower_StringLiteral(gen, node):
             # itself a previous cat), so it is freed as soon as the next cat
             # has copied it; the first part may be a literal or a borrowed
             # variable's string and is never freed here.
-            acc_val = gen._emit_str_cat(acc_val, part_val, acc_val in gen._fresh_str_tmps, False)
+            #
+            # The RIGHT operand is freed when the fresh-value chokepoint says
+            # nobody else can name it, which is the same question
+            # `free_left` asks of the left and was not being asked at all. A
+            # container interpolation goes through a repr WALKER
+            # (`_stringify_value`'s / `_repr_value`'s container arms), the
+            # walker `strdup`s its result, `mojo_str_cat` copies out of it —
+            # and nothing released it: 12.8 B per interpolated container,
+            # measured flat over a 4x loop range, for `f"{xs}"`. A part that
+            # is a literal (`_slit_N`), a variable read, or a field is not in
+            # `_fresh_vals` and is untouched, which is the whole reason the
+            # question is asked through the registry rather than by node
+            # shape.
+            acc_val = gen._emit_str_cat(
+                acc_val, part_val, acc_val in gen._fresh_str_tmps,
+                part_val in gen._fresh_vals)
     if acc_val is None:
         # Only reachable for an f-string whose parts are all empty
         # literals (e.g. f"{''}") — emit an empty string, not the old

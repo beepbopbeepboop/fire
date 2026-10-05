@@ -6658,6 +6658,30 @@ def gen_module_impl(self, stmts):
             _xf_ct = self._xmod_ctor_field_hints[_xf_key]
             if not _xf_ct or _xf_hstruct not in self.struct_field_types:
                 continue
+            # The hint's key half is the CONSTRUCTOR PARAMETER's name, because
+            # that is what the `_xf_record` producer above indexes with and
+            # what `_ctor_param_evidence` (the OTHER consumer of this table,
+            # through `_xf_own_ctor_params`) looks up when it types the
+            # `self.<f> = <p>` store. It is NOT necessarily a FIELD's name,
+            # and writing it into `struct_field_types` unconditionally turned
+            # every constructor parameter into one:
+            #
+            #     class Parser:
+            #         def __init__(self, tokens):
+            #             self.toks = tokens
+            #
+            # emitted `MojoList * tokens;` as a second field, and the generated
+            # `_mojo_getattr_Parser` answered for it — so
+            # `getattr(p, 'tokens')` returned the never-written slot and
+            # printed `[]` where CPython raises `AttributeError`: a
+            # plausible-looking wrong value, exit 0, rather than an error.
+            #
+            # So a hint may only REFINE a field the struct actually declares.
+            # One whose name is not already in the table is not a field at
+            # all, whatever the constructor called its parameter, and the
+            # right answer for it is the `int64_t` default it already has.
+            if _xf_hfield not in self.struct_field_types[_xf_hstruct]:
+                continue
             _xf_cur = self.struct_field_types[_xf_hstruct].get(_xf_hfield)
             if _xf_cur in (None, 'int', 'int64_t'):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
@@ -7568,7 +7592,53 @@ def gen_module_impl(self, stmts):
         expression, or (None, None). IdentExpr defers to the caller's
         scanned local map; a container LITERAL is provable on the spot,
         which is what the IdentExpr-only walk above could not see either
-        (`total([1.0, 2.0])` read its argument as int64 bits)."""
+        (`total([1.0, 2.0])` read its argument as int64 bits); a CALL
+        RESULT defers to the callee's own registered return element type.
+
+        The `CallExpr` arm is the third of one idea. The first two were a
+        name the caller's own scan can see and a literal written in place;
+        a name produced by ANOTHER function is the same fact one hop out,
+        and it was the one shape left, so a parameter whose every call site
+        is handed a call result recorded no element evidence at all, fell
+        to `int64_t`, and every read of its elements used
+        `mojo_list_get_int`:
+
+            def total(xs):
+                s = 0
+                for t in xs:
+                    s = s + t.numel()      # the generic no-op stub
+                return s
+            def build(n):
+                return [T(n), T(n + 1)]
+            total(build(10))                # a heap address, exit 0
+
+        Both one-hop neighbours were already right — a container LITERAL at
+        the call site, and a local holding one — which is what made this a
+        gap rather than a known limit.
+
+        It reads `_return_elem_types`, Pass 2c's answer to "what element
+        type does this function's return value carry", so the evidence is
+        the callee's OWN `return [T(n), T(n+1)]` literal and not the
+        callee's parameter types: the two are not interchangeable and only
+        one of them is the answer. `nested` stays `None` even when the
+        element type is itself `MojoList *`, because a callee's return
+        element type says what the OUTER slot holds and nothing about what
+        the inner one does; claiming otherwise would be a second,
+        independently-drifting inference.
+        """
+        if isinstance(a, gimple_ctypes.CallExpr) \
+                and isinstance(a.func, gimple_ctypes.IdentExpr):
+            _cn = _gmi_as_str(a.func.name)
+            _re = self._return_elem_types.get(_cn)
+            # An `int64_t` element type is not positive evidence here
+            # either, for the reason the IdentExpr arm gives: it is both
+            # the honest answer for a list of ints and this codegen's
+            # "cannot tell" default, and `_record_param_elem`'s conflict
+            # rule would let it erase a real answer from a sibling call
+            # site.
+            if _re and _re != 'int64_t':
+                return _gmi_as_str(_re), None
+            return None, None
         if isinstance(a, gimple_ctypes.IdentExpr):
             _n = _gmi_as_str(a.name)
             if _n in elem:

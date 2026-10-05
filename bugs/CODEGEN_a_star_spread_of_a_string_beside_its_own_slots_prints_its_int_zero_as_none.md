@@ -108,5 +108,11 @@ the result (a fresh string, since the source's is shared)").
 
 - `bugs/CODEGEN_star_spread_in_a_list_or_tuple_display_segfaults.md` — the fix
   this is the residue of, and whose Status records it.
-- `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md` —
-  the same repr-walker's remaining ownership gap, on the `print` side.
+- The same repr-walker's remaining ownership gap, on the `print` side: a
+  printed container's repr buffer was never freed (16.4 B per print), and
+  neither were the four other consumers of the same walkers — `str(xs)`,
+  `repr(xs)`, `f"{xs}"` and `'%s' % xs`, all 12.8 B per call, plus the
+  dict-keyed `'%(k)s' % d` primitive at 122 B. All fixed 2026-10-04 by putting
+  `_OWNED_REPR_FNS` into `_FRESH_STRING_RETURNS` and teaching the ownership
+  analysis that an f-string is not a constant; pinned by the eight
+  `gimple_*_repr_is_released` rows in `test_gimple_runner.py`.

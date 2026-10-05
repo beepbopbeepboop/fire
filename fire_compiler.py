@@ -276,6 +276,34 @@ class TstringLiteral:
     line: int = 0
     col: int = 0
 
+def is_fstring_literal(node) -> bool:
+    """True iff `node` is a `StringLiteral` this parser built from an
+    f-string (or a t-string, which uses the same `{expr}` syntax and is
+    lowered identically).
+
+    An f-string is NOT a different node class: the parser emits a plain
+    `StringLiteral` whose `value` still carries its `f` prefix AND its
+    surrounding quotes, where a plain literal's quotes are stripped at
+    tokenize time. That asymmetry is what makes the test unambiguous —
+    `'"'` and `"a "` are content that begins with a quote, not a prefix —
+    and it is why the predicate has to be this shape rather than
+    `value.startswith('f')`.
+
+    It lives here, beside the node it asks about, because two engines need
+    the same answer and neither may grow its own: the codegen's f-string
+    interpolation (`mojo/middle/resolve_shared._decode_str_literal_text`,
+    which strips the prefix) and the ownership analysis
+    (`ownership_destruct`, which must know that `s = f"{xs}"` builds a fresh
+    string so the name can own it). Those two disagreed until this existed:
+    the analysis saw a `StringLiteral`, decided it was a constant, and never
+    credited the name — so an interpolated container leaked its repr buffer
+    once per iteration for want of one predicate.
+    """
+    if not isinstance(node, StringLiteral):
+        return False
+    val = _as_str(node.value)
+    return (len(val) > 1 and val[0] in 'fFtT' and val[1] in '"\'\'')
+
 @dataclass
 class BoolLiteral:
     value: bool

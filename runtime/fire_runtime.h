@@ -1734,10 +1734,13 @@ char *mojo_repr_bool(int b);
 
 /* A callable-valued parameter default naming an IMPORTED module's function
  * (`def probe(x, *, g=os.walk)`) — see the block comment on
- * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was a
- * SIGSEGV and why ONE no-parameter function is the right stub for every
+ * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was
+ * a SIGSEGV and why ONE no-parameter function is the right stub for every
  * arity. `mojo_set_unavailable_callable_name` arms the name the diagnostic
- * prints; the codegen emits it immediately before the call it belongs to. */
+ * prints; the codegen emits it immediately before the call it belongs to.
+ * Calling it RAISES a catchable NotImplementedError naming the callable: a 0
+ * returned to the caller was indistinguishable from a real 0 the function
+ * could have returned, so every number derived from it was wrong with exit 0. */
 void    mojo_set_unavailable_callable_name(const char *name);
 int64_t mojo_unavailable_callable(void);
 void   *mojo_unavailable_callable_ptr(void);
@@ -1750,6 +1753,14 @@ char *mojo_cstr_or_int_str(int64_t v);
    what turned `d[3000000000] = 1` into a `strcmp` of address 3000000000.
    Transient block, same ownership and same release rule as the entry above. */
 char *mojo_int_str_transient(int64_t v);
+/* The LENGTH of a type-erased word, decided by the runtime's own registries
+   instead of by the codegen's guess about the slot's declared type: the three
+   container registries first, then `mojo_boxed_is_str`'s string arm, else 0.
+   This is what `len(x)` calls when the operand's C type is `int64_t` and
+   `_actual_types` recorded no kind for it -- a parameter whose call sites
+   disagree, or a conditional that assigns two kinds. Without it the lowering
+   committed to `mojo_list_len` and read a header out of string bytes. */
+int64_t mojo_len_of_word(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
 void *mojo_sorted(void *iterable);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */

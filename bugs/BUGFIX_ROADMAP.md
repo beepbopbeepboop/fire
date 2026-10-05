@@ -203,11 +203,12 @@ the number it was assigned when it was filed.
   generator. Two docs were filed rather than fixed from what those turned up:
   `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
   `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
-  A merge in the same batch restored the
-  `emit_dict_int_value_store` delegate that another worker's doc
-  (`CODEGEN_merge_dropped_the_emit_dict_int_value_store_delegate.md`, on
-  another branch) says was dropped — that doc can be retired at integration
-  rather than re-fixed.
+  A merge in the same batch also left `gimple_codegen.GimpleGen` carrying the
+  `emit_dict_int_value_store` delegation TWICE — the merge was resolved file by
+  file, and `gimple_codegen.py` is the aggregator both copies of the shared
+  file fed. Python keeps the last, both bodies were identical, and no test could
+  see it. Deduplicated, with an `ast`-based check in `test_gimple.py` that no
+  class in the codegen tiers defines a name twice.
 - **The nested-`def` closure environment is freed**
   (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
   OPEN 2, the `{mut}` capture box, is still open and is now the only thing in

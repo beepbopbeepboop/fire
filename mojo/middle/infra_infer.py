@@ -1798,11 +1798,19 @@ def _returned_param_containers(func) -> dict:
             out[n] = ctype
     return out
 
-def _each_binding(body: list) -> list:
+def _each_binding(body: list, include_defs: bool = False) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing
     through control flow and never into a nested `FunctionDef` (which has its
     own locals and its own return inference -- the same boundary
     `mutated_free_names` uses).
+
+    `include_defs` yields the nested `FunctionDef` statements themselves, still
+    without descending into them, for the one consumer that wants the DEF as a
+    binding rather than its body: `_lambda_call_ret_locals`, which has to know
+    what calling a nested def produces. It is a parameter rather than a second
+    walker because the traversal below is the thing that had already drifted
+    once -- the container overlay walked `elif` bodies and the dict overlay did
+    not -- and a second copy of it is how that happened.
 
     ONE walker for the three local-type overlays below. Each of them used to
     carry its own copy, and they had already drifted: the container copy
@@ -1829,6 +1837,8 @@ def _each_binding(body: list) -> list:
     def walk(stmts):
         for s in (stmts or []):
             if isinstance(s, gimple_ctypes.FunctionDef):
+                if include_defs:
+                    out.append(s)
                 continue
             out.append(s)
             if isinstance(s, gimple_ctypes.IfStmt):
@@ -2116,8 +2126,8 @@ def _dict_value_locals(gen, body: list) -> dict:
 
 
 def _lambda_call_ret_locals(gen, body: list) -> dict:
-    """`{local name: ctype}` for every local in `body` bound to a LAMBDA,
-    naming what CALLING it produces.
+    """`{local name: ctype}` for every local in `body` bound to a LAMBDA or to
+    a NESTED DEF, naming what CALLING it produces.
 
     A lambda created and called in the same statement list is never
     materialized: `_lower_LambdaExpr` records it in `gen._inlined_lambdas`
@@ -2138,19 +2148,46 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
     decimal. Only the RETURN boundary loses it: `fn = lambda: q * 2` then
     `print(fn)` is unaffected, because that path materializes the lambda.
 
-    So the table answers one question — the ctype of `name(...)` for a
-    lambda-bound `name` — and `resolve_shared._quick_type`'s call case
-    consults it for that question only. It is NOT `_callable_ret_types`
-    (the runtime table the MATERIALIZED path uses): that one is keyed by
-    lowered VALUE as well as by name and is populated during emission,
-    which is too late for a signature the forward declaration has already
-    been written from. Keeping the two apart is also what stops an
-    emission-time entry from leaking into unrelated inference.
+    A NESTED DEF is the same question asked through a different door. Its
+    body is its own function with its own `return`s, so
+    `_infer_return_type_core` answers it exactly as it answers any other
+    function — but nothing was calling that on it, because the enclosing
+    function's signature is written before any nested def is emitted:
+
+        def a1():
+            p = 'mm'
+            def inner():
+                return p
+            return inner()       # int64_t a1(void) — the char * printed
+                                  # as 4378056936
+
+    So it goes in the SAME table rather than a second one: one question (what
+    does calling this local produce), one consumer (`resolve_shared._quick_type`
+    's call case), one conflict rule. Two tables for one question is how the
+    three overlays this file already had drifted apart in the first place.
+
+    It is NOT `_callable_ret_types` (the runtime table the MATERIALIZED path
+    uses): that one is keyed by lowered VALUE as well as by name and is
+    populated during emission, which is too late for a signature whose forward
+    declaration has already been written from. Keeping the two apart is also
+    what stops an emission-time entry from leaking into unrelated inference.
 
     Only a body whose type is NOT the `int64_t` default is recorded, since
     a recorded `int64_t` would say nothing the fallback does not already
     say; and a name rebound to a different shape keeps its FIRST lambda,
     matching `_declare_var`'s first-decl-wins rule.
+
+    NO recursion guard, and the reason is worth stating because a guard is the
+    obvious thing to reach for: nothing here follows a CALL. The nested def's
+    return type comes from `_infer_return_type` over its OWN `return`
+    statements, and `_quick_type` on a call to a sibling nested def reads
+    `_lambda_call_ret_types`, which is still the outer table at that moment
+    (the new entries are only merged in after this function returns). So two
+    mutually recursive nested defs each infer `int64_t` — the `int64_t`
+    default, which is what mutual recursion inferred before this table
+    existed — and the recursion is bounded by AST nesting depth in any case.
+    A guard would be guarding against nothing, and it would be the kind of
+    thing that later gets removed for being unreachable.
     """
     out: dict = {}
 
@@ -2170,8 +2207,19 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if bt and bt != 'int64_t':
             out[name] = bt
 
+    def note_def(fd):
+        name = _as_str(fd.name)
+        if not name or name in out:
+            return
+        bt = _infer_return_type(gen, fd.body)
+        if bt and bt != 'int64_t':
+            out[name] = bt
+
     for n in _each_binding(body):
         note(n)
+    for n in _each_binding(body, include_defs=True):
+        if isinstance(n, gimple_ctypes.FunctionDef):
+            note_def(n)
     return out
 
 

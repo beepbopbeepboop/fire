@@ -28,7 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
-    _as_ident_node, _as_member_node,
+    _as_ident_node, _as_member_node, is_fstring_literal,
 )
 import regex_compile
 import mlir
@@ -1270,6 +1270,15 @@ _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_rstrip', 'mojo_str_lstrip_chars', 'mojo_str_rstrip_chars',
     'mojo_str_rjust', 'mojo_str_ljust', 'mojo_str_center',
     'mojo_str_expandtabs', 'mojo_str_join',
+    # The dict-keyed %-formatting primitive (`'%(prog)s v%(ver)d' % d`). It
+    # builds its result through the runtime's own `_FmtBuf` and returns that
+    # heap block on every path, and it is what `_lower_percent` reaches for a
+    # `%(key)s` spec — which is also the only way a CONTAINER reaches a `%`
+    # conversion, since a container has no int/str form. It was missing, and
+    # it leaked the whole formatted buffer per call: measured 122 B/iteration
+    # for `"%r" % {'k': 'v'}`, flat over a 4x range. The `fmt` argument is
+    # read and copied, never returned, so there is no aliasing case.
+    'mojo_str_format_dict',
 ])
 
 
@@ -1365,9 +1374,17 @@ def is_fresh_container_operand(gen, node, val: str) -> bool:
     default answer is False."""
     if val == '' or val not in gen._fresh_vals:
         return False
-    return isinstance(node, (ListExpr, DictExpr, SetExpr, Comprehension,
-                             CallExpr, SubscriptExpr, SliceExpr, BinaryOp,
-                             TstringLiteral))
+    if isinstance(node, (ListExpr, DictExpr, SetExpr, Comprehension,
+                         CallExpr, SubscriptExpr, SliceExpr, BinaryOp,
+                         TstringLiteral)):
+        return True
+    # An f-string, which is a plain `StringLiteral` to the parser — see
+    # `fire_compiler.is_fstring_literal`. It is here for the same reason the
+    # type list is: the syntactic test is "this expression can only have
+    # produced this value", and `f"{xs}"` passes only vacuously otherwise,
+    # because a PLAIN string literal is a `_slit_N` pool global and must not
+    # be freed. The discriminator is the prefix the parser leaves on.
+    return is_fstring_literal(node)
 
 
 def owned_free_fn_for(gen, val: str, ctype: str) -> str:
@@ -5216,6 +5233,34 @@ _OWNED_REPR_FNS = frozenset({
 })
 
 
+# The REPR WALKERS belong in `_FRESH_STRING_RETURNS` too, and they are
+# `_OWNED_REPR_FNS` verbatim: every one of them allocates its return on EVERY
+# path and none of them can return its own argument, which is the whole
+# contract that table states. They were missing, and it cost 12.8 B per call in
+# every spelling that asks one of them for a value — `str(xs)`, `repr(xs)`,
+# `f"{xs}"`, `'%s' % xs` — because a producer this table does not name is not
+# "fresh for whoever consumes it next", so the consumer that frees the
+# PREVIOUS value (`_gen_stmt_AssignStmt`'s reassignment free) skipped it and the
+# buffer survived the loop. Measured flat after, over a 4x range.
+#
+# The union is HERE rather than written into the frozenset literal above
+# because `_OWNED_REPR_FNS` is defined below it, and it is a union rather than
+# a restatement because the walkers were already enumerated body by body for
+# `_gen_print`, which frees after its last `mojo_print`. Two lists of the same
+# names is exactly the drift the pair is prone to: a walker added to one and
+# not the other leaks through the other. The two tables answer different
+# questions about one fact — "may the CALLER free it" (print) and "may the NEXT
+# CONSUMER free it" (the fresh-value chokepoint) — and the fact is the same
+# one, read body by body once.
+#
+# Deliberately NOT added, and `_OWNED_REPR_FNS` is where the reason for each
+# lives: `_mojo_dispatch_repr`, `mojo_repr_bool`, `mojo_bool_to_str`,
+# `mojo_repr_float` and `mojo_repr_boxed` each return a string LITERAL on at
+# least one arm (`return "None"`, `b ? "True" : "False"`, `"nan"`/`"inf"`),
+# where a `free` is heap corruption rather than a leak.
+_FRESH_STRING_RETURNS = _FRESH_STRING_RETURNS | _OWNED_REPR_FNS
+
+
 def _own_repr(gen, fn: str, value: str, out: list) -> str:
     """Record `value` for release after the print that consumes it, when `fn`
     is one whose return the caller owns on EVERY path (`_OWNED_REPR_FNS`).
@@ -5307,7 +5352,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # last `print_fn` call below — the repr walkers, which all `strdup` their
     # result and which nothing freed. 16.4 B per printed container, measured
     # flat over a 4x loop range; see
-    # `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`
+    # the repr-walker ownership family (print, str, repr, f-string, %-format)
     # and `_OWNED_REPR_FNS` above for which helpers may be released and which
     # three may not (each has a `return "<literal>"` arm, where a `free` is
     # heap corruption rather than a leak).

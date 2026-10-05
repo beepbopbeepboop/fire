@@ -2762,8 +2762,22 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if actual == 'MojoSet *':
             sp = gen._coerce_to_type('int64_t', 'MojoSet *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_set_len ({sp})')
-        lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
-        return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
+        if actual == 'MojoList *':
+            lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
+            return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
+        # NO recorded kind: the slot really is polymorphic, so ASK. A
+        # parameter whose call sites are a list AND a string, a conditional
+        # that assigns two kinds, a value forwarded from either — for all of
+        # them `_actual_types` has nothing (there is no single store to
+        # record: the slot is one C type and several kinds), and the previous
+        # unconditional `mojo_list_len` was a header read out of whatever the
+        # word addressed — non-deterministically, since that is whatever
+        # follows the bytes (bugs/CODEGEN_len_of_a_param_called_with_both_a_
+        # list_and_a_str.md). `mojo_len_of_word` is `mojo_cstr_or_int_str`'s
+        # discriminator asked the length question, and `print` has used that
+        # shape for its operand all along.
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_len_of_word',
+                                         [('int64_t', av)])
     return 'int64_t', gen._new_val('int64_t', f'(int64_t)0  /* len() on unsupported type {at} */')
 
 

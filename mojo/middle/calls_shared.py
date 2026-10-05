@@ -348,13 +348,15 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     # exit 139 and no output. Padding 0 is the one answer that is always
     # available and always wrong.
     #
-    # So: a stub address, armed with the name. The diagnostic is inside the
-    # stub, so a callee that never calls the parameter is COMPLETELY
-    # unaffected — no message, no behaviour change — and one that does gets a
-    # greppable line and a 0 instead of a signal. That is the same
-    # loud-but-continuing shape as `mojo_unsupported_iter`, and for the same
-    # reason: continuing with the previous behaviour beats taking the process
-    # down.
+    # So: a stub address, armed with the name. Calling it RAISES a catchable
+    # NotImplementedError naming the callable, rather than printing a line and
+    # returning 0 — a 0 handed back from `g(x)` is indistinguishable from a
+    # real 0 the function could have returned, so every number derived from it
+    # was wrong with exit 0 (`probe('/r')` printed `0` where CPython prints a
+    # generator object). The raise is inside the stub, so a program that never
+    # CALLS the parameter is still completely unaffected, and a program that
+    # does can catch it and say so. Same decision, and the same reason, as
+    # `mojo_module_not_compiled`: a name that resolved to nothing here.
     #
     # Scoped to MemberExpr on purpose. A bare `IdentExpr` default
     # (`g=some_helper`) is NOT routed here: a module-level constant lowers to

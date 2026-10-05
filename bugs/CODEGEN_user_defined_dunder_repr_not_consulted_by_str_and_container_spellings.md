@@ -232,13 +232,18 @@ still knows the element's type:
 needs a type recorded somewhere this codegen does not record it, which is a
 different problem from the container repr:
 
-* `bugs/CODEGEN_module_scope_struct_binding_has_no_type.md` — a container whose
-  element is an unannotated MODULE-LEVEL binding read at module level. That
-  binding is boxed into an `int64_t` global, `_quick_type` says `int64_t`, the
-  slot appends through `mojo_list_append_int`, and there is no type at any point
-  for any of this to consult. The doc's own original reproducer is in this
-  shape, which is why its `repr([p])` row is fixed only for the shapes listed
-  above.
+* An unannotated MODULE-LEVEL binding read at module level — FIXED 2026-10-02,
+  so it no longer needs a doc. That binding is boxed into an `int64_t` global
+  and `_quick_type` said `int64_t` for it, so a container whose element was one
+  appended through `mojo_list_append_int` and there was no type at any point
+  for any of this to consult. `_quick_type`'s `IdentExpr` arm now answers with
+  `_own_global_var_types[name]` for a name that is neither a local nor a
+  closure, and the element type is recovered at the list literal (which is where
+  `_struct_elem_repr_shim` looks for it). `_own_`, not the shared
+  `_global_var_types`: the latter is a whole-transitive-tree superset, so
+  answering from it makes `_quick_type` describe a SIBLING's global — measured,
+  the self-host closure's `.ci` going from 13 distinct gcc errors to 15. This
+  doc's `repr([p])` row is fixed for the shapes listed above.
 * `CODEGEN_struct_typed_field_reprs_as_an_integer` — a struct-typed
   FIELD inside another struct's generated field dump (`Holder(p=P(...))` prints
   `Holder(p=4381809120, ...)`). `struct_field_types` says `int64_t` for that
