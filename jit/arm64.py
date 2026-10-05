@@ -1,7 +1,10 @@
 """ARM64 JIT compiler for Mojo.
 
 Compiles Mojo code to GIMPLE, then dynamically compiles to ARM64
-machine code using GCC, and executes it via ctypes.
+machine code using GCC, and executes it by running the result as a
+subprocess. (It used to be `ctypes`, and the import was still here with
+nothing reading through it: every step of this file drives gcc through
+`subprocess.run`. Dead, or stale, and the sentence was the stale half.)
 
 Uses SHA256-based caching to avoid recompilation of identical source code.
 """
@@ -10,7 +13,11 @@ import os
 import sys
 import tempfile
 import subprocess
-import ctypes
+# `ctypes` was imported here and read NOTHING through it: this file drives gcc
+# with `subprocess.run` at every step and never dlopens anything. A dead import
+# blocks a file on the formal path for exactly the reason an absent module
+# does; see `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+# §3.
 import platform
 import hashlib
 from pathlib import Path

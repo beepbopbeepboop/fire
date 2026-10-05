@@ -131,6 +131,19 @@ answered:
 | `copy` | 1 of 13 (`alone`) | `tools/apply_extraction.py` imported `copy` and read nothing through it | deleted the import |
 | `collections` | 4 of 39, **2 of them `alone`** | four files imported it and read nothing through it: `consolidate_string_pool.py` (`from collections import OrderedDict`), `formal/admitted.py`, `tools/formal_chain_probe.py`, `tools/formal_field_walk_differential.py` | deleted the imports; `collections`'s `alone` count went **10 → 8** |
 
+**And four more, outside the wall entirely** — `test_formal_fnmatch.py`,
+`test_formal_hostmods_census.py` (`subprocess`), `test_formal_interop.py` and
+`jit/arm64.py` (`ctypes`) — none of which the ranking could see, because all four
+import a module that HAS a `formal/hostmods/` model and so is not on the wall at
+all. `tools/formal_host_import_shapes.py --dead` is the mode that walks the
+tree instead of the sweep's 220 files, and `test_formal_host_import_shapes.py`
+ratchets its output to **exactly one file**: `fire_compiler.py`'s dead
+`from abc import abstractmethod`. That one is deliberately not fixed here —
+`fire_compiler.py` is the AST source of truth and every formal change's blast
+radius passes through it, and its line 8401 emits `@abstractmethod` into GENERATED
+source, so a reader of that import would reasonably conclude the node classes are
+declared abstract. **The next step for it is one line in the file that owns it.**
+
 The `collections` half is the same shape of finding as the `copy` half and was
 found by the same instrument: **`DEAD` is a column, not an absence.** Neither
 `formal_sweep_causes.py` nor the wall tool prints it, because both ask whether a

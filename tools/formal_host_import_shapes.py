@@ -384,6 +384,82 @@ def uses_in(path, module):
     return {k: (v or {"DEAD"}) for k, v in out.items()}
 
 
+def dead_host_imports(root="."):
+    """Every `.py` file under `root` with a host import nothing reads through it.
+
+    `rows_for` reads the files a SWEEP blocked, which is the right set for
+    ranking a row and the wrong set for this: **a dead host import blocks its
+    file for exactly the reason an absent module does**, whether or not the
+    sweep ever got as far as naming the module — a file that stops on
+    `collections` before it reaches `itertools` is invisible in the `itertools`
+    row and just as blocked. So this walks the tree instead, which is what found
+    the four `collections` files in §3 of the bug doc and the four below it.
+
+    `.py` ONLY, and the restriction is not a shortcut: a `.mojo` file is not
+    Python, so `ast.parse` on one either fails or succeeds on a syntax that is
+    not the file's — which is why
+    `tools/formal_sweep_causes.py::_host_mentions_module` returns `None` for a
+    Mojo path rather than answering. A `.mojo` file's imports are read by the
+    backend's own reader (`formal/imports.py::imported_modules`, over
+    `fire_compiler`'s node classes), so a Mojo dead import is a real gap and
+    this tool deliberately says nothing about it.
+
+    `.git`, `build/`, `bugs/`, `.tmp/` and every dotted directory are skipped:
+    the first two are not source, the third is prose and the last is scratch.
+    """
+    import glob as _glob
+    skipped = {".git", "build", "bugs", ".tmp", "__pycache__", "node_modules"}
+    out = []
+    for path in _glob.glob(os.path.join(root, "**", "*.py"), recursive=True):
+        parts = set(os.path.normpath(path).split(os.sep))
+        if parts & skipped or any(p.startswith(".") for p in parts):
+            continue
+        found = _dead_in(path)
+        if found:
+            out.append((os.path.relpath(path, root), found))
+    return out
+
+
+def _dead_in(path):
+    """`[(module, bound_local)]` for the host imports `path` never reads."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError, ValueError):
+        return []
+    binds = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if not node.module or not _is_host(node.module):
+                continue
+            for alias in node.names:
+                if alias.name != "*":
+                    binds[alias.asname or alias.name] = (
+                        "%s.%s" % (node.module, alias.name))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if _is_host(top):
+                    binds[alias.asname or top] = top
+    if not binds:
+        return []
+    reads = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            reads.add(node.id)
+        elif (isinstance(node, ast.Attribute)
+              and isinstance(node.value, ast.Name)):
+            reads.add(node.value.id)
+    return sorted({v for k, v in binds.items() if k not in reads})
+
+
+def _is_host(name):
+    try:
+        return bool(_imports._is_host_module(name))
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
 def rows_for(sweep, min_files=1):
     parsed, missed = parse_log(sweep)
     by_module = {}
@@ -444,9 +520,28 @@ def main(argv=None):
                          "files (default 1, so nothing is hidden)")
     ap.add_argument("--files", metavar="NAME", default=None,
                     help="print every blocked file for one module and stop")
+    ap.add_argument("--dead", action="store_true",
+                    help="instead of the ranking: every .py file in the tree "
+                         "with a host import nothing reads through it. This is "
+                         "the set the ranking CANNOT see, because a file that "
+                         "stops on `collections` before it reaches `itertools` "
+                         "is invisible in the `itertools` row and just as "
+                         "blocked")
+    ap.add_argument("--root", default=".", metavar="DIR",
+                    help="what --dead walks (default: the repository root)")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable rows instead of the table")
     args = ap.parse_args(argv)
+
+    if args.dead:
+        found = dead_host_imports(args.root)
+        for path, names in found:
+            print(f"{path}\t{', '.join(names)}")
+        print(f"\n{sum(len(n) for _, n in found)} dead host import(s) in "
+              f"{len(found)} file(s) under {args.root} (`.py` only; a `.mojo` "
+              f"file's imports are read by the backend's own reader, so this "
+              f"tool says nothing about them)")
+        return 1 if found else 0
 
     sweep = args.sweep or default_sweep()
     if not sweep:

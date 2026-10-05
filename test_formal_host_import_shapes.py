@@ -354,6 +354,37 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
                          "embedded CPython, which is why the row is tiered "
                          "`unreachable` and not `modelled`")
 
+    def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
+        """`--dead` is the set the ranking CANNOT see, so its ratchet is the
+        count, and the one file it names is named here so that a reader who
+        wants it fixed knows which.
+
+        A dead host import blocks its file for exactly the reason an absent
+        module does, and whether the sweep got as far as naming the module is
+        irrelevant: a file that stops on `collections` before it reaches
+        `itertools` is invisible in the `itertools` row and just as blocked.
+        Four `collections` files and four more outside the wall came out of this
+        walk (`bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+        §3); this is what stops a fifth.
+
+        `fire_compiler.py`'s is NOT fixed here and the reason is worth having
+        written down: it is a dead `from abc import abstractmethod`, and this
+        file's own line 8401 emits `@abstractmethod` into GENERATED source, so a
+        reader of `fire_compiler.py` would reasonably conclude the AST node
+        classes are declared abstract. `fire_compiler.py` is the AST source of
+        truth and every formal change's blast radius passes through it, so
+        deleting the line belongs to whoever owns that file; the next step is
+        §"the next step" of the bug doc.
+        """
+        found = dict(S.dead_host_imports(HERE))
+        self.assertEqual(
+            found, {"fire_compiler.py": ["abc.abstractmethod"]},
+            "the tree's dead host imports changed:\n    "
+            + "\n    ".join(f"{p}: {n}" for p, n in sorted(found.items()))
+            + "\nA dead host import blocks its file for exactly the reason an "
+              "absent module does, so each one is a file off the wall for "
+              "nothing. Delete the import, or say here why it stays.")
+
     # ── the three ratchets, whose going RED is the point ────────────────────
     #
     # Each is a row whose files the sweep blocked and this tree no longer
