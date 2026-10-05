@@ -2189,9 +2189,30 @@ dylib_exports: list = None, globals_base: int = None,
 
 
         if isinstance(stmt, F.AssertStmt):
-            # assert cond [, msg] — evaluate cond; on falsy, _exit(1).
-            # msg is not formatted into the diagnostic (no printf on this
-            # path); the nonzero exit status is the signal.
+            # `assert cond [, msg]` — evaluate `cond`; on falsy, run `msg` and
+            # leave with status 1.
+            #
+            # **Both halves of the failing path are observable, and both used to
+            # be dropped.** `msg` is not formatted into a diagnostic on this
+            # path (there is no printf for it), but CPython EVALUATES it before
+            # it raises, so `assert n > 0, why()` calls `why()` — and a message
+            # that logs, that frees, that closes, or that prints is a program
+            # whose output and whose effects are missing. Measured on both
+            # backends: `assert n > 0, why()` printed nothing where CPython
+            # printed `why`. `debug_assert` already emitted its messages "for
+            # their effects, and only on the path that exits"; a plain `assert`
+            # is the same construct and was not.
+            #
+            # And the exit goes through `_emit_diverge` rather than
+            # `_emit_exit` directly, which is what makes an enclosing `finally`
+            # run on the way out — the same flush a `raise` gets, and the reason
+            # it lives with the exit rather than at each call site. Measured on
+            # both backends: `try: assert n > 0 finally: print('fin')` printed
+            # `body` where CPython prints `body` then `fin`.
+            #
+            # ORDER matters and is CPython's: the message runs first, then the
+            # `finally`, because the assert raises and the `finally` runs during
+            # the unwinding that follows it.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self._assert_counter += 1
@@ -2202,20 +2223,19 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit_label_rel(fail_label, here_offset=-4)
             self._emit_b_to(ok_label)
             self.asm.label(fail_label)
-            # The one exit on this backend (`_emit_exit`), so a failed assert
-            # leaves what the program printed behind it and leaves status 1.
-            self._emit_exit(1)
+            msg = getattr(stmt, "msg", None)
+            if msg is not None:
+                self._emit_expr(msg)
+            self._emit_diverge()
             self.asm.label(ok_label)
             return
 
         if isinstance(stmt, F.RaiseStmt):
-            # No EH runtime: evaluate the exception expression for side
-            # effects (args of `raise RuntimeError(...)` etc.), then diverge.
-            # except handlers stay unreachable — there is no
-            # unwinder to route to; the nonzero status is the signal.
-            if stmt.value is not None:
-                self._emit_expr(stmt.value)
-            self._emit_diverge()
+            # No EH runtime: run whatever the raised expression does for its
+            # side effects, then leave. `except` handlers stay unreachable —
+            # there is no unwinder to route to; the nonzero status is the
+            # signal.
+            self._emit_raise(stmt)
             return
 
         if isinstance(stmt, F.WhileStmt):
@@ -2623,8 +2643,8 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`.
+    def _emit_diverge(self, status: int = 1) -> None:
+        """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
         it rather than spelling the exit each: a `raise`, which has no unwinder
@@ -2633,9 +2653,66 @@ dylib_exports: list = None, globals_base: int = None,
         nothing else to emit. Two copies of the exit is how two of them come to
         differ, and the finally flush is the part that is easy to drop — a
         `raise` inside a `try` must still run the `finally` on its way out.
+
+        `status` is a parameter rather than a constant because
+        `raise SystemExit(3)` is CPython's way of saying "exit 3", and
+        `model.raise_exit_status` is where that is decided. Every other caller
+        passes nothing and gets the 1 the whole hierarchy leaves behind.
         """
         self._flush_pending_finally()
-        self._emit_exit(1)
+        self._emit_exit(status)
+
+    def _emit_raise(self, stmt: F.RaiseStmt) -> None:
+        """`raise <expr>` — run the expression's effects, then leave the process.
+
+        Two shapes, and the difference is whether the raised expression is an
+        exception CLASS this image cannot construct:
+
+        * **a builtin exception class** (`raise ValueError('boom')`, or the bare
+          `raise ValueError`) — `model.raise_class_name` recognises it, and
+          there is no declaration of `ValueError` here to construct, so the
+          call has no symbol to bind and the name has no home. Emitting it as
+          an ordinary expression produced two refusals that both named a
+          SYMBOL instead of the construct: `BL ValueError` caught by the link
+          audit, and `'ValueError' has no home` from the name reader. What
+          CPython's contract is for an uncaught one is short enough to state
+          exactly — the ARGUMENT EXPRESSIONS run (so `raise ValueError(g())`
+          calls `g`), the enclosing `finally` clauses run, the process leaves
+          with status 1 and its output flushed — and none of that needs an
+          instance, because there is no handler in the image to bind one to.
+        * **anything else** — an instance the program built, a call's result, a
+          subscript. The expression is emitted as written, which is what this
+          path has always done and what makes `raise e` for a local `e` and
+          `raise int('zz')` work.
+
+        The two are one decision in `formal/model.py` rather than one per
+        backend, and that is the point: the two architectures used to answer
+        this question with the same two lines of code, which is exactly the
+        arrangement under which they come to disagree.
+        """
+        value = getattr(stmt, "value", None)
+        exc_name = M.raise_class_name(value, self._structs)
+        if exc_name is None:
+            declared = M.raise_declared_class_name(value, self._structs)
+            if declared is not None:
+                # `raise MyErr` in CPython instantiates `MyErr`, so it is
+                # `raise MyErr()` — and going through the ordinary construction
+                # arm is what keeps a class whose `__init__` PRINTS honest:
+                # CPython runs the constructor, so this must too, and the
+                # refusal for a constructor body this path cannot lower keeps
+                # answering rather than being routed around. The status is 1,
+                # because `MyErr` is not `SystemExit`.
+                self._emit_expr(M.raise_zero_arg_construction(
+                    declared, getattr(stmt, "line", 0) or 0))
+                self._emit_diverge()
+                return
+            if value is not None:
+                self._emit_expr(value)
+            self._emit_diverge()
+            return
+        for arg in M.raise_arg_exprs(value):
+            self._emit_expr(arg)
+        self._emit_diverge(M.raise_exit_status(exc_name, value))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -7329,8 +7406,60 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_cmp_operands(l, r)
         self.asm.emit(encode_fmov_gpr_to_v(0, 0))
         self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
+            self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 0, 1))
         self.asm.emit(encode_fmov_v_to_gpr(0, 0))
+
+    def _emit_float_divide_by_zero_guard(self) -> None:
+        """Leave with status 1 when the DIVISOR in D1 is zero, around an FDIV.
+
+        CPython raises `ZeroDivisionError` for `x / 0.0` on doubles, and IEEE-754
+        does not: `FDIV` by a zero divisor answers `+inf` (or `-inf`, or NaN for
+        `0.0/0.0`) and keeps going. So without this guard the backend computed a
+        NUMBER for a program CPython refuses and then ran the lines after it —
+        measured on both backends, `x = 1.0/0.0` printed `b` and exited 0 where
+        CPython prints `a` and exits 1, which is the "wrong but exit 0" answer
+        nothing in this compiler can detect on its own.
+
+        **The test is on the BIT PATTERN, in the integer file, and it is the
+        integer test shifted left by one.** A double is zero iff its pattern is
+        `+0.0` (`0`) or `-0.0` (`1 << 63`), and `LSL #1` drops the sign bit and
+        shifts the rest up, so `LSL X2, X1, #1` is zero for exactly those two
+        patterns and non-zero for every other — including NaN, whose payload is
+        non-zero, which is right: `1.0/nan` is `nan` in CPython and does not
+        raise.
+
+        Testing it this way rather than with `FCMP D1, D31` is deliberate and is
+        about the proof layer, not the code: `FCMP` sets NZCV to `0011` for an
+        unordered compare, so an `EQ` branch on it needs the model to reason
+        about a case the integer rules already cover, whereas a `CBZ` on a
+        shifted register is the exact shape `_emit_div_shift_pow`'s integer
+        `div0` guard already emits, and the proof generators already treat a
+        codegen-internal `CBZ` with no source condition by closing the taken arm
+        as dead when the register holds a compile-time non-zero constant (which
+        is what `1.0 / 2.5` gives it). One shape for both divides is one shape
+        for the model to carry.
+
+        Not `_record_cond_branch`: neither the integer guard nor this one has an
+        AST condition behind it, and recording it would claim a source-level
+        `if` the program never wrote.
+        """
+        self._if_counter += 1
+        cid = self._if_counter
+        fn = self.func_name
+        div0_label = f"{fn}_fdv{cid}_z"
+        ok_label = f"{fn}_fdv{cid}_ok"
+        self.asm.emit(encode_lsl_xd_xn_imm(2, 1, 1))
+        self.asm.emit(encode_cbz_xn(0, 2))
+        self.asm.emit_label_rel(div0_label, here_offset=-4)
+        self._emit_b_to(ok_label)
+        self.asm.label(div0_label)
+        # The same `_emit_exit(1)` an integer divide-by-zero and a failed
+        # `assert` leave behind, so "the program stopped here" has one shape
+        # and the status one value on this path.
+        self._emit_exit(1)
+        self.asm.label(ok_label)
 
     def _cmp_spec(self, op: str, l, r):
         """`(left, right, unsigned_cond, signed_cond, float_reading)` for a compare.
@@ -11270,12 +11399,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         return M.BLOB_ESTIMATE_FALLBACK
 
     def _static_int(self, e):
-        if isinstance(e, F.IntLiteral):
-            return e.value
-        if isinstance(e, F.UnaryOp) and e.op == "-" \
-                and isinstance(e.operand, F.IntLiteral):
-            return -e.operand.value
-        return None
+        """A literal integer value for `e`, else None.
+
+        A ONE-LINE wrapper over `model.integer_literal_value` and kept only so
+        the call sites below read as before. The rule is the shared reader's
+        because x86-64's copy of this method, `raise_exit_status` and
+        `_cfg_int_value` all ask the same question, and three private copies is
+        how they come to disagree about a NEGATED literal — which is how
+        `raise SystemExit(-1)` came to leave status 1 where CPython leaves 255."""
+        return M.integer_literal_value(e)
 
     def _emit_list_concat(self, left, right) -> None:
         """`a + b` as list-blob concat → base pointer in X0.

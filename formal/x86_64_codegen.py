@@ -2019,9 +2019,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.AssertStmt):
-            # assert cond [, msg]: evaluate cond, exit(1) when falsy. The
-            # message is not formatted — there is no printf on this path — and
-            # the nonzero status is the signal.
+            # `assert cond [, msg]`: evaluate `cond`, run `msg` and leave with
+            # status 1 when it is falsy.
+            #
+            # **Both halves of the failing path are observable, and both used to
+            # be dropped.** `msg` is not formatted into a diagnostic on this
+            # path (there is no printf for it), but CPython EVALUATES it before
+            # it raises, so `assert n > 0, why()` calls `why()` — and a message
+            # that logs, that frees, that closes, or that prints is a program
+            # whose output and whose effects are missing. Measured on both
+            # backends: `assert n > 0, why()` printed nothing where CPython
+            # printed `why`. And the exit goes through the flush a `raise` gets,
+            # so an enclosing `finally` runs on the way out: measured on both
+            # backends, `try: assert n > 0 finally: print('fin')` printed
+            # `body` where CPython prints `body` then `fin`.
+            #
+            # ORDER is CPython's: the message runs first, then the `finally`,
+            # because the assert raises and the `finally` runs during the
+            # unwinding that follows it.
             #
             # The JMP over the exit is not an optimisation, it is the whole
             # statement. There was none here: `jcc fail` was immediately
@@ -2043,17 +2058,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_jcc(COND_E, fail_label)
             self._emit_jmp(ok_label)
             self.asm.label(fail_label)
+            msg = getattr(stmt, "msg", None)
+            if msg is not None:
+                self._emit_expr(msg)
+            self._flush_pending_finally()
             self._emit_call_exit(1)
             self.asm.label(ok_label)
             return
 
         if isinstance(stmt, F.RaiseStmt):
-            # No EH runtime: evaluate the exception expression for its side
-            # effects (the args of `raise RuntimeError(...)`), then diverge.
-            # Handlers stay unreachable — there is no unwinder to route to.
-            if stmt.value is not None:
-                self._emit_expr(stmt.value)
-            self._emit_diverge()
+            # No EH runtime: run whatever the raised expression does for its
+            # side effects, then leave. Handlers stay unreachable — there is
+            # no unwinder to route to.
+            self._emit_raise(stmt)
             return
 
         if isinstance(stmt, F.TryStmt):
@@ -2528,6 +2545,54 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """
         self._flush_pending_finally()
         self._emit_call_exit(1)
+
+    def _emit_raise(self, stmt: F.RaiseStmt) -> None:
+        """`raise <expr>` — run the expression's effects, then leave the process.
+
+        The mirror of `formal/arm64_codegen.py`'s method of the same name, and
+        the reason the CLASSIFICATION lives in `formal/model.py` rather than
+        here: the two spellings that used to be refused (`raise ValueError("x")`
+        reaching the link audit as an unbound `BL ValueError`, and a bare
+        `raise ValueError` refused as "'ValueError' has no home") are two
+        copies of the same missing piece, and two copies are how two
+        architectures come to disagree about it.
+
+        What CPython's contract is for an uncaught exception is short enough to
+        state exactly: the ARGUMENT EXPRESSIONS run for their side effects, the
+        enclosing `finally` clauses run, and the process leaves with status 1
+        and everything it printed already flushed. No instance is needed for
+        any of that, because there is no handler in the image to bind one to.
+
+        `SystemExit` is the one class whose status is not 1, and
+        `model.raise_exit_status` decides it — `raise SystemExit(3)` is how a
+        program says "exit 3" and CPython honours it.
+        """
+        value = getattr(stmt, "value", None)
+        exc_name = M.raise_class_name(value, self._structs)
+        if exc_name is None:
+            declared = M.raise_declared_class_name(value, self._structs)
+            if declared is not None:
+                # `raise MyErr` in CPython instantiates `MyErr`, so it is
+                # `raise MyErr()` — and going through the ordinary construction
+                # arm is what keeps a class whose `__init__` PRINTS honest:
+                # CPython runs the constructor, so this must too, and the
+                # refusal for a constructor body this path cannot lower keeps
+                # answering rather than being routed around. The status is 1,
+                # because `MyErr` is not `SystemExit`.
+                self._emit_expr(M.raise_zero_arg_construction(
+                    declared, getattr(stmt, "line", 0) or 0))
+                self._flush_pending_finally()
+                self._emit_call_exit(1)
+                return
+            if value is not None:
+                self._emit_expr(value)
+            self._flush_pending_finally()
+            self._emit_call_exit(1)
+            return
+        for arg in M.raise_arg_exprs(value):
+            self._emit_expr(arg)
+        self._flush_pending_finally()
+        self._emit_call_exit(M.raise_exit_status(exc_name, value))
 
     def _frame_member_slot(self, node):
         """The frame slot `node` names, or None having refused the access.
@@ -6867,8 +6932,54 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
         }[M.FLOAT_BINARY_MNEMONICS[op][1]]
         self._emit_float_operands(l, r)
+        if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
+            self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 1))
         self.asm.emit(encode_movq_r64_xmm(Reg.RAX, 0))
+
+    def _emit_float_divide_by_zero_guard(self) -> None:
+        """Leave with status 1 when the DIVISOR in XMM1 is zero, around a DIVSD.
+
+        The mirror of `formal/arm64_codegen.py`'s method of the same name, and
+        `model.raise_float_divides_by_zero_is_an_exception` is what both ask so
+        that the two architectures cannot come to disagree about whether the
+        LANGUAGE raises here — IEEE-754 does not trap, so `DIVSD` by zero
+        answers `+inf` and the program runs on past a line CPython refuses.
+        Measured before the guard on both backends: `x = 1.0/0.0` printed `b`
+        and exited 0 where CPython prints `a` and exits 1.
+
+        **The test is on the BIT PATTERN, in the integer file, and it is arm64's
+        `LSL #1` written as an `ADD r,r`.** A double is zero iff its pattern is
+        `+0.0` (0) or `-0.0` (`1 << 63`), and `R11 + R11` is `2 * R11` modulo
+        2^64, which is 0 for exactly those two patterns and non-zero for every
+        other — including NaN, whose payload is non-zero, which is right:
+        `1.0/nan` is `nan` in CPython and raises nothing.
+
+        `_emit_float_operands` leaves the divisor's bits in R11 as well as in
+        XMM1 (it copied them there before the pop overwrote RAX with the left
+        operand), so the test costs one `ADD` and no second load. Testing in the
+        integer file rather than with `UCOMISD` against a zeroed XMM register is
+        the same reason arm64 tests in the integer file: `UCOMISD` sets PF on an
+        unordered compare, so an `EQ` branch on it needs the model to reason
+        about the NaN case, whereas a `TEST`+`JZ` is the shape the integer
+        divide-by-zero guard already emits.
+
+        Not `_record_cond_branch`: neither the integer guard nor this one has an
+        AST condition behind it, and recording it would claim a source-level
+        `if` the program never wrote."""
+        self._if_counter += 1
+        cid = self._if_counter
+        div0_label = f"{self.func_name}_fdv{cid}_z"
+        ok_label = f"{self.func_name}_fdv{cid}_ok"
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R11))
+        self._emit_jcc_bool(Reg.R11, COND_E, div0_label)
+        self._emit_jmp(ok_label)
+        self.asm.label(div0_label)
+        # The C library's `exit(1)`, which is the shape every other failing
+        # check on this backend uses (`_emit_call_exit`), so "the program
+        # stopped here" has one shape and its output is flushed.
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
 
     def _emit_float_operands(self, l, r) -> None:
         """Two doubles into XMM0 (left) and XMM1 (right), both surviving a call.
@@ -10671,15 +10782,15 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _static_int(self, e):
         """A literal integer value for `e`, else None.
 
-        UnaryOp('-', IntLiteral(n)) counts as -n, so `range(a, b, -1)` is
-        recognized as a descending range even though the parser keeps the
-        minus as a node."""
-        if isinstance(e, F.IntLiteral):
-            return e.value
-        if isinstance(e, F.UnaryOp) and e.op == "-" \
-                and isinstance(e.operand, F.IntLiteral):
-            return -e.operand.value
-        return None
+        A ONE-LINE wrapper over `model.integer_literal_value` and kept only so
+        the ~10 call sites below read as before: `UnaryOp('-', IntLiteral(n))`
+        counts as -n, so `range(a, b, -1)` is recognised as a descending range
+        even though the parser keeps the minus as a node. The rule is the
+        shared reader's because arm64's copy of this method is the same question
+        — a shift amount, a `**` exponent and a `SystemExit` status all ask it,
+        and three private copies of it is how they come to disagree about a
+        NEGATED literal, which is how `raise SystemExit(-1)` left status 1."""
+        return M.integer_literal_value(e)
 
 
 def _align16(value: int) -> int:
