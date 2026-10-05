@@ -286,7 +286,7 @@ def _lower_StringLiteral(gen, node):
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
-    val, is_fstring = gen._decode_str_literal_text(val)
+    val, is_fstring = gen._decode_str_literal_text(val, gimple_ctypes._str_literal_interp_flag(node))
     if not is_fstring:
         # A RAW literal's escapes are its CHARACTERS, and `_c_escape` passes a
         # recognised escape through unchanged on the reasoning that the C
@@ -412,7 +412,12 @@ def _lower_StringLiteral(gen, node):
 
 def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
     val = node.value
-    val, _ = gen._decode_str_literal_text(val)
+    # `'1'`, and not a flag read off the node: a `TstringLiteral` is the node
+    # type that exists only for a `t"..."` template literal, so it is
+    # interpolated by construction and carries no field to say so. (Nothing in
+    # this tree builds one — `_parse_primary` folds t-strings into
+    # `StringLiteral`s — so this is the lowering a hand-built node reaches.)
+    val, _ = gen._decode_str_literal_text(val, '1')
     parts = gen._parse_fstring_parts(val)
     # Plain unpack loop, NOT `''.join(v for k, v, _s, _c in parts)` — see
     # `_lower_StringLiteral`'s identical fix above for why.
@@ -4561,7 +4566,7 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
             gen.lower_expr(e)
         return 'MojoBytes *', lv
     if isinstance(node.left, gimple_ctypes.StringLiteral):
-        fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
+        fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value, gimple_ctypes._str_literal_interp_flag(node.left))
         if not is_fstring:
             return gen._lower_percent_format(node, fmt_text)
     return None  # sentinel: caller falls through to generic numeric `%`

@@ -260,6 +260,23 @@ BUILTIN_PROGRAMS = {
             var s = f"value={x}"
             print(s)
     """),
+    # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
+    # Both engines printed the STRIPPED body (`n`, `x`) and exited 0, so the
+    # diff between them was clean — which is why this program is also in
+    # CPYTHON_COMPARABLE: engine-vs-engine is the comparison that cannot see a
+    # bug the two share, and CPython prints `f"n"` and `t'x'`. The escaped row
+    # is the control: with the inner and the outer quote the same kind, `\"`
+    # survives into the value, so it starts `f\` and the prefix sniff every
+    # engine used to do was accidentally right about it.
+    "string_body_that_starts_with_a_prefix": textwrap.dedent("""\
+        def main():
+            a = 'f"n"'
+            b = "t'x'"
+            c = "f\\"n\\""
+            print(a)
+            print(b)
+            print(c)
+    """),
     # A method call is the only `return` EXPRESSION KIND whose type the
     # enclosing function's inference had no case for: `_quick_type`'s
     # method-call branch is gated on the RECEIVER's type naming a registered
@@ -1337,6 +1354,7 @@ CPYTHON_COMPARABLE = {
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
+    "string_body_that_starts_with_a_prefix",
 }
 
 

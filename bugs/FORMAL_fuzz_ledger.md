@@ -509,13 +509,22 @@ heap). Asked once from `formal/build.py`'s shared pipeline, over
 `model.iter_nodes`, so a literal nested under a call is reached by the same walk
 the frame layout uses and the two front ends cannot answer differently.
 
-**What the fix does not cover**, filed as
-`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`: the
-test is the value's PREFIX, and an ordinary string whose TEXT starts with `f"` or
-`t'` is indistinguishable from an interpolated one in this AST. Measured on
-` s = 'f"n"' `: the interpreter and the compiled path both print `n` where CPython
-prints `f"n"`, and the formal path now refuses. The fix belongs in the parser —
-a flag beside `is_raw`, set where the placeholder is built from the RAW token.
+**What the fix does not cover, and now DOES — this paragraph's second half is
+history.** The predicate here used to be a test of the literal's value's PREFIX,
+and an ordinary string whose TEXT starts with `f"` or `t'` is indistinguishable
+from an interpolated one in this AST: measured on `s = 'f"n"'`, the interpreter
+and the compiled path both printed `n` where CPython prints `f"n"`, and this
+path refused the program. Fixed the way the note said it had to be — in the
+parser, beside `is_raw`, set from the RAW token: `StringLiteral.is_interpolated`,
+read here and by `myinterpreter.eval_StringLiteral` and
+`resolve_shared._decode_str_literal_text` (one flag, three readers, so a
+fourth cannot re-derive it). Pinned by `test_string_literal_lexing.py`'s
+`FLAG_ROWS` and its `prefix_looking` end-to-end case, by
+`test_formal_run.py`'s `ordinary_string_starting_with_f_is_not_an_fstring`, and
+by `test_runtime_diff.py`'s `string_body_that_starts_with_a_prefix` (which is
+`CPYTHON_COMPARABLE`, because both engines printed `n` and so agreed with each
+other). What the fix above does still not cover is the BUFFER: a real `f"n={n}"`
+is refused on this path, which is unchanged.
 
 ### 3.9 `k, v = d` bound a key and then a VALUE, and printed an address for the first
 

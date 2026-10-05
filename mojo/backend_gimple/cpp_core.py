@@ -621,10 +621,13 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
     return f'{fn}((char *)({part_val}), (int64_t){width}, "{fill}")'
 
 
-def _cpp_string_literal_expr(gen, val: str) -> str:
+def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
     """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
     `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
-    and interpolates its `{expr}` fields, instead of the naive "just
+    and interpolates its `{expr}` fields, with `is_interp` the AST's own
+    `StringLiteral.is_interpolated` answer (`''` for a value that is not a
+    literal at all — see `resolve_shared._decode_str_literal_text`), instead
+    of the naive "just
     C-escape the raw token text" this case used to do. That previous
     behavior was a genuine SILENT MISCOMPILE, not an honest refusal: an
     f-string StringLiteral's `.value` (e.g. `f"===== {text} "`,
@@ -639,7 +642,7 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
     (unlike `_lower_StringLiteral`, which emits a GIMPLE statement per
     part). Non-f-string plain strings take the previous fast path
     unchanged (single C string literal, no parsing)."""
-    text, is_fstring = gen._decode_str_literal_text(val)
+    text, is_fstring = gen._decode_str_literal_text(val, is_interp)
     if not is_fstring:
         # gimple_ctypes._c_escape, NOT a hand-rolled replace chain: the
         # parser stores a StringLiteral's value as RAW SOURCE TEXT
@@ -756,7 +759,8 @@ def _cpp_percent_format(gen, node) -> str | None:
     """
     if not isinstance(node.left, gimple_ctypes.StringLiteral):
         return None
-    fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
+    fmt_text, is_fstring = gen._decode_str_literal_text(
+        node.left.value, gimple_ctypes._str_literal_interp_flag(node.left))
     if is_fstring:
         return None
     rhs_exprs = (list(node.right.elements)
@@ -1107,7 +1111,10 @@ def _cpp_module_global_field(gen, marker, name):
     if _bm_const is not None:
         _bm_ctype, _bm_val = _bm_const
         if _bm_ctype == 'char *':
-            return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val)
+            # `''`: a `builtin_module_constant` is a value the table holds BY
+            # VALUE (os.linesep and friends), not a source token, so there is
+            # no prefix to take off and nothing to interpolate.
+            return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val, '')
         return _bm_ctype, f'({_bm_ctype}){_bm_val}'
     found = gen._module_global_field_type(bound, name)
     key = bound
@@ -1594,7 +1601,7 @@ def _cpp_expr(gen, e) -> str:
         val = e.value
         if val.startswith('`') and val.endswith('`') and len(val) > 2:
             return val  # backtick-quoted identifier (mojo keyword escape)
-        return _cpp_string_literal_expr(gen, val)
+        return _cpp_string_literal_expr(gen, val, gimple_ctypes._str_literal_interp_flag(e))
     if isinstance(e, gimple_ctypes.IdentExpr):
         if e.name == 'None':
             return '0'  # None → null pointer / zero (matches _lower_IdentExpr)
@@ -7128,7 +7135,8 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
             msg_arg = val.args[0] if isinstance(val, gimple_ctypes.CallExpr) and val.args else None
             if msg_arg is not None:
                 if isinstance(msg_arg, gimple_ctypes.StringLiteral):
-                    text, is_fstr = gen._decode_str_literal_text(msg_arg.value)
+                    text, is_fstr = gen._decode_str_literal_text(
+                        msg_arg.value, gimple_ctypes._str_literal_interp_flag(msg_arg))
                     if is_fstr:
                         msg_cpp = gen._cpp_expr(msg_arg)
                     else:
@@ -7147,7 +7155,8 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
     msg_cpp = 'nullptr'
     if msg_arg is not None:
         if isinstance(msg_arg, gimple_ctypes.StringLiteral):
-            text, is_fstr = gen._decode_str_literal_text(msg_arg.value)
+            text, is_fstr = gen._decode_str_literal_text(
+                msg_arg.value, gimple_ctypes._str_literal_interp_flag(msg_arg))
             if is_fstr:
                 # F-string message: emit the interpolated expression as
                 # the message (best-effort — a static string or a simple

@@ -5168,7 +5168,17 @@ class Interpreter:
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
-        is_fstring = value.startswith('f"') or value.startswith("f'")
+        # `expr.is_interpolated`, and NOT "does the value start with `f"`/`t`".
+        # An ordinary literal's value is its BODY and a body may begin with any
+        # two characters, so that test read `s = 'f"n"'` as an f-string and
+        # printed `n` where CPython prints `f"n"`; the compiled path did the
+        # same and the formal path refused the program. The parser decides the
+        # question from the SOURCE TOKEN (`_raw_string_is_ftstring`) and records
+        # it in the node, which is the only place the two spellings differ.
+        # It also settles the UPPERCASE spellings, which this test never matched
+        # at all: `F"n={n}"` interpolated on the compiled path and printed its
+        # own source text here.
+        #
         # Mojo's `t"..."` template-string literal shares f-string's `{expr}`/
         # `{{`-escape interpolation syntax (see fire_compiler.py's
         # _strip_string_prefix_and_quotes) — real Mojo turns it into a
@@ -5177,8 +5187,7 @@ class Interpreter:
         # Python's own, unrelated PEP 750 t-strings would produce a
         # string.templatelib.Template object instead of a str) gets the same
         # final value without needing to model an intermediate Template type.
-        is_tstring = value.startswith('t"') or value.startswith("t'")
-        if is_fstring or is_tstring:
+        if getattr(expr, 'is_interpolated', False):
             body = value[1:]  # strip the leading f/t prefix
             # Detect a triple-quoted body without ever writing a literal
             # triple-quote substring in this file's own source: fire_compiler's

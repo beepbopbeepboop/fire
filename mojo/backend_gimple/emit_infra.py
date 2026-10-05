@@ -3459,7 +3459,7 @@ def _fstring_sub_exprs(gen, node) -> list:
     observed. See CODEGEN_untyped_param_string_direct_fstring_call.
     Mirrors _lower_StringLiteral's own fresh-parse-from-text handling of
     these so both paths agree on what a call site looks like."""
-    val, is_fstring = gen._decode_str_literal_text(node.value)
+    val, is_fstring = gen._decode_str_literal_text(node.value, gimple_ctypes._str_literal_interp_flag(node))
     if not is_fstring:
         return []
     out = []

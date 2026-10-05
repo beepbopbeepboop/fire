@@ -2671,6 +2671,20 @@ CASES = [
      "    c = \"%d%s\"\n"
      "    printf(\"[%s][%s][%s]\\n\", a, b, c)\n"
      "    return 0\n", 0, "[{}][{not a field}][%d%s]"),
+    # The same guard one axis over: the ordinary string whose own TEXT begins
+    # with an f/t prefix and a quote. `a = 'f"n"'` is a four-character string
+    # and this path used to REFUSE it by name — the predicate that decides
+    # "interpolated?" asked the literal's VALUE, and an ordinary literal's value
+    # is its body, so a body may begin with `f"` all by itself. It is a
+    # build-and-run assertion, not a refusal assertion, because that is what
+    # the bug was: correct code this path declined. The companion refusal cases
+    # above still stand for REAL f-strings, which this path cannot compose.
+    ("ordinary_string_starting_with_f_is_not_an_fstring",
+     "def main(n):\n"
+     "    a = 'f\"n\"'\n"
+     "    b = \"t'x'\"\n"
+     "    printf(\"[%s][%s]\\n\", a, b)\n"
+     "    return 0\n", 0, "[f\"n\"][t'x']"),
 
     # ── the class: every operator that reached the integer path ────────────
     #
