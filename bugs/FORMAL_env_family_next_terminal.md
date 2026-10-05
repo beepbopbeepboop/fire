@@ -1,9 +1,19 @@
 # FORMAL_env_family_next_terminal: where the 55-file family stands, and what the next reader needs
 
-**Status: the family's own terminal has NOT MOVED since 2026-10-02, and it is a
-file whose own document was deleted for measuring at a ceiling of ZERO. What is
-left in this document is a measurement, not a defect.** Re-measured 2026-10-02 on
-`work/formal8-5`, arm64, on the real stdlib file:
+**Status: SUPERSEDED IN PART (2026-10-05, `formal37-2`).** The terminal recorded
+below has **moved**: `binary_heap.mojo` is no longer in `env.mojo`'s refusal at
+all, and the family now stops on two *present* surfaces rather than on an absence.
+Read **§"Re-measured 2026-10-05"** at the end first — it has the current
+terminal, and it records that the 172-file import closure resolves completely,
+so this is no longer a transitive-import problem. The measurement this document
+originally carried is kept below for the same reason the model-fuzz ledger keeps
+its own: it is what a reader has to check the new one against.
+
+**Original Status (2026-10-02, `work/formal8-5`): the family's own terminal has
+NOT MOVED since 2026-10-02, and it is a file whose own document was deleted for
+measuring at a ceiling of ZERO. What is left in this document is a measurement,
+not a defect.** Re-measured 2026-10-02 on `work/formal8-5`, arm64, on the real
+stdlib file:
 
 ```
 $ python3 tools/memslot.py --gb 8 -- python3 fire.py build --formal --no-prove \
@@ -160,3 +170,77 @@ bucket. So the fix is hardening against a class that has not recurred since the
 55-file family it was written for, which is a real thing to say about it and not
 a reason to skip it: a misclassification that is never exercised is a rule that
 will be wrong the first time it fires.
+
+## Re-measured 2026-10-05 (`formal37-2`): the terminal MOVED, twice over, and the
+## old one is gone from the message entirely
+
+Re-ran this document's own reproduction against the real stdlib file
+(`/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/std/os/env.mojo`,
+arm64, `--no-prove`). The Status above says the terminal is **`binary_heap.mojo`**,
+quoted as `binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares
+only the generic struct template(s) BinaryHeap`. **That string is not in the
+message any more.** What is there now:
+
+```
+build: env.mojo imports 'std.ffi', which cannot be built either: `dealloc` is
+  called, and it is imported from `std.memory.alloc`, so the call has to bind a
+  symbol `std.memory.alloc` exports. That module does not export it …
+  A generic template's instantiations ARE compiled into that module's library
+  when an importer asks for them (`formal/monomorph.py`), so this call is one that
+  asked for none … Mojo infers a template call's type arguments, so `dealloc(…)`
+  with no bracket is correct code … and this path does not infer them yet.
+```
+
+**So the family moved a whole layer, and in the direction this document wanted.**
+`binary_heap.mojo` still does not build, but it no longer refuses for the reason
+recorded here — built on its own it now reaches the `self.unsafe_ptr()` method
+refusal, which is *deeper* in the same file:
+
+```
+build: self.unsafe_ptr() is a method call on a value, and this backend lowers
+  only append, clear, close, write … and the string methods count, endswith,
+  find, lstrip, startswith — the receiver is a name on this path, and
+  'unsafe_ptr' is not one of those methods of those receivers …
+```
+
+Both refusals mention `unsafe_ptr`, so the Status's claim that it "is still absent
+from it" is **no longer a distinguishing detail** — the family is no longer
+stopped by an absence but by two *present* surfaces, each with its own message
+naming its own gap.
+
+### The new terminal is a CLAIMED doc, which is why this is a measurement and not a queue item
+
+The new refusal names its own owner:
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`,
+which **exists in this tree** (not deleted with a fix), and it states the 123
+measured files the inference is worth. So a reader does not have to work out what
+to do with `env.mojo`: the terminal is another worker's claim, with the count
+attached.
+
+**The closure itself is clean, which is worth recording separately** because it is
+the part that has to hold for either refusal to be the *whole* story. Walked with
+`formal/imports.py`'s own `resolve_module_path` against both roots:
+
+```
+closure files: 172
+unresolved:    {}
+binary_heap in closure:       True
+std.memory.alloc in closure:  True
+```
+
+Every module `env.mojo` reaches **resolves**, including `binary_heap.mojo` and
+`std.memory.alloc`. So nothing here is a missing file any more — which is exactly
+the shape the host-import work closed for `version.py`, and it means this
+family's remaining cost is two capability questions in the emitter, not a
+transitive import problem.
+
+### What is now true, and what a reader should not conclude
+
+**True:** the family is not one patch from `env.mojo`; it is two *named*
+capability questions, each with an owner, and the import closure is not among
+them. **Not concluded:** that the 55-file family is closed. Step 1's
+"`external_call` is what all 55 reach" was measured for `external_call` and is
+untouched by this; nothing here re-measures the 55, and step 3 (the
+`formal_sweep.py --stdlib-subtrees` re-run) is still not done — it remains the
+gate runner's, for the reason this document gives: tens of minutes and hundreds
+of builds.
