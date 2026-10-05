@@ -1363,6 +1363,31 @@ def lean_dir(root: str) -> str:
 #: prefix is the declaration the tactic appeared in — which is why the same
 #: name shows up in the closure of every theorem that USES that declaration.
 #:
+#: **`decl` is a FULL Lean name and so is usually NAMESPACE-QUALIFIED, and the
+#: regex has to accept that.**  Measured on this toolchain:
+#:
+#:     'arm64_step_add_reg'                  … [arm64_step_add_reg._native.bv_decide.ax_1_5]
+#:     'DylibExport.Semantics_refutable'     … [DylibExport.Semantics_refutable._native.native_decide.ax_1_1]
+#:     'IEEE754.signed_zeros_are_equal'      … [IEEE754.signed_zeros_are_equal._native.native_decide.ax_1_1]
+#:
+#: `decl` was `[^.]+`, which matched the first line and NOTHING ELSE, and the
+#: failure was silent and directional: `axiom_site_tactic` returned None for
+#: every qualified name, so `axiom_census_summary` filed each of those theorems
+#: as `text_only` — "its SOURCE names a decide tactic and its closure reaches
+#: none" — which is the exact column whose purpose is to catch a name the
+#: closure census cannot see.  Measured effect on this tree before the fix:
+#: `IEEE754` read `reaches 0 / text_only 19` for 19 theorems that each carry
+#: their own `native_decide` axiom, and `ProofLib`'s three `DylibExport`
+#: `native_decide` theorems read as `text_only` too.  Five of the six
+#: `lib/` modules open a `namespace`, so the blind spot was most of the library.
+#:
+#: `.+` with the `._native.` tail anchored is the fix, and greediness is the
+#: right way round: `_native` is Lean's reserved segment, so a declaration name
+#: cannot contain it and there is exactly one place to split.  `test_formal_
+#: admitted.py::test_the_axiom_names_are_classified_not_guessed` pins the
+#: qualified spellings as measured text, because a docstring is not a test and
+#: the unqualified samples this regex was written against are all still there.
+#:
 #: `Lean.ofReduceBool` is what these tactics reached in earlier Lean 4, and it
 #: is what `library_trust`'s docstring and FORMAL.md §7 row 10 used to say.  It
 #: is measurably absent here: `#print axioms` over every theorem in `lib/`
@@ -1370,7 +1395,7 @@ def lean_dir(root: str) -> str:
 #: reaches it" is a MEASUREMENT and a reader needs something to compare against
 #: when the toolchain moves.
 AXIOM_SITE_RE = re.compile(
-    r"^(?P<decl>[^.]+)\._native\.(?P<tactic>" + "|".join(AXIOM_TACTICS)
+    r"^(?P<decl>.+)\._native\.(?P<tactic>" + "|".join(AXIOM_TACTICS)
     + r")\.ax_(?P<n>\d+)_(?P<m>\d+)$")
 
 #: The name §7 and `library_trust` used to publish, kept as a constant so the

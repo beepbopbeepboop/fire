@@ -96,10 +96,18 @@ for f in dataclasses.fields(node):
 ```
 
 `getattr(node, f.name)` is a DYNAMIC field read — the name is a run-time
-value. Measured, `.tmp/dc/p2.py`: `getattr(x, "a")` does not lower at all; the
-image binds a symbol nothing provides. So even a hypothetical `fields()` that
-returned the right names would be followed by a loop the backend cannot
-express, because the field to read is not known until the loop runs.
+value. **Status 2026-10-04 (`formal29-1`): the sentence after this one is now
+WRONG in two directions and both are fixed; the conclusion is unchanged.** The
+old text said `getattr(x, "a")` "does not lower at all; the image binds a symbol
+nothing provides". Measured on this tree today, with a LITERAL name it is
+REFUSED — `model.UNIMPLEMENTED_BUILTINS["getattr"]` exists and names the limit —
+and with a literal name it now LOWERS, because `getattr(p, "a")` is `p.a` and
+this backend has always lowered that. See "What landed 2026-10-04" at the end.
+
+So even a hypothetical `fields()` that returned the right names would be
+followed by a loop the backend cannot express, because the field to read is not
+known until the loop runs — and that is now a statement about the loop alone,
+with the name half measured rather than described.
 
 Answering it would mean unrolling the loop in the front end, at the point where
 the static type of the receiver IS known, turning
@@ -201,3 +209,94 @@ spelling of the same question. That is the honest answer and it is pinned by
 `test_dataclasses_formal.py`'s three reflection cases, which assert on the
 message rather than only on the build failing. What is refused here is not
 implemented, and the word "implemented" is doing no work it has not earned.
+
+## What landed 2026-10-04 (`formal29-1`): `getattr(o, "name")` with a LITERAL
+## name is the field read, and the refusal's reason was false for it
+
+This is the `getattr` half of "What is deliberately NOT being done here", and it
+is the one part of it that was **wrong rather than unimplemented**.
+
+`model.UNIMPLEMENTED_BUILTINS["getattr"]` read, and this is the measured text:
+
+> the attribute it names is a STRING at run time, and a field read on this path
+> is a load from `[base, #8k]` with a slot index the build computed from the
+> struct's own field list; a frame has no element width and no length, so a
+> run-time-indexed read of one is not an address arithmetic question this backend
+> can answer
+
+and it refused this, identically on arm64 and x86-64:
+
+```python
+struct Pt:  a, b
+def main(k): var p = Pt(); p.a = 7; p.b = 5
+             var v = getattr(p, "a"); printf("getattr-a=%d", v)
+```
+
+**The name in that program is a literal.** There is no run-time string, no
+unknown index, and no element width to establish: `v` is `p.a`, the slot comes
+from `Pt`'s own field list and the read is `base + 8` — the read this backend has
+always emitted. Four clauses of the sentence are false of this source, and the
+one thing it does not say is the repair, because there is no defect to repair.
+That is the failure mode the wide-receiver family documents itself as existing to
+prevent: "a message that asserts a mechanism which is not operating sends the
+reader after a non-bug", and its mirror — a message that asserts a limit which is
+not operating.
+
+**What landed**, and it is a REWRITE beside `_rewrite_identity_intrinsic_calls`
+rather than an emitter branch, for the reason that function's own docstring
+gives: every check downstream of `_prepare_functions` reads the AST, so a
+lowering in an emitter would leave `getattr(p, "a")` in the tree the field-read
+analysis has already classified.
+
+* `model.LITERAL_ATTRIBUTE_READ_CALLS` + `model.literal_attribute_read` — the
+  table is `{"getattr"}` and the predicate accepts a **bare string literal** and
+  nothing else.
+* `formal/build.py::_rewrite_literal_attribute_reads` erases `getattr(o, "name")`
+  to `MemberExpr(o, "name")`, called immediately after
+  `_rewrite_identity_intrinsic_calls` and for the same reason.
+* the three siblings keep their own entries in `UNIMPLEMENTED_BUILTINS` with
+  their own reasons, because each asks a different question: `hasattr` asks
+  whether the attribute is THERE (a frame's slots are its whole layout, so there
+  is no absent case), `setattr` is a store whose target is not a slot the build
+  established, `delattr` removes one.
+* `getattr`'s own entry now SAYS which case it is, and names the literal one as
+  not it — so a reader who reaches it can tell in one clause that their program
+  is not the case and that a different spelling is.
+
+**The dynamic case is untouched, and that is the point.** `getattr(p, f.name)`,
+`getattr(p, k)` and `getattr(p, "a" + b)` all still refuse, which is why
+**this document's answer is unchanged**: all three `fields()` loops in
+`ownership_check.py` and `mojo/backend_gimple/cpp_core.py` name the field with
+`f.name`, so the loop the backend cannot express is still the loop, and the
+front-end unroller is still what they would want. Measured on this tree after the
+rewrite: both files are `codegen/dependency` behind `_syscalls.mojo`'s own
+non-ASCII refusal, i.e. neither moved — which is the honest result and not a
+disappointment, because the row they are in is the one this document measured.
+
+**Files blocked: 0.** There are 11 `getattr(o, "literal")` sites in the corpus
+and ten of them are in `formal/` and `mojo/backend_gimple/` — the compiler's own
+sources, which this path does not compile as targets. What the change buys is
+that a construct with two spellings answers both, and that the refusal is now
+true of every program it reaches.
+
+**Pinned four ways, and two of them are the boundary rather than the win**, which
+is what makes the rewrite a rewrite and not a hole:
+
+| row | what it pins |
+|---|---|
+| `test_formal_run.py`'s `getattr_of_a_literal_name_is_the_field_read` | the read is the SECOND slot (`b`, not `a`), both architectures — 3 + 4 = 7 laid out so a read at offset 0 would be visible |
+| `getattr_defined_here_is_not_erased_to_a_field_read` | a module that DEFINES `getattr` keeps its own function (7, not 4) — the gate `_shadowing_attribute_read_names` exists for |
+| `byref_refuse_getattr_of_a_computed_name` | `getattr(p, names[0])` still refuses, needle **"A LITERAL name is not this case"** — so a reword that dropped the clause fails here rather than leaving the right program refused with the wrong sentence |
+| `byref_refuse_getattr_of_a_name_that_is_not_a_field` | `getattr(p, "zz")` is refused by the FIELD refusal (quoting `Pt`'s two real fields), not by a `getattr` message — which is the accurate answer about a name that is not in the layout |
+| `byref_refuse_getattr_names_the_builtin` | **this row's program was `getattr(p, "a")` and it asserted the refusal**, so it went red and had to be re-pointed at `getattr(p, n)` — a plain word — rather than deleted, because the builtin clause it pins is load-bearing for `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and for `tools/formal_sweep_causes.py` |
+
+**The last row is the one worth reading.** An existing green test said, in
+effect, "`getattr` with a literal name is a builtin this path does not
+implement", and it was right about the message and wrong about the program. The
+full `test_formal_run.py` run is what found it — a rewrite in
+`_prepare_functions` touches every build, so it owes the whole corpus rather
+than the five rows above — and the right response was to move the row to the
+shape the message is about, not to delete it. A deleted test is a hole; a
+re-pointed one is the anti-rot working, and the two are now different programs
+(a plain word, and a value read out of a container) rather than one program with
+two needles.

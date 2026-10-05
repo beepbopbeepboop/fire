@@ -385,6 +385,60 @@ def test_a_library_that_CALLS_its_own_import_alias_binds_the_defining_name(
           f"{text!r}")
 
 
+def test_a_library_that_forwards_a_name_AND_defines_one_publishes_both(
+        tmpdir, _):
+    """The forwarding is recorded on the manifest whether or not the module has
+    code, and it used to be recorded only when it did not.
+
+    The two cases above are both about the file that WRITES the alias: the
+    program (a two-file tree) and a library that calls it (three files, where
+    `mid` re-exports `base` and nothing else). This one is the shape neither
+    covers, and it is the ordinary shape of a package that has grown a helper of
+    its own — `mid` re-exports `base as aliased` AND defines `own`, so its
+    export table is NOT empty, so `compile_formal_dylib` took the code path, so
+    `_record_namespace` was never called and `reexports` never reached the
+    manifest. The consumer therefore read an empty `forwarded` table for a
+    module that publishes the name under both spellings:
+
+        build: main: `aliased` is called, and it is imported from `mid`, so the
+        call has to bind a symbol `mid` exports. That module does not export
+        it, and the reason is `doc/ABI.md`'s export rule …
+
+    — four exclusions (a leading `_`, a generic template, an overload, a C
+    library name), none of which applies, sent at a reader who has a working
+    three-module program. The same tree with the alias removed builds and runs,
+    which is what isolates the alias as the whole difference: `mid` forwarding
+    `base` unaliased was always published, because `base == aliased` there was
+    never the question — the KEY is.
+
+    Three files, and `mid` must have a definition of its own: that is the
+    condition under which the manifest was written by the code path, so a
+    two-file or a forward-only tree cannot see it. Both the bare spelling the
+    consumer writes and the dotted one the library publishes are exercised, and
+    `mid`'s OWN export is called too, so a fix that dropped the code path's
+    exports to publish the forwarding would fail here.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "forward_and_define")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf.mojo": "def base(a):\n    return a * 3\n",
+        "mid.mojo": "from leaf import base as aliased\n\n\n"
+                    "def own(a):\n    return aliased(a) + 1\n",
+        "prog.mojo": "from mid import aliased, own\n\n\n"
+                     "def main(k):\n"
+                     "    printf(\"fwd-bare=%d@@\", aliased(10))\n"
+                     "    printf(\"fwd-own=%d@@\", own(10))\n"
+                     "    printf(\"fwd-dotted=%d@@\", mid.aliased(4))\n"
+                     "    return 0\n",
+    })
+    text, rc = agrees_with_cpython(tmpdir, "forward and define", root,
+                                   "prog.aout", expect_exit=0)
+    check("fwd-bare=30@fwd-own=31@fwd-dotted=12@" in text,
+          f"the forwarded name did not bind leaf's definition under any of the "
+          f"three spellings: {text!r}")
+
+
 def test_an_alias_of_a_non_exported_name_is_refused_by_name(tmpdir, _):
     """`from m import _private as p`, and `p()` is refused naming the module.
 

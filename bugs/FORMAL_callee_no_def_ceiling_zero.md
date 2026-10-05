@@ -333,7 +333,7 @@ and the two halves have nothing to do with each other:
 |---|---|---|---|
 | A | the PROGRAM imports under an alias and calls it (`from deflib import need_two as nt; nt(1)`) | worked | worked — `test_formal_cross_module.py`'s case, 2024 |
 | B | the PROGRAM imports under an alias, and the program calls **the library's own function**, which calls the alias | **refused** — `mid.mojo: the library would bind 1 symbol(s) that nothing provides, so it could not be loaded: aliased` | **FIXED** — `compile_formal_dylib` hands its emitters `import_bindings` now |
-| C | a MODULE re-exports an alias and a consumer imports it (`from mid import aliased`) | **refused** — “`aliased` is called, and it is imported from `mid` … That module does not export it, and the reason is `doc/ABI.md`'s export rule” | **still refused** |
+| C | a MODULE re-exports an alias and a consumer imports it (`from mid import aliased`) | **refused** — “`aliased` is called, and it is imported from `mid` … That module does not export it, and the reason is `doc/ABI.md`'s export rule” | **FIXED** — see "MEASURED AND FIXED 2026-10-04" below; it was a manifest that never recorded the forwarding, not a choice of spelling |
 
 **B is the one the sentence does not describe and the one that was silently
 whole.** The alias is a property of the file that WRITES it, so a module that
@@ -346,24 +346,84 @@ under an alias and calls it, prog imports mid) and it is now
 `test_formal_cross_module.py`'s `a LIBRARY that calls its own import alias binds
 the defining name`, differential against CPython on both architectures.
 
-**C is still open and is a smaller question than it looks.** `reexported_names`
-already returns BOTH spellings — measured in process on this tree:
+## MEASURED AND FIXED 2026-10-04 (`formal29-1`): C was a WRITER, not a choice of
+## spelling
 
-```python
->>> reexported_names(module_statements("mid.mojo"))
-{'base': ('leaf', …, 'base'), 'aliased': ('leaf', …, 'base')}
+The guess recorded below was that "whatever writes the manifest keeps one
+spelling", and that the open question was an ABI one — *which* spelling wins.
+**It was neither: nothing kept a spelling, because for this shape the manifest
+never recorded the forwarding at all.** `reexported_names` was right all along
+(`{'base': ('leaf', …, 'base'), 'aliased': ('leaf', …, 'base')}`, re-measured on
+this tree), `_record_namespace` was right, and the consumer's
+`model.dylib_export_tables` was right. What was missing is a CALLER.
+
+`_record_namespace` is the only writer of a manifest's `reexports`, and it is
+reachable only from the two `_namespace_library` branches, which are both guarded
+by `not entries`. So it fires for a module that forwards names and defines
+NONE. A module that forwards a name **and defines one of its own** takes the code
+path, writes its manifest through `write_dylib_manifest` and returns — and
+`reexports` never reaches the file. Instrumented at the refusal, on the
+three-module reproducer below:
+
+```
+LINK LINE:            leaf.dylib, mid.dylib
+by_name keys:         ['base', 'own']
+by_module:            {'leaf': ['base'], 'mid': ['own']}
+forwarded:            {}                       <-- mid publishes 'aliased'
+aliases:              {'aliased': ('mid', 'aliased')}
 ```
 
-so the publication table is right and the drop is downstream of it: both entries
-name ONE symbol in `leaf`'s trie, and whatever writes the manifest keeps one
-spelling. **The exact next step is to find where a re-export entry's NAME stops
-being the key** — `compile_formal_dylib`'s `_formal_exports`/`module_prefixes`,
-or the export trie — and to decide which spelling wins, because a consumer that
-spells `aliased` and a consumer that spells `base` both have to bind, and that
-is an ABI question (`doc/ABI.md`'s export rule) rather than a reader's fix. Until
-it is decided, the honest state of this item is the sentence above plus the two
-rows: B landed, C refused by name with a message that now names the export rule
-rather than the link line.
+`forwarded` empty for a module that publishes the name under both spellings is
+what every later stage then reads, and it is why the refusal was the export-rule
+paragraph: four exclusions (a leading `_`, a generic template, an overload, a C
+library name) sent at a reader whose three-module program is correct.
+
+**The fix is one function and two call sites.** `_record_reexports` is the half
+of `_record_namespace` that has nothing to do with being a namespace — write the
+forwarding, do not mark the manifest — and `compile_formal_dylib` calls it on
+both container paths (Mach-O and ELF) whenever `reexports` is non-empty.
+`kind: "namespace"` stays on the namespace path only, which is correct: a library
+with code is not a namespace, and `_record_namespace`'s own docstring says the
+field is what makes an EMPTY export list legal to read back.
+
+**Which spelling wins, answered: BOTH, and it was never an ABI question.** The
+forwarding table is keyed by the name the CONSUMER writes and carries the symbol
+the DEFINING module exports (`{"name": "aliased", "symbol": leaf__base_…,
+"defines": "base"}`), so `by_name`-keyed consumers and `forwarded`-keyed ones
+cannot disagree, and `model.dylib_export_tables` was already written to borrow
+the signature from the defining name for exactly this reason. The doc's worry —
+"a consumer that spells `aliased` and a consumer that spells `base` both have to
+bind" — is the property that was already designed for and simply never reached
+the file.
+
+**Measured, both architectures, and pinned.** Three flat modules: `leaf` defines
+`def base(a): return a * 3`, `mid` does `from leaf import base as aliased` **and**
+defines `def own(a): return aliased(a) + 1`, `prog` does `from mid import
+aliased, own` and calls all three spellings. Before: refused on arm64.
+After: `Built` on arm64 and x86-64, and the images print
+
+```
+fwd-bare=30@ fwd-own=31@ fwd-dotted=12@
+```
+
+which is CPython's answer for all three (`30 = base(10)`, `31 = own(10)`,
+`12 = aliased(4)`), with `mid`'s OWN export called in the same program so a fix
+that traded the code path's exports for the forwarding would fail the case.
+`test_formal_cross_module.py`'s `a library that forwards a name AND defines one
+publishes both`, differential against CPython.
+
+**Why C was invisible to the two cases above, and it is the same reason as
+everywhere else in this family: a shape needs a boundary on BOTH sides.** A is a
+two-file tree and reads `prog`'s side alone; B's `mid` forwards and defines
+nothing, so it IS a namespace library and the writer was already reached. C is
+the first shape that puts an ordinary module — one with code — on the forwarding
+side, and it is the ordinary shape of a package that has grown a helper.
+
+**Files blocked: still 0.** Nothing in this section moves a swept file; §1b's
+eleven are each behind a different construct. What it buys is that the refusal is
+no longer *wrong* about a class of correct programs, which is the same thing
+§3's per-parameter contract bought and the reason this row is worth working on at
+a ceiling of zero.
 
 ## 5. The histogram that found the last false clause
 

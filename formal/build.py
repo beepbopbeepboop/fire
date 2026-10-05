@@ -5866,6 +5866,123 @@ def _erase_identity_intrinsics(node):
     return node
 
 
+def _rewrite_literal_attribute_reads(functions, stmts) -> None:
+    """`getattr(o, "name")` → `o.name`, where the SOURCE wrote the name.
+
+    The same shape of rewrite, in the same place, for the same measured reason
+    as `_rewrite_identity_intrinsic_calls`: every check downstream of this point
+    reads the AST, so a lowering in an emitter would leave `getattr(p, "a")` in
+    the tree the field-read analysis has already classified, and a call node is
+    not a `MemberExpr` to any of them.
+
+    **What it buys, and what the refusal said instead.** `model.
+    UNIMPLEMENTED_BUILTINS["getattr"]` said "the attribute it names is a STRING
+    at run time … a run-time-indexed read is not an address arithmetic question
+    this backend can answer", and refused this program:
+
+    ```
+    struct Pt:  a, b
+    def main(k): var p = Pt(); p.a = 7; p.b = 5
+                 var v = getattr(p, "a"); printf("%d", v)
+    ```
+
+    on both architectures. The name in that program is a LITERAL, so there is
+    nothing run-time about it: `v` is `p.a`, the slot index comes from `Pt`'s own
+    field list, and the answer is a load from `base + 8`. The refusal named four
+    things — a frame has no element width, no length, the index is not known
+    until the program runs — and not one of them is true of this source. That is
+    the failure mode this family of messages documents itself as existing to
+    prevent: a reader with a two-word program this path can answer is sent
+    looking for a limitation that is not there.
+
+    **Everything the rewrite does NOT touch keeps the refusal, and that is the
+    point.** `model.literal_attribute_read` accepts a bare string literal and
+    nothing else, so `getattr(p, f.name)`, `getattr(p, k)` and
+    `getattr(p, "a" + b)` all still refuse — and those are the shapes the
+    `dataclasses.fields()` loops in `ownership_check.py` and
+    `mojo/backend_gimple/cpp_core.py` actually write, which is why
+    `bugs/FORMAL_dataclass_runtime_reflection.md`'s answer is unchanged: the
+    field to read is not known until the loop runs. Widening the rewrite to keep
+    the table small is what leaves the real cases refused.
+
+    **A `getattr` this module DEFINES is not the builtin**, and the rewrite is
+    gated on that: `def getattr(o, n)` in the same file is an ordinary function
+    the source may call with whatever it likes, including a computed name.
+    `test_formal_run.py`'s `byref_a_local_getattr_is_not_the_builtin` is the row
+    that pins it, and this gate is what keeps it green.
+    """
+    if not M.LITERAL_ATTRIBUTE_READ_CALLS:
+        return
+    shadowed = _shadowing_attribute_read_names(stmts)
+    if not shadowed:
+        for fn in functions:
+            _erase_literal_attribute_reads(getattr(fn, "body", None))
+
+
+def _shadowing_attribute_read_names(stmts) -> set:
+    """The `getattr` spellings this module does NOT mean as the builtin.
+
+    `_defined_names` for `FunctionDef`/`StructDef` at the top level, plus
+    everything a `from … import …` binds — because `from m import getattr` is
+    the same hazard from the other side, and neither reader resolves imports at
+    this point in the pipeline (`_prepare_functions` runs before
+    `_resolve_imports`), so both are read off the AST. An `import getattr` is
+    not a thing that can bind a bare name, so it is not here.
+
+    `imported_bound_names` is called UNGUARDED, and deliberately: this function
+    runs in the middle of `_prepare_functions`, which already calls the same
+    reader unguarded a few hundred lines below it, so a raise here is a raise
+    there and wrapping this one in a `try` would only buy a traceback in one
+    place instead of two.
+    """
+    from formal.imports import imported_bound_names
+    names = {getattr(st, "name", None)
+             for st in (stmts or [])
+             if isinstance(st, (F.FunctionDef, F.StructDef))}
+    names.discard(None)
+    names |= set(imported_bound_names(stmts))
+    return names & M.LITERAL_ATTRIBUTE_READ_CALLS
+
+
+def _erase_literal_attribute_reads(node):
+    """`node` with every `getattr(o, "name")` in it replaced by `o.name`.
+
+    The `_erase_identity_intrinsics` traversal, unchanged and for the same
+    reasons: functional rather than in-place, because a statement tree's
+    children live in lists; nothing allocated unless something moved; and the
+    operand is recursed into so a nested `getattr(getattr(p, "a"), "b")` is
+    both of them.
+    """
+    if isinstance(node, (list, tuple)):
+        moved = None
+        for i, x in enumerate(node):
+            replacement = _erase_literal_attribute_reads(x)
+            if replacement is x:
+                continue
+            if moved is None:
+                moved = list(node)
+            moved[i] = replacement
+        if moved is None:
+            return node
+        return tuple(moved) if isinstance(node, tuple) else moved
+    if isinstance(node, F.CallExpr):
+        read = M.literal_attribute_read(node)
+        if read is not None:
+            receiver, member = read
+            return _erase_literal_attribute_reads(
+                F.MemberExpr(obj=receiver, member=member))
+    for fname in getattr(node, "__dataclass_fields__", ()):
+        if fname in ("line", "col"):
+            continue
+        value = getattr(node, fname, None)
+        if value is None or isinstance(value, (int, float, str, bool)):
+            continue
+        replacement = _erase_literal_attribute_reads(value)
+        if replacement is not value:
+            setattr(node, fname, replacement)
+    return node
+
+
 def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> int:
     """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
 
@@ -15753,6 +15870,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `_rewrite_identity_intrinsic_calls`'s docstring has the two programs that
     # say what the ordering is worth.
     _rewrite_identity_intrinsic_calls(functions)
+    # …and `getattr(o, "a")` → `o.a`, for the same reason and in the same place:
+    # the name is a LITERAL there, so the read is the field read the analysis
+    # below already knows how to classify (or refuse), and leaving the call in
+    # the tree meant every one of those checks saw a call nothing classifies.
+    # Gated on this module not DEFINING `getattr`, and on the name being a bare
+    # string literal — `bugs/FORMAL_dataclass_runtime_reflection.md`'s three
+    # `fields()` loops all name a field with `f.name`, and those keep refusing.
+    _rewrite_literal_attribute_reads(functions, stmts)
     # …and a target query IN a body, which the constant substitution cannot
     # reach: `__mlir_attr[...]` is an expression, not a name, and a function
     # that asks the build what it is compiling for has to get the answer
@@ -18454,6 +18579,44 @@ def _namespace_containers(reexports: dict, linked: list) -> list:
     return out
 
 
+def _record_reexports(manifest_path: str, reexports: dict,
+                      dylib_syms: dict) -> None:
+    """Record what this library FORWARDS, for a library that also has code.
+
+    **The half of `_record_namespace` that is not about being a namespace**, and
+    it exists because the namespace half was the only caller: a module that
+    declares its own function AND re-exports one took the code path, wrote its
+    manifest through `write_dylib_manifest` and finished — so `reexports` never
+    reached the file, and every consumer read an EMPTY `forwarded` table for a
+    module that publishes a real name. Measured, three flat modules (`leaf`
+    defines `base`, `mid` does `from leaf import base as aliased` and defines
+    `own`, `prog` does `from mid import aliased` and calls it): correct Mojo,
+    and the build refused `main: 'aliased' is called, and it is imported from
+    'mid' … That module does not export it` — `doc/ABI.md`'s export-rule
+    paragraph, naming four exclusions none of which applies, for a module that
+    publishes the name under BOTH spellings. Instrumented at the refusal:
+    `by_module = {'leaf': ['base'], 'mid': ['own']}`, `forwarded = {}`. The
+    same tree with the alias removed builds and runs.
+
+    So this is not a namespace question and must not be gated on being one. The
+    condition is "does this module forward anything", which is a property of its
+    statements and not of whether it happens to define code as well — and a
+    module that does both is the ordinary shape of a package that has grown a
+    helper of its own.
+
+    The SYMBOL is looked up under the entry's `defining_name`, not under the
+    key, for the reason `_record_namespace` gives: `from x import f as g`
+    publishes `g` and the symbol is `f`'s.
+    """
+    def _mark(payload):
+        payload["reexports"] = {
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
+                "defines": v[2]}
+            for n, v in sorted(reexports.items())}
+
+    update_dylib_manifest(manifest_path, _mark)
+
+
 def _record_namespace(manifest_path: str, reexports: dict,
                       dylib_syms: dict, traits: list = None) -> None:
     """Mark a manifest as a NAMESPACE library and record what it forwards.
@@ -18474,23 +18637,14 @@ def _record_namespace(manifest_path: str, reexports: dict,
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
 
-    The SYMBOL is looked up under the entry's `defining_name`, not under the
-    key. `dylib_syms` is the flat `{bare export name: symbol}` map assembled
-    from the linked libraries' manifests, and a defining module exports its own
-    name — so for every re-export that existed before aliases were recorded the
-    two are the same string, and for an ALIAS they are not: `from x import f as
-    g` publishes `g`, the symbol is `f`'s, and looking `g` up returns None,
-    which is how an aliased re-export reached the consumer as a name with no
-    symbol behind it. `defines` records the name the symbol was found under, so
-    a reader can tell an alias from a definition and neither has to re-derive
-    the import statement.
+    **It delegates the forwarding itself to `_record_reexports`**, because a
+    library with code forwards names too and used to lose them: this function
+    was reachable only from the empty-`entries` path, so the half of its work
+    that has nothing to do with being a namespace was done for a namespace
+    library and skipped for every other one. Two callers, one writer.
     """
     def _mark(payload):
         payload["kind"] = "namespace"
-        payload["reexports"] = {
-            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
-                "defines": v[2]}
-            for n, v in sorted(reexports.items())}
         if traits:
             # Absent rather than empty for a pure re-export package: the key
             # means "this library declares traits", and writing `[]` there
@@ -18499,6 +18653,8 @@ def _record_namespace(manifest_path: str, reexports: dict,
             payload["traits"] = sorted(set(traits))
 
     update_dylib_manifest(manifest_path, _mark)
+    if reexports:
+        _record_reexports(manifest_path, reexports, dylib_syms)
 
 
 def compile_formal_dylib(source_paths: list, output: str = None,
@@ -19115,6 +19271,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             constants=constants)
         if linked:
             _record_link_deps(manifest_path, linked)
+        # A library that ALSO forwards names has to say so in its manifest, on
+        # this container exactly as on Mach-O: `dylib_export_tables` builds one
+        # `forwarded` table from both, and a name the manifest omits is a name
+        # no consumer can bind. See `_record_reexports`.
+        if reexports:
+            _record_reexports(manifest_path, reexports, dylib_syms)
         result = {
             "manifest_path": manifest_path,
             "path": output,
@@ -19228,6 +19390,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         containers=sorted(n for n, s in library_slots.items() if not s.mutable))
     if linked:
         _record_link_deps(manifest_path, linked)
+    # **The library has code AND forwards names, and both belong in its
+    # manifest.**  `reexports` used to be written only by `_record_namespace`,
+    # which is reachable only when the export table is EMPTY — so the ordinary
+    # module that re-exports one thing and defines another published nothing
+    # about it, every consumer read an empty `forwarded` table for it, and a
+    # call to the forwarded name was refused with `doc/ABI.md`'s export-rule
+    # paragraph (a leading `_`, a generic template, an overload, a C library
+    # name) — four exclusions, none of which applied. Measured, three flat
+    # modules: `leaf` defines `base`, `mid` does `from leaf import base as
+    # aliased` and defines `own`, `prog` does `from mid import aliased` and
+    # calls it. Correct Mojo, refused. Same tree with the alias removed builds.
+    if reexports:
+        _record_reexports(manifest_path, reexports, dylib_syms)
 
     result = {
         "manifest_path": manifest_path,
