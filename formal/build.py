@@ -13743,6 +13743,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # before these checks), so a chain that survives to here names a module
         # attribute the module does not publish as a value.
         module_reads = {}
+        # The `raise ValueError` exemption, collected per FUNCTION and keyed by
+        # node identity for the same reason `module_reads` is: `iter_nodes` has
+        # no parent, the same spelling is a class reference in a `raise` and a
+        # genuine local read everywhere else, and keying on the string would
+        # exempt every read of that name in the function. See
+        # `model.raised_exception_class_nodes`.
+        raised_class_nodes = M.raised_exception_class_nodes(
+            getattr(fn, "body", None) or [], structs_by_name)
         if imported:
             # Every `MemberExpr` on the SPINE of a call's callee — `os.path` as
             # well as `os.path.join` in `os.path.join("a", "b")`. Collected by
@@ -13932,6 +13940,21 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # an address is a home — so there is nothing to raise.)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
+                continue
+            # `raise ValueError` — the BARE spelling of a builtin exception
+            # class — is a read of a name that the emitter never reads: it
+            # recognises the class, runs the raised expression's arguments for
+            # their effects and leaves the process
+            # (`model.raise_class_name`). Asked first, before every other
+            # exemption, because the message this walk would otherwise give
+            # ("'ValueError' has no home: the register allocator collected no
+            # home for it") is about a node that has no value to place, and it
+            # sends the reader to look for a declaration in a file that has
+            # none — CPython's `builtins` is not in this image and never will
+            # be. The set comes from `model.raised_exception_class_nodes`, which
+            # asks the SAME reader the emitters ask, so a name one accepts and
+            # the other skips cannot come to disagree.
+            if id(node) in raised_class_nodes:
                 continue
             # `bracketed` is asked BEFORE the callee exemption, and the order
             # is load-bearing rather than tidiness. A construct refusal is

@@ -2001,12 +2001,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.RaiseStmt):
-            # No EH runtime: evaluate the exception expression for its side
-            # effects (the args of `raise RuntimeError(...)`), then diverge.
-            # Handlers stay unreachable — there is no unwinder to route to.
-            if stmt.value is not None:
-                self._emit_expr(stmt.value)
-            self._emit_diverge()
+            # No EH runtime: run whatever the raised expression does for its
+            # side effects, then leave. Handlers stay unreachable — there is
+            # no unwinder to route to.
+            self._emit_raise(stmt)
             return
 
         if isinstance(stmt, F.TryStmt):
@@ -2450,6 +2448,54 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """
         self._flush_pending_finally()
         self._emit_call_exit(1)
+
+    def _emit_raise(self, stmt: F.RaiseStmt) -> None:
+        """`raise <expr>` — run the expression's effects, then leave the process.
+
+        The mirror of `formal/arm64_codegen.py`'s method of the same name, and
+        the reason the CLASSIFICATION lives in `formal/model.py` rather than
+        here: the two spellings that used to be refused (`raise ValueError("x")`
+        reaching the link audit as an unbound `BL ValueError`, and a bare
+        `raise ValueError` refused as "'ValueError' has no home") are two
+        copies of the same missing piece, and two copies are how two
+        architectures come to disagree about it.
+
+        What CPython's contract is for an uncaught exception is short enough to
+        state exactly: the ARGUMENT EXPRESSIONS run for their side effects, the
+        enclosing `finally` clauses run, and the process leaves with status 1
+        and everything it printed already flushed. No instance is needed for
+        any of that, because there is no handler in the image to bind one to.
+
+        `SystemExit` is the one class whose status is not 1, and
+        `model.raise_exit_status` decides it — `raise SystemExit(3)` is how a
+        program says "exit 3" and CPython honours it.
+        """
+        value = getattr(stmt, "value", None)
+        exc_name = M.raise_class_name(value, self._structs)
+        if exc_name is None:
+            declared = M.raise_declared_class_name(value, self._structs)
+            if declared is not None:
+                # `raise MyErr` in CPython instantiates `MyErr`, so it is
+                # `raise MyErr()` — and going through the ordinary construction
+                # arm is what keeps a class whose `__init__` PRINTS honest:
+                # CPython runs the constructor, so this must too, and the
+                # refusal for a constructor body this path cannot lower keeps
+                # answering rather than being routed around. The status is 1,
+                # because `MyErr` is not `SystemExit`.
+                self._emit_expr(M.raise_zero_arg_construction(
+                    declared, getattr(stmt, "line", 0) or 0))
+                self._flush_pending_finally()
+                self._emit_call_exit(1)
+                return
+            if value is not None:
+                self._emit_expr(value)
+            self._flush_pending_finally()
+            self._emit_call_exit(1)
+            return
+        for arg in M.raise_arg_exprs(value):
+            self._emit_expr(arg)
+        self._flush_pending_finally()
+        self._emit_call_exit(M.raise_exit_status(exc_name, value))
 
     def _frame_member_slot(self, node):
         """The frame slot `node` names, or None having refused the access.

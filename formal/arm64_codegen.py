@@ -2165,13 +2165,11 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.RaiseStmt):
-            # No EH runtime: evaluate the exception expression for side
-            # effects (args of `raise RuntimeError(...)` etc.), then diverge.
-            # except handlers stay unreachable — there is no
-            # unwinder to route to; the nonzero status is the signal.
-            if stmt.value is not None:
-                self._emit_expr(stmt.value)
-            self._emit_diverge()
+            # No EH runtime: run whatever the raised expression does for its
+            # side effects, then leave. `except` handlers stay unreachable —
+            # there is no unwinder to route to; the nonzero status is the
+            # signal.
+            self._emit_raise(stmt)
             return
 
         if isinstance(stmt, F.WhileStmt):
@@ -2549,8 +2547,8 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`.
+    def _emit_diverge(self, status: int = 1) -> None:
+        """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
         it rather than spelling the exit each: a `raise`, which has no unwinder
@@ -2559,9 +2557,66 @@ dylib_exports: list = None, globals_base: int = None,
         nothing else to emit. Two copies of the exit is how two of them come to
         differ, and the finally flush is the part that is easy to drop — a
         `raise` inside a `try` must still run the `finally` on its way out.
+
+        `status` is a parameter rather than a constant because
+        `raise SystemExit(3)` is CPython's way of saying "exit 3", and
+        `model.raise_exit_status` is where that is decided. Every other caller
+        passes nothing and gets the 1 the whole hierarchy leaves behind.
         """
         self._flush_pending_finally()
-        self._emit_exit(1)
+        self._emit_exit(status)
+
+    def _emit_raise(self, stmt: F.RaiseStmt) -> None:
+        """`raise <expr>` — run the expression's effects, then leave the process.
+
+        Two shapes, and the difference is whether the raised expression is an
+        exception CLASS this image cannot construct:
+
+        * **a builtin exception class** (`raise ValueError('boom')`, or the bare
+          `raise ValueError`) — `model.raise_class_name` recognises it, and
+          there is no declaration of `ValueError` here to construct, so the
+          call has no symbol to bind and the name has no home. Emitting it as
+          an ordinary expression produced two refusals that both named a
+          SYMBOL instead of the construct: `BL ValueError` caught by the link
+          audit, and `'ValueError' has no home` from the name reader. What
+          CPython's contract is for an uncaught one is short enough to state
+          exactly — the ARGUMENT EXPRESSIONS run (so `raise ValueError(g())`
+          calls `g`), the enclosing `finally` clauses run, the process leaves
+          with status 1 and its output flushed — and none of that needs an
+          instance, because there is no handler in the image to bind one to.
+        * **anything else** — an instance the program built, a call's result, a
+          subscript. The expression is emitted as written, which is what this
+          path has always done and what makes `raise e` for a local `e` and
+          `raise int('zz')` work.
+
+        The two are one decision in `formal/model.py` rather than one per
+        backend, and that is the point: the two architectures used to answer
+        this question with the same two lines of code, which is exactly the
+        arrangement under which they come to disagree.
+        """
+        value = getattr(stmt, "value", None)
+        exc_name = M.raise_class_name(value, self._structs)
+        if exc_name is None:
+            declared = M.raise_declared_class_name(value, self._structs)
+            if declared is not None:
+                # `raise MyErr` in CPython instantiates `MyErr`, so it is
+                # `raise MyErr()` — and going through the ordinary construction
+                # arm is what keeps a class whose `__init__` PRINTS honest:
+                # CPython runs the constructor, so this must too, and the
+                # refusal for a constructor body this path cannot lower keeps
+                # answering rather than being routed around. The status is 1,
+                # because `MyErr` is not `SystemExit`.
+                self._emit_expr(M.raise_zero_arg_construction(
+                    declared, getattr(stmt, "line", 0) or 0))
+                self._emit_diverge()
+                return
+            if value is not None:
+                self._emit_expr(value)
+            self._emit_diverge()
+            return
+        for arg in M.raise_arg_exprs(value):
+            self._emit_expr(arg)
+        self._emit_diverge(M.raise_exit_status(exc_name, value))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.

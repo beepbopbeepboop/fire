@@ -23413,6 +23413,243 @@ def builtin_base_fields(base: str) -> tuple:
     return ()
 
 
+# ── what a `raise` of an exception CLASS lowers to ─────────────────────────
+#
+# `raise E(...)` / `raise E` where `E` names a CPython builtin exception class
+# has no image at all: there is no declaration of `ValueError` here, so the
+# emitter's call path used to reach the extern path and emit `BL ValueError`,
+# which the link audit then refused ("the image would bind 1 symbol(s) that
+# nothing provides"), and a BARE `raise E` reached the name reader and was
+# refused as "'E' has no home". Both refusals name a SYMBOL and neither names
+# the construct, and both are wrong about what is missing: the class is not
+# missing, the backend has no unwinder, so there is nothing for an instance to
+# be handed to.
+#
+# What CPython's contract actually is for an UNCAUGHT one is short and is the
+# whole of this table: the ARGUMENT EXPRESSIONS run for their side effects (so
+# `raise ValueError(g())` calls `g`), the enclosing `finally` clauses run, and
+# the process leaves with status 1 and everything it printed already flushed.
+# Nothing observes the instance — there is no handler to bind it to and no
+# `except` arm in the image — so building one and discarding it would be an
+# allocation whose only purpose is to be dropped.
+#
+# So the rule is ONE function, in this file, that both emitters read: it
+# classifies the raised expression and says what to run and what status to
+# leave. `SystemExit` is the one member of the hierarchy whose status is not 1,
+# and `model.raise_exit_status` is where that is decided rather than in either
+# backend.
+
+#: `raise E` where `E` is a name: `(mode, arg_exprs, exc_name)`.
+#: `mode` is `"args"` — run each of `arg_exprs` for its effects, then leave.
+RAISE_CLASS_MODE = "args"
+
+#: `raise <expr>` that is not a bare class reference: emit `expr` as written,
+#: then leave. The existing `_emit_diverge` path.
+RAISE_EXPR_MODE = "expr"
+
+
+def raise_class_name(value, structs: dict | None = None) -> str | None:
+    """The exception class `raise <value>` names, or None when it names none.
+
+    The two spellings CPython accepts for a class rather than an instance, and
+    the answer is a NAME so both backends can agree on it:
+
+      * `raise ValueError('boom')` — a `CallExpr` on a bare `IdentExpr`;
+      * `raise ValueError` — the bare `IdentExpr` itself.
+
+    `structs` is this image's own class table and it WINS over
+    `CPYTHON_EXCEPTION_BASES`, because a name both declare means the
+    declaration: `class ValueError: ...` is a struct to construct, not a
+    builtin to leave behind, and reading it as the latter would silently
+    discard fields the program set. That is the same precedence
+    `builtin_base_fields` reads the other way round (a base the image declares
+    contributes nothing, because the declaration already has the fields), so
+    the two together are one rule rather than two.
+
+    `None` for everything else, and that is a refusal rather than a guess: an
+    `except` arm the image cannot see has already been refused by name
+    (`refuse_dropped_handler_arm`), so the only `raise`s left are ones whose
+    value the program can observe — an instance it built, a call's result, a
+    subscript — and those keep the existing `RAISE_EXPR_MODE` path, which emits
+    the expression."""
+    if isinstance(value, F.CallExpr):
+        func = getattr(value, "func", None)
+        if not isinstance(func, F.IdentExpr):
+            return None
+        name = func.name
+        arg_exprs = list(getattr(value, "args", None) or [])
+        arg_exprs += [v for _k, v in (getattr(value, "kwargs", None) or [])]
+    elif isinstance(value, F.IdentExpr):
+        name = value.name
+        arg_exprs = []
+    else:
+        return None
+    if structs and name in structs:
+        # Declared here: a real class with a real layout, so `raise` of it is a
+        # CONSTRUCTION plus a leave. The construction is not this table's
+        # business — the emitter's own constructor path already handles a
+        # declared class, and `raise MyErr()` builds today.
+        return None
+    if name not in CPYTHON_EXCEPTION_BASES:
+        return None
+    return name
+
+
+def raise_arg_exprs(value) -> list:
+    """The argument EXPRESSIONS of `raise E(...)`, in source order.
+
+    Split out from `raise_class_name` because the two callers need different
+    halves of the same walk: the classification needs the NAME and this needs
+    the expressions to evaluate. Positional arguments first, then the keyword
+    values, which is the order CPython evaluates them in (the call's own
+    argument-passing order), so a `raise E(f(), g())` runs `f` before `g`."""
+    args = list(getattr(value, "args", None) or [])
+    args += [v for _k, v in (getattr(value, "kwargs", None) or [])]
+    return args
+
+
+def raise_exit_status(exc_name: str, value=None) -> int:
+    """The status an uncaught `raise` of `exc_name` leaves behind.
+
+    1 for the whole hierarchy, and that is CPython's rule rather than this
+    backend's convenience: an uncaught exception makes the interpreter report
+    the traceback on stderr and exit 1.
+
+    **`SystemExit` is the one exception to the exception**, and it is the
+    reason this is a function rather than a constant. `SystemExit` is not a
+    failure — it is how a program says "stop with this status", so CPython
+    never prints a traceback for it and the status is its ARGUMENT:
+
+        raise SystemExit        -> 0
+        raise SystemExit(0)     -> 0
+        raise SystemExit(3)     -> 3
+        raise SystemExit(-1)    -> 255   (the C library masks to a byte)
+        raise SystemExit("msg") -> 1, and `msg` on stderr
+
+    Measured on the interpreter this compiler runs on, all five. The two
+    cases that are not a plain small non-negative integer are the reason the
+    rule is stated and not guessed: a non-integer argument is the "print it and
+    fail" form, and a negative or out-of-range one is truncated by
+    `exit(3)`'s `status & 0xFF`, which is a fact about the C library rather
+    than about this backend — so it is reproduced rather than refused, because
+    a program's own exit status is the one thing a caller can observe.
+
+    Only an integer LITERAL is read. `raise SystemExit(n)` for a computed `n`
+    is not a different program, so it must not be a different answer, and the
+    honest way to keep the two apart is to leave the computed case at 1 rather
+    than to claim a status the build cannot see — which is what a caller
+    reading a wrong number cannot detect. That case is written down in
+    `bugs/FORMAL_a_computed_systemexit_status_is_not_the_programs_own.md`."""
+    if exc_name != "SystemExit":
+        return 1
+    args = raise_arg_exprs(value) if value is not None else []
+    if not args:
+        return 0
+    first = args[0]
+    if isinstance(first, F.IntLiteral) and not isinstance(first.value, bool):
+        return first.value & 0xFF
+    # A non-integer argument is CPython's "print the object and exit 1" form.
+    # The exit status is 1 either way, so this needs no further reading.
+    return 1
+
+
+def raise_declared_class_name(value, structs: dict | None = None) -> str | None:
+    """A class this image DECLARES that `raise <value>` names, or None.
+
+    **The bare spelling only.** `raise MyErr` in CPython instantiates `MyErr`
+    and raises the instance — CPython's own rule, and the same one that makes
+    `raise MyErr` and `raise MyErr()` the same program. So this path has to run
+    the class's CONSTRUCTOR, which means going through the emitter's ordinary
+    construction arm rather than skipping it the way a builtin exception class
+    is skipped, and it means a class whose `__init__` has a body is refused by
+    the refusal that already names `__init__` — measured: `class MyErr` with a
+    `print` in `__init__` then `raise MyErr()` is refused on both backends, and
+    `raise MyErr` must not become a way around it, because CPython prints.
+
+    The called spelling (`raise MyErr('m')`) is deliberately NOT answered here.
+    It already lowers — `_emit_struct_constructor` handles it, and
+    `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_then_dies.md`
+    is about what its `raise` does at run time rather than about whether it
+    builds — so re-deriving it here would be a second implementation of a
+    decision the emitter already makes.
+
+    `None` for a builtin exception class: `raise_class_name` owns that half,
+    and the two halves are asked in that order because a name both tables
+    contain means the DECLARATION (see `raise_class_name`)."""
+    if not isinstance(value, F.IdentExpr):
+        return None
+    if structs and value.name in structs:
+        return value.name
+    return None
+
+
+def raise_zero_arg_construction(name: str, line: int = 0) -> F.CallExpr:
+    """`F.CallExpr(func=F.IdentExpr(name), args=[])` — what `raise C` means.
+
+    One constructor rather than each emitter spelling it, for the reason the
+    rest of this group has one reader: a synthesised node that two backends
+    build separately is two places for them to differ about a field, and the
+    field that matters here is `args` being empty rather than absent.
+
+    The node is a fresh object on every call, which is what makes it safe to
+    hand to an emitter that may store it — `id()` is how the name walk keys
+    the nodes it must not re-read, and a shared instance would make two
+    different `raise C` statements in one function look like one node."""
+    return F.CallExpr(func=F.IdentExpr(name=name, line=line, col=0),
+                      args=[], kwargs=[], line=line, col=0)
+
+
+def raised_exception_class_nodes(body, structs: dict | None = None) -> set:
+    """`id()`s of the `IdentExpr` nodes that NAME an exception class in a `raise`.
+
+    For `check_module_symbols`' name walk, which asks about every `IdentExpr` in
+    a function body and refuses one nothing places. `raise ValueError` — the
+    bare spelling, and the one `raise_class_name` answers — is such a read, and
+    it is refused as "'ValueError' has no home: … the register allocator
+    collected no home for it", which is a true statement about a node that is
+    never read as a value: the emitter consumes the whole `RaiseStmt` and the
+    name only has to be RECOGNISED.
+
+    So the walk skips exactly these, and the exemption is keyed on
+    `raise_class_name` rather than on a spelling — the same reader the emitters
+    ask, so a name this accepts and the name walk skips cannot come to disagree,
+    which is the failure mode a second spelling test would introduce.
+
+    `raise ValueError('m')`'s `IdentExpr` is the CALLEE of a call, and is not
+    in this set: it is in `callees`, which the walk already exempts, and
+    leaving it there keeps this about the one shape that had no exemption."""
+    out = set()
+    for stmt in iter_nodes(body):
+        if not isinstance(stmt, F.RaiseStmt):
+            continue
+        value = getattr(stmt, "value", None)
+        if not isinstance(value, F.IdentExpr):
+            continue
+        if raise_class_name(value, structs) is not None \
+                or raise_declared_class_name(value, structs) is not None:
+            out.add(id(value))
+    return out
+
+
+def raise_float_divides_by_zero_is_an_exception() -> bool:
+    """CPython raises `ZeroDivisionError` for `x / 0.0` on doubles, and so must
+    this path.
+
+    Not the same rule as the INTEGER divide's, and the difference is the whole
+    reason this exists as a function rather than being read off the integer
+    guard. IEEE-754 divides by zero without trapping — `1.0/0.0` is `+inf` and
+    `0.0/0.0` is NaN — so an emitted `FDIV` answers a NUMBER for a program
+    CPython refuses, and the program then continues past the line that should
+    have stopped it: measured on both backends, `x = 1.0/0.0` printed `b` and
+    exited 0 where CPython prints `a` and exits 1.
+
+    So the FLOAT divide needs the zero guard the integer one already has
+    (`_emit_div_shift_pow`'s `div0_label`), and both backends ask THIS function
+    so that the two cannot come to disagree about whether the language raises
+    here."""
+    return True
+
+
 def _merged_field_names(struct_def, by_name: dict, memo: dict,
                         active: set) -> tuple:
     """`(names, unresolved bases, inherited defaults)` — the recursion.
