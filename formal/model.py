@@ -5597,6 +5597,8 @@ def specialization_call_refusal(name: str) -> str:
     instead, which is the whole difference between a build error and a
     program that answers a question nobody asked.
     """
+    if "." in (name or ""):
+        return dotted_specialization_refusal(name)
     return (
         f"{name}[…](…) calls a name this unit does not compile, so the "
         f"brackets cannot be bound. If `{name}` is a generic of another module "
@@ -5605,14 +5607,85 @@ def specialization_call_refusal(name: str) -> str:
         f"ones an importer asks for — `formal/monomorph.py` compiles each into "
         f"that module's own library and rewrites the call to the mangled name — "
         f"so a call arriving here asked for none: its brackets named no type "
-        f"argument, named a value rather than a type, or spelled the template "
-        f"as `module.{name}`. Write it as `{name}[<a type>](…)` and the library "
-        f"will carry the instantiation; the four ways this can still be reached "
-        f"are in bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
+        f"argument or named a value rather than a type. Write it as "
+        f"`{name}[<a type>](…)` and the library will carry the instantiation; "
+        f"the ways this can still be reached are in "
+        f"bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
         f"an ordinary value then the brackets are a subscript, which is not a "
         f"call this path can name at all. Refused rather than emitted with the "
         f"brackets dropped: that builds, runs, and returns a number the "
         f"source never wrote, with nothing on the link line to catch it"
+    )
+
+
+def dotted_specialization_refusal(name: str) -> str:
+    """The refusal for a bracketed callee spelled THROUGH A MODULE.
+
+    `import lib as L`, then `L.Pair[Int]()`, and this build cannot bind it —
+    not because no type argument was named (it names one perfectly well) and
+    not because `L` is not exported, but because the ONE recogniser of a
+    bracketed callee cannot see a dotted base.
+
+    **A whole function and not a clause of `specialization_call_refusal`,
+    because every sentence of the bare-name text is FALSE about this program.**
+    It was handed the ROOT of the dotted chain, so `name` was `L`, and the
+    message read "`L[…](…)` … If `L` is a generic of another module … write it
+    as `L[<a type>](…)`": three claims about a program that says none of them.
+    `L` is the MODULE, so it is not a generic of one; `L[<a type>]` is not a
+    spelling of anything; and the "the call asked for no instantiation" clause
+    is exactly the diagnosis this case needs to NOT give, because the brackets
+    named a type argument and the reason the call arrived here is the
+    recogniser. That is the `refuse_without:` class of defect this repository's
+    own discipline names — a repair that is wrong about correct code — and the
+    fix is a message that names the module, the template, the reason and a
+    spelling that works.
+
+    **The reason is stated rather than implied, because it is the useful part.**
+    `mojo/middle/comptime.specialization_name` answers `None` for a dotted base
+    BY DESIGN: both backends' `_specialization_of` and
+    `formal/model.py::subscript_callee_names` consult that one function, and a
+    second recogniser that disagreed with it would bind the call to the WRONG
+    MODULE's instantiation — a wrong answer rather than a refusal, which is the
+    one direction this backend must never take. So the dotted application is not
+    a gap in a message, it is a gap in the mechanism, and §2 of
+    `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
+    the ABI decision it needs.
+
+    **The remedy is the one spelling measured to work, and nothing else is
+    claimed.** `from pairlib import Pair` — the module's OWN name — then
+    `Pair[Int]()`, which builds, runs and answers CPython on both architectures
+    (`test_formal_monomorph.py`'s two rows here). The ALIASED form is NOT
+    claimed: `from pairlib import Pair as P` then `P[Int]()` was measured on
+    this tree and is refused with `specialization_call_refusal`, because the
+    demand walk reads `P` where the template is `Pair` and a struct template's
+    instantiation is emitted under the mangled name. §2 of the doc says the
+    alias "maps back" for a FUNCTION template's demand; it is not true of this
+    one, so the message does not say it.
+    """
+    module, _, leaf = name.rpartition(".")
+    return (
+        f"{name}[…](…) is a bracketed callee spelled THROUGH A MODULE, and "
+        f"`{module}` is the module while `{leaf}` is the template — so this is "
+        f"not a name this unit fails to compile, it is a spelling of a "
+        f"specialization this build cannot yet recognise. The brackets name a "
+        f"type argument perfectly well; what is missing is the reader. "
+        f"`mojo/middle/comptime.specialization_name` is the ONE recogniser of "
+        f"a bracketed callee — both backends' `_specialization_of` and "
+        f"`formal/model.py::subscript_callee_names` ask it — and it answers "
+        f"`None` for a dotted base BY DESIGN, because a second recogniser that "
+        f"disagreed with it would bind the call to the wrong module's "
+        f"instantiation. Bind the template by its bare name instead — "
+        f"`from <the module> import {leaf}`, spelled with the MODULE'S OWN name "
+        f"rather than the `{module}` alias — and call `{leaf}[…](…)`. That is "
+        f"the same program, and it builds, runs and answers CPython on both "
+        f"architectures; the ALIASED form (`import … as {module}` then "
+        f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
+        f"measured on this tree and is still refused, so do not stop there. "
+        f"The dotted application itself, and the ABI question a fix needs, are "
+        f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
+        f"emitted with the brackets dropped: that builds, runs, and returns a "
+        f"number the source never wrote, with nothing on the link line to catch "
+        f"it"
     )
 
 

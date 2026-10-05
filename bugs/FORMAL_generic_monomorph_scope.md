@@ -107,6 +107,10 @@ the two were in.
 
 ## 2. A DOTTED application — `mod.Pair[Int]()`
 
+**Status 2026-10-04 (`work/formal19-3`): STILL REFUSED, and the refusal was
+FALSE about correct code in three separate ways until this round. That is what
+landed; the recogniser is unchanged and the item stays.**
+
 **The construct.** `import std.collections.binary_heap as bh`, then
 `bh.BinaryHeap[Int]()`.
 
@@ -117,12 +121,93 @@ which `formal/model.py::subscript_callee_names` and both backends'
 (`formal/model.py::refuse_a_dotted_specialized_callee_names` is what depends on
 it). Widening it here would mean a second recogniser that disagrees with the
 one every backend consults, and the disagreement's failure mode is a call bound
-to the wrong module's instantiation.
+to the wrong module's instantiation. **That reasoning is unchanged and is the
+whole of why §2 is still open.**
 
-**Note that the ALIASED IMPORT form is not affected**: `from pairlib import Pair
-as P` then `P[Int]()` is a bare name, and `formal/imports.py::import_bindings`
-already maps `P` back to `pairlib`'s `Pair`. The gap is only the
-`module.Name[…]` spelling.
+### 2a MEASURED: the refusal named the MODULE as the template
+
+**What was run.** `fire.py build --formal --no-prove` on both architectures, over
+a two-file tree — `pairlib.mojo` declaring `struct Pair[T]` and a
+non-template function so the library itself builds, `main.mojo` with
+`import pairlib as L` then `L.Pair[Int]()`. Both machines refused:
+
+```
+build: L[…](…) calls a name this unit does not compile, so the brackets cannot
+be bound. If `L` is a generic of another module then its instantiation is the
+boundary symbol … so a call arriving here asked for none: its brackets named no
+type argument, named a value rather than a type, or spelled the template as
+`module.L`. Write it as `L[<a type>](…)` and the library will carry the
+instantiation …
+```
+
+**Three claims, and every one of them is false about the program in front of the
+reader.** `formal/build.py`'s bracketed-callee scan names a call by the ROOT of
+its dotted chain (`base_name = root_ident.name`), so `L.Pair[Int]()` arrived as
+the name `L`:
+
+1. **`L` is the MODULE**, not a template, so "If `L` is a generic of another
+   module" describes a word that is one;
+2. **`L[<a type>](…)` is not a spelling of anything** — it is a subscript of a
+   module object, which is the storage-less construct
+   `module_state_no_storage` exists for;
+3. **"the call arriving here asked for none" is exactly the diagnosis this case
+   must not give.** The brackets named a type argument perfectly well. The
+   reason the call arrived here is that the recogniser cannot see a dotted base
+   — the opposite of a missing demand.
+
+**And there was a second, worse one behind it**, which is the reason this was
+worth a session rather than a reword:
+`formal/build.py::_bracketed_export_gap` asks `doc/ABI.md`'s export rule about
+that same root name, and `L` resolves to `pairlib` and is not in
+`pairlib`'s own published set — **because a module never publishes its own
+NAME**. So the reader was told the library exports no such symbol, which is a
+sentence about a LIBRARY's boundary on a program whose problem is in the
+consumer. That half is now `None` for any dotted base, with the reason in its
+docstring.
+
+**What landed.** `formal/model.py::dotted_specialization_refusal` is a whole
+function, not a clause of `specialization_call_refusal`, because every sentence
+of the bare-name text is false here. It names the module, the template, the
+REASON (`specialization_name` answers `None` for a dotted base BY DESIGN, and a
+second recogniser that disagreed with it would bind the call to the wrong
+module's instantiation), and a spelling that is measured to work. The sweep
+tables gained a row for it in BOTH directions — a family and a cause, each
+above `"would bind"`, because the new text contains "cannot bind" and that row
+would otherwise file a recogniser's gap under the link line (measured: it did,
+before the marker was added). The bare-name spelling of the same construct also
+gained its missing FAMILY row; it had a CAUSE row and classified as
+`other refusal` — the bucket `tools/formal_sweep.py`'s own docstring calls
+"nobody has looked" — for one of the corpus's larger single rows.
+
+**The ALIASED IMPORT form is NOT unaffected, and the paragraph above was wrong
+about it.** Measured on this tree: `from pairlib import Pair as P` then
+`P[Int]()` is REFUSED with `specialization_call_refusal` naming `P`, because the
+demand walk reads `P` where the template is `Pair` and a struct template's
+instantiation is emitted under the mangled name.
+`formal/imports.py::import_bindings` maps an alias back for a name the walk
+resolves, and a STRUCT template's bracket is not such a name. So the gap is the
+`module.Name[…]` spelling AND the aliased one, and the new message recommends
+the module's own name (`from pairlib import Pair`, which builds and answers
+CPython on both architectures) and says the aliased form was measured and does
+not work rather than implying it does.
+
+**Measured:**
+
+```
+python3 test_formal_monomorph.py     PASS=24 FAIL=0   (22 rows, two of them new)
+python3 test_refusal_taxonomy.py     PASS (271/271 checks, 47 families, 67 causes)
+python3 test_formal_specialization.py PASS=18 FAIL=0
+python3 test_formal_dylib.py         PASS=24 FAIL=0
+```
+
+**What is still open is the recogniser, and it is an ABI decision rather than a
+patch** — unchanged from the section above. What a fix needs, in order: a
+`specialization_name` that answers the TEMPLATE for a dotted base and leaves the
+module to its caller (which is what keeps it one recogniser rather than two);
+`formal/monomorph.py::demands` able to attribute that demand to the module the
+chain names; and the decision §1a's paragraph records, because the library's own
+signature is compiled once per demand set. §1a is upstream of this for the same
+reason it is upstream of the library half.
 
 ---
 

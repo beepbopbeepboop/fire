@@ -210,6 +210,105 @@ def run_pair_case(tmpdir, arch, name, lib, prog, cpython, expect_ok=True,
     return run.stdout
 
 
+# §2 of the doc: the DOTTED application, `L.Pair[Int]()`. Two rows, and the
+# second is the one that matters — the message used to name the MODULE as the
+# template.
+DOTTED_LIB = PAIR_LIB + """
+
+def seed() -> Int:
+    return 1
+"""
+
+DOTTED_PROG = """\
+import pairlib as L
+
+def main():
+    var a = L.Pair[Int]()
+    a.first = 7
+    a.second = 3
+    print(a.get_first())
+"""
+
+
+def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
+    """`L.Pair[Int]()` is refused, and the refusal names `Pair` as the template.
+
+    §2's construct, and §2 is not a message problem — it is a recogniser this
+    build does not have: `mojo/middle/comptime.specialization_name` answers
+    `None` for a dotted base BY DESIGN, because both backends'
+    `_specialization_of` and `formal/model.py::subscript_callee_names` consult
+    that one function and a second recogniser that disagreed with it would bind
+    the call to the WRONG MODULE's instantiation. So the construct stays
+    refused, and what this case pins is that the refusal is about the program.
+
+    **It was not.** The scan that raises it names the call by the ROOT of its
+    dotted chain, so `L.Pair[Int]()` arrived as the name `L`, and the message
+    read:
+
+        build: L[…](…) calls a name this unit does not compile … If `L` is a
+        generic of another module … Write it as `L[<a type>](…)`
+
+    Three claims about a program that says none of them: `L` is the MODULE, so
+    it is not a generic of one; `L[<a type>]` is not a spelling of anything;
+    and "the call asked for no instantiation" is precisely the diagnosis this
+    case must not give, because the brackets name a type argument perfectly
+    well. That is the `refuse_without:` class of defect — a repair that is
+    wrong about correct code — and it is why the text is a whole function
+    (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
+
+    Four needles, each for a different false claim above, and the last one is
+    the only part of the message a reader can act on: `from L import Pair` then
+    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
+    below, on this machine, in this tree.
+    """
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
+                             DOTTED_PROG,
+                             None, expect_ok=False)
+        for needle in ("is a bracketed callee spelled THROUGH A MODULE",
+                       "`L` is the module while `Pair` is the template",
+                       "answers `None` for a dotted base BY DESIGN",
+                       "from <the module> import Pair",
+                       "the ALIASED form"):
+            check(needle in text,
+                  f"[{arch}] the dotted application did not say {needle!r}: "
+                  f"{text.strip()[-400:]}")
+        check("L[<a type>](…)" not in text,
+              f"[{arch}] the refusal still recommends `L[<a type>](…)`, which "
+              f"is not a spelling of anything — `L` is the module. That is the "
+              f"sentence this change removes: {text.strip()[-300:]}")
+        check("If `L` is a generic of another module" not in text,
+              f"[{arch}] the refusal still says `L` is a generic of another "
+              f"module. `L` IS the module: {text.strip()[-300:]}")
+
+
+def test_the_dotted_applications_remedy_is_lowered(tmpdir):
+    """The spelling the new refusal recommends, on both architectures, vs CPython.
+
+    A message that recommends a repair nothing checks is a message nobody can
+    act on, and this file's other rows are all "the construct LOWERS". So the
+    remedy is pinned as a differential rather than trusted: `from pairlib import
+    Pair` then `Pair[Int]()`, one instantiation, two fields, and CPython's
+    `PAIR_CPYTHON`/`PAIR_CPYTHON_MAIN` reference run at test time.
+
+    **The remedy is the NON-aliased spelling, and that is measured rather than
+    assumed**: `from pairlib import Pair as P` then `P[Int]()` is still refused
+    on this tree (the demand walk reads `P` where the template is `Pair`), so
+    the message names the module's own name and says so. This row is what
+    makes that claim worth making.
+    """
+    bare = PAIR_PROG.replace("import pairlib", "from pairlib import Pair")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_dottedremedy", PAIR_LIB, bare,
+                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
+              f"not the three answers this case is about — so the message is "
+              f"recommending a spelling nothing checks")
+
+
 # ── behavioural: the boundary symbols ───────────────────────────────────────
 
 
@@ -1926,6 +2025,10 @@ TESTS = [
      test_a_generic_function_template_is_instantiated_too),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
+    ("a dotted application says which word is the module",
+     test_a_dotted_application_says_which_word_is_the_module),
+    ("…and its remedy is lowered, both architectures",
+     test_the_dotted_applications_remedy_is_lowered),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a package re-export attributes the demand to the defining module",

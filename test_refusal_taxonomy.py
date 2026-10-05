@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 import formal_sweep as S  # noqa: E402
 import formal_sweep_causes as C  # noqa: E402
 import formal.model as FM  # noqa: E402
+from formal.model import dotted_specialization_refusal  # noqa: E402
 
 # ── the two samples that are BUILT rather than copied ──────────────────────
 # Every other sample in this file is a hand-copy of a message, which is what
@@ -377,6 +378,16 @@ SAMPLES = [
     # clause is the only difference) because they share a message on purpose —
     # `formal/model.py::not_a_code_address_refusal` — and a family keyed on a
     # message cannot have two rows for one message.
+    # A bracketed callee spelled THROUGH A MODULE, and its bare sibling — two
+    # rows because `formal/model.py` grew a whole function for the dotted text
+    # rather than a clause of the bare one (`dotted_specialization_refusal`'s own
+    # paragraph is why), and a family keyed on a message cannot have two rows for
+    # one message. Both samples are the LIVE functions' output, so a reword
+    # leaves them behind and this fails instead of quietly emptying a row.
+    ("specialization spelled through a module",
+     dotted_specialization_refusal("L.Pair")),
+    ("specialization of a callee this unit does not compile",
+     FM.specialization_call_refusal("Box")),
     ("value call: the word is not an address",
      "`17` is called as a FUNCTION and the source says it holds an integer, "
      "passed to `apply_arg()` as parameter `f`, which `apply_arg()` calls "
@@ -547,6 +558,11 @@ CAUSE_SAMPLES = [
      "debug_assert[…](…) calls a name this unit does not compile, so the "
      "brackets cannot be bound. A comptime specialization's brackets are the "
      "generic's comptime parameters"),
+    # …and its DOTTED sibling, built rather than copied for the same reason the
+    # string-composition pair above is: `dotted_specialization_refusal` is a
+    # whole function and a hand-copy is a sample that can only rot.
+    ("a bracketed specialization spelled through a module",
+     dotted_specialization_refusal("L.Pair")),
     # The corpus's LARGEST row, and it had no row at all until 2026-10-04: 170 of
     # the 710 files on the b10 sweep, 55% of every codegen finding in the tree,
     # every one of them this one sentence. The ranking reported them as

@@ -12606,7 +12606,8 @@ def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
                                   forwarded) is not None
 
 
-def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
+def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
+                          spelling: str = None):
     """The EXPORT refusal for `base_name[…](…)`, or None when the export rule
     is not what stops it.
 
@@ -12631,7 +12632,23 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
     that has not resolved imports) or a module with no readable export table
     yields an empty `published`, and an empty table is not evidence that
     anything is missing from it — so it returns None and the old verdict stands.
+
+    **A DOTTED base is None, always, and that is the half this function used to
+    get wrong.** `base_name` is the ROOT of the chain, so for
+    `import pairlib as L` + `L.Pair[Int]()` it was `L` — which resolves to the
+    module and is therefore not in that module's own published set, because a
+    module never publishes its own NAME. The export rule was asked a question
+    about a word that cannot be the answer, and the reader was told the module
+    exports no such symbol: a message about a LIBRARY's boundary, on a program
+    whose problem is that this build has no recogniser for a bracketed callee
+    spelled through a module. Measured on both architectures. `spelling` is the
+    dotted chain the scan already had (`model.member_chain_text(sub.obj)`), and
+    a base whose spelling carries a `.` is a MODULE — so the export rule is not
+    what stops it, and `model.dotted_specialization_refusal` is the sentence
+    that is true of it.
     """
+    if spelling and "." in spelling:
+        return None
     sym = M.module_symbol(base_name)
     if sym is None or getattr(sym, "site", None) != "imported":
         return None
@@ -13395,6 +13412,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # IS a call's bracketed base, so the name is the base name by
                 # that fact rather than by asking again.
                 base_name = root_ident.name
+                # The ROOT is the module for a DOTTED base, and
+                # `specialization_call_refusal` has to say so: `L.Pair[Int]()`
+                # arrived here as `base_name == "L"`, so the refusal named the
+                # module as the template and told the reader to write
+                # `L[<a type>](…)`, which is not a spelling. The dotted name is
+                # `member_chain_text(sub.obj)`, the ONE reader for the chain —
+                # `sub.obj` is a MemberExpr on this arm and an IdentExpr on the
+                # bare one, so the same call answers a bare name unchanged and
+                # a dotted one in full. `model.dotted_callee_sentence` is what
+                # turns the difference into the sentence, and it is asked of the
+                # NAME rather than of the node so the emitters' two copies of
+                # this refusal cannot spell it differently.
+                callee_spelling = M.member_chain_text(sub.obj)
                 if (base_name not in _callee_defs(functions)
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
@@ -13407,8 +13437,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
                         else (_bracketed_export_gap(
-                            base_name, fn.name, link_line)
-                            or M.specialization_call_refusal(base_name)))
+                            base_name, fn.name, link_line, callee_spelling)
+                            or M.specialization_call_refusal(callee_spelling)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
                     # for, and it is a different KIND of answer from the three
