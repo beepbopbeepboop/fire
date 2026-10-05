@@ -96,7 +96,7 @@ One file, one lemma, and a decision about the tactic:
    * give the theorem `set_option maxHeartbeats <n> in` with an `n` MEASURED
      (the heartbeat ceiling is this project's own recurring subject —
      `FORMAL.md` §"…maxHeartbeats does not meter the thing that spins", and
-     `bugs/FORMAL_the_three_branch_certificate_exceeds_the_lean_bound.md` is the
+     `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` is the
      precedent for a per-declaration ceiling), or
    * express the high half WITHOUT `Int`: `(a * b) >>> 64` on the unsigned
      product is the same 64 bits, and it is the shape every other arm in this

@@ -1835,7 +1835,6 @@ def arm64_logic_flags (r : UInt64) : UInt8 :=
   (if r = 0 then 0x2 else 0)
     ||| (if (r >>> 63) = 1 then 0x1 else 0)
 
-
 /-- Zero-extend (mask) the low 8/16/32 bits of a 64-bit value. -/
 def t8u (x : UInt64) : UInt64 := x &&& 0xff
 def t16u (x : UInt64) : UInt64 := x &&& 0xffff
@@ -2652,7 +2651,6 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
                 else
                   (arm64_reg_or_sp rn s) + UInt64.ofNat imm9
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
-
   else
     none
 
@@ -7030,7 +7028,6 @@ def cbz_off64 (w : UInt32) : UInt64 :=
   if (imm19 &&& 0x40000) ≠ 0
     then (UInt64.ofNat imm19.toNat) - (UInt64.ofNat (2^19))
     else UInt64.ofNat imm19.toNat
-
 
 /-- CBNZ's sign-extended 19-bit byte offset, as `arm64_step` computes it. -/
 def cbnz_off64 (w : UInt32) : UInt64 :=
