@@ -10913,7 +10913,7 @@ CONSTRUCTION_CASES = [
      "    except:\n"
      "        pass\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:`formal` has no exception unwinder", None),
     # The construction half, which is what this group was about and which the
     # refusal above would otherwise take with it: the same class, the same
     # `raise`, and NO `try` — so nothing claims to catch it, the exit status is 1
@@ -12476,7 +12476,7 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    print(\"caught\")\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:`formal` has no exception unwinder", None),
     ("constr_a_try_with_a_declared_exception_base_is_refused_too",
      "class MyBase:\n"
      "    var msg: String\n"
@@ -12494,7 +12494,7 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    print(\"caught\")\n"
      "    return 0\n",
-     "refuse:this image has no unwinder", None),
+     "refuse:`formal` has no exception unwinder", None),
     # And the half that must KEEP working, because the refusal reads
     # `stmt.handlers` and nothing else. `try:`/`finally:` is a cleanup scope
     # rather than an exception scope: `finally` needs no runtime, and
