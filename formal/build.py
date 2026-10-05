@@ -15626,6 +15626,59 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     why_generator = M.generator_function_refusal(functions)
     if why_generator is not None:
         raise CodegenError(why_generator)
+    # A `nonlocal` that WRITES a captured cell, refused here for the same
+    # reason and with the same two-part shape as the two above. Both emitters
+    # reach the statement as `unsupported statement NonlocalStmt on the formal
+    # arm64/x86-64 path`, which names the AST node and nothing else — and the
+    # two spellings are the only thing that differs, so a reader is told which
+    # machine refused without being told what was refused.
+    #
+    # The capture ABI has no cell for this to write to, and that is the whole
+    # of it: `_flatten_closures` captures by VALUE and prepends the captured
+    # names as leading PARAMETERS, so the lifted function's copy of the name is a
+    # copy — writing it would change only the copy and the enclosing frame would
+    # still read its own, which is precisely the wrong answer the refusal
+    # prevents. A `nonlocal` that only READS is not refused: the read resolves to
+    # the by-value parameter, which is what `nonlocal_no_write`-shaped programs
+    # rely on, and the row that pins it is in
+    # `test_formal_closures.py`.
+    why_nonlocal = M.nonlocal_write_refusal(functions)
+    if why_nonlocal is not None:
+        raise CodegenError(why_nonlocal)
+    # A `@decorator` on a `def`, asked HERE and for the same reasons. Measured on
+    # this tree before this check: the decorator is not APPLIED at all — both
+    # emitters ignore `FunctionDef.decorators` — so
+    #
+    #     def deco(f):
+    #         print("deco ran")
+    #         return other
+    #     @deco
+    #     def g(x): return x * 2
+    #     print(g(3))
+    #
+    # printed 6 and never printed "deco ran", where CPython answers 103 and
+    # prints it. That is a dropped STATEMENT with an observable effect — the
+    # failure class `refuse_dropped_handler_arm` exists for, and the one CLAUDE.md
+    # calls the failure every other check is structurally blind to.
+    #
+    # NARROW on purpose, and the measurement is what makes it safe: a name in
+    # `model.COMPILE_TIME_DECORATOR_NAMES` (`@inline`, `@always_inline`,
+    # `@staticmethod`, `@comptime`, the trait names, …) is a lowering HINT or a
+    # calling-convention selector that the Mojo front end consumes and no
+    # user-level function is called, so dropping it is not a wrong answer. A
+    # decorator that is neither of those two things is a CALLABLE the reader
+    # expects to run, and 202 of the 610 stdlib modules carry a decorated def —
+    # so the check is asked only where the decorated name is DEFINED IN THIS
+    # UNIT as a `def`, which is the case that is provably wrong here (the body is
+    # in the image and nothing calls it), and even that is narrowed again by
+    # `model._decorator_is_identity`, because `return f` is provably not a wrong
+    # answer. Measured over those 610 modules the population is ZERO, so this
+    # check removes wrong builds rather than builds. A decorator imported from
+    # elsewhere is not this check's business: its body is not in this image, so
+    # nothing here can say whether dropping it loses an effect.
+    why_deco = M.unapplied_decorator_refusal(functions)
+    if why_deco is not None:
+        raise CodegenError(why_deco)
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):

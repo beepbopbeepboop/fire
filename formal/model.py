@@ -35276,6 +35276,251 @@ _UNRESOLVED_NAME_ALLOWED = frozenset({
 })
 
 
+# The decorators that select a LOWERING MODE or a CALLING CONVENTION rather
+# than wrapping a function, and so are not applied by any executor: there is no
+# user-level function of that name to call, and dropping one is not a wrong
+# answer. `@inline`/`@always_inline`/`@unroll` are inlining hints, `@staticmethod`
+# /`@classmethod`/`@property` select how a method binds its receiver, `@comptime`
+# and the trait names (`Copyable`, `Movable`, `Hashable`, `Sized`, `AnyType`,
+# `Boolable`, `Stringable`, `Intable`, `KeyElement`, `Writable`, `Comparable`,
+# `Hashable`, `EqualityComparable`, `Absable`, `Powable`, `Rounded`) declare
+# conformance, and `@export`/`@parameter`/`@fieldwise_init`/`@debug_assert` are
+# front-end spellings of things the Mojo parser itself handles.
+#
+# ONE list for two consumers rather than two lists, which is the whole reason it
+# is here: `myinterpreter.py::_COMPILE_TIME_DECORATORS` is the interpreter's
+# copy (it uses the set to DECIDE not to apply), and the formal path needs it to
+# decide not to REFUSE. Two lists that answer the same question \u2014 "is this
+# decorator a wrapper or a hint?" \u2014 is how a name ends up applied on one path
+# and refused on the other, which is a construct whose behaviour depends on which
+# front end compiled it.
+#
+# Measured for its size, because it is what makes
+# `unapplied_decorator_refusal` SAFE rather than a sweep regression: of the 610
+# stdlib modules in this repository's own stdlib, 202 carry a decorated `def`,
+# and `@inline`+`@always_inline` alone are 2269 of the 2367 decorator spellings
+# in them. A refusal asked of every decorated def would take 202 modules whose
+# only use of a decorator is a hint this backend has no use for.
+COMPILE_TIME_DECORATOR_NAMES = frozenset({
+    "always_inline", "inline", "unroll",
+    "staticmethod", "classmethod", "property",
+    "comptime", "export", "parameter", "fieldwise_init",
+    "debug_assert", "noncapturing", "no_inline",
+    # Trait conformance and the abstract base capabilities.
+    "Copyable", "Movable", "ImplicitlyCopyable", "ExplicitlyCopyable",
+    "AnyType", "Defaultable", "Boolable", "Sized", "Stringable", "Intable",
+    "Hashable", "Comparable", "EqualityComparable", "KeyElement",
+    "CollectionElement", "Indexer", "Absable", "Powable", "Rounded",
+    "Writable", "Destructible", "Key",
+    # The compiler's own spelling for "this attribute is not materializable".
+    "__allow_legacy_any_origin_fields",
+    "__allow_legacy_custom_self_type",
+    "__unsafe_nested_origins_read_only",
+})
+
+
+def nonlocal_write_refusal(functions) -> str:
+    """Why a `nonlocal` that ASSIGNS is refused, or None when there is none.
+
+    Both emitters reach the statement as `unsupported statement NonlocalStmt on
+    the formal <arch> path`, which names the AST node and nothing else — and the
+    only thing that differs between the two is which machine refused. So the
+    construct is named here, once, and asked from the shared pipeline.
+
+    Only a `nonlocal` that WRITES is refused. A `nonlocal` that merely reads
+    resolves to the by-value capture parameter `_flatten_closures` prepended,
+    which is the right answer for a read \u2014 nothing can observe that the copy
+    differs, because nothing else reads the cell. A WRITE is different in the
+    way that matters: the enclosing frame holds its own copy of the name, the
+    lifted function holds the parameter, and an assignment through `nonlocal`
+    would change only the second. So the program would build, run, and answer the
+    enclosing frame's old value: the wrong number, with exit 0. That is the
+    failure class this whole file's refusals exist to prevent.
+
+    A write is decided by asking whether the declaration's names are STORED in
+    the function that declares them, not by whether the enclosing frame has an
+    assignment: `nonlocal c` followed by `c = c + 1` inside the nested function
+    is the case, and a `nonlocal` with no assignment to any of its names is the
+    read-only spelling that must keep building. `model.read_before_store`'s
+    `_names_bound_in` is the walk that answers the question for a body, and it
+    is asked per function here so the declaration and the assignment have to be
+    in the SAME frame to count.
+    """
+    for fn in (functions or []):
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if type(node).__name__ != "NonlocalStmt":
+                continue
+            names = list(getattr(node, "names", None) or ())
+            if not names:
+                continue
+            stored = _names_bound_in(fn) | {
+                p[0] if isinstance(p, (tuple, list)) and p else p
+                for p in (getattr(fn, "params", None) or ())}
+            written = [n for n in names if n in stored]
+            if not written:
+                continue
+            where = ""
+            line = getattr(node, "line", 0) or 0
+            if line:
+                where = f"line {line}: "
+            spelled = ", ".join(f"`{n}`" for n in written)
+            return (
+                f"{where}this `nonlocal` writes {spelled}, and a captured name "
+                f"has no shared cell for a write to reach: this path captures by "
+                f"VALUE \u2014 `formal/build.py`'s `_flatten_closures` prepends each "
+                f"captured name to the lifted function as an ordinary leading "
+                f"PARAMETER, so `{fn.name}` keeps its own copy and the nested "
+                f"function a second one. Assigning through `nonlocal` would change "
+                f"only the second, and the program would build, run and answer "
+                f"{fn.name}'s old value, which is a wrong answer with exit 0 "
+                f"rather than an error. A `nonlocal` that only READS is not "
+                f"refused \u2014 the read resolves to the parameter, which is what it "
+                f"is for \u2014 so the working spellings are to return the value "
+                f"(`return c`) and to pass it back as an argument, or to make the "
+                f"state a value the caller owns: build a list, append to it, and "
+                f"return it")
+    return None
+
+
+def unapplied_decorator_refusal(functions) -> str:
+    """Why a `@decorator` on a `def` of this unit is refused, or None.
+
+    The narrowest form of the question that is still sound, and the measurement
+    that fixes its boundary is in `formal/build.py` at the call site: both
+    emitters ignore `FunctionDef.decorators` entirely, so a decoration is never
+    applied and `g` is emitted as the UNDECORATED body. Measured, on both
+    backends, before this check:
+
+        def other(x): return x + 100
+        def deco(f):
+            print("deco ran")
+            return other
+        @deco
+        def g(x): return x * 2
+        print(g(3))
+
+    printed `6` and never printed `deco ran`, where CPython prints `103` and
+    prints it. The decorator's own `print` is a statement with an observable
+    effect that is silently absent, which is the same class as
+    `refuse_dropped_handler_arm` and the one CLAUDE.md calls the failure every
+    other check is structurally blind to.
+
+    **TWO exclusions, and both are measurements rather than taste.**
+
+    `COMPILE_TIME_DECORATOR_NAMES` \u2014 `@inline`, `@always_inline`,
+    `@staticmethod`, `@classmethod`, `@comptime`, `@unroll`, the trait
+    conformance names. These select a lowering mode or a calling convention and
+    there is no user-level function to call, so dropping them is not a wrong
+    answer. They are 2137 of the 2268 decorator spellings in this repository's
+    own 610 stdlib modules, which is why the check cannot be "refuse every
+    decorated def": measured, that would take 202 modules whose only use of a
+    decorator is a hint this backend does not need.
+
+    A decorator that is NOT a `def` of this unit. `@doc_hidden` imported from a
+    module is the common spelling and its body is not in this image, so nothing
+    here can say whether dropping it loses an effect \u2014 the honest report for
+    that case is this same message with the narrower claim, and refusing it would
+    be refusing on a guess. What IS decidable, and is what this asks, is the
+    case where the decorated function's replacement is IN the image: a decorator
+    defined here has a body the image contains and nothing calls.
+
+    So the needle is a decorator name that is a `def` of this unit. Measured
+    over this repository's own 610 stdlib modules, the population is ZERO: no
+    module defines a decorator and uses it (`std/documentation/documentation.mojo`
+    matched a line-by-line scan and does not \u2014 its `@doc_hidden` is inside the
+    `doc_hidden` function's own docstring, in a markdown fence, and is not a
+    decorator at all). So this refusal costs the formal sweep no file here, and
+    what it removes is a class of WRONG builds rather than a class of builds.
+    """
+    defined = {getattr(f, "name", None) for f in (functions or [])}
+    for fn in (functions or []):
+        for deco in (getattr(fn, "decorators", None) or []):
+            name = _decorator_name(deco)
+            if not name or name in COMPILE_TIME_DECORATOR_NAMES:
+                continue
+            if name not in defined:
+                # Not a function of this unit: its body is not in this image, so
+                # whether dropping it loses an effect is not decidable here.
+                continue
+            if _decorator_is_identity(functions, name):
+                # `return f`, provably and by the narrowest test that is still a
+                # proof: the whole body is one `return` of its own first
+                # parameter. Dropping that changes nothing \u2014 the image is the
+                # same image \u2014 so refusing it would refuse a program whose
+                # answers are already right, and the rows that pin that are the
+                # `a_decorator_that_returns_its_argument` and
+                # `two_decorators_that_both_return_their_argument` cases in
+                # `test_formal_closures.py`.
+                continue
+            return (
+                f"`@{name}` on `{fn.name}` is a decorator this path does not "
+                f"APPLY, and `{name}` is defined in this unit \u2014 its body is in "
+                f"the image and nothing calls it. CPython runs it and rebinds "
+                f"`{fn.name}` to whatever it returns, bottom-up, so the decorated "
+                f"name reaches the WRAPPING function; here the decorated name is "
+                f"emitted as the original body, so the program's answer is the "
+                f"UNDECORATED one and every effect in `{name}` is silently "
+                f"absent \u2014 a `print` in a decorator never runs. That is a "
+                f"wrong answer with exit 0, not an error, which is why it is "
+                f"refused rather than run. Applying it is `{fn.name} = {name}"
+                f"({fn.name})` after the definition, which needs a module-level "
+                f"name bound to a value, and on this path a name resolves to a "
+                f"symbol rather than to storage \u2014 so a decoration that CHANGES "
+                f"the function has no representation here. A decorator that "
+                f"returns its argument unchanged (`return f`) is what still "
+                f"builds, because the image it produces is the image without the "
+                f"decoration. To wrap the body, write the wrapper's effect into "
+                f"`{fn.name}` itself")
+    return None
+
+
+def _decorator_is_identity(functions, name: str) -> bool:
+    """True when `name` is a `def` whose whole body is `return <its parameter>`.
+
+    The one shape of decorator whose ABSENCE is provably not a wrong answer: the
+    image is the same image with or without it, because the value it would
+    produce is the value that is already there. Deliberately the narrowest test
+    that is still a proof rather than a heuristic \u2014 exactly one `ReturnStmt`,
+    whose value is a bare read of the FIRST parameter. A decorator with a
+    statement before the return is NOT identity even if it ends in `return f`,
+    because the statement is an effect that would be dropped, and a decorator
+    returning a CALL (`return wrap(f)`) is not identity because the value it
+    produces is not the parameter.
+    """
+    for f in (functions or []):
+        if getattr(f, "name", None) != name:
+            continue
+        body = [s for s in (getattr(f, "body", None) or [])
+                if type(s).__name__ != "Pass"]
+        if len(body) != 1 or type(body[0]).__name__ != "ReturnStmt":
+            return False
+        params = [p[0] if isinstance(p, (tuple, list)) and p else p
+                  for p in (getattr(f, "params", None) or ())]
+        value = getattr(body[0], "value", None)
+        return (bool(params) and isinstance(value, F.IdentExpr)
+                and value.name == params[0])
+    return False
+
+
+def _decorator_name(deco) -> str:
+    """The bare name a `@decorator` names, from all three spellings.
+
+    A bare `@deco` arrives as a string; `@deco(x)` arrives as a `CallExpr`
+    (the parser stopped discarding the argument list in 2026-09-27) and
+    contributes only its callee, which is enough for a name comparison; an
+    `@IdentExpr` arrives for the dataclass-transform rewrites. One reader
+    because a decorator refused under one spelling and lowered under another
+    would be a construct that works or does not depending on punctuation.
+    """
+    if isinstance(deco, str):
+        return deco
+    if isinstance(deco, F.IdentExpr):
+        return deco.name
+    if isinstance(deco, F.CallExpr) and isinstance(deco.func, F.IdentExpr):
+        return deco.func.name
+    return ""
+
+
 def free_names_in_lambda(lam) -> set:
     """Every bare name `lam`'s own body reads, its parameters included.
 

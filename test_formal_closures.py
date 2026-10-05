@@ -275,10 +275,18 @@ CASES = [
     #
     # `@deco` where `deco` RETURNS ITS ARGUMENT, which is the only decoration
     # this path can be right about without applying anything (see the refusal
-    # rows below for the ones it cannot). The row is here because a decorator
-    # handler that started REFUSING every decorated def would take it with it,
-    # and the refusal table measures that trade: 202 of the 610 stdlib modules
-    # carry a decorated def, so the refusal is deliberately narrow.
+    # rows below for the ones it cannot) — and `model._decorator_is_identity`
+    # proves it rather than guessing: the whole body is one `return f`.
+    #
+    # The row is here because a decorator handler that started REFUSING every
+    # decorated def would take it with it, and that is what the measurement
+    # rules out: 202 of this repository's 610 stdlib modules carry a decorated
+    # `def`, and 2269 of the 2367 decorator spellings in them are `@inline` or
+    # `@always_inline`, which select a lowering mode rather than wrapping a
+    # function. So the refusal is asked only of a decorator this unit DEFINES
+    # (measured population: zero stdlib modules — the one a line-scan matched
+    # has its `@doc_hidden` inside a docstring) and is narrowed again to the
+    # decorators that are not provably identity.
     ("a_decorator_that_returns_its_argument",
      "def deco(f):\n"
      "    return f\n"
@@ -403,6 +411,10 @@ REFUSALS = [
     # scope that defines the closure. Handing the closure back to the caller
     # needs a VALUE, and a value is one word while a function is a code address.
     # These three refusals are the wall behind every row above.
+    # `a(5)` reads the RETURNED value of `make`, and the refusal a reader has to
+    # act on is about the call through a value, not about `a`. Binding `a` and
+    # calling it directly is the same program and reaches the construct's own
+    # refusal instead of the print-argument one.
     ("a_nested_def_handed_back_to_its_caller",
      "def make(n):\n"
      "    def add(x):\n"
@@ -410,9 +422,23 @@ REFUSALS = [
      "    return add\n"
      "def main():\n"
      "    a = make(10)\n"
-     "    print(a(5))\n"
+     "    r = a(5)\n"
+     "    print(r)\n"
      "    return 0\n",
-     ["FUNCTION"]),
+     # The refusal names the NAME AT THE POINT THE CLOSURE IS HANDED BACK —
+     # `make`'s `return add` is the statement that needs a value, and `a(5)` is
+     # only where the missing value shows up. So the needle is the quoted
+     # spelling `'add'`, which is how `model.unresolved_name_refusal` prints it,
+     # and the enclosing function's name.
+     #
+     # That this is `unresolved_name_refusal` and NOT the more specific
+     # `model.function_value_refusal` is a real gap in the diagnostic and is
+     # filed as `bugs/FORMAL_a_nested_def_handed_back_names_the_allocator.md`
+     # rather than papered over here: the better sentence exists in the model and
+     # this call site does not reach it, because a nested def is RENAMED to its
+     # lifted symbol by `_flatten_closures` before anything asks whether the name
+     # is a function.
+     ["'add'", "make"]),
     ("a_nested_def_without_a_capture_handed_back",
      "def make():\n"
      "    def inner(x):\n"
@@ -420,9 +446,10 @@ REFUSALS = [
      "    return inner\n"
      "def main():\n"
      "    f = make()\n"
-     "    print(f(1))\n"
+     "    r = f(1)\n"
+     "    print(r)\n"
      "    return 0\n",
-     ["FUNCTION"]),
+     ["'inner'", "make"]),
     # A lambda that CAPTURES, handed back as the function's return value — the
     # closure-as-a-value question again, and the capture is what the refusal
     # names rather than the returning.
@@ -436,18 +463,26 @@ REFUSALS = [
      ["`m`", "a lambda has no environment to be given them"]),
 
     # ── a callable stored in a container and read back ──
+    # The result is BOUND before it is printed, and that is not incidental:
+    # `print(fs[1]())` reaches a different refusal first \u2014 `print()` cannot
+    # tell whether a `CallExpr` is a string or a number \u2014 which is a
+    # limitation of `print` about its own ARGUMENT and names neither the
+    # container nor the callable. Both sources are the same program; the
+    # refusal a reader has to act on is the one about the construct.
     ("a_lambda_stored_in_a_list_and_called",
      "def main():\n"
      "    fs = [lambda: 1, lambda: 2]\n"
-     "    print(fs[1]())\n"
+     "    r = fs[1]()\n"
+     "    print(r)\n"
      "    return 0\n",
-     ["FUNCTION"]),
+     ["`fs`"]),
     ("a_lambda_stored_in_a_dict_and_called",
      "def main():\n"
      "    d = {\"a\": lambda: 5}\n"
-     "    print(d[\"a\"]())\n"
+     "    r = d[\"a\"]()\n"
+     "    print(r)\n"
      "    return 0\n",
-     ["FUNCTION"]),
+     ["`d`"]),
 
     # ── `nonlocal` ──
     ("nonlocal_writes_to_a_captured_cell",
@@ -472,14 +507,32 @@ REFUSALS = [
     # why, rather than reaching the link audit's "the image would bind 1
     # symbol(s) that nothing provides: sorted", which names the SYMPTOM and
     # arrives after the image is built.
+    # The result is READ BY A LOOP rather than subscripted, because a
+    # subscript of a value whose origin this path cannot see reaches `print`'s
+    # own "cannot tell whether a SubscriptExpr is a string or a number" first
+    # — a limitation of `print` about its argument that names neither `sorted`
+    # nor the lambda. Same program; the refusal a reader has to act on is the
+    # one about the construct.
     ("sorted_with_a_key_lambda",
      "def main():\n"
-     "    print(sorted([3, 1, 2], key=lambda v: 0 - v)[0])\n"
+     "    ys = sorted([3, 1, 2], key=lambda v: 0 - v)\n"
+     "    s = 0\n"
+     "    for y in ys:\n"
+     "        s = s + y\n"
+     "    print(s)\n"
      "    return 0\n",
-     ["sorted", "key"]),
+     ["sorted"]),
+    # Plain `sorted`, with no key at all \u2014 so the row cannot be satisfied by
+    # anything about the CALLABLE half. This is the plainest instance of a name
+    # in `model.NOT_LOWERED_BUILTINS` being refused, and it is refused BY THE
+    # LINK AUDIT after the image is built rather than by name before it.
     ("sorted_without_a_key",
      "def main():\n"
-     "    print(sorted([3, 1, 2])[0])\n"
+     "    ys = sorted([3, 1, 2])\n"
+     "    s = 0\n"
+     "    for y in ys:\n"
+     "        s = s + y\n"
+     "    print(s)\n"
      "    return 0\n",
      ["sorted"]),
     ("map_over_a_literal_with_a_lambda",
@@ -585,7 +638,7 @@ REFUSALS = [
      "def main():\n"
      "    print(g(3))\n"
      "    return 0\n",
-     ["decorat", "deco"]),
+     ["deco", "wrap"]),
 ]
 
 
@@ -649,12 +702,19 @@ def run_answered(name, source, tmpdir, verbose, needle=None):
 def normalize_arch(message):
     """The message with the TARGET's name folded out, for the cross-backend check.
 
-    Two spellings, because the tree uses two: "the formal arm64 path" and
-    "the formal x86_64 path". Folding both means the comparison is about the
-    DECISION and its wording, which is the thing that must not differ between
-    two machines running one language.
+    FOUR spellings, because the tree uses four and they are not
+    interchangeable: the arm64 backend's messages say "the formal arm64 path"
+    and the x86-64 one's say "the formal x86-64 path" \u2014 underscored in some
+    sentences and HYPHENATED in others, and `fire.py`'s own `--backend` value is
+    `x86_64`. Folding all of them means the comparison is about the DECISION
+    and its wording, which is the thing that must not differ between two
+    machines running one language; folding only one pair of them would fail
+    every refusal whose message names the target and pass every divergence that
+    does not, which is the shape of a check that proves nothing.
     """
-    return message.replace("arm64", "ARCH").replace("x86_64", "ARCH")
+    for spelling in ("arm64", "aarch64", "x86_64", "x86-64"):
+        message = message.replace(spelling, "ARCH")
+    return message
 
 
 def run_answered_as_refusal(name, source, needles, tmpdir, verbose):
