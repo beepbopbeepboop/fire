@@ -202,12 +202,185 @@ CASES += [("andb %cl, %al", lambda: X.encode_and_r8_r8(R["RAX"], R["RCX"])),
           ("setnp %al", lambda: X.encode_setnp(R["RAX"])),
           ("setp %cl", lambda: X.encode_setp(R["RCX"]))]
 
+# ── the pointee-width MEMORY forms, and the two encoders `CASES` never named ──
+#
+# `tools/formal_isa_census.py` reads this file's table by AST and reported
+# fourteen emitted encoders with no byte-for-byte differential at all — and
+# they are the memory forms, which are where the frame lives: an 8-byte load
+# where the model expects 4 is a silent over-read, and a byte-width store over
+# a `malloc`ed buffer is a silent corruption that does not trap. `CASES` above
+# named the REGISTER half of every one of these families and no memory operand
+# except `movq`, which is the same hole the arm64 file had and the reason the
+# arm64 sweep was extended in the same commit.
+#
+# The displacements sweep both ends of the disp8/disp32 choice, because
+# `_rm_disp` picks the narrowest form and a case at one end says nothing about
+# the other; the `r8`-`r15` bases are in the set for the same reason as
+# everywhere else (REX.B, and R13/R12's SIB).
+CASES += [
+    ("movq (%r13), %rbx", lambda: X.encode_mov_r64_rm64(R["RBX"], R["R13"], 0)),
+    ("movq %rax, (%r13)", lambda: X.encode_mov_rm64_r64(R["R13"], 0, R["RAX"])),
+    ("movq 8(%r13), %r11", lambda: X.encode_mov_r64_rm64(R["R11"], R["R13"], 8)),
+    ("movq -0x410(%rbp), %r10",
+     lambda: X.encode_mov_r64_rm64(R["R10"], R["RBP"], -0x410)),
+    ("movsbq -1(%rbp), %r9", lambda: X.encode_movsx_r64_rm8(R["R9"], R["RBP"], -1)),
+    ("movsbq 300(%rbx), %r9",
+     lambda: X.encode_movsx_r64_rm8(R["R9"], R["RBX"], 300)),
+    ("movswq -2(%rbp), %rax", lambda: X.encode_movsx_r64_rm16(R["RAX"], R["RBP"], -2)),
+    ("movswq 300(%rbx), %r11",
+     lambda: X.encode_movsx_r64_rm16(R["R11"], R["RBX"], 300)),
+    ("movslq 8(%rbp), %rax", lambda: X.encode_movsx_r64_rm32(R["RAX"], R["RBP"], 8)),
+    ("movslq 300(%rbx), %r11",
+     lambda: X.encode_movsx_r64_rm32(R["R11"], R["RBX"], 300)),
+    ("movb %sil, -1(%rbp)", lambda: X.encode_mov_rm8_r8(R["RBP"], -1, R["RSI"])),
+    ("movb %r9b, 300(%rbx)", lambda: X.encode_mov_rm8_r8(R["RBX"], 300, R["R9"])),
+    ("movw %r11w, -2(%rbp)", lambda: X.encode_mov_rm16_r16(R["RBP"], -2, R["R11"])),
+    ("movq %rax, %xmm0", lambda: X.encode_movq_xmm_rm64(0, R["RAX"])),
+    ("movq %r9, %xmm3", lambda: X.encode_movq_xmm_rm64(3, R["R9"])),
+    # `imul r64, r64, imm32` (`69 /r id`) is the one ALU form with an immediate
+    # AND two registers, and it is the shape a `x * 10` reaches for, so its
+    # opcode byte (0x69) is one nothing else in this file emits.
+    ("imulq $7, %rbx, %rax", lambda: X.encode_imul_r64_r64_imm(R["RAX"], R["RBX"], 7)),
+    ("imulq $-3, %r12, %r10",
+     lambda: X.encode_imul_r64_r64_imm(R["R10"], R["R12"], -3)),
+    ("imulq $-128, %r14, %r15",
+     lambda: X.encode_imul_r64_r64_imm(R["R15"], R["R14"], -128)),
+    ("imulq $127, %r14, %r15",
+     lambda: X.encode_imul_r64_r64_imm(R["R15"], R["R14"], 127)),
+]
+
+# The four-byte-width memory forms, kept OUT of the byte table above on purpose.
+# `as` spells `movl -8(%rbp), %eax` as `8b 45 f8` and this backend emits
+# `40 8b 45 f8` — a REX byte with no bits set — and the same for `movzbq`, where
+# `as` adds REX.W (`48`) to a 64-bit destination that zero-extends either way.
+# Both are the same instruction and both are legal; a byte-identity comparison
+# would be testing the assembler's CHOICE of prefix, which is the same
+# distinction `tools/formal_model_fuzz.py::_ALIASES` draws on the arm64 side.
+# What is checked instead is that the two differ ONLY in the REX byte, with the
+# reason stated per row, because that is the property a field in the wrong
+# place would break.
+REX_VARIANT_CASES = [
+    # (text, encoder call, why the REX byte differs)
+    ("movl -8(%rbp), %eax", lambda: X.encode_mov_r32_rm32(R["RAX"], R["RBP"], -8),
+     "32-bit load: ours emits a null REX (0x40), `as` omits it"),
+    ("movl %ebx, -4(%rbp)", lambda: X.encode_mov_rm32_r32(R["RBP"], -4, R["RBX"]),
+     "32-bit store: the same null REX"),
+    ("movzbq -1(%rbp), %rax", lambda: X.encode_movzx_r64_rm8(R["RAX"], R["RBP"], -1),
+     "`movzx r32, m8` and `movzx r64, m8` both zero the whole register, so ours "
+     "leaves REX.W clear where `as` sets it"),
+    ("movzbq 300(%rbx), %r11",
+     lambda: X.encode_movzx_r64_rm8(R["R11"], R["RBX"], 300),
+     "…and the same with REX.R already set, so the two differ in W alone"),
+    ("movzbq (%rbx), %rax", lambda: X.encode_movzx_r64_rm8(R["RAX"], R["RBX"], 0),
+     "the zero-extending 1-byte load at displacement 0: the same REX.W "
+     "difference as the row above"),
+    ("movzwq -2(%rbp), %rax", lambda: X.encode_movzx_r64_rm16(R["RAX"], R["RBP"], -2),
+     "the 16-bit load of the same family"),
+    ("movzwq 300(%rbx), %r11",
+     lambda: X.encode_movzx_r64_rm16(R["R11"], R["RBX"], 300),
+     "…with REX.R already set"),
+    ("movw %ax, 300(%rbx)", lambda: X.encode_mov_rm16_r16(R["RBX"], 300, R["RAX"]),
+     "the 2-byte STORE (66 89 /r): ours emits a null REX after the operand-size "
+     "prefix where `as` omits it"),
+    ("movl 8(%r13), %r11d", lambda: X.encode_mov_r32_rm32(R["R11"], R["R13"], 8),
+     "a 32-bit load off an r8-r15 base: REX.B is set on both sides"),
+]
+
 
 def main() -> int:
     failures = 0
     failures += check_encoders()
+    failures += check_rex_variants()
     failures += check_cpu_types()
     return 1 if failures else 0
+
+
+def check_rex_variants() -> int:
+    """Every `REX_VARIANT_CASES` row: the two encodings differ in the REX byte
+    and in nothing else.
+
+    The byte-identity table above cannot hold for these rows, and the difference
+    is real and legal rather than a defect: a null REX byte is the same
+    instruction one byte longer, and REX.W on a zero-extending load changes
+    nothing about the value written. So the property checked here is the one
+    that would still catch a defect — everything from the ModRM byte onwards,
+    which is where a field in the wrong place, a missing SIB byte or a sign
+    error in a displacement lives — and the prefix that was allowed to differ
+    must itself be a REX byte (or absent on one side).
+    """
+    failures = 0
+    with tempfile.TemporaryDirectory() as d:
+        for i, (text, fn, why) in enumerate(REX_VARIANT_CASES):
+            src = f'.text\n.globl v{i}\nv{i}:\n\t{text}\n'
+            path = os.path.join(d, f"v{i}.s")
+            with open(path, "w") as f:
+                f.write(src)
+            obj = os.path.join(d, f"v{i}.o")
+            r = subprocess.run(["clang", "-arch", "x86_64", "-c", path,
+                                "-o", obj], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"FAIL(assemble) {text}: {r.stderr.strip()}")
+                failures += 1
+                continue
+            want, got = object_code(obj), bytes(fn())
+            why_bad = _rex_only_difference(got, want)
+            if why_bad:
+                print(f"FAIL {text}: {why_bad}\n"
+                      f"  want {want.hex()}\n  got  {got.hex()}\n  ({why})")
+                failures += 1
+                continue
+            print(f"ok   {text} (REX byte only: {why})")
+    print(f"{len(REX_VARIANT_CASES) - failures}/{len(REX_VARIANT_CASES)} "
+          f"REX-variant encoders match GNU as beyond the prefix byte")
+    return failures
+
+
+def _rex_at(code: bytes):
+    """`(index, byte)` of the REX byte, or None when there is not one.
+
+    It is the first byte when there is no operand-size prefix and the second
+    when there is (`66 REX 89 /r` is the 2-byte store this backend emits).
+    """
+    at = 1 if code[:1] == b"\x66" else 0
+    if len(code) > at and 0x40 <= code[at] <= 0x4F:
+        return at, code[at]
+    return None
+
+
+def _rex_only_difference(ours: bytes, theirs: bytes):
+    """None when the two encodings differ in the REX byte alone, else why not.
+
+    "The REX byte alone" is deliberately narrow. The REX byte's W bit is the
+    only bit allowed to differ, and only because a zero-extending load writes
+    the whole register either way; R, X and B each NAME a register or an index,
+    so a difference there is a real defect and this returns a reason instead of
+    passing it. A REX byte present on one side and absent on the other is
+    allowed only when the one present is NULL (0x40), which is a no-op prefix.
+    Everything from the ModRM byte onwards must be byte-identical, and that is
+    where a field in the wrong place, a missing SIB byte or a sign error in a
+    displacement lives.
+    """
+    a, b = _rex_at(ours), _rex_at(theirs)
+    if a is None or b is None:
+        present = a or b
+        if present and present[1] != 0x40:
+            return ("one side has a REX byte with bits set and the other has "
+                    "none")
+        if present is None:
+            return "neither side has a REX byte where one was expected"
+        ours = ours[:a[0]] + ours[a[0] + 1:] if a else ours
+        theirs = theirs[:b[0]] + theirs[b[0] + 1:] if b else theirs
+    else:
+        if ours[:a[0]] != theirs[:b[0]]:
+            return "the prefixes before the REX byte differ"
+        if (ours[a[0]] ^ theirs[b[0]]) & ~0x08:
+            return ("the REX bytes differ in R, X or B, which each name a "
+                    "register")
+        ours = ours[:a[0]] + ours[a[0] + 1:]
+        theirs = theirs[:b[0]] + theirs[b[0] + 1:]
+    if ours != theirs:
+        return "differs beyond the REX byte"
+    return None
 
 
 def check_encoders() -> int:

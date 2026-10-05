@@ -311,7 +311,224 @@ def cases():
     # -512 is representable and +512 is not (`as`: "range [-512, 504]").
     for b in (512,):
         c.append((f"stp x0, x1, [sp, #-{b}]!", A.encode_stp_sp_pre(0, 1, b)))
+    # ── the integer core: the forms this file never mentioned ────────────
+    #
+    # `tools/formal_isa_census.py` answers "which emitted form has no byte-for-
+    # byte differential against `as`", and the answer on this tree was 40 of the
+    # 77 encoders the emitters call — including every register-form ALU
+    # operation, both un/aligned loads and stores, all four branches and both
+    # shift-register forms. That is not a subtle hole: `encode_add_xd_xn_xm`
+    # has 29 call sites and was checked by nothing, so a wrong field in it would
+    # have reached every one of them with this file green.
+    #
+    # Every row below is a byte comparison, which is the only oracle that can
+    # execute the instruction, and each sweeps the operand SHAPES rather than
+    # one tuple: a register field landing in the wrong place is invisible when
+    # every case writes register 0.
+    for (xd, xn, xm) in ((0, 1, 2), (5, 7, 19), (30, 31, 0), (2, 0, 0)):
+        c.append((f"add x{xd}, x{xn}, x{xm}", A.encode_add_xd_xn_xm(xd, xn, xm)))
+        c.append((f"sub x{xd}, x{xn}, x{xm}", A.encode_sub_xd_xn_xm(xd, xn, xm)))
+        c.append((f"mul x{xd}, x{xn}, x{xm}", A.encode_mul_xd_xn_xm(xd, xn, xm)))
+        c.append((f"smulh x{xd}, x{xn}, x{xm}",
+                  A.encode_smulh_xd_xn_xm(xd, xn, xm)))
+        c.append((f"adds x{xd}, x{xn}, x{xm}",
+                  A.encode_adds_xd_xn_xm(xd, xn, xm)))
+        c.append((f"and x{xd}, x{xn}, x{xm}", A.encode_and_xd_xn_xm(xd, xn, xm)))
+        c.append((f"orr x{xd}, x{xn}, x{xm}", A.encode_orr_xd_xn_xm(xd, xn, xm)))
+        c.append((f"eor x{xd}, x{xn}, x{xm}", A.encode_eor_xd_xn_xm(xd, xn, xm)))
+        c.append((f"sdiv x{xd}, x{xn}, x{xm}", A.encode_sdiv_xd_xn_xm(xd, xn, xm)))
+        c.append((f"udiv x{xd}, x{xn}, x{xm}", A.encode_udiv_xd_xn_xm(xd, xn, xm)))
+        c.append((f"lslv x{xd}, x{xn}, x{xm}", A.encode_lslv_xd_xn_xm(xd, xn, xm)))
+        c.append((f"lsrv x{xd}, x{xn}, x{xm}", A.encode_lsrv_xd_xn_xm(xd, xn, xm)))
+        c.append((f"asrv x{xd}, x{xn}, x{xm}", A.encode_asrv_xd_xn_xm(xd, xn, xm)))
+    # The two SCALED register adds, which are the same class as the unscaled one
+    # and were the two encoders the shift-field could have gone into.
+    for (xd, xn, xm) in ((0, 1, 2), (5, 7, 19), (30, 31, 0)):
+        c.append((f"add x{xd}, x{xn}, x{xm}, lsl #3",
+                  A.encode_add_xd_xn_xm_lsl3(xd, xn, xm)))
+        c.append((f"add x{xd}, x{xn}, x{xm}, lsl #4",
+                  A.encode_add_xd_xn_xm_lsl4(xd, xn, xm)))
+    # Two-operand forms, over the same triples: a `Rd` in `Rm`'s place is the
+    # failure, and one case cannot see it.
+    for (xd, xn) in ((0, 1), (5, 7), (2, 0), (0, 30)):
+        c.append((f"neg x{xd}, x{xn}", A.encode_neg_xd_xn(xd, xn)))
+        c.append((f"mvn x{xd}, x{xn}", A.encode_mvn_xd_xn(xd, xn)))
+        c.append((f"sxtb w{xd}, w{xn}", A.encode_sxtb_wd_wn(xd, xn)))
+        c.append((f"sxth w{xd}, w{xn}", A.encode_sxth_wd_wn(xd, xn)))
+        c.append((f"sxtw x{xd}, w{xn}", A.encode_sxtw_xd_wn(xd, xn)))
+        xa = (xd + 1) % 31
+        xm = (xn + 1) % 31
+        c.append((f"msub x{xd}, x{xn}, x{xm}, x{xa}",
+                  A.encode_msub_xd_xn_xm_xa(xd, xn, xm, xa)))
+    # …and register 31 as a SOURCE, which the row above leaves out because
+    # `MVN`'s encoder bounds it: register 31 in a source field is the ZERO
+    # register, so `neg x0, xzr` is a real spelling with a real encoding and it
+    # is the row that finds an `Rm` field in the wrong place. (`mvn x0, xzr`
+    # and `msub …, xzr` are refused by the encoders, which is right: `ORN`'s
+    # `Rn` and `MSUB`'s `Ra` at 31 name XZR, and A64 gives `MSUB` with
+    # `Ra = 31` the meaning of `MUL`.)
+    c.append(("neg x0, xzr", A.encode_neg_xd_xn(0, 31)))
+    # AND (immediate): the mask WIDTH is the third argument, so all three
+    # canonical immediates are cases and not one sample of the family.
+    for (xd, xn, w) in ((0, 1, 8), (0, 1, 16), (0, 1, 32), (5, 7, 32),
+                        (30, 31, 8)):
+        c.append((f"and x{xd}, x{xn}, #{(1 << w) - 1}",
+                  A.encode_and_xd_xn_imm(xd, xn, w)))
+    # The flag-setting compares, over register pairs that include XZR in the
+    # first operand (`cmp xzr, x1` is a NEG and `cmp x31, x1` is the SUBS the
+    # overflow check emits) and the immediate form's whole range.
+    # `Rn = 31` in the shifted-register class is XZR, not SP (see the note
+    # above `arm64_step`'s ADD branch, and `bugs/FORMAL_arm64_instruction_
+    # coverage.md`'s extended-register section), which is what makes `cmp
+    # x31, x1` the NEG the overflow check leans on. `Rm = 31` is refused by
+    # the encoder and rightly so: `SUBS` with `Rm = 31` is `SUB Xd, Rn, XZR`,
+    # which the assembler spells `sub` and the backend does not emit.
+    for (xn, xm) in ((0, 1), (1, 0), (31, 1), (31, 30)):
+        c.append((f"cmp x{xn}, x{xm}", A.encode_cmp_xn_xm(xn, xm)))
+    for (xn, imm) in ((0, 0), (0, 4095), (17, 8)):
+        c.append((f"cmp x{xn}, #{imm}", A.encode_cmp_xn_imm(xn, imm)))
+    # `Rn = 31` in the immediate class is SP (`cmp sp, #8`), which is the only
+    # way a frame-pointer compare is spelled — and `as` refuses the `x31`
+    # spelling outright, so the case has to use it.
+    c.append(("cmp sp, #8", A.encode_cmp_xn_imm(31, 8)))
+    c.append(("cmp sp, #0", A.encode_cmp_xn_imm(31, 0)))
+    # CSEL's one-operand sibling, over EVERY condition: it is 72 call sites'
+    # worth of boolean materialisation and a wrong condition field is a branch
+    # that reads the wrong flags.
+    for cond in ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+                 "hi", "ls", "ge", "lt", "gt", "le"):
+        c.append((f"cset x0, {cond}", A.encode_cset_xd_cond(0, cond)))
+        c.append((f"cset x17, {cond}", A.encode_cset_xd_cond(17, cond)))
+    # The unconditional branches. `encode_b`/`encode_bl` take the offset in
+    # FOUR-BYTE UNITS (imm26 counts words, and their own docstrings say so)
+    # while every other branch encoder here takes bytes, so the assembler text
+    # is `.+32` and `.+8` respectively for the same jump — a difference that is
+    # easy to read as a bug in one of the two and is not.
+    for words in (8, -8, 262143, -262143):
+        c.append((f"b .+{words * 4}", A.encode_b(words)))
+        c.append((f"bl .+{words * 4}", A.encode_bl(words)))
+    for (xn, off) in ((0, 8), (17, -8), (31, 4), (5, 0x80000)):
+        c.append((f"cbz x{xn}, .+{off}", A.encode_cbz_xn(off, xn)))
+        c.append((f"cbnz x{xn}, .+{off}", A.encode_cbnz_xn(off, xn)))
+    # ── memory: unsigned offset, register offset, and the narrow widths ──
+    #
+    # Both ends of the 12-bit scaled range are here because the encoder picks
+    # the narrowest form at the call site and a case at one end says nothing
+    # about the other; and `SP` is the base the frame traffic uses, where the
+    # assembler rejects the `x31` spelling.
+    for (xt, base, off) in ((0, 3, 8), (0, 3, 32760), (5, 31, 16),
+                            (30, 31, 32760), (17, 3, 0)):
+        rn = "sp" if base == 31 else "x%d" % base
+        c.append((f"ldr x{xt}, [{rn}, #{off}]",
+                  A.encode_ldr_xt_xn_imm(xt, base, off)))
+        c.append((f"str x{xt}, [{rn}, #{off}]",
+                  A.encode_str_xt_xn_imm(xt, base, off)))
+    for (wt, base, off) in ((0, 3, 4), (0, 3, 16380), (9, 31, 4)):
+        rn = "sp" if base == 31 else "x%d" % base
+        c.append((f"ldr w{wt}, [{rn}, #{off}]",
+                  A.encode_ldr_wt_wn_imm(wt, base, off)))
+        c.append((f"str w{wt}, [{rn}, #{off}]",
+                  A.encode_str_wt_wn_imm(wt, base, off)))
+    for (wd, base, off) in ((0, 3, 0), (0, 3, 4095), (4, 31, 1)):
+        rn = "sp" if base == 31 else "x%d" % base
+        c.append((f"ldrb w{wd}, [{rn}, #{off}]",
+                  A.encode_ldrb_wd_wn(wd, base, off)))
+        c.append((f"strb w{wd}, [{rn}, #{off}]",
+                  A.encode_strb_wd_wn(wd, base, off)))
+    # The REGISTER-offset forms, whose offset register is a second operand
+    # rather than an immediate: `SP` as the base is the shape a stack-indexed
+    # blob reaches, and XZR as the OFFSET register is a legal spelling the
+    # assembler accepts and the encoder must too.
+    for (xt, base, xm) in ((0, 3, 4), (5, 31, 4), (30, 3, 31), (17, 31, 2)):
+        rn = "sp" if base == 31 else "x%d" % base
+        c.append((f"ldr x{xt}, [{rn}, x{xm}]",
+                  A.encode_ldr_xt_xn_xm(xt, base, xm)))
+        c.append((f"str x{xt}, [{rn}, x{xm}]",
+                  A.encode_str_xt_xn_xm(xt, base, xm)))
+    # ── ADRP, the linker's entry stub ────────────────────────────────────
+    #
+    # `as` takes a page offset as a plain number rather than a label (a
+    # label-relative ADRP is a relocation and `as` refuses to encode it in a
+    # bare object), so the operand here is the page offset the encoder takes.
+    for (xd, page) in ((0, 0), (0, 0x1000), (16, 0x1000), (30, 0x2000),
+                       (5, 0x80000000)):
+        c.append((f"adrp x{xd}, {page}", A.encode_adrp(xd, page)))
+    # ── BR, SVC, RET ─────────────────────────────────────────────────────
+    c.append(("br x3", A.encode_br_xn(3)))
+    c.append(("br x16", A.encode_br_xn(16)))
+    for imm8 in (0, 1, 60, 255):
+        c.append((f"svc #{imm8}", A.encode_svc(imm8)))
+    c.append(("ret", A.encode_ret()))
     return c
+
+
+def equivalent_cases():
+    """`[(ours, their_text)]` for encoders `as` spells a DIFFERENT way.
+
+    One of them, and the reason this list exists rather than a case in
+    `cases()`: `encode_mov_zr_xn` emits `ADD Xd, Xn, #0` (83 call sites) where
+    `as` spells the same instruction `ORR Xd, XZR, Xn`. Both are MOV, both are
+    architecturally identical, and a byte-for-byte comparison would be testing
+    the SPELLING CHOICE rather than the encoding — the same distinction
+    `tools/formal_model_fuzz.py`'s `_ALIASES` table draws when it compares
+    DISASSEMBLY instead of bytes.
+
+    What is checked here is the weaker but real property: that our word
+    disassembles to the assembler's own text for the same instruction. A field
+    in the wrong place changes the disassembly, so this is not vacuous; what it
+    does not check is that our word is the word `as` would have chosen.
+    """
+    return [(A.encode_mov_zr_xn(0, 1), "mov x0, x1"),
+            (A.encode_mov_zr_xn(5, 31), "mov x5, sp"),
+            (A.encode_mov_zr_xn(30, 0), "mov x30, x0")]
+
+
+def disassemble(word_bytes, tmpdir, tag):
+    """`mnemonic text` for one instruction word, or None without `as`."""
+    src = os.path.join(tmpdir, "d-%s.s" % tag)
+    obj = os.path.join(tmpdir, "d-%s.o" % tag)
+    with open(src, "w") as f:
+        f.write(".text\n\t.inst 0x%08x\n" % int.from_bytes(word_bytes, "little"))
+    if subprocess.run(["as", "-arch", "arm64", "-o", obj, src],
+                      capture_output=True).returncode != 0:
+        return None
+    out = subprocess.run(["otool", "-tv", obj], capture_output=True,
+                         text=True).stdout
+    for line in out.splitlines():
+        m = re.match(r"^[0-9a-f]{8,16}\s+(\S+)\s+(.*)$", line)
+        if m:
+            return re.sub(r"\s+", " ", (m.group(1) + " " + m.group(2)).strip())
+    return None
+
+
+def test_our_spelling_is_the_assemblers_instruction():
+    """The alias rows must be the SAME INSTRUCTION, not merely a difference.
+
+    `equivalent_cases()` is where a byte comparison is impossible, so the check
+    here is disassembly equality after the alias is normalised the way
+    `tools/formal_model_fuzz.py::_ALIASES` normalises it: `add x0, x1, #0` and
+    `orr x0, xzr, x1` are both `mov x0, x1`. Without the normalisation this
+    test would fail on the alias it exists to describe; with it, it fails on a
+    field in the wrong place.
+    """
+    aliases = (
+        (re.compile(r"^add (x\d+|sp), (x\d+|sp), #0x0$"), r"mov \1, \2"),
+        (re.compile(r"^add (w\d+), (w\d+), #0x0$"), r"mov \1, \2"),
+        (re.compile(r"^orr (x\d+|sp), xzr, (x\d+|sp)$"), r"mov \1, \2"),
+        (re.compile(r"^orr (w\d+), wzr, (w\d+)$"), r"mov \1, \2"),
+    )
+    if not HAVE_AS:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (ours, text) in enumerate(equivalent_cases()):
+            got = disassemble(ours, tmp, "e%d" % i)
+            for pat, repl in aliases:
+                if got and pat.match(got):
+                    got = pat.sub(repl, got)
+                    break
+            check(got == text,
+                  f"our encoding disassembles to {got!r} where the assembler's "
+                  f"own text for the same instruction is {text!r}")
 
 
 def test_the_sp_pair_offset_is_bounded():
@@ -484,6 +701,98 @@ def test_the_survey_does_not_count_an_encoder_nothing_emits():
           "B.cond is emitted by every conditional branch and must stay covered")
 
 
+def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
+    """The survey's "is it emitted?" question must not be answerable by the
+    PROOF layer, and prose must not answer it either.
+
+    `tools/arm64_insn_audit.py`'s second exclusion is that an encoder no
+    lowering emits is not an instruction any image can contain. It was asking
+    the question over every `.py` in `formal/`, and two things in there are not
+    lowerings:
+
+    * **`formal/arm64_proof_gen.py`**, which renders Lean text about
+      instructions and emits none into any image. It references
+      `encode_cmn_xn_xm` and `encode_tst_xn_xm` because `lib/ProofLib.lean`'s
+      `arm64_step` needs a model arm for each, so 27,307 instructions of real
+      compiler output — `tst` 16,345 and `cmn` 10,603, plus the 359 `br` its
+      `br_xn` model arm names — were counted as COVERED for images that cannot
+      contain them. That is this survey's own sharpest lesson
+      (`bugs/FORMAL_arm64_instruction_coverage.md`: "an encoder with no CALLER
+      is that failure one step earlier") applied one level deeper than it was
+      written for: the caller has to be a lowering.
+
+    * **a DOCSTRING**, which is prose about an encoder rather than a use of one.
+      `encode_cmn_xn_xm` occurs in `formal/arm64.py` exactly once outside its
+      own definition, in the docstring of the encoder beside it, and that one
+      mention is enough to hold `cmn` out of the gap list on its own.
+
+    The assertions are DIRECTIONS, in the same style as the test above, because
+    naming an encoder here is the claim this survey has repeatedly got wrong:
+    `blr` was named until a lowering emitted it, and `tbz`/`tbnz`/`strh` were
+    named until theirs did.
+
+    * `tst` and `cmn` must be in the unwired set. This one DOES name two
+      encoders, deliberately: they are the two the proof layer's model arms
+      reference, and the whole defect is that a reference from
+      `arm64_proof_gen.py` used to count. An encoder named here is a claim that
+      no lowering emits it, and the way that claim goes stale — a lowering
+      landing — is a green run rather than a false one.
+    * Every mnemonic in `ASSEMBLER_EMITTED` must have an emitter that is NOT an
+      encoder call, because the entry's claim is precisely that. `adrp` is the
+      live one and it is 3.45% of every instruction a real compiler emits:
+      without it, scoping the search to the lowering files reports the single
+      largest gap in the survey for a mnemonic the assembler emits on every
+      relocation — the false gap being far more expensive than the false
+      coverage it replaced.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "arm64_insn_audit", os.path.join(HERE, "tools", "arm64_insn_audit.py"))
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    unwired = set(audit.unwired_encoders())
+    for name in ("encode_tst_xn_xm", "encode_cmn_xn_xm"):
+        check(name in unwired,
+              f"{name} is no longer reported as unemitted, so either a "
+              f"lowering emits it now — in which case this test's claim about "
+              f"it is stale and should be dropped, not worked around — or the "
+              f"search is reading a reference from somewhere that cannot emit an "
+              f"instruction again. Current unwired set: {sorted(unwired)}")
+    # The narrower search is the one that has to hold, and it is stated as a
+    # property of the FUNCTION rather than of the two names above, so a third
+    # proof-layer reference cannot slip in unnoticed.
+    check(set(audit.lowering_files()) and
+          all(os.path.basename(p) in ("arm64_codegen.py", "arm64.py")
+              for p in audit.lowering_files()),
+          f"the files the survey treats as lowerings are {audit.lowering_files()}"
+          f", which is not the set this test was written against: a file that "
+          f"renders Lean about instructions must not be one of them, or "
+          f"`cmn` and `tst` are covered again")
+    arm64_py = open(os.path.join(HERE, "formal", "arm64.py")).read()
+    # The CODE of `arm64.py`, by the tool's own rule: prose and `def` lines
+    # dropped. Asking "is `encode_adrp(` called?" of the raw text is answered by
+    # its own `def` line, which is how this assertion was wrong the first time
+    # it was written.
+    code_only = "\n".join(
+        line for i, line in enumerate(arm64_py.splitlines(), 1)
+        if i not in audit._prose_lines(arm64_py)
+        and not line.strip().startswith("def "))
+    for mn in audit.ASSEMBLER_EMITTED:
+        check(f"encode_{mn}(" not in code_only,
+              f"ASSEMBLER_EMITTED claims {mn} reaches an image without an "
+              f"encoder call, but formal/arm64.py CALLS encode_{mn} — so the "
+              f"entry explains a route the code no longer takes and should be "
+              f"deleted rather than left in place: an exclusion nobody can see "
+              f"is not one, and a stale one is worse")
+    check(audit.ASSEMBLER_EMITTED.get("adrp"),
+          "ASSEMBLER_EMITTED has lost its adrp entry, which is the one that "
+          "matters: `Assembler.emit_adrp_add` emits ADRP+ADD as raw words "
+          "because the two share one page relocation, so without the entry the "
+          "survey reports the single largest gap in it — 3.45% of every "
+          "instruction a real compiler emits — for a mnemonic this backend "
+          "emits on every relocation")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -512,14 +821,19 @@ def main():
                 failed += 1
                 print(f"  ERROR {text}: {type(e).__name__}: {e}")
 
-    for name, fn in (("out-of-range raises", test_range_is_enforced),
+    for name, fn in (("our alias spelling is the same instruction",
+                      test_our_spelling_is_the_assemblers_instruction),
+                     ("out-of-range raises", test_range_is_enforced),
                      ("movz cannot write XZR", test_movz_cannot_write_xzr),
                      ("the SP pair offset is bounded",
                       test_the_sp_pair_offset_is_bounded),
                      ("every encoder names a base mnemonic",
                       test_a_base_mnemonic_is_either_wired_or_named),
                      ("the survey counts emitted encoders, not table entries",
-                      test_the_survey_does_not_count_an_encoder_nothing_emits)):
+                      test_the_survey_does_not_count_an_encoder_nothing_emits),
+                     ("a reference from something that cannot emit is not a "
+                      "caller",
+                      test_a_reference_from_something_that_cannot_emit_is_not_a_caller)):
         try:
             fn()
             passed += 1

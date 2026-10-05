@@ -5014,6 +5014,70 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
         self._emit_extern_call("write")
 
+    def _emit_blob_growth_guard(self, what: str, total_reg, capacity: int,
+                                tag: str) -> None:
+        """Stop the program LOUDLY when a blob-producing site's run-time element
+        total is past the reservation it made — the ONE guard for `a + b` and
+        `xs * n`, and the x86-64 twin of
+        `ARM64Codegen._emit_blob_growth_guard`.
+
+        **This backend had a guard on `+` and none on `*`, and the one it had
+        was a SILENT `exit(1)`.** Three defects, one cause: each site reserved a
+        static estimate (`_blob_site_growth`, clamped to the frame's remaining
+        blob area) and then copied a run-time element count into it, and the
+        count comes from the operands' own `[count]` header words, which no pass
+        over the source can read. Measured before the change: the
+        `for i in range(16000): s = s + [1]` program built, ran, and `exit(1)`
+        having printed nothing — so even where the check existed, a program
+        whose only symptom was that it stopped. arm64 had no check at all on any
+        of its three sites and printed `len=16001` after writing 16001 elements
+        into a 65-element region.
+
+        The stop is loud for the reason `list_append_overflow_message` gives: a
+        program that only stopped, with nothing on either stream, is the worst
+        of the three answers this backend can give.
+        `model.blob_growth_overflow_message` is shared with arm64 so the two
+        machines cannot name this limit differently — and it is a SIBLING of the
+        append message rather than that message, because the two bounds are
+        different facts (an append's capacity is the number of append SITES;
+        this one's is a static estimate of the element total).
+
+        Emitted HERE, in front of the copy loops rather than as a branch to a
+        block at the end of the site: the check has to be the last thing before
+        anything is written into the destination, and a forward branch to a
+        trailing block would put the loops inside the guarded region. This form
+        is a forward conditional branch OVER the diagnostic-and-exit, so the
+        not-taken path is the code that follows and the taken path never
+        returns.
+
+        Unsigned (`COND_BE`), which is right: both sides are element COUNTS read
+        from count words, so a negative one is not a case. The reservation is
+        materialised into R11 and compared register-to-register rather than as a
+        `cmp r64, imm32`, because the reservation can be any size the frame
+        allows and the immediate form's range would make the guard silent for
+        every large reservation — exactly the programs whose estimate is most
+        likely to be low. R11 is free here (the copy loops use R10 and RAX) and
+        `_emit_overflow_diagnostic` below sets up its own argument registers.
+
+        `total_reg` holds the element total the caller computed — `nL + nR` for
+        a concatenation, `nL * count` for a repetition — and the caller computes
+        it into a register other than RAX only where RAX is the RESULT register
+        of the emitter, which is why `_emit_list_concat` keeps RAX.
+
+        `tag` is per-SITE (`cat`/`rep`) rather than a bare counter so a program
+        with two concatenations gets two distinct labels and a reader
+        disassembling it can tell which site a diagnostic came from.
+        """
+        self._emit_mov_imm(Reg.R11, capacity)
+        self.asm.emit(encode_cmp_r64_r64(total_reg, Reg.R11))
+        self._while_counter += 1
+        ok = f"{self.func_name}_{tag}ok{self._while_counter}"
+        self._emit_jcc(COND_BE, ok)                     # fits → skip the block
+        self._emit_overflow_diagnostic(
+            M.blob_growth_overflow_message(what, capacity))
+        self._emit_call_exit(1)
+        self.asm.label(ok)
+
     def _emit_file_write(self, e) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
 
@@ -5681,14 +5745,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
         self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R9))       # total
         self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        # The guard, BEFORE either copy loop and before the count word's own
+        # store is anything but correct.  This site had one, written as
+        # `cmp total, cap ; jbe past_the_exit ; call exit(1)` — which was right
+        # about WHEN and silent about WHAT, so a program whose estimate was low
+        # stopped with nothing on either stream.  It is the shared helper now,
+        # which also gives the repetition the check it never had.  See
+        # `_emit_blob_growth_guard`.
+        self._emit_blob_growth_guard("a list concatenation", Reg.RAX, cap,
+                                     "cat")
+
         self._while_counter += 1
         fn = f"{self.func_name}_cat{self._while_counter}"
-        overflow_label = f"{fn}_ovf"
-        self.asm.emit(encode_cmp_r64_imm32(Reg.RAX, cap))
-        self._emit_jcc(COND_BE, overflow_label)
-        self._emit_call_exit(1)
-        self.asm.label(overflow_label)
-
         self._while_counter += 2
         cl = f"{fn}_lcl{self._while_counter}"
         cld = f"{fn}_lcd{self._while_counter}"
@@ -5783,6 +5851,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         offset = self._reserve_blob(8 + 8 * cap, "a list repetition")
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # len(blob)
+        # The guard, and this site had NONE — `*` was the one blob-producing
+        # operator x86-64 reserved room for and then wrote into with no
+        # comparison at all, so a low estimate was a silent frame overrun here
+        # exactly as it was on arm64.  The total is `len(blob) * count`
+        # computed into RAX (which the loops overwrite as they go, and which is
+        # why the test is here rather than after them): `len(blob)` is the
+        # SOURCE's run-time length, read from its own count word, and the
+        # reservation is a static estimate of `blob_est(blob) * count`.  See
+        # `_emit_blob_growth_guard`.
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.R9))
+        self._emit_blob_growth_guard("a list repetition", Reg.RAX, cap, "rep")
         self._emit_blob_base(offset, Reg.RDX)                      # dst base
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RDX))
         self.asm.emit(encode_add_r64_imm32(Reg.RDI, 8))           # dst = +8
