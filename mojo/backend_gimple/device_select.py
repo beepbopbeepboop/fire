@@ -189,11 +189,20 @@ def _decorator_names(fdef) -> set:
     unhashable, so the obvious `{_as_str(d) for d in decorators}` dies
     with `TypeError: cannot use 'CallExpr' as a set element`.
 
-    That is not hypothetical: `version.py` carries
-    `@functools.lru_cache(maxsize=1)` on `version()`, and it is inside
-    the self-host closure, so the whole closure failed to compile with
-    that TypeError and the link then failed on an undefined
-    `_version_version`. Any module with a parameterized decorator hit it.
+    That is not hypothetical: `version.py` carried
+        `@functools.lru_cache(maxsize=1)` on `version()`, and it was inside
+        the self-host closure, so the whole closure failed to compile with
+        that TypeError and the link then failed on an undefined
+        `_version_version`. Any module with a parameterized decorator hit it.
+
+        **`version.py` no longer carries that decorator** (`formal37-2`,
+        2026-10-05 — it was the file's whole `functools` dependency, and it was
+        the only call-shaped decorator in `fire.py`'s import closure), so this
+        branch is now covered by
+        `test_metal_codegen.py::TestDeviceSelect::test_a_parameterized_decorator_is_its_callees_name`
+        rather than by a real file's incidental shape. Keep that test in step
+        with this arm: it is the only thing exercising the `CallExpr` line
+        below.
 
     So: take a string entry as itself, an `IdentExpr`/`MemberExpr` as its
     attribute name, and a call as its callee's name (`lru_cache` from

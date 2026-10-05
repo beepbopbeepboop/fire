@@ -4511,7 +4511,159 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
               "closure — either the import went away (then this row is stale) "
               "or it resolves (then the tool's `alone` column is stale)")
 
+def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
+    """`version.py`'s `functools.lru_cache` was a row, and the row closed.
+
+    `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` recorded
+    `functools` as the last honest row on the host-import wall — "`functools`
+    for `version.py`, one file ... which is a capability question and not a
+    missing file" — and the document's OWN two closures say what the answer is
+    when a row is a CORPUS spelling rather than a module: `itertools` left
+    `test_formal_run.py` (a double index loop over pairs the generator already
+    knows the length of) and `copy` left `tools/apply_extraction.py` (a dead
+    import). Here `lru_cache` decorated a ZERO-ARGUMENT function, so the whole
+    of what it did was "compute once", and that is two module globals.
+
+    So this asks the three questions the row turns on, and none of them is
+    "is the string `functools` still in the file":
+
+      1. **the closure is empty** — every module `version.py` reaches resolves,
+         walked with `formal/imports.py`'s own resolver, the one the build uses.
+         That is `alone 0`, and it is the claim the ranking's `alone` column is
+         for. Re-adding the import puts `functools` straight back on the wall.
+      2. **the memo is a MEMO** — computed once, and the same object after.
+         This is the half a dead-import test does not have: deleting an import
+         that nothing reads cannot get this wrong, but a hand-rolled cache that
+         recomputes per call is not the `lru_cache(maxsize=1)` it replaced, and
+         the cost would be two `git` subprocesses per caller. `version()` is on
+         the path of `fire.py`, `cas.py` and `jit/arm64.py`.
+      3. **the ANSWER is unchanged** — the value still comes from the same
+         resolution order, measured against a local `functools.lru_cache` built
+         from the pre-change body. A cache that returns the right string for the
+         wrong reason (a primed `'unknown'`, say) passes 1 and 2 and is still a
+         regression in every caller.
+    """
+    root = HERE
+    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
+        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+
+    def closure_unresolved(path):
+        seen, stack, out = set(), [path], set()
+        while stack:
+            p = stack.pop()
+            rp = os.path.realpath(p)
+            if rp in seen or not p or not os.path.exists(p):
+                continue
+            seen.add(rp)
+            for m in I.imported_modules(I.module_statements(p)):
+                d = I.resolve_module_path(m, relative_to=p,
+                                          project_root=root)
+                if d is None and os.path.isdir(stdlib):
+                    d = I.resolve_module_path(m, relative_to=p,
+                                              project_root=stdlib)
+                out.add(m) if d is None else stack.append(d)
+        return out
+
+    target = os.path.join(root, "version.py")
+    check(os.path.exists(target), f"{target} is gone, so this row is stale")
+
+    # (1) The closure. `functools` named because it is the row that was
+    # measured, and because its return is the failure that matters.
+    un = closure_unresolved(target)
+    check("functools" not in un,
+          f"`version.py` imports `functools` again, which puts it back on the "
+          f"host-import wall as the file's ONLY unresolved name")
+    check(not un,
+          f"`version.py` has an unresolved import the formal sweep files as "
+          f"not-answerable/host-import: {sorted(un)}")
+
+    # (2) and (3) need the module, imported under a name of our own so the
+    # repository's own `version` — which three modules import — is not disturbed
+    # for the rest of this process.
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("_version_under_test", target)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    first = mod.version()
+    check(first == mod.version(),
+          f"`version()` returned {first!r} then {mod.version()!r} — the memo "
+          f"is not a memo, and every caller pays the two `git` subprocesses")
+
+    # **The memo is READ, not just written** — and this is the check the string
+    # comparison above cannot make, which is why it is here and not implied by
+    # it. A `version()` that recomputed every call and stored the result would
+    # answer the same string every time, so `first == mod.version()` holds and
+    # `_VERSION_CACHE == first` holds, and the substitution is broken in the way
+    # that costs the most: two `git` subprocesses per caller, on the path of
+    # `fire.py`, `cas.py` and `jit/arm64.py`. What distinguishes them is that a
+    # memo is AUTHORITATIVE, so poisoning it with a string no amount of
+    # recomputing could produce must come straight back out. This is measured,
+    # not assumed: with the early return deleted the rest of this test passes.
+    saved_cache = mod._VERSION_CACHE
+    try:
+        mod._VERSION_CACHE = "poisoned-sentinel"
+        poisoned = mod.version()
+        check(poisoned == "poisoned-sentinel",
+              f"with `_VERSION_CACHE = 'poisoned-sentinel'` `version()` "
+              f"answered {poisoned!r}: the memo is WRITTEN but never READ, so "
+              f"every call recomputes -- the same answer, and the cost of "
+              f"`lru_cache(maxsize=1)` paid back")
+    finally:
+        mod._VERSION_CACHE = saved_cache
+    check(mod._VERSION_CACHE == first,
+          f"`version()` set no memo (`_VERSION_CACHE` is "
+          f"{mod._VERSION_CACHE!r} after answering {first!r})")
+
+    # (3) The same answer as the decorator it replaced, from the same order:
+    # RELEASE, then the git short SHA with `-dirty`, then `'unknown'`. Built
+    # here rather than imported so the two are compared on THIS tree.
+    import functools as _ft
+    import subprocess as _sp
+    here = os.path.dirname(os.path.abspath(target))
+
+    def _reference():
+        def _git(*a):
+            return _sp.run(['git', '-C', here, *a], capture_output=True,
+                           text=True, timeout=5)
+        if mod.RELEASE:
+            return mod.RELEASE
+        try:
+            r = _git('rev-parse', '--short', 'HEAD')
+            if r.returncode == 0 and r.stdout.strip():
+                v = r.stdout.strip()
+                if _git('diff', '--quiet', 'HEAD').returncode != 0:
+                    v += '-dirty'
+                return v
+        except Exception:
+            pass
+        return 'unknown'
+
+    # Wrapped the way the file wrapped it, so the reference is a real
+    # `lru_cache(maxsize=1)` and not a hand-rolled stand-in beside it.
+    cached = _ft.lru_cache(maxsize=1)(_reference)
+    check(first == cached(),
+          f"`version()` answers {first!r} where the `lru_cache` it replaced "
+          f"answers {cached()!r} — the memo changed the value, not only the "
+          f"cost of computing it")
+
+    # And `RELEASE`, which is the branch nothing else here reaches: a constant
+    # overrides the git SHA, so it is the one input that does not depend on the
+    # tree being a git checkout at all.
+    saved_release, saved_cache = mod.RELEASE, mod._VERSION_CACHE
+    try:
+        mod.RELEASE, mod._VERSION_CACHE = "9.9-test", None
+        check(mod.version() == "9.9-test",
+              f"with RELEASE='9.9-test' `version()` answered "
+              f"{mod.version()!r} — the override branch is dead or shadowed")
+        check(mod.version() is mod.version(),
+              "the RELEASE answer is not memoised either")
+    finally:
+        mod.RELEASE, mod._VERSION_CACHE = saved_release, saved_cache
+
+
 TESTS = [
+    ("a memo replaces the decorator the corpus cannot climb",
+     test_a_memo_replaces_the_decorator_the_corpus_cannot_climb),
     ("an import links the module and the program runs",
      test_import_links_and_runs),
     ("a module-qualified call `mod.fn()` links and runs",

@@ -228,3 +228,48 @@ Order of work, if it is picked up:
 
 Until step 2, no `functools` name may be exported, and the test's
 `functools`-shaped absence group is what keeps that true.
+
+## Update 2026-10-05 (`formal37-2`): the corpus needed exactly NONE of the above,
+## and that is the finding this document now has to carry
+
+**Every one of `version.py`'s and this tree's `functools` uses turned out to be
+spellable without a decorator and without a function value**, so none of steps 1-3
+moved a file, and the module is now not needed by this tree at all.
+
+`version.py`'s was the only `functools` reach in the corpus — the `alone 1` row
+of `tools/formal_host_import_wall.py` over 751 files, and §"§2 The three
+0-terminal rows" of
+`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` had it as "NOT
+WORK: every name is a decorator or a function value". It was
+`@functools.lru_cache(maxsize=1)` on a **zero-argument** function, and that is
+the whole of what `lru_cache(maxsize=1)` does there: compute once. Two module
+globals are that. `functools` is now **absent from the wall measurement's
+output** — not `alone 0`, absent, because `alone 1 / reach 1` was its whole
+column.
+
+**So the ordering above is right and the framing was wrong.** Steps 1 and 2 are
+still what a `functools.mojo` needs, and step 3 is still the module's
+precondition — but they are now needed by **no file in this tree**, and a
+document that says "until step 2, no `functools` name may be exported" without
+saying "and nothing here wants one any more" reads as a queue item when it is a
+closed capability question.
+
+**What did NOT come off with it, so the remaining three names in §"TYPE-OR-OBJECT"
+are untouched by this:** `wraps`, `reduce` and the rest are still refused, and
+still need steps 1-2. The `functools`-shaped absence group in
+`test_formal_core_hostmods.py` is still the safeguard, and it is still load-bearing
+for a module someone might write later.
+
+**And the closure this document's reasoning leaned on had a hole in it**, found
+while removing the row: `version.py` was cited by
+`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §4 as the
+worked example for `mojo/backend_gimple/device_select.py::_decorator_names`'s
+`CallExpr` branch — the TypeError this document's §"not hypothetical" describes —
+and it was the ONLY call-shaped decorator in `fire.py`'s 75-file import closure,
+with **no direct unit test** for that branch. So removing it did trade a file of
+the wall for a hole in a compiled-path test, exactly as that document said it
+would. The hole is closed by
+`test_metal_codegen.py::TestDeviceSelect::test_a_parameterized_decorator_is_its_callees_name`,
+which pins all four decorator shapes on source the test supplies; deleting the
+`CallExpr` arm fails it. Both docstrings that cited `version.py` are updated to
+name the test instead of the file.

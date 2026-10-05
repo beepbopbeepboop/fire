@@ -125,6 +125,57 @@ class TestMetalOpsTables(unittest.TestCase):
 class TestDeviceSelect(unittest.TestCase):
     """Which functions become MSL instead of C."""
 
+    def test_a_parameterized_decorator_is_its_callees_name(self):
+        """`@functools.lru_cache(maxsize=1)` is a CALL, not a name.
+
+        `mojo/backend_gimple/device_select.py::_decorator_names` collects a
+        function's decorator NAMES, and the obvious
+        `{_as_str(d) for d in decorators}` dies with
+        `TypeError: cannot use 'CallExpr' as a set element` — a `CallExpr` is
+        unhashable. That was not hypothetical: `version.py` carried
+        `@functools.lru_cache(maxsize=1)` on `version()`, it is inside the
+        self-host closure, so the whole closure failed to compile with that
+        TypeError and the link then failed on an undefined `_version_version`.
+
+        **This test exists because that coverage was INCIDENTAL.** `version.py`
+        was the only file in `fire.py`'s import closure carrying a call-shaped
+        decorator (measured: 0 after `formal37-2` removed it, because the
+        decorator was the file's whole `functools` dependency — see
+        `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`), and
+        `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §4
+        named that as the reason to leave the row alone: "removing the import
+        would trade one file of this wall for a hole in a compiled-path test."
+
+        A real file's incidental shape is not a test. Pinning the branch on
+        source the test supplies is strictly better coverage than the closure
+        compile was — it fails with this assertion's message instead of a
+        TypeError three modules deep, and it names the three decorator shapes
+        the branch has to accept rather than the one that happened to be in
+        `version.py`.
+        """
+        # The shape that broke it: a call on a member expression.
+        fdef = _fn('@functools.lru_cache(maxsize=1)\n'
+                   'def version() -> str:\n    return "x"\n')
+        self.assertEqual(dsel._decorator_names(fdef), {'lru_cache'},
+                         'a call decorator must contribute its CALLEE name, '
+                         'or the CallExpr lands in a set and raises')
+
+        # The three shapes the branch accepts, so a future edit cannot narrow it
+        # to the one above: a bare string (the hand-written stdlib markers), a
+        # bare IdentExpr (`@gpu`), a MemberExpr (`@torch.jit`), and a call
+        # (`@functools.lru_cache(maxsize=1)`).
+        self.assertEqual(
+            dsel._decorator_names(_fn('@gpu\ndef k(x):\n    return x\n')),
+            {'gpu'})
+        self.assertEqual(
+            dsel._decorator_names(_fn('@torch.jit\ndef k(x):\n    return x\n')),
+            {'torch.jit'})
+        # A bare name is still a bare name after the fix — the point of the
+        # CallExpr arm is to ADD a shape, not to reshape the ones already there.
+        self.assertEqual(
+            dsel._decorator_names(_fn('@gpu\n@kernel\ndef k(x):\n    return x\n')),
+            {'gpu', 'kernel'})
+
     def test_explicit_gpu_decorator(self):
         m = parse('@gpu\ndef k(x):\n    return x\n\ndef h(y):\n    return y\n')
         self.assertEqual(dsel.classify_functions(m),
