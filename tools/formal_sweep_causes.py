@@ -783,6 +783,54 @@ CAUSES = (
     ("string composition: nothing to compose into",
      (("no buffer to compose one in",),
       ("on two strings is refused on this path",))),
+    # THE TEXT ENCODING BLOCK, which was the corpus's largest row with no name in
+    # it: 229 of the 236 `other refusal` findings on the 2026-10-04 b12 sweep are
+    # this one sentence, all of them refused in `formal/hostmods/os/_syscalls.mojo`
+    # and 0 of them naming anything that module declares. `formal/model.py` calls
+    # the block "TEXT ENCODING" and it is ONE representation gap — a string is a
+    # bare `char *` to BYTES and CPython's `str` is CHARACTERS — asked from four
+    # different constructs, so four rows would read as four projects.
+    #
+    # **TWO WORDINGS, ONE GAP, and the marker for the first covers THREE of the
+    # four constructs** rather than there being three markers: `len`, `find`,
+    # `strstr` and a `printf` `%<width>s` / `%<width>d` conversion are all said by
+    # `codepoint_refusal` and `printf_text_width_refusal` /
+    # `printf_text_conversion_refusal`, and all three of those functions quote the
+    # SAME clause — "is refused: on this path it would answer in BYTES where
+    # CPython answers in CHARACTERS" — which is why one alternative collects them.
+    # The second wording is `string_element_refusal`'s and shares no clause with
+    # it.
+    #
+    # IT IS NOT THE COMPOSITION ROW ABOVE, and the two are deliberately not
+    # merged even though both messages end by pointing at the missing buffer:
+    # this row's clearing condition is stated by the model itself and is about
+    # the IMAGE ("no literal with a byte >= 0x80 anywhere means no string in the
+    # image can have one, so every element read is a character" —
+    # `string_element_refusal`'s own docstring), while composition's is a missing
+    # buffer and fires on ASCII text too. Merging them would put the 115-file
+    # row's advice on a construct whose answer is "keep the text ASCII", and put
+    # "keep the text ASCII" on a construct no amount of ASCII fixes.
+    #
+    # **AND THE FACT THAT PUT 229 FILES HERE WAS FIXED ON 2026-10-04**, which is
+    # the reason this row's count is a statement about a DEFECT and not about a
+    # gap: the scan that publishes a unit's non-ASCII literals was publishing
+    # DOCSTRINGS, whose bytes nothing can name, so six lines of em-dash in one
+    # hostmod's prose made this refusal fire over the whole corpus. That is
+    # `formal/model.py::is_docstring_statement`, and
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §3.2 has the measurement.
+    # The row STAYS, because the refusal is CORRECT for a real non-ASCII value —
+    # `s[i]` on `"héllo"` would read a continuation byte, and `len` would answer
+    # 5 where the byte count is 6 — and a queue that emptied this row by deleting
+    # it would be reading a fix as a closure.
+    #
+    # The marker is the FACT ("would answer in BYTES where CPython answers in
+    # CHARACTERS", "whose text is not ASCII"), not the advice that follows it in
+    # the same message, for the reason the composition row states: a fix deletes
+    # the advice.
+    ("a non-ASCII string: BYTES where CPython has CHARACTERS",
+     (("is refused: on this path it would answer in BYTES where CPython "
+       "answers in CHARACTERS",),
+      ("is refused on a string whose text is not ASCII",))),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
     # the callee has to hand the receiver back somehow. Four wordings and one
     # cause, because one convention covers the receiver and what is refused is

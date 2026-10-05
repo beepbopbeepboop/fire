@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 import formal_sweep as S  # noqa: E402
 import formal_sweep_causes as C  # noqa: E402
 import formal.model as FM  # noqa: E402
+import fire_compiler as F  # noqa: E402
 
 # ── the two samples that are BUILT rather than copied ──────────────────────
 # Every other sample in this file is a hand-copy of a message, which is what
@@ -150,6 +151,69 @@ def _frame_slot_message():
 
 
 _FRAME_SLOT_REFUSAL = _frame_slot_message()
+
+# The TEXT ENCODING block's two wordings, BUILT rather than copied, and for the
+# third time in this file the reason is that a hand-copy of a 900-character
+# message is exactly the rot this file exists to catch: reword the message and
+# the copied sample still matches a stale marker, `check_cause_table` still
+# passes, and the row becomes a row about a sentence nothing emits.
+#
+# It mattered more here than for the other two because this refusal was the
+# corpus's largest UNNAMED family — 229 of the 236 `other refusal` findings on
+# the 2026-10-04 b12 sweep, all of them one module — so the row had no sample,
+# no marker, and no test, and 229 files read as a shrug until the round named
+# them. What put them there was a defect in the scan that feeds this refusal
+# (`model.is_docstring_statement`: a DOCSTRING was published as a non-ASCII
+# string value, and nothing can name a docstring), which is why this pair goes
+# with the refusal rather than outliving it.
+NON_ASCII_CAUSE = "a non-ASCII string: BYTES where CPython has CHARACTERS"
+# The FAMILY spelling, asserted by value rather than by import for the same
+# reason `STRING_COMPOSITION_FAMILY` is: `formal_sweep._REFUSAL_FAMILIES` is a
+# second table in a second file, and the two labels drifting apart is the
+# disagreement a reader of either one has to be able to see.
+NON_ASCII_FAMILY = "a non-ASCII string: BYTES where CPython has CHARACTERS"
+
+
+def _non_ascii_messages():
+    """`(the element refusal, the byte-quantity refusal)`, built not copied.
+
+    `string_element_refusal` reads the published non-ASCII set and REFUSES to
+    answer without one, so the set has to be published for the sample to exist
+    — which is itself the fact worth pinning: the two refusals in this row are
+    conditioned on the same image fact, and a sample built without it would be
+    `None` rather than a message.
+
+    `string_element_refusal` wants a SUBSCRIPT's receiver and index, so the node
+    is PARSED (`s[0]` in a function) rather than hand-built: `spelled()` and
+    `string_literal_text()` both read real node shapes, and a stub with the
+    right attribute names would prove nothing about either. `SubscriptExpr`'s
+    fields are `obj`, `index`, `attrs` — the receiver is `obj`, not `base`, which
+    is the kind of thing a hand-built node gets wrong silently.
+    """
+    saved = FM.non_ascii_strings()
+    try:
+        FM.clear_non_ascii_strings()
+        FM.publish_non_ascii_strings(["héllo"])
+        subs = F.Parser(F.py_tokenize(
+            "def f(s: String) -> Int:\n    return s[0]\n")).parse_module()
+        element = FM.string_element_refusal(subs[0].body[0].value.obj,
+                                            subs[0].body[0].value.index)
+        quantity = FM.codepoint_refusal("len(s)", "s")
+    finally:
+        FM.clear_non_ascii_strings()
+        FM.publish_non_ascii_strings(saved)
+    if element is None or quantity is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses one of the two TEXT ENCODING "
+            f"wordings (element: {element is not None}, byte quantity: "
+            f"{quantity is not None}). A sample of a message the backend "
+            "cannot produce is a sample that can only rot — see this file's "
+            "docstring, point 3 — so the pair goes with the refusal rather than "
+            "outliving it.")
+    return element, quantity
+
+
+_NON_ASCII_ELEMENT_REFUSAL, _NON_ASCII_QUANTITY_REFUSAL = _non_ascii_messages()
 
 # The planner's spelling of the same cause, and it is spelled here independently
 # of `formal_sweep_causes.py::CAUSES` for the reason `STRING_COMPOSITION_CAUSE`
@@ -384,7 +448,19 @@ SAMPLES = [
     # the reason this one is asserted by value rather than by import.
     (STRING_COMPOSITION_FAMILY, _FSTRING_REFUSAL),
     (STRING_COMPOSITION_FAMILY, _CONCAT_REFUSAL),
-
+    # The TEXT ENCODING block, in both of its wordings, from the two BUILT
+    # messages above. It is a FAMILY here and a CAUSE below for the reason the
+    # pair above gives — the two tables are keyed on different things — and it is
+    # in BOTH because on the b12 sweep it was the corpus's largest family with
+    # no name in either instrument: 229 files reading as `other refusal`, which
+    # both tables define as "nobody has looked".
+    #
+    # TWO SAMPLES, NOT ONE, and each is a SEPARATE proof: the family matcher
+    # sees only the message, and the two wordings share no clause at all, so one
+    # sample would leave the other's marker unexercised — which is the
+    # dead-marker failure this file exists for.
+    (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
+    (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
 ]
 
 # ── the SECOND table: `tools/formal_sweep_causes.py` ────────────────────────
@@ -875,6 +951,19 @@ CAUSE_SAMPLES = [
     # does not — which is the disagreement a reader of either table has to be
     # able to see.  `model.frame_slot_element_refusal` decides and words both.
     (FRAME_SLOT_CAUSE, _FRAME_SLOT_REFUSAL),
+    # The TEXT ENCODING block, in both of its wordings, from the two BUILT
+    # messages above. It is a FAMILY here and a CAUSE below for the reason the
+    # pair above gives — the two tables are keyed on different things — and it is
+    # in BOTH because on the b12 sweep it was the corpus's largest family with
+    # no name in either instrument: 229 files reading as `other refusal`, which
+    # both tables define as "nobody has looked".
+    #
+    # TWO SAMPLES, NOT ONE, and each is a SEPARATE proof: `classify_message`
+    # sees only the message, and the two wordings share no clause at all, so one
+    # sample would leave the other's marker unexercised — which is the dead-marker
+    # failure this file exists for.
+    (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
+    (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
