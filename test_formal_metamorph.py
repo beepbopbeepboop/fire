@@ -659,6 +659,74 @@ class ScopeResolution(unittest.TestCase):
 class TheDriver(unittest.TestCase):
     """The harness's own decisions: verdicts, drivers, and what a run reports."""
 
+    def _run_check_pair(self, base_by_backend, tmpdir, backends=("arm64",
+                                                                 "x86_64")):
+        """`check_pair` with the backends stubbed, so the verdicts are decided.
+
+        The cross-machine rule is the only one in the file that is NOT a
+        comparison between two answers from one backend, so it is the only one that
+        cannot be exercised through `_compare_one` and needs the whole driver.
+        """
+        args = types.SimpleNamespace(backends=list(backends), seed="t",
+                                     transforms="rename")
+        prog = {"text": "def main() -> Int32:\n    return 0\n",
+                "verbatim": None, "driver_args": "", "test_input": None,
+                "notes": (), "reason": None}
+        with mock.patch.object(F, "cpython_answer",
+                               return_value=((0, ""), "")), \
+             mock.patch.object(M.F, "run_on",
+                               lambda b, t, d, n, test_input=None:
+                               base_by_backend[b]):
+            return M.check_pair("row", prog, 0, args, tmpdir)
+
+    def test_one_machine_refusing_and_the_other_answering_is_a_finding(self):
+        """They are ONE language implementation, so this needs no oracle.
+
+        And it is the one thing this tool cannot see by comparing two answers
+        from ONE backend — every other verdict here is within a backend, so a
+        program x86-64 refused and arm64 answered agreed with itself twice and
+        read as `match`.  Measured: 1 of 8 programs of a `slicing` sweep at
+        `--stmts 30 60`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._run_check_pair(
+                {"arm64": ok("1\n"), "x86_64": refused("no such construct")},
+                tmp)
+        self.assertEqual(rec["verdict"], "CROSS-MACHINE-REFUSAL")
+        self.assertIn("CROSS-MACHINE-REFUSAL", M.FINDING_VERDICTS)
+        self.assertIn("x86_64", rec["detail"])
+
+    def test_the_container_budget_asymmetry_is_documented_and_is_not_a_finding(self):
+        """`formal_fuzz`'s own note on `CONTAINER_BUDGET` says which of the two
+        is smaller and that a program has to fit it to build on both machines, so
+        a program over x86-64's budget answers on arm64 and is refused on x86-64
+        BY DESIGN.  Reported — counted, named and printed — because "how many
+        programs were over the budget" is a measurement."""
+        diag = ("build: a slice view does not fit in the frame: it needs 520 "
+                "bytes and this function has 152 left for containers")
+        self.assertIn(F.FRAME_BLOB_REFUSAL_HEAD, diag)
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._run_check_pair(
+                {"arm64": ok("1\n"), "x86_64": refused(diag)}, tmp)
+        self.assertEqual(rec["verdict"], "match")
+        self.assertIn("x86_64", rec["asymmetry"])
+        # And the OTHER direction is not exempt: a refusal about a construct is
+        # still a cross-machine finding, or the exemption is a blanket one.
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._run_check_pair(
+                {"arm64": refused("an arm whose `AssignStmt` would be absent"),
+                 "x86_64": ok("1\n")}, tmp)
+        self.assertEqual(rec["verdict"], "CROSS-MACHINE-REFUSAL")
+
+    def test_both_machines_refusing_the_same_way_is_not_a_cross_machine_finding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._run_check_pair(
+                {"arm64": refused("`x` has no home"), "x86_64": refused("`x` has no home")},
+                tmp)
+        self.assertEqual(rec["verdict"], "match")
+        self.assertNotIn("asymmetry", rec)
+        self.assertEqual(rec["refused"], ["arm64", "x86_64"])
+
     def test_a_metamorphic_disagreement_is_a_finding_and_a_divergence_is_not(
             self):
         """`DIVERGENCE-*` is `formal_fuzz`'s queue; the rest are findings here."""
@@ -727,17 +795,102 @@ class TheDriver(unittest.TestCase):
             (0, "1\n"))
         self.assertEqual(got, [])
 
-    def test_two_refusals_in_different_words_are_a_finding(self):
+def test_two_refusals_in_different_words_are_a_finding(self):
         # The two architectures are ONE language implementation, so the same
-        # refusal in two sets of words is a finding — and a transform that does
-        # not change the program must not change the sentence either.
+        # refusal in two sets of words is a finding — and a transform that does not
+        # change the program must not change the sentence either.
         got = M._compare_one(
             "x86_64",
             refused("`x` has no home: the register allocator collected no "
-                         "home for it"),
+                    "home for it"),
             refused("`x` cannot be represented on this target"),
             (0, "1\n"))
         self.assertEqual(got, ["REFUSAL-DIVERGES-X86"])
+
+
+class RefusalFolding(unittest.TestCase):
+    """`_fold_places` — the refusal comparison is a rule about the SENTENCE.
+
+    `REFUSAL-DIVERGES` says the two machines are one language implementation, so
+    the same refusal in two sets of words is a finding.  Every one of the four rows
+    below was a false positive on a big-program sweep, and every one of them was
+    the same shape: the sentence was identical and the DIFFERENCE was in something
+    the sentence points at rather than in the sentence.
+    """
+
+    #: The whole point: positions and quoted source are not the sentence.
+    def test_a_line_number_moved_by_the_transform_is_not_a_divergence(self):
+        """`limits` at `--stmts 30 60`, 10 of 10 programs, every one false.
+
+        Every refusal in this tree is printed as `build: line 46: …`, and six of
+        the ten transformations add a statement above it.  This is also why §2's
+        small-program sweeps never saw it: the rule had nothing to fire on.
+        """
+        base = refused("build: line 46: a bare `except:` is a handler arm with a "
+                       "body this path cannot put in the image")
+        twin = refused("build: line 51: a bare `except:` is a handler arm with a "
+                       "body this path cannot put in the image")
+        self.assertEqual(M._compare_one("arm64", base, twin, (0, "")), [])
+
+    def test_a_source_token_the_printer_re_spelled_is_not_a_divergence(self):
+        """`fstrings` at `--stmts 30 60`, 7 of 8 programs, every one false.
+
+        `formal_fuzz`'s generator spells an f-string `F'v={s1} '`, `ast.unparse`
+        spells it `f'v={s1} '`, and the refusal quotes the token the parser kept.
+        So every twin — a twin is an AST, always — came back with a different case
+        in the middle of the same sentence.
+        """
+        base = refused("build: an f-string literal on line 18 is refused: the "
+                       "parser keeps the whole source token (`F'v={s1} '`) as the "
+                       "literal's value")
+        twin = refused("build: an f-string literal on line 20 is refused: the "
+                       "parser keeps the whole source token (`f'v={s1} '`) as the "
+                       "literal's value")
+        got = M._compare_one("arm64", base, twin, (0, ""),
+                             "F'v={s1} '\n", "f'v={s1} '\n")
+        self.assertEqual(got, [])
+
+    def test_a_construct_name_is_still_compared(self):
+        """The fold is not "fold the backquotes".
+
+        `AssignStmt` is a bare word and is not in the program, so a sentence that
+        names a different statement kind still diverges — which is the case the
+        rule exists to catch, and the case a blanket fold would have hidden.
+        """
+        base = refused("an arm whose every statement in this arm (`AssignStmt`) "
+                       "would be absent")
+        twin = refused("an arm whose every statement in this arm (`ExprStmt`) "
+                       "would be absent")
+        self.assertEqual(M._compare_one("arm64", base, twin, (0, "")),
+                         ["REFUSAL-DIVERGES-ARM"])
+        # And the reason is the NAME, not the line: the two folded sentences
+        # differ, which is the whole claim.
+        self.assertNotEqual(M._fold_places(base.get("diag"), "x = 1\n"),
+                            M._fold_places(twin.get("diag"), "x = 1\n"))
+
+    def test_an_operator_is_not_folded_by_where_it_appears(self):
+        """The row that keeps the fold from being a substring test.
+
+        The f-string refusal advises "build the text with `+` once that is
+        lowered".  Whether the character `+` appears anywhere in a 1700-character
+        program is not a fact about the sentence — the original had none and
+        `ast.unparse`'s twin spelled a unary `+` — so a one-character span is never
+        folded, however often the program contains it.
+        """
+        diag = ("an f-string literal is refused: print the parts as separate "
+                "operands, or build the text with `+` once that is lowered")
+        self.assertEqual(M._fold_places(diag, "x = 1\n"),
+                         M._fold_places(diag, "x = 1 + 2\n"))
+        # And a NAME is a name whatever the program contains.
+        named = "an arm whose statement is `AssignStmt` would be absent"
+        self.assertEqual(M._fold_places(named, "AssignStmt = 1\n"),
+                         M._fold_places(named, "x = 1\n"))
+
+    def test_a_quoted_span_that_is_not_in_the_program_is_kept(self):
+        """Folding a copy of the program, not a copy of ANY program."""
+        diag = "the source token (`F'v={s1} '`) is kept whole"
+        self.assertIn("F'v={s1} '", M._fold_places(diag, "y = 2\n"))
+        self.assertIn("`<src>`", M._fold_places(diag, "x = F'v={s1} '\n"))
 
     def test_one_verdict_is_not_reported_twice(self):
         """One disagreement, one token for it.

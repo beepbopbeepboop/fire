@@ -95,12 +95,18 @@ WHAT IS MEASURED
                         backend bug and not a documented limit: the twin BUILT,
                         so the construct is representable and the machine that
                         declined it is wrong about the program.
-  REFUSAL-DIVERGES-*    the two machines disagree about a refusal, or one
-                        machine's words change under a transform that does not
-                        change the program.  The same rule
-                        `formal_fuzz.py::classify` applies, on the pair: the two
-                        architectures are ONE language implementation, so two
-                        refusals in different words are a finding.
+  REFUSAL-DIVERGES-*    ONE machine's words about a refusal change under a
+                        transform that does not change the program.  The two
+                        architectures are ONE language implementation, so the
+                        same construct must produce the same sentence, and
+                        `_fold_places` removes the parts of a sentence that are
+                        not the sentence — a line number the transform shifted, an
+                        address, and a quoted span that is a copy of the program.
+  CROSS-MACHINE-REFUSAL the two architectures disagree about the ORIGINAL: one
+                        refused it and the other answered.  They are one language
+                        implementation, so this needs no oracle either, and it is
+                        the one finding a within-one-backend comparison cannot see
+                        by construction — see `check_pair`.
   transform-invalid     CPython answered P and T differently.  A BUG IN THIS
                         TOOL, reported at the same loudness as a backend bug
                         because it invalidates every other row: see above.
@@ -2471,6 +2477,104 @@ def program_texts(args):
 
 # ── one pair ────────────────────────────────────────────────────────────────
 
+#: A diagnostic with its PLACES folded: `line 46` and `0x1a40` become `line <n>`
+#: and `<addr>`.  Both are positions in the twin rather than words in the
+#: sentence, and `REFUSAL-DIVERGES` is a rule about the SENTENCE.
+#:
+#: WHY IT IS NEEDED, and the measurement.  Every refusal in `formal/build.py` and
+#: the model is printed as `build: line 46: …`, and the six of the ten
+#: transformations that ADD a statement (`dead_local`, `extra_param`, `noop_loop`,
+#: `if_true`, `rename` of a longer name, `extract`) move every line below it.  So
+#: on any program whose refusal quotes a line, the ORIGINAL and the TWIN print the
+#: same sentence about the same construct at different lines, and the comparison
+#: reported **10 of 10** programs of a `limits` sweep as `REFUSAL-DIVERGES` — the
+#: only verdict in this file that turns a clean sweep into ten findings, and every
+#: one of them false.  It is also why §2's sweeps never saw it: at `--stmts 8 20`
+#: the generated programs are small and most carry no refusal at all, so the rule
+#: had nothing to fire on.  A rule that is only wrong on large programs is still
+#: wrong, and the big-program sweep in §2a is what reached it.
+#:
+#: WHAT A FOLD HIDES, said plainly: two refusals about DIFFERENT constructs that
+#: differ only in the position they quote would now agree.  That cannot arise for
+#: the transforms above — an added statement is never an `except:` arm, and a
+#: construct's own text (which construct, which statement kind) is in the sentence
+#: — and the alternative, keeping the positions, reports a finding on every pair
+#: over a refused program.
+#:
+#: It is NOT folded in `formal_sweep_parity.py::fold_arch`, which this delegates
+#: to for the architecture names: there a row is one source file compared against
+#: another run of the SAME file, so a line number is a fact about the file and
+#: belongs in the row.  Here it is a fact about a file this tool has just edited.
+_PLACE_RE = re.compile(r"\bline\s+\d+|\b\d+:\d+\b|0x[0-9a-fA-F]+")
+
+#: A backquoted span.  Backquotes because every refusal in this tree quotes the
+#: thing it is talking about in them — `AssignStmt`, `f'v={s1} '`, `except:` — and
+#: that is the only convention the messages share.
+_QUOTED_RE = re.compile(r"`([^`\n]*)`")
+
+#: A span that is one NAME, with nothing else in it.  This is the test that keeps
+#: the quoted-source rule from folding a construct's NAME, and it is here because a
+#: weaker test folded `+`: the f-string refusal advises "build the text with `+`
+#: once that is lowered", and whether the character `+` happened to appear anywhere
+#: in a 1700-character program decided the verdict — the original had none and the
+#: twin did, for a reason (`ast.unparse` spelling a unary `+`) that has nothing to
+#: do with `noop_loop`.  A name is `AssignStmt`, `raise`, `formal`, `f-string`, and
+#: it is the part of the sentence a reader goes and looks up; a lone `+` or `,` is
+#: an OPERATOR, which is why the rule also insists on more than one character.
+_BARE_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _fold_places(diag, source=""):
+    """`diag` with architecture names and everything POSITIONAL in it folded.
+
+    Two kinds, and they are different defects:
+
+    * a LINE NUMBER and a hexadecimal ADDRESS.  `line 46` became `line 51` because
+      the transform added a statement above it, and the sentence was identical.
+      Measured: **10 of 10** programs of a `limits` sweep at `--stmts 30 60`,
+      every one of them false, and the only verdict in this file that turns a
+      clean sweep into ten findings.  It is also why §2's sweeps never saw it: at
+      `--stmts 8 20` the programs are small and mostly carry no refusal at all,
+      so the rule had nothing to fire on.  A rule that is only wrong on large
+      programs is still wrong.
+    * a QUOTED span that is a copy of the program.  `formal_fuzz`'s generator
+      spells an f-string `F'v={s1} '` and `ast.unparse` — which prints every twin,
+      because a twin is an AST — spells the same string `f'v={s1} '`, and the
+      refusal quotes the token it kept, so the same sentence came back with a
+      different case in it.  Measured: **7 of 8** programs of an `fstrings` sweep,
+      every one of them the same construct refused with the same words.
+
+    Only a quoted span that is a SUBSTRING of the program text, is MORE THAN ONE
+    character and is not one bare word is folded, and those two extra conditions
+    are what make it precise rather than a blanket "fold the backquotes": a
+    construct NAME (`AssignStmt`, `f-string`) is one bare word and a lone `+` is one
+    character, so a sentence that names a different construct still diverges and
+    `rename` moving a name through a diagnostic still shows.  The cost is that a
+    quoted snippet which is also a bare word (`except:`) is folded, and it is paid
+    for: both sides quote the same enumeration, so nothing is lost.
+
+    `source` is the text the diagnostic is about, and it is a parameter rather
+    than an assumed module global because the two sides of the comparison are
+    two DIFFERENT programs: a span quoted from the original is a copy of the
+    original's text and one quoted from the twin a copy of the twin's.
+
+    NOT folded in `formal_sweep_parity.py::fold_arch`, which this delegates to for
+    the architecture names: there a row is one source file compared against another
+    run of the SAME file, so a line number is a fact about the file and belongs in
+    the row.  Here it is a fact about a file this tool has just edited.
+    """
+    diag = F.fold_arch(diag)
+    diag = _PLACE_RE.sub("<pos>", diag)
+
+    def _quoted(m):
+        span = m.group(1)
+        if len(span) < 2 or _BARE_WORD_RE.fullmatch(span):
+            return m.group(0)          # a NAME or an OPERATOR: not the program
+        return "`<src>`" if span in source else m.group(0)
+
+    return _QUOTED_RE.sub(_quoted, diag)
+
+
 def _answer(res):
     """`(exit, stdout)` from a `formal_fuzz.run_on` result, or None."""
     if res.get("verdict") != "ok":
@@ -2478,7 +2582,8 @@ def _answer(res):
     return (res.get("rc"), res.get("stdout"))
 
 
-def _compare_one(backend, base, twin, want):
+def _compare_one(backend, base, twin, want, base_text="",
+                  twin_text=""):
     """Every verdict for one backend on one pair.  A list, deduped and ordered.
 
     Four comparisons, and the four-way split is the whole design:
@@ -2507,6 +2612,11 @@ def _compare_one(backend, base, twin, want):
     The dedupe matters for more than tidiness: `MISMATCH-arch` used to be
     appended once per side, so a screen line read
     `MISMATCH-X86+MISMATCH-X86+MISMATCH-ARM+MISMATCH-ARM` for one disagreement.
+
+    `base_text` and `twin_text` are the two SOURCES, and they are parameters
+    because the refusal comparison needs both: a diagnostic that quotes the
+    program is quoting a text the transform rewrote, so `_fold_places` is told
+    which text each side is talking about rather than one global.
     """
     out = []
     arch = "X86" if backend == "x86_64" else "ARM"
@@ -2532,7 +2642,8 @@ def _compare_one(backend, base, twin, want):
         # Both refusing is agreement only if the WORDS agree: the two machines
         # are one language implementation.  A transform that does not change
         # the program must not change the sentence.
-        if F.fold_arch(base.get("diag", "")) != F.fold_arch(twin.get("diag", "")):
+        if _fold_places(base.get("diag", ""), base_text) != _fold_places(
+                twin.get("diag", ""), twin_text):
             out.append("REFUSAL-DIVERGES-" + arch)
     # `MISMATCH` means the TRANSFORM INTRODUCED the disagreement: the original
     # agreed with CPython and the twin does not.  A disagreement BOTH sides have
@@ -2564,6 +2675,7 @@ def _compare_one(backend, base, twin, want):
 #: file a reader has open.  So a reader meets it first.
 SEVERITY = (
     "NORMALISES-DIFFERLY-X86", "NORMALISES-DIFFERLY-ARM",
+    "CROSS-MACHINE-REFUSAL",
     "METAMORPH-X86", "METAMORPH-ARM",
     "TWIN-DIVERGES-X86", "TWIN-DIVERGES-ARM",
     "MISMATCH-X86", "MISMATCH-ARM",
@@ -2593,6 +2705,7 @@ SEVERITY = (
 #: nothing to do.
 FINDING_VERDICTS = (
     "NORMALISES-DIFFERLY-X86", "NORMALISES-DIFFERLY-ARM",
+    "CROSS-MACHINE-REFUSAL",
     "METAMORPH-X86", "METAMORPH-ARM",
     "TWIN-DIVERGES-X86", "TWIN-DIVERGES-ARM",
     "MISMATCH-X86", "MISMATCH-ARM",
@@ -2636,12 +2749,20 @@ def check_pair(label, prog, index, args, tmpdir):
     "P and T answer the same" is only worth checking once the oracle has agreed
     that P and T are the same PROGRAM.
     """
-    rec = {"label": label, "index": index, "verdict": "match", "transforms": {},
-           "diverge": [], "notes": prog.get("notes", ()),
-           "driver_args": prog["driver_args"]}
     text = prog["text"]
     argv = prog["driver_args"]
     tin = prog["test_input"]
+    rec = {"label": label, "index": index, "verdict": "match", "transforms": {},
+           "diverge": [], "notes": prog.get("notes", ()),
+           "driver_args": argv,
+           # The reproducer.  It is here rather than only on the transform entries
+           # because `main` writes `<stem>.mojo` from the PROGRAM record, and it
+           # wrote an EMPTY file: a finding whose original is not on disk is a
+           # finding nobody can re-run, which is the only thing a finding is for.
+           # Measured on the first `REFUSAL-DIVERGES` sweep — ten findings, ten
+           # empty reproducers, the diagnostics in `findings.json` and nothing to
+           # feed them back in.
+           "text": text, "verbatim": prog.get("verbatim")}
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError) as e:
@@ -2656,6 +2777,49 @@ def check_pair(label, prog, index, args, tmpdir):
     want = (ref[0], ref[1])
     base = {b: F.run_on(b, text, tmpdir, f"m{index}p", test_input=tin)
             for b in args.backends}
+    # A program a backend REFUSES measured nothing, and the tally cannot say so:
+    # `run_on` returns no answer, every verdict downstream is `match` because both
+    # sides refused alike, and `10 match` on a screen reads exactly like ten
+    # programs that ran.  Measured on a `limits` sweep at `--stmts 30 60`: every
+    # one of the ten is refused on BOTH architectures over the same bare
+    # `except:` arm, and the run reported `match 10` with nothing else on the
+    # screen.  A reader would have recorded that as ten programs the backend got
+    # right, which is the opposite of what happened.  So the refusals are counted
+    # and printed, per backend, always — zero included.
+    rec["refused"] = [b for b in args.backends
+                      if base[b].get("verdict") == "refusal"]
+    # And the CROSS-MACHINE half, which is a separate question from everything
+    # else this file asks: the two architectures are one language implementation,
+    # so a program one of them refused and the other answered is a finding with
+    # no oracle in it.  It is checked on the ORIGINAL rather than on every twin,
+    # because the twins inherit their parent's answer and reporting it per pair
+    # would say it ten times.  Measured: 1 of 8 programs of a `slicing` sweep at
+    # `--stmts 30 60`, which read as `match` for want of this check — x86-64
+    # refused, arm64 answered, and every verdict on the pair was `match` because
+    # each machine agreed with itself.
+    refused_by = set(rec["refused"])
+    if refused_by and refused_by != set(args.backends):
+        who, other = sorted(refused_by), sorted(set(args.backends) - refused_by)
+        detail = "{} refused it and {} answered".format(",".join(who),
+                                                        ",".join(other))
+        if all(F.FRAME_BLOB_REFUSAL_HEAD in (base[b].get("diag") or "")
+               for b in refused_by):
+            # The one cross-machine asymmetry this tool does NOT call a finding,
+            # and it is documented rather than discovered here:
+            # `tools/formal_fuzz.py`'s own note on the constant it imports says
+            # "`formal/model.py::CONTAINER_BUDGET` is the smaller of the two and
+            # the one a program has to fit to build on both machines".  So a
+            # program over x86-64's container budget answers on arm64 and is
+            # refused on x86-64 BY DESIGN, and a verdict here would be a fresh
+            # finding on every sweep that varied the frame.  Counted and printed
+            # as its own line rather than dropped, because "how many programs were
+            # over the budget" is a measurement and "none" is not.
+            rec["asymmetry"] = detail + (
+                " (the documented container-budget asymmetry: "
+                + F.FRAME_BLOB_REFUSAL_HEAD + "…)")
+        else:
+            rec["verdict"] = "CROSS-MACHINE-REFUSAL"
+            rec["detail"] = detail
     # The ORIGINAL's own disagreement with CPython, once per program rather than
     # once per transform: every twin inherits its parent's answer, so counting it
     # per twin would report one disagreement ten times.  It is `DIVERGENCE-*` and
@@ -2676,7 +2840,6 @@ def check_pair(label, prog, index, args, tmpdir):
         rec["verdict"] = _worst(bad)
         rec["detail"] = ("the normalised file answers differently from the file "
                          "as written: " + "; ".join(bad))
-        rec["text"] = text
         return rec
     for tname in wanted_transforms(args):
         entry = _one_transform(rec, label, text, index, tname, want, args,
@@ -2784,7 +2947,7 @@ def _one_transform(rec, label, text, index, tname, want, args, tmpdir, base,
     for b in args.backends:
         twins[b] = F.run_on(b, ttext, tmpdir, f"m{index}_{tname}_{b}",
                             test_input=test_input)
-        verdicts += _compare_one(b, base[b], twins[b], want)
+        verdicts += _compare_one(b, base[b], twins[b], want, text, ttext)
     entry = {"verdict": "+".join(verdicts) or "match"}
     if entry["verdict"] != "match":
         entry["text"] = text
@@ -2906,6 +3069,8 @@ def main():
     per_transform = {t: collections.Counter() for t in TRANSFORM_NAMES}
     findings = []
     normalised = {}
+    refused = collections.Counter()
+    asymmetry = {}
     live = [(lbl, p) for lbl, p in progs if p["text"] is not None]
     tmpdir = tempfile.mkdtemp(prefix="metamorph.", dir=args.work)
     try:
@@ -2920,6 +3085,10 @@ def main():
                     entry["verdict"].split(":")[0]] += 1
             for v in rec.get("diverge", []):
                 counts[v] = counts.get(v, 0) + 1
+            for b in rec.get("refused", ()):
+                refused[b] += 1
+            if rec.get("asymmetry"):
+                asymmetry[rec["label"]] = rec["asymmetry"]
             if rec.get("notes"):
                 normalised[rec["label"]] = list(rec["notes"])
             line = report(rec)
@@ -2933,6 +3102,7 @@ def main():
 
     with open(os.path.join(args.work, "findings.json"), "w") as f:
         json.dump({"args": vars(args), "counts": counts,
+                   "refused": dict(refused), "asymmetry": asymmetry,
                    "per_transform": {t: dict(c) for t, c in per_transform.items()},
                    "undrivable": undrivable, "normalised": normalised,
                    "findings": findings},
@@ -2965,6 +3135,17 @@ def main():
     for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if v not in ALWAYS:
             print(f"  {v:<20} {n}")
+    # A REFUSED program measured nothing, and `match` does not say so — see
+    # `check_pair`.  Printed always, per backend, zero included, for the same
+    # reason `transform-invalid` is: "0 refused" is a fact about the run and "no
+    # line" is not.
+    print("  refused by backend (measured nothing, counted as `match`): "
+          + ", ".join(f"{b}={refused.get(b, 0)}" for b in args.backends))
+    if asymmetry:
+        print(f"  cross-machine refusals that are the DOCUMENTED container-budget "
+              f"asymmetry, not findings: {len(asymmetry)}")
+        for label, why in sorted(asymmetry.items()):
+            print(f"    {label}: {why}")
     print("  transforms (skip = does not apply to that program):")
     for tname in TRANSFORM_NAMES:
         row = per_transform.get(tname) or {}
