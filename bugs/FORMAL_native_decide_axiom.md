@@ -14,10 +14,11 @@ now `decide`/`rfl` proofs the KERNEL checks; what is left is the replacement
 plan, which is a debt being paid down rather than a patch.
 
 **Status: the census part is DONE.** The audit of 2026-10-04
-(`bugs/FORMAL_trust_audit_2026-10-04.md` §`lib/*.lean`) counted the sites and put
-them in FORMAL.md §7's trust inventory as row 10. What is left is the measurement
-this worker could not make: which theorems actually reach the axiom, and the plan
-to shrink the number.
+(`formal/admitted.py::library_trust`, whose count is pinned by
+`test_formal_admitted.py::test_the_library_trust_counts_are_pinned`) counted the
+sites and put them in FORMAL.md §7's trust inventory as row 10. What is left is
+the measurement this worker could not make: which theorems actually reach the
+axiom, and the plan to shrink the number.
 
 **Status 2026-10-04 (`work/formal21-5`): item 2 is DONE, and item 1 is DONE for
 the half a text census can decide — the 749 sites are now attributed to the 56
@@ -28,10 +29,11 @@ is item 1's transitive half (`#print axioms`, a Lean run) and items 3–4, and
 before "The exact next step", which is the plan as it was written.
 
 **Status: the census part is DONE.** The audit of 2026-10-04
-(`bugs/FORMAL_trust_audit_2026-10-04.md` §`lib/*.lean`) counted the sites and put
-them in FORMAL.md §7's trust inventory as row 10. What was left is the
-measurement this worker could not make: which theorems actually reach the axiom,
-and the plan to shrink the number.
+(`formal/admitted.py::library_trust`, whose count is pinned by
+`test_formal_admitted.py::test_the_library_trust_counts_are_pinned`) counted the
+sites and put them in FORMAL.md §7's trust inventory as row 10. What was left is
+the measurement this worker could not make: which theorems actually reach the
+axiom, and the plan to shrink the number.
 
 Claim: `sweep20:admitted-audit` was the original. The 2026-10-04 work here is
 `project22:native-decide`.
@@ -50,8 +52,10 @@ toolchain**, and one of them was false of the tree:
    confirmation" — could not have succeeded, and a reader who grepped a proof's
    axiom list for it would have found nothing and concluded the proof was
    kernel-checked. That is how a wrong name becomes a wrong conclusion, and it is
-   the same version-drift shape `FORMAL_trust_audit_2026-10-04.md` records about
-   `subprocess.check_call`: the obvious answer is the one that is wrong.
+   the same version-drift shape the 2026-10-04 admitted-contract audit records
+   about `subprocess.check_call` (measured by
+   `test_formal_admitted.py`'s `TRUTH_PROBES`): the obvious answer is the one
+   that is wrong.
 2. **"749 sites" — an UNDERCOUNT wearing a total's clothes.**
    `formal/admitted.py::lean_code_regions` read a `'` IMMEDIATELY after an
    identifier character as the opening quote of a character literal. It is a

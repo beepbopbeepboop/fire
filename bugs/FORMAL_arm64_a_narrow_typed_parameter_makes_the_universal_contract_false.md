@@ -85,10 +85,11 @@ obligation seen from `hcond_4`.
 
 No `sorry` is involved: the obligation is a `have … := by` with a failing proof,
 so Lean refuses the file and the hole census reads **0**. That is the whole
-reason this sat unnoticed while
-`bugs/FORMAL_trust_audit_2026-10-04.md` went through the generator's admissions
-and found nothing wrong with them — the audit read the `sorry`s, and this is not
-one.
+reason this sat unnoticed while the 2026-10-04 admitted-contract audit went
+through every `@admitted` declaration in `formal/hostmods/` and found nothing
+wrong with any of them (`test_formal_admitted.py`'s `TRUTH_PROBES`, nineteen
+contracts, fifteen of them wrong about the host) — the audit read the HOST
+declarations, and this is a hole in the generator.
 
 It surfaced while replacing the CFG leaves' fallbacks, because stripping them
 turns "the proof elaborates" into "the proof says which line failed", and the
