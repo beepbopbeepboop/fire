@@ -42,8 +42,8 @@ host while every group above was green.  The `truth` group asks CPython or the
 OS what the host actually does and requires each contract's own text to cover
 it; `test_the_truth_probes_reject_the_pre_audit_text` puts every pre-audit
 sentence back through its own probe, so a probe that stops testing what it was
-written for fails rather than passing quietly.  `bugs/FORMAL_trust_audit_2026-10-04.md`
-is the audit, with the table.
+written for fails rather than passing quietly.  `TRUTH_PROBES` below is the
+audit's table, one row per contract, and it is the whole of it.
 
 ## Groups
 
@@ -476,7 +476,7 @@ def test_the_scope_probes_refuse_what_they_are_written_for(tmpdir=None):
 # Everything above checks that an admission is SCOPED (it constrains the answer
 # and not the host's behaviour) and that it is COUNTED.  Neither of those can
 # tell a TRUE admission from a FALSE one, and the difference is the whole subject
-# of `bugs/FORMAL_trust_audit_2026-10-04.md`: on 2026-10-04, FIFTEEN of the
+# of this group: on 2026-10-04, FIFTEEN of the
 # nineteen contracts asserted something the host does not do (three more were
 # true only under a reading the audit had to choose), and all nineteen were green
 # in every other group in this file.

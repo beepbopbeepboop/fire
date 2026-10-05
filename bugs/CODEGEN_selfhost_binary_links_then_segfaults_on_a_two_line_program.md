@@ -9,19 +9,20 @@ regression".
 ## Where this doc stands against the other `CODEGEN_selfhost_*` docs
 
 Every one of those describes the SAME job failing in the GCC era, and that
-shape is GONE. The three this doc cited by name — the one about the job being
-red on the branch base, the "red on the merged tree, 149 gcc errors" one, and
-the one whose last measurement was "13 errors remain" — were DELETED with their
-fixes, because their gcc-error counts reached zero; what is left in `bugs/` with
-this prefix is the post-GCC generation (`CODEGEN_selfhost_binary_links…` is this
-one, `CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults`,
-`CODEGEN_selfhost_actual_types_identifier_field_key`,
+shape is GONE. Every doc that stated a gcc-error count — "157 distinct gcc
+errors" on the branch base, "149 gcc errors" on a merged tree, "13 remain" — was
+DELETED with its fix, because those counts reached zero; what is left in
+`bugs/` with this prefix is the post-GCC generation (`CODEGEN_selfhost_binary_
+links…` is this one, `CODEGEN_selfhost_closure_compiles_and_the_binary_
+segfaults`, `CODEGEN_selfhost_actual_types_identifier_field_key`,
 `CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform`,
 `CODEGEN_selfhost_tokenize_region_eq_quadratic`, and the module-level
-`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`).
-There is no doc anywhere in `bugs/` whose subject is the state the job is
-in NOW, which is that the generated C compiles, links, and produces a binary
-that **crashes on the first program it is given**. A reader who runs the job and
+`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`
+— read off `ls bugs/CODEGEN_selfhost*` rather than from a list carried in
+prose, so it is a census and not an inventory. There is no doc anywhere in
+`bugs/` whose subject is the state the job is in NOW, which is that the
+generated C compiles, links, and produces a binary that **crashes on the first
+program it is given**. A reader who runs the job and
 sees a SIGSEGV has no document that describes it, which is the whole reason
 this one is filed.
 

@@ -3851,6 +3851,23 @@ UNREGISTERED = {
     #    reading of a bug doc.
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
+    # `formal/x86_64_model_fuzz.py` is a TOOL and its two `HARNESS` verdict rows
+    # are the ones a reader must not go looking for in `lib/X86.lean`, so the
+    # harness's own entry path needs a check even though the sweep it feeds does
+    # not. This file is that check, and it is unregistered for the reason its own
+    # docstring gives: three of its four cases are Lean-free and cheap, but the
+    # fourth compiles the harness `clang -arch x86_64` and runs it `arch -x86_64`,
+    # and it SKIPS where that is unavailable — so on a host that cannot run
+    # x86-64 code the row that matters most reports nothing, which is the shape
+    # `formal-receiver-position` was moved out of `proofs` for.
+    'test_x86_64_model_fuzz.py':
+        'The model-fuzz harness\'s ENTRY register file, read back through '
+        '`--entry-probe`: if the stub\'s real `mov` loads did not land, every '
+        'field of every program the harness compares is a false disagreement. '
+        'Three text cases are Lean-free; the fourth builds and runs the harness '
+        'under `arch -x86_64` and SKIPS where that is not available, which is '
+        'why this is listed rather than registered \u2014 a registered job that '
+        'skips its only substantive case is a green line that says nothing.',
 
     # A DOCUMENT check, and the cheapest file in this list by a wide margin:
     # import-and-compare against `runtime_abi()`, `reflect` and three Markdown

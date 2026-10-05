@@ -2802,14 +2802,16 @@ class TestX86EndToEndEmitter(unittest.TestCase):
 
         L.run_lean = fake
         try:
-            ok, admitted, fired, err = E._run_lean("theorem t : True := by\n"
-                                                   "  trivial\n")
+            ok, admitted, fired, err, live = E._run_lean("theorem t : True := by\n"
+                                                         "  trivial\n")
         finally:
             L.run_lean = real
         self.assertTrue(seen.get("called"), "the launcher was not reached")
         self.assertFalse(ok, "a `lean` that exited non-zero must not be `ok`: "
                              "the caller reads `ok` as \"the file elaborates\"")
         self.assertFalse(fired, "…and must not report the file as fully proved")
+        self.assertIsNone(live, "…and must not name a hole in a file no `lean` "
+                                "ever checked")
         self.assertIn("lean::memory_exception", err,
                       "the reason has to name the cause, not the exit code: "
                       "`lean::memory_exception` aborts instead of reporting, so "
@@ -2938,57 +2940,194 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                            "has collapsed to the admitted count the guard is no "
                            "longer being recognised")
 
-    def test_a_side_condition_is_charged_to_the_fact_before_it(self):
-        """The measurement behind the word `candidate` in the report.
+    def test_a_side_condition_is_charged_to_the_step_it_belongs_to(self):
+        """The attribution, on the shape the emitter actually writes.
 
-        A step lemma is emitted as `have hstep7 : T := x86_step_…` — WITHOUT a
-        `by` — so the census's "last `have … := by`" cursor is still the PREVIOUS
-        fact when it reads a `sorry` inside that step's inline `(by …)`. So a
-        guard that fires in a side condition is charged to the fact above it, and
-        the name in the report is where the search STARTS rather than the hole's
-        owner.
+        A step lemma is `have hstep7 : T := x86_step_…` — the `:=` on the
+        STATEMENT line and no `by` — so a cursor that advanced only on `:= by`
+        charged every guard that fires inside one to the fact above it, and the
+        report's name was a place to start looking rather than the hole. The
+        report names the hole exactly now (`test_lean_says_which_sorry_fired`),
+        but the census that answers "which side condition" still runs off this
+        cursor, so the shape is pinned here rather than assumed.
 
-        Measured on `formal/examples/const2.mojo` (16 steps, no `call`, so its
-        closing read is the one at `X86State.init`'s stack): the report named
-        `hrip`, and deleting the two `hrip` blocks' `all_goals sorry` lines and
-        nothing else left the file checking with `returncode 0` and NO errors
-        while Lean still reported `declaration uses sorry`. That is what moved
-        the report from "1 admitted (hrip)" to "1 admitted candidate (hrip)",
-        and this case is what keeps the two apart if the attribution is ever
-        fixed: when it is, this assertion fails and the wording goes back to
-        `admitted`.
+        **The fixture the previous version of this case used had its `:=` on a
+        CONTINUATION line**, which is a shape this emitter does not produce. It
+        therefore agreed with the report being wrong about a shape nobody writes,
+        and it is the reason the defect went unnoticed: the assertion was about
+        the census, and the census was right about everything it was shown. The
+        second half asserts the one-line shape on three real emissions, which is
+        what makes the first half say something.
         """
+        import re as _re
         import formal.x86_64_endtoend_test as E
-        # The emitter's own two-line step shape, which is the point: the `:=` is
-        # on the CONTINUATION line, so `_HAVE_BY` — `^\s*have NAME … :=` — does
-        # not see it and the cursor is still the previous fact when the side
-        # condition is read.
         text = ("theorem t : True := by\n"
                 "  have hprev : True := by\n"
                 "    trivial\n"
                 "    all_goals sorry\n"          # hprev's own admission
-                "  have hstep157 : x86_step s157 rc = some\n"
-                "    { s157 with rip := 0 } := x86_step_ret s157 rc 42 (by\n"
+                "  have hstep157 : x86_step s157 rc = some { s157 with rip := 0 } :=\n"
+                "    x86_step_ret s157 rc 42 (by\n"
                 "  try (trivial)\n"
                 "  all_goals sorry)\n")           # a side CONDITION of hstep157
-        facts = E.admitted_facts(text)
-        self.assertEqual([(n, k) for n, _l, k in facts],
-                         [("hprev", "admitted"), ("hprev", "guarded")],
-                         "the side condition is charged to hprev, which is the "
-                         "defect the word `candidate` admits; if this is now "
-                         "hstep157, the attribution is fixed and the report's "
-                         "wording should stop hedging. A `have` whose `:=` is on "
-                         "its OWN line is charged correctly, which is why this "
-                         "fixture is two lines and the previous one was not")
+        self.assertEqual([(n, k) for n, _l, k in E.admitted_facts(text)],
+                         [("hprev", "admitted"), ("hstep157", "guarded")],
+                         "a step lemma is `have hstep7 : … :=` with no `by`, so "
+                         "a cursor that required `:= by` charged every guard "
+                         "inside one to the fact above it")
+        for name, emitted in (("crossed", self._emitted()),
+                              ("straight", self._emitted(self.STRAIGHT)),
+                              ("const2", self._emitted_path("const2"))):
+            # On the emitter's REAL text: every guarded side condition is charged
+            # to a STEP (`hstep{k}` / `hpop{k}`), never to a `:= by` fact
+            # sitting above it — which is the whole claim, on the three
+            # emissions that matter. Asking it per-`have` instead would be
+            # wrong: `have hval{k} :` wraps its long conjunction and `have key`
+            # is a `try`-scoped local inside the closing block, and neither is
+            # the owner of anything.
+            names = {n for n, _l, k in E.admitted_facts(emitted)
+                     if k == "guarded"}
+            wrong = sorted(n for n in names
+                           if not _re.match(r"^h(?:step|pop)\d+$", n))
+            self.assertEqual(wrong, [],
+                             f"{name}: a side condition charged to {wrong} "
+                             "rather than to the step whose hypothesis argument "
+                             "it is — that is a place to start looking, not the "
+                             "hole")
+            self.assertTrue(names,
+                            f"{name}: a chain has several side conditions per "
+                            "step, so an empty set here means the guard is no "
+                            "longer being recognised at all")
 
-    def test_the_report_says_candidate_and_never_claims_an_identified_hole(self):
+    def test_the_reported_line_is_the_sorrys_own_line(self):
+        """`admitted_facts`' line, and the block-comment filter that broke it.
+
+        The report resolves Lean's `line:col` through `admitted_facts`, so the
+        line it hands back has to be the `sorry`'s own. Two things stood in the
+        way and both are asserted here:
+
+        * the two classes must land on DIFFERENT lines, or the exact lookup in
+          `hole_at` cannot tell a fact's own admission from its first side
+          condition — the fixture puts them one line apart on purpose;
+        * `_BLOCK_COMMENT` is applied with a replacement that keeps the comment's
+          newlines. It was `sub("")`, and the docstring above it claims the
+          opposite ("replaced by blank lines so the line numbers the check
+          reports still point at the source") — which made every line after a
+          `/-- … -/` come back lower than it is, by the height of the comment.
+          That is invisible in a census that only counts and fatal in one that
+          looks a position up, and the generated file's first comment is on
+          `all_bytes` two lines above everything else.
+        """
+        import formal.x86_64_endtoend_test as E
+        text = ("theorem t : True := by\n"
+                "  have hprev : True := by\n"
+                "    trivial\n"
+                "    all_goals sorry\n"
+                "  have hstep : True := exact (by\n"
+                "  try (trivial)\n"
+                "  all_goals sorry)\n")
+        lines = [(n, ln, k) for n, ln, k in E.admitted_facts(text)]
+        self.assertEqual([(n, ln, k) for n, ln, k in lines],
+                         [("hprev", 4, "admitted"), ("hstep", 7, "guarded")],
+                         "each row's line must be the `sorry`'s own, so a "
+                         "position from Lean resolves to exactly one of them")
+        tall = ("theorem t : True := by\n"
+                "/-- a docstring\n"
+                "    over three lines\n"
+                "    so the shift is visible -/\n"
+                "  have h : True := by\n"
+                "    trivial\n"
+                "    all_goals sorry\n")
+        self.assertEqual([ln for _n, ln, _k in E.admitted_facts(tall)], [7],
+                         "a `/-- … -/` must not move the lines below it: the "
+                         "comment says so and `hole_at` needs it")
+
+    def test_the_header_asks_lean_where_the_hole_is(self):
+        """`pp.sorrySource` in every generated file, because without it there is
+        nothing to read.
+
+        The position this whole mechanism depends on is in Lean's own
+        `declaration uses `sorry`` warning, and it is only in the warning when the
+        file sets the option: measured on this tree, the same file elaborates to
+        ``uses `sorry` `` with the option and to ``uses `sorry `«…:363:12»`` ``
+        without it. So this is not an optimisation to be argued about — it is the
+        only thing that puts the hole's location in the output at all, and a
+        generated file without it silently degrades the report to the old
+        candidate list.
+        """
+        import formal.x86_64_endtoend_test as E
+        for text in (self._emitted(), self._emitted(self.STRAIGHT)):
+            self.assertIn("set_option pp.sorrySource true", text,
+                          "both theorems come from `_header`, and the option is "
+                          "what makes Lean's hole report name the hole")
+
+    def test_lean_says_which_sorry_fired_and_the_report_names_it(self):
+        """THE END-TO-END CASE, and the one the report's wording rests on.
+
+        Every other test here is about text. This one asks Lean, because the
+        whole subject is a fact about the elaborated TERM: a `sorry` is written in
+        two shapes, the tactic above one of them usually closes its goal, and
+        only Lean knows which of the hundreds is load-bearing. The method is the
+        cheapest honest one — take the corpus's shortest fully-closed example,
+        make ONE guard unsatisfiable, and read back the fact and line.
+
+        Measured on `formal/examples/const2.mojo` (19 steps, no `call`): the
+        patched file elaborates, Lean reports the declaration as using `sorry`,
+        and `_run_lean` returns `live == "hstep7's side condition, line 363"` —
+        which is the `all_goals sorry` on that line, attributed to the step whose
+        hypothesis argument it is. Without the patch the same file reports
+        `fired=False` and `live=None`, so the two halves of the question are
+        separated: the emission is not a hole, and the patch is what makes one.
+
+        Skips without the pinned Lean, which is what `TestAxiomClosureCensus`
+        already does for the axiom census — and the file is left `expect=` in
+        `tools/suite.py` either way, so a skip is visible rather than silent.
+        """
+        import formal.x86_64_endtoend_test as E
+        if not E.LEAN_BIN:
+            self.skipTest("the pinned lean is not installed")
+        text = self._emitted_path("const2")
+        lines = text.split("\n")
+        patched, at = None, None
+        for i, l in enumerate(lines):
+            if l.strip() == "try (simp [hs7, hdec6])":
+                at = i + 1
+                patched = "\n".join(
+                    lines[:i] + ["  try (exact (4294968000 : Nat) = 4294968001)"]
+                    + lines[i + 1:])
+                break
+        self.assertIsNotNone(patched,
+                             "the fixture is pinned to a guard this emitter "
+                             "emits; if the emission changed, the acceptance "
+                             "test has to move with it")
+        ok, _n, fired, err, live = E._run_lean(patched)
+        self.assertTrue(ok, f"the patched file must still elaborate: {err!r}")
+        self.assertTrue(fired,
+                        "an unsatisfiable guard must make Lean report the "
+                        "declaration as using `sorry`, or the identification "
+                        "below is reading nothing")
+        self.assertEqual(live, "hstep7's side condition, line %d" % (at + 1),
+                         "the report must name the fact and the LINE of the "
+                         "`sorry` that fired — the nearest enclosing fact is "
+                         "only a place to start looking")
+
+        # …and the unpatched file must NOT claim a hole. `const2` is one of the
+        # fully-closed chains, so a report that named one here would be a false
+        # positive on the same code the case above proves the reader of.
+        ok, _n, fired, err, live = E._run_lean(text)
+        self.assertTrue(ok, err)
+        self.assertFalse(fired,
+                         "the unpatched file elaborates with no load-bearing "
+                         "`sorry`: every one of its emissions closed")
+
+    def test_the_report_says_the_hole_it_can_identify_and_hedges_only_when_it_cannot(self):
         """One wording for both theorems, and the word is the claim.
 
-        The value line and the termination line are the same sentence about two
-        different theorems, so they go through `admitted_phrase` and a test asks
-        the wording a question without running Lean — which is the only way to
-        ask it at all, since the lines are printed from inside `main`'s Lean
-        loop.
+        A name in the census is the enclosing fact of an emitted `all_goals
+        sorry`, which is a place to start looking and not the hole — so it is
+        printed as a `candidate`, and the `live` form replaces it entirely rather
+        than sitting beside it. A report that showed both would be asking the
+        reader to prefer the weaker claim it had been given the stronger one to
+        replace.
         """
         import formal.x86_64_endtoend_test as E
         self.assertEqual(E.admitted_phrase(1, ["hrip"], 249),
@@ -3000,6 +3139,13 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                          "a `sorry` before any `have` has no name, and "
                          "`unattributed` is that answer rather than a "
                          "placeholder")
+        self.assertEqual(
+            E.admitted_phrase(1, ["hrip"], 249,
+                              live="hstep7's side condition, line 363"),
+            "1 live hole (hstep7's side condition, line 363), 249 guarded",
+            "an identified hole REPLACES the candidate list: it is the same "
+            "number said better, and printing both would be asking the reader "
+            "to choose between them")
         for phrase in (E.admitted_phrase(1, ["hrip"], 249),
                        E.admitted_phrase(1, [], 9)):
             self.assertNotIn("admitted (", phrase,

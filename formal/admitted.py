@@ -37,8 +37,10 @@ killed by signal N; fourteen of the nineteen contracts were false in some such
 way and every instrument this module had — the count, the scope rule, the
 emitted declaration, the inertness check — was green on all of them, because
 each decides FORM and none of them asks whether an assumption is true.  That is
-what `test_formal_admitted.py`'s `truth` group is for, and
-`bugs/FORMAL_trust_audit_2026-10-04.md` is the audit with the table.
+what `test_formal_admitted.py`'s `truth` group is for, and the
+per-contract table is that group's `TRUTH_PROBES` — one row per contract,
+each measured against CPython or the OS (2026-10-04, the audit that found
+the fourteen).
 
 WHY `sorry` AND NOT `axiom`
 ---------------------------
@@ -161,8 +163,9 @@ class Contract:
         `Lock.acquire` returns `True`.  So `admitted_subprocess_check_call : UInt64 →
         UInt64` is a claim about what THIS MODEL answers, and a proof that reads
         it as CPython's return type is reading a different claim from the one the
-        declaration makes.  `bugs/FORMAL_trust_audit_2026-10-04.md` §"the word is
-        the model's" carries the measurement and the per-operation table.
+        declaration makes.  The per-operation table is in
+        `test_formal_admitted.py`'s `TRUTH_PROBES`, which measured it on
+        2026-10-04: `subprocess.check_call` returns 0 there, not `None`.
         """
         return (f"ADMITTED: {self.qualified}.\n"
                 f"    THE WORD IS THE MODEL'S: this declaration is "
@@ -752,8 +755,9 @@ def contract_texts_are_unique(contracts: list) -> str:
 #
 # FORMAL.md §7 states the project's position as *no Lean `axiom` and no `opaque`
 # anywhere; everything is assumed in the `sorry` sense*.  Measured on `lib/` on
-# 2026-10-04 (`bugs/FORMAL_trust_audit_2026-10-04.md`): the first half of that
-# sentence is true of the SOURCE TEXT and false of a theorem's transitive
+# 2026-10-04 (the admitted-contract audit, whose census found it): the first
+# half of that sentence is true of the SOURCE TEXT and false of a theorem's
+# transitive
 # closure.  There is no `axiom` declaration and no `sorry` in any of the five
 # modules — and 751 proof sites are closed by `native_decide` or `bv_decide`,
 # which do not go through the kernel: they compile a decision procedure and run

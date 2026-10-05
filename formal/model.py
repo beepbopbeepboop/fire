@@ -9551,6 +9551,178 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
             f"functions so each gets its own budget.")
 
 
+#: The element-count estimate for a blob whose length this path cannot read.
+#: It was a bare `64` written into each backend's `_blob_est` as the fallback
+#: arm, which made it a frame-budget decision with two copies; it is here
+#: because the loop-growth arithmetic below multiplies it and a reader has to
+#: be able to find the number that gets multiplied.
+BLOB_ESTIMATE_FALLBACK = 64
+
+
+def loop_trip_count(start, stop, step):
+    """`len(range(start, stop, step))`, or None when a bound is not a literal.
+
+    The one place the "how many times can this loop run" question is asked, so
+    that a `for … in range(2, 40, 3)` and a `for … in range(70)` cannot get two
+    different answers from two hand-written formulas. `None` means "no
+    compile-time bound", which is a distinct answer from `0` — an empty range
+    really does run zero times, and a loop whose bound is a runtime value does
+    not.
+    """
+    if start is None or stop is None or step is None:
+        return None
+    try:
+        return len(range(int(start), int(stop), int(step)))
+    except (TypeError, ValueError):
+        return None
+
+
+def blob_loop_growth(entry: int, once: int, trips: int) -> int:
+    """Elements a blob-producing SITE must reserve when it sits inside a loop.
+
+    A blob on this path is a fixed-size block of the frame, and the reservation
+    is made ONCE per site — the emitted code is one copy, however many times it
+    runs. That is sound only while the site executes at most once, and the
+    commonest way to build a list breaks it: `s = s + [x]` and `s.append(x)`
+    inside a loop both produce a value the NEXT iteration reads, so the last
+    iteration's blob is longer than the first's by a factor of the trip count.
+
+    Measured on both architectures, the same three-line program:
+
+        var s = [0]
+        for i in range(K): s = s + [1]
+        printf("len=%d", len(s))
+
+    x86-64 built, linked and exited 1 having printed nothing at `K = 65` and
+    answered correctly at `K = 64`, because the site's estimate was
+    `blob_est(s) + 1 = 64 + 1 = 65` words — the fallback above, plus the one
+    element appended. arm64 has no guard on that path at all and overran its
+    own reservation by `K - 65` words, which is a frame corruption rather than
+    a wrong number: a callee's copy of the same loop returned the right length
+    and its caller's `printf` printed nothing. The identical shape with
+    `s.append(1)` instead stopped at `K = 2` on BOTH machines, because an
+    append's capacity is the number of append SITES in the function.
+
+    `entry` is the longer operand as it stands on entry to the loop, `once` is
+    the single-execution bound `_blob_est` already computes, and `trips` is
+    `loop_trip_count`'s answer. The growth is per ITERATION, so the total is
+    `entry + (once - entry) * trips` rather than `once * trips` — which is what
+    keeps `for x in ys: s = s + [x]` (with `ys` a blob of unknown length, so
+    `once` is dominated by the fallback) reserving what it reserved before
+    instead of 64 times as much.
+    """
+    per = max(1, int(once) - int(entry))
+    return max(0, int(entry)) + per * max(1, int(trips))
+
+
+def stmt_bound_names(stmts) -> set:
+    """Every name a statement list BINDS, at any depth inside it.
+
+    The question a loop's reservation asks is "does this loop's body rebind a
+    name this site reads?", and the answer has to include the rebinding that
+    happens inside a nested `if`, a nested loop or a `try`, because the loop
+    still executes them. A nested `def`/`lambda` is deliberately NOT descended
+    into: its body runs on its own schedule, and a name it binds is not one
+    this loop's iterations can see.
+
+    `iter_nodes` is not used because it descends into everything, nested
+    functions included, and because the answer wanted here is TARGETS rather
+    than every name mentioned — a body that only READS `s` does not make the
+    site that reads `s` loop-carried.
+    """
+    out: set = set()
+    for stmt in stmts or ():
+        _collect_bound_names(stmt, out)
+    return out
+
+
+def _collect_bound_names(stmt, out: set) -> None:
+    if isinstance(stmt, (list, tuple)):
+        for s in stmt:
+            _collect_bound_names(s, out)
+        return
+    if stmt is None or not hasattr(stmt, "__dataclass_fields__"):
+        return
+    if isinstance(stmt, (F.FunctionDef, F.LambdaExpr)):
+        return
+    # A loop's own TARGET is not in this set: the counter is bound by the loop
+    # rather than by its body, and a site that reads it is reading the counter,
+    # not a value the body grows.
+    if isinstance(stmt, (F.AssignStmt, F.AugAssignStmt, F.VarDecl,
+                         F.MultiAssignStmt)):
+        for name in assignment_target_names(stmt):
+            out.add(name)
+    for field in ("body", "then_body", "elifs", "else_body", "orelse",
+                  "finalbody", "handlers"):
+        value = getattr(stmt, field, None)
+        if value:
+            _collect_bound_names(value, out)
+
+
+def blob_names_read(expr) -> set:
+    """The plain names an expression MENTIONS.
+
+    Over-approximating on purpose and saying so: a name that appears as a
+    subscript base, a call's callee or an attribute's object is counted, which
+    can only make a site look loop-carried when it is not. The cost of that
+    over-approximation is a reservation multiplied by a trip count it did not
+    need — frame bytes, and in the worst case a `frame_blob_refusal` — while
+    the cost of missing a rebinding is a program that writes past its own
+    reservation, so the direction is fixed.
+    """
+    return {n.name for n in iter_nodes(expr)
+            if isinstance(n, F.IdentExpr) and isinstance(n.name, str)}
+
+
+def walk_stmt_trips(stmts, loop_trips):
+    """`(node, trips)` for every AST node in `stmts`, with its execution bound.
+
+    `trips` is an upper bound on how many times the node's enclosing code runs:
+    1 outside any loop, the loop's own bound inside one, and the PRODUCT in a
+    nested one. `None` means "no compile-time bound" and it propagates — a node
+    inside a `while` inside a `range(70)` has no bound, and rounding that down
+    to 70 is how a capacity ends up a promise the program cannot keep.
+
+    `loop_trips(stmt)` is the caller's reader for a loop statement's header,
+    because only the caller knows how to evaluate the expressions in it
+    (`_range_info` plus `_static_int` on one side, `_blob_iter_trip_bound` on a
+    container iterable). It is asked only about the statement kinds that are
+    loops, and any other statement is one execution. A nested `def`/`lambda`
+    body is not descended into: it runs on its own schedule.
+
+    One pass over the node fields, rather than `iter_nodes` per statement: the
+    second is quadratic in the size of a function, and this runs once per
+    function over the whole stdlib.
+
+    The whole-function scan exists because an append's capacity is a property
+    of the FUNCTION, not of the site: the blob is reserved where the literal
+    is, which is usually nowhere near the `append` that grows it, so the two
+    ends have to be counted together — the same reason `_scan_list_caps`
+    returns two maps. This is the loop-aware half of that count.
+    """
+    out = []
+
+    def walk(node, trips):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, trips)
+            return
+        if node is None or not hasattr(node, "__dataclass_fields__"):
+            return
+        if isinstance(node, (F.FunctionDef, F.LambdaExpr)):
+            return
+        bound = trips
+        if isinstance(node, (F.WhileStmt, F.ForStmt, F.ComptimeForStmt)):
+            here = loop_trips(node)
+            bound = None if (trips is None or here is None) else trips * here
+        out.append((node, bound))
+        for field in _node_field_names(node):
+            walk(getattr(node, field), bound)
+
+    walk(stmts, 1)
+    return out
+
+
 # The number of slots a list literal containing `*xs` reserves for a DYNAMIC
 # operand. One number, in one place, because it is a frame-budget decision
 # that both backends make and a disagreement between them is a program that

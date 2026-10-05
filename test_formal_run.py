@@ -7892,6 +7892,98 @@ BOTH_ARCH_CASES = [
     # looking code rather than an exotic one. `1 // 2` is here for the same
     # reason and is the FIRST thing that breaks if the correction's condition is
     # written as `sKey a = sKey b` (which is `a = b`, so it would answer -1).
+    # A container grown ONCE PER ITERATION, in both spellings.  The reservation
+    # for a blob site is made ONCE (the emitted code is one copy however many
+    # times it runs), and it used to be the number of append SITES or the
+    # fallback estimate — neither of which knows the site runs N times.  The
+    # threshold was exact: `for i in range(65): s = s + [1]` answered `len=66`
+    # and `range(66)` left the image with NOTHING printed and status 1 on
+    # x86-64, while arm64 — which has no run-time guard on that path at all —
+    # overran its own reservation (measured, and it took its caller's `printf`
+    # argument with it when the loop was in a callee).  `s.append(x)` in the
+    # same loop stopped at the SECOND append on BOTH machines, which is why
+    # both spellings are in ONE program: a fix to the `+` path alone would
+    # leave the `append` half red, and both numbers come out of one build per
+    # architecture.
+    #
+    # The trip counts are `65` and `64` on purpose — both past the old bounds —
+    # and the expected numbers are CPython's (`66`, `65`, `64 + 64`, `71`,
+    # `1 + 4 * 3`), computed rather than typed.  `s = s + [1]` grows by one and
+    # `s.append(1)` by one; `t = t * 2` starts at one and quadruples twice, so
+    # it is a multiplication in a loop rather than an addition, which is the
+    # third blob-producing site and the one with the largest single-execution
+    # estimate.
+    ("both_arch_a_list_grown_by_a_loop_reaches_past_the_old_threshold",
+     "def main(n):\n"
+     "    var s = [0]\n"
+     "    for i in range(65):\n"
+     "        s = s + [1]\n"
+     "    var t = [0]\n"
+     "    for i in range(64):\n"
+     "        t.append(1)\n"
+     "    var u = [1]\n"
+     "    for i in range(2):\n"
+     "        u = u * 2\n"
+     "    printf(\"%d %d %d\", len(s), len(t), len(u))\n"
+     "    return 0\n", 0, "66 65 4"),
+    # The same shape with the trip count SPELLED as `range(0, 400, 3)` — 134
+    # iterations, so 135 elements, which is past the old 65-word reservation
+    # again — beside a small one, so a reservation that is right at one size
+    # and short at another cannot pass.  The three-argument spelling is the
+    # point of the first loop: `_range_info` normalises the one-, two- and
+    # three-argument forms, and the trip count has to be read off the same
+    # three expressions the loop's own head test uses
+    # (`model.loop_trip_count`), not off the argument list.
+    ("both_arch_a_loop_carried_concat_sizes_itself_from_the_loop_bound",
+     "def main(n):\n"
+     "    var a = [0]\n"
+     "    for i in range(0, 400, 3):\n"
+     "        a = a + [7]\n"
+     "    var b = [0]\n"
+     "    for i in range(3):\n"
+     "        b = b + [7]\n"
+     "    printf(\"%d %d\", len(a), len(b))\n"
+     "    return 0\n", 0, "135 4"),
+    # A concat inside a loop that does NOT grow the container: neither operand
+    # is re-bound by the body, so the reservation is the single-execution one
+    # and the growth arithmetic must not be applied to it.  This row is a
+    # GUARD rather than a witness — it passes before the change too — and it is
+    # here because the fix multiplies by a trip count, which is exactly the
+    # kind of change that turns a site inside a loop into a
+    # `frame_blob_refusal` if the loop-carried test is wrong.  `s[0]` is in the
+    # output so the assertion cannot be satisfied by a substring of a longer
+    # number.
+    ("both_arch_a_concat_inside_a_loop_that_does_not_grow_it_is_not_resized",
+     "def main(n):\n"
+     "    var v = [5]\n"
+     "    var w = [6]\n"
+     "    var s = [0]\n"
+     "    for i in range(200):\n"
+     "        s = v + w\n"
+     "    printf(\"%d %d\", len(s), s[0])\n"
+     "    return 0\n", 0, "2 5"),
+    # A loop with no compile-time iteration count keeps the one-per-site bound
+    # it always had, and the run-time guard answers for anything past it —
+    # which is what it is for.  A GUARD row, like the one above it: it passes
+    # before the change too, and it is here because the alternative that was
+    # available was to turn every unbounded loop carrying a container into
+    # a build failure.  This row pins that DECISION
+    # (`_blob_site_growth` returns the unmultiplied estimate rather than
+    # refusing), because the alternative was a build failure on
+    # `for i in range(n): s.append(x)`, the commonest way real code builds a
+    # list, in exchange for a message about a case a message would not have
+    # fixed.  The loop here runs once against a capacity of two, so the program
+    # still ANSWERS; the loud overflow for the same shape is
+    # `list_append_overflow_is_loud` below, which is what pins the other half.
+    ("both_arch_a_loop_with_no_compile_time_bound_keeps_the_run_time_guard",
+     "def main(n):\n"
+     "    var xs = [1]\n"
+     "    var i = 0\n"
+     "    while i < 1:\n"
+     "        xs.append(7)\n"
+     "        i = i + 1\n"
+     "    printf(\"n=%d e=%d\", len(xs), xs[1])\n"
+     "    return 0\n", 0, "n=2 e=7"),
     ("both_arch_floor_division_and_modulo_agree_with_cpython",
      "def main(n):\n"
      "    printf(\"%d %d %d %d\", 0 - 7 // 2, 7 // (0 - 2), (0 - 8) // 2, 7 // 2)\n"

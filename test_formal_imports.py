@@ -3831,6 +3831,233 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
           f"the corpus it claims to cover")
 
 
+# ── the host-import wall's own instrument ─────────────────────────────────
+#
+# `tools/formal_host_import_wall.py` ranks what a file's import CLOSURE still
+# names, which is the question a sweep's `not-answerable/host-import` class
+# cannot answer: the class is one bucket over a queue of unrelated capabilities,
+# and a module landing unmasks the row behind it. The doc that asked for the
+# tool is `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
+# these are its pins — the properties that make the ranking a MEASUREMENT rather
+# than a second description to drift.
+#
+# Everything here is Lean-free and builds nothing: the instrument reads the
+# backend's own readers, so a bug in it is a wrong TABLE, not a wrong image, and
+# a test that had to compile a file to check it would be a test about the
+# compiler.
+#
+# These pins were written against a second tool, `formal_host_import_walls.py`,
+# which another branch built for the same doc at the same time. Two tools
+# answering one question is a second thing to forget an arm of, so this file is
+# the one that survived and the pins were moved onto it: `walls.py`'s `measure`
+# returned `(reach, alone, files_of, (clean, errors))` where `rank` returns
+# `{name: {"reach": [...], "alone": [...]}}` and `module_imports` answers None
+# for a file the backend cannot read — which is where `clean` and `errors` come
+# from here. Nothing was lost but `walls.py`'s `--scope`, which is now
+# `formal_host_import_wall.py`'s.
+
+
+def _wall_module():
+    """The tool, imported as a module.
+
+    Imported rather than run as a subprocess because the pins below are about
+    the numbers it computes; a subprocess would only be able to read them off
+    stdout, and the point of `reach`/`alone` being separate columns is that a
+    reader has them separately.
+    """
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_host_import_wall as W
+    return W
+
+
+def _measure(W, paths, unmodelled=frozenset()):
+    """`walls.py`'s five-tuple, computed from `wall.py`'s two functions.
+
+    Kept as a helper so the pins read the way they were written and the
+    difference between the two tools is in ONE place: `rank` gives the two
+    count columns and the file lists, and `module_imports` answers `None` for a
+    file the backend cannot read, which is this tree's `errors`. The
+    `clean`/`errors` split is therefore not a property of the tool but of this
+    wrapper — which is the honest place for it, because `rank` does not
+    promise it.
+    """
+    rows = W.rank(list(paths), unmodelled)
+    reach = {n: len(v["reach"]) for n, v in rows.items()}
+    alone = {n: len(v["alone"]) for n, v in rows.items()}
+    files_of = {n: v["reach"] for n, v in rows.items()}
+    errors = [p for p in paths if W.module_imports(p) is None]
+    clean = sum(1 for p in paths if p not in errors and not W.walls_of(p, unmodelled))
+    return reach, alone, files_of, (clean, errors)
+
+
+def test_the_wall_instrument_uses_the_backends_own_readers(tmpdir, _shared):
+    """A closure walk that reads the WRONG tree reports an empty wall.
+
+    `imported_modules` takes `fire_compiler`'s nodes; handing it
+    `ast.parse(...).body` returns nothing at all, so every row of such a table
+    reads 0 and the table looks like a clean corpus. That is the failure this
+    row exists to make impossible to reintroduce silently: it asserts the tool
+    sees a host module through `formal.build.parse_module` and cannot see one
+    through `ast`.
+    """
+    W = _wall_module()
+    check(W.module_imports is not None, "the tool could not be imported")
+
+    class _Fake:                                   # not a dataclass node
+        __dataclass_fields__ = ()
+
+    check(W.FB.parse_module("import os\n", "<t>") is not None,
+          "parse_module returned nothing for a one-line import")
+    got = W.I.imported_modules(W.FB.parse_module("import os\n", "<t>"))
+    check("os" in got,
+          f"the backend's reader did not see `import os` (got {got})")
+    check(not I.imported_modules([_Fake()]),
+          "a non-node yielded a name, so the reader is not the one under test")
+    # And the two readers disagree, which is the whole reason the tool is not
+    # written against `ast`: `imported_modules` filters the front-end-provided
+    # names, an `ast` walk does not.
+    check("dataclasses" in I.FRONTEND_PROVIDED_MODULES,
+          "the front-end-provided list changed, so this row's contrast is gone")
+    got = W.I.imported_modules(
+        W.FB.parse_module("import dataclasses\n", "<t>"))
+    check("dataclasses" not in got,
+          "a front-end-provided module is being counted as a wall")
+
+
+def _a_real_wall_name(W):
+    """A host module this tree does NOT resolve, chosen from the tier tables.
+
+    Picked at run time rather than written down, because a written-down name goes
+    stale the day a wave models it and the case then fails for the best possible
+    reason — which is the one kind of failure that trains a reader to ignore a
+    red suite. The tables are the same ones the tool ranks with, so this is the
+    same question the ranking asks, asked once here.
+    """
+    for name in sorted(I.HOST_MODULES):
+        if name in sys.stdlib_module_names \
+                and I.resolve_module_path(name) is None:
+            return name
+    return None
+
+
+def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
+    """`reach` and `alone` are different questions and the tool answers both.
+
+    `reach` is how many files name the module at all; `alone` is how many for
+    which it is the ONLY name, i.e. the files "writing this module makes this
+    file build" is a true statement about. A ranking built on `reach` alone
+    picks the module with the widest closure — `importlib`, which most of this
+    repository reaches and for which "write importlib" is true of none of them —
+    so the column a worker plans against has to be the second one, and the
+    instrument has to print both.
+
+    Three files over two walls: one naming both, one naming one, one naming
+    neither. The third is what makes `clean` a measurement rather than a
+    constant, and the second is what makes `alone` a different number from
+    `reach`.
+    """
+    W = _wall_module()
+    wall_a = _a_real_wall_name(W)
+    wall_b = None
+    for name in sorted(I.HOST_MODULES):
+        if name != wall_a and name in sys.stdlib_module_names \
+                and I.resolve_module_path(name) is None:
+            wall_b = name
+            break
+    check(wall_a is not None and wall_b is not None,
+          "no two host modules are walls in this tree, so the columns cannot "
+          "be told apart here")
+    d = str(tmpdir)
+    a = os.path.join(d, "a.mojo")                    # both walls
+    b = os.path.join(d, "b.mojo")                    # one wall
+    c = os.path.join(d, "c.mojo")                    # none
+    open(a, "w").write(f"import {wall_a}\nimport {wall_b}\n")
+    open(b, "w").write(f"import {wall_a}\n")
+    open(c, "w").write("x = 1\n")
+    reach, alone, files_of, (clean, errors) = _measure(W, [a, b, c])
+    check(not errors, f"unexpected parse errors: {errors}")
+    check(reach.get(wall_a) == 2,
+          f"reach for `{wall_a}` was {reach.get(wall_a)}, not 2")
+    check(alone.get(wall_a) == 1,
+          f"alone for `{wall_a}` was {alone.get(wall_a)}: it is the only wall "
+          f"on one of the two files that name it")
+    check(reach.get(wall_b) == 1 and alone.get(wall_b, 0) == 0,
+          f"`{wall_b}` is not the only wall on its file, so `alone` must not "
+          f"count it (reach {reach.get(wall_b)}, alone {alone.get(wall_b)})")
+    check(clean == 1,
+          f"exactly one of the three files names no wall, so clean was {clean}")
+    check(sorted(files_of.get(wall_a, [])) == sorted([a, b]),
+          "the file list does not name the files the reach count came from")
+
+
+def test_the_wall_instrument_measures_a_delta_on_one_tree(tmpdir, _shared):
+    """`--pretend-unmodelled` is what makes "writing this module moves N files"
+    a measurement, and it has to move the numbers.
+
+    A before/after across two checkouts measures the merge, not the change, which
+    is why this flag exists. The fixture imports `os`, which this tree DOES
+    resolve (`formal/hostmods/os.mojo`) — so the file starts with no wall at all
+    and pretending `os` absent is exactly "that module is not in this tree",
+    which is the state a wave measures before it writes one. Both the `reach`
+    row and the `clean` count have to move, and in one direction only: a delta
+    that went the other way is a bug in the instrument whatever the number is.
+    """
+    W = _wall_module()
+    check(W.I.resolve_module_path("os") is not None,
+          "`os` is not a wall on this tree any more, so pretending it absent "
+          "measures nothing; pick a module that resolves and is absent")
+    p = os.path.join(str(tmpdir), "p.mojo")
+    open(p, "w").write("import os\nimport signal\n")
+    reach_b, _alone_b, _files_b, (clean_b, _) = _measure(W, [p])
+    reach_a, alone_a, _files_a, (clean_a, _) = _measure(W, [p], frozenset(("os",)))
+    check("os" not in reach_b,
+          "`os` is already a wall on this tree, so the delta measures nothing")
+    check(clean_b == 1 and clean_a == 0,
+          f"pretending `os` absent must move clean from 1 to 0, and it went "
+          f"{clean_b} to {clean_a}")
+    check(reach_a.get("os") == 1 and alone_a.get("os") == 1,
+          f"pretending `os` absent did not make it a wall that is ALSO alone "
+          f"(reach {reach_a.get('os')}, alone {alone_a.get('os')})")
+    # One module's absence adds exactly that module's row and disturbs nothing
+    # else — the property that makes the flag usable as a DELTA rather than as a
+    # second scope.
+    expected = dict(reach_b)
+    expected["os"] = 1
+    check(reach_a == expected,
+          f"pretending one module absent changed other rows too: "
+          f"{ {k: v for k, v in reach_a.items() if expected.get(k) != v} }")
+
+
+def test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel(tmpdir, _shared):
+    """The `sweep` column is the LAST host module named, not the first.
+
+    A refusal chains (`a imports b, which imports c, which is a host module`),
+    and which module the row is really about is the one at the END of the chain:
+    the first is what the file asked for, the last is what stopped it. Reading
+    the first attributes the row to a module that is merely the file's first
+    dependency, which is how a ranking ends up pointing at `collections` for
+    everything.
+    """
+    W = _wall_module()
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        log = os.path.join(d, "sweep.txt")
+        open(log, "w").write(
+            "NOT-ANSWERABLE/HOST-IMPORT: x.mojo  (build: x.mojo imports "
+            "'copy', which cannot be built either: y.mojo imports "
+            "'importlib', which is a host module)\n"
+            "PASS other.mojo\n")
+        rows = W.sweep_rows(log)
+    counts = {}
+    for _p, _name in rows.items():
+        counts[_name] = counts.get(_name, 0) + 1
+    check(counts.get("importlib") == 1,
+          f"the chain's terminal module was not the one counted: {counts}")
+    check("copy" not in counts,
+          "the chain's FIRST host module was counted, which is the wrong end")
+    check(W.sweep_rows("") == {} and W.sweep_rows("/nope") == {},
+          "a missing sweep log must be an empty column, not an error")
+
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -3974,6 +4201,14 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
+    ("the host-import wall's instrument reads the backend's own tree",
+     test_the_wall_instrument_uses_the_backends_own_readers),
+    ("the wall instrument separates reach from alone",
+     test_the_wall_instrument_separates_reach_from_alone),
+    ("the wall instrument measures a delta on one tree",
+     test_the_wall_instrument_measures_a_delta_on_one_tree),
+    ("the wall instrument reads the sweep column with its own peel",
+     test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel),
 ]
 
 

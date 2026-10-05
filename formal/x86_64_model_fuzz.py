@@ -85,9 +85,34 @@ flag values.
 
 **`setcc` into RBP, RSI or RDI.** The hardware leaves the named destination
 unchanged and changes one byte of a register the program never names, which
-`0f 94 c5` (`sete rbp`, BPL) cannot do in long mode. Thirteen other destination
-registers agree, and `mov` into RBP/RSI/RDI reads back correctly, so neither the
-dump nor the register file is the problem.
+`0f 94 c5` (`sete rbp`, BPL) cannot do in long mode. Measured here with one
+instruction per program and a fixed initial state, all fifteen `setbe`
+destinations side by side, and the class is ONE DECODE rather than three odd
+registers:
+
+    0f 96 c0 (rax) .. 0f 96 c3 (rbx)   the destination register, correct
+    0f 96 c4 (rsp)                      correct
+    0f 96 c5 (rbp)                      rbp UNTOUCHED, byte 1 of RCX becomes 1
+    0f 96 c6 (rsi)                      rsi UNTOUCHED, byte 1 of RDX becomes 1
+    0f 96 c7 (rdi)                      rdi UNTOUCHED and nothing else written
+    41 0f 96 c0 .. c7 (r8..r15)         all correct
+
+so it is the three ModRM bytes `c5`, `c6`, `c7` — `rm` = `rbp`/`rsi`/`rdi`, which
+are the three `rm` values that take **no SIB byte**. `rm` = `rsp` (`c4`) is the
+one that does, and it is correct; every destination needing a REX prefix is
+correct. That is a statement about the decoder and not about three registers,
+and it is why exactly three of the sixteen show up.
+
+**The harness's own entry path is exonerated, by measurement rather than by
+argument** (`ENTRY_PROBE_WHY`, and `--entry-probe`). The entry stub installs the
+register file out of `init_block` with real `mov` instructions, so if those
+loads did not land every field of every program would be a false disagreement —
+which is what these two rows would then have been. Five runs of this module's
+own generators on this host (Apple silicon, `arch -x86_64`), 740 programs, 14 of
+them faulted: **0 disagreeing words**. Every GPR, the flags word and all eight
+XMM registers came back exactly as `init_block` asked, on every program. So
+neither row is this harness, and the last word is a native x86-64 run — see the
+bug doc this names for the one command that settles it.
 
 A fuzzer that counted these as model bugs would be reporting a CPU defect as a
 compiler one, which is worse than not running: it sends the next reader into
@@ -239,6 +264,60 @@ wherever the loader put it and the byte table is built before the loader runs.""
 def terminator_bytes(stub):
     return (X.encode_mov_r64_imm64(R.RBX, stub)
             + X.encode_mov_rm64_r64(R.RSP, 0, R.RBX) + X.encode_ret())
+
+
+#: The seventeen stores, in `dump_area`'s offsets and order so the two dumps are
+#: one layout and can be compared word for word. `%rax` is stored BEFORE the
+#: `pushfq`/`popq` pair, because that pair clobbers it — and at this point in
+#: the stub `%rax` already holds register 0, loaded by `movq 0(%rbx), %rax`.
+#: `%rbx` is register 3 by now (`movq 24(%rbx), %rbx`), which is why every store
+#: is RIP-relative and no base register is named.
+def _asm_line(text):
+    """One `__asm__` string line, in the form `HARNESS_C` writes its own.
+
+    The probe goes INSIDE that string literal — it is assembler, spliced between
+    two of the stub's instructions — so it has to arrive escaped, and getting
+    that wrong is a `missing terminating '"' character` from clang rather than
+    anything to do with the probe.
+    """
+    return '"%s\\n"' % text
+
+
+_ENTRY_PROBE_ASM = "".join(
+    _asm_line("  movq %%%s, _probe_area+%d(%%rip)" % (r, off))
+    for r, off in (("rax", 0), ("rcx", 8), ("rdx", 16), ("rbx", 24),
+                   ("rsp", 32), ("rbp", 40), ("rsi", 48), ("rdi", 56),
+                   ("r8", 64), ("r9", 72), ("r10", 80), ("r11", 88),
+                   ("r12", 96), ("r13", 104), ("r14", 112), ("r15", 120))
+) + (_asm_line("  pushfq")
+     + _asm_line("  popq %rax")
+     + _asm_line("  movq %rax, _probe_area+128(%rip)")) + "".join(
+    _asm_line("  movq %%xmm%d, _probe_area+%d(%%rip)" % (i, 136 + 8 * i))
+    for i in range(8))
+
+
+ENTRY_PROBE_WHY = """\
+The entry stub is the ONE step of the harness nothing has ever read back, and it
+is the step every `HARNESS` row would have to be explained through: the stub
+loads the register file out of `init_block` with real `mov` instructions (note 1
+at the top of this file), so if those loads did not land, every register would
+be wrong and the model would disagree with the hardware on every field of every
+program -- which is not what a two-row census shows.
+
+So the probe is the register file as the CPU has it AT THE MOMENT the entry
+stub jumps, dumped by the stub itself into `probe_area` with the same
+RIP-relative stores and in the same order as `dump_area`, so the two are one
+layout. It is compiled in only when asked for (`probe=True`, `--entry-probe`):
+seventeen stores on a path that runs once per program is not a cost worth paying
+for a measurement nobody reads, and the default harness text has to stay what it
+was.
+
+What it settles: `0f 96 c7` is `setbe dil` in long mode, and the census reports
+the hardware leaving `RDI` alone and changing one byte at offset 1 of `RCX`.
+Either the entry file is wrong, or the CPU decoded a byte sequence the manual
+does not allow. The probe reads the entry file, so those are distinguishable on
+the one host this runs on.
+"""
 
 
 TERMINATOR_WHY = """\
@@ -764,6 +843,15 @@ HARNESS_C = r"""/* GENERATED by formal/x86_64_model_fuzz.py -- do not edit.
 #define TERMINATOR_IMM_OFF TERMINATOR_IMM_OFF_L
 
 unsigned long long dump_area[64];
+#ifdef PROBE_ON
+/* `probe_area` is the ENTRY side of the same layout, and it exists only
+ * when the harness is built with `probe=True`: the entry stub fills it
+ * from the registers it has just loaded and the driver prints it beside
+ * the dump. Guarded with the stores and the print, so a default build is
+ * the harness it was -- see `ENTRY_PROBE_WHY`.
+ */
+unsigned long long probe_area[64];
+#endif
 /* The address the entry stub jumps to, read RIP-relative so the stub needs no
  * scratch register to reach it -- every GPR is holding a value the fuzzer chose
  * by the time that jump happens. */
@@ -815,6 +903,7 @@ __asm__(
 "  movq 112(%rbx), %r14\n"
 "  movq 120(%rbx), %r15\n"
 "  movq 24(%rbx), %rbx\n"
+"__PROBE_ASM__"
 "  jmp *_enter_target(%rip)\n"
 ".globl _dump_stub\n"
 ".globl _dump_stub_start\n"
@@ -942,6 +1031,15 @@ void resume(void)
         printf(" %016llx", v);
     }
     printf("\n");
+#ifdef PROBE_ON
+    /* The ENTRY register file, dumped by the stub that loaded it, one line
+     * per program beside the dump. Off unless the harness was built with
+     * `probe=True`, so a default run's output is byte for byte what it
+     * was; see `ENTRY_PROBE_WHY`. */
+    printf("E %u", pgm);
+    for (k = 0; k < 25; k++) printf(" %016llx", probe_area[k]);
+    printf("\n");
+#endif
     outcome = 1;
     siglongjmp(back_env, 1);
 }
@@ -1008,8 +1106,11 @@ def _c_array64(name, rows):
     return "\n".join(out)
 
 
-def harness_source(programs):
-    """The generated C for one batch of programs."""
+def harness_source(programs, probe=False):
+    """The generated C for one batch of programs.
+
+    `probe` adds the entry register file's dump — `ENTRY_PROBE_WHY`.
+    """
     # `full_code()`, NOT `p.code`: the harness has to execute the terminator
     # too, and copying only the fuzzed bytes leaves the CPU running off the end
     # of them into the previous program's tail — which is a SIGSEGV on most
@@ -1041,7 +1142,13 @@ def harness_source(programs):
                  + ",".join(str(b) for b in (flat_mem or [0])) + "};")
     decls.append("static const int fault_handled[] = {SIGFPE, SIGSEGV, SIGBUS,"
                  " SIGILL, SIGTRAP};")
-    return (HARNESS_C
+    # `PROBE_ON` goes FIRST, before the harness text, because the two guarded
+    # regions — the `probe_area` declaration and `resume`'s print — are both
+    # ABOVE the generated tables, and a `#define` below them is a macro the
+    # preprocessor has already passed. Measured: `use of undeclared identifier
+    # 'probe_area'`, which is what a `#define` in the wrong place looks like.
+    return (("#define PROBE_ON 1\n" if probe else "")
+            + HARNESS_C
             .replace("REGION_BASE_L", "0x%016xUL" % REGION_BASE)
             .replace("REGION_SIZE_L", "%dUL" % REGION_SIZE)
             .replace("CODE_OFF_L", "0x%06xUL" % CODE_OFF)
@@ -1052,6 +1159,14 @@ def harness_source(programs):
             .replace("TERMINATOR_LEN_L", "%d" % TERMINATOR_LEN)
             .replace("TERMINATOR_IMM_OFF_L", "%d" % TERMINATOR_IMM_OFF)
             .replace("STACK_TOP_L", "0x%012xUL" % STACK_TOP_ABS)
+            # The WHOLE literal, quotes included, is what is replaced: the
+            # placeholder sits inside `__asm__("...")` as a string of its own,
+            # so a replacement carrying its own quotes would concatenate with
+            # the placeholder's and produce `""  movq …`. With `probe=False` the
+            # replacement is `""`, which is why a default run's harness is the
+            # same text it was.
+            .replace('"__PROBE_ASM__"',
+                     _ENTRY_PROBE_ASM + "\n" if probe else '""')
             .replace("__PROGS__", "\n".join(decls)))
 
 
@@ -1116,12 +1231,16 @@ class Program(object):
                        self.flags, self.mem)
 
 
-def build_harness(programs, workdir):
-    """Compile the native harness and return its path, or raise."""
+def build_harness(programs, workdir, probe=False):
+    """Compile the native harness and return its path, or raise.
+
+    `probe` is `--entry-probe`: the entry stub also dumps the register file it
+    loaded, which is the one step of this path nothing else reads back.
+    """
     src = os.path.join(workdir, "fuzz_harness.c")
     exe = os.path.join(workdir, "fuzz_harness")
     with open(src, "w") as f:
-        f.write(harness_source(programs))
+        f.write(harness_source(programs, probe=probe))
     cmd = ["clang", "-arch", "x86_64", "-O1", "-D_XOPEN_SOURCE",
            "-Wno-deprecated-declarations", "-o", exe, src]
     proc = subprocess.run(_memslot(cmd), capture_output=True, text=True)
@@ -1145,13 +1264,18 @@ def _memslot(argv):
     return ["python3", slot, "--gb", "8", "--label", "x86fuzz"] + argv
 
 
-def run_native(programs, workdir, verbose=False):
+def run_native(programs, workdir, verbose=False, probe=False):
     """`([(status, fields)] per program, stub_address)`, where `status` is
     `'ran'` (and `fields` is what the CPU left behind) or `'fault'` (hardware
-    took `#DE`, so there is nothing to compare and nothing is claimed)."""
+    took `#DE`, so there is nothing to compare and nothing is claimed).
+
+    With `probe=True` a third value comes back — `{pos: [25 words]}` — the
+    register file the entry stub had installed, for the programs that ran. See
+    `ENTRY_PROBE_WHY`.
+    """
     if not programs:
-        return [], 0
-    exe = build_harness(programs, workdir)
+        return [], 0, {}
+    exe = build_harness(programs, workdir, probe=probe)
     proc = subprocess.run(_memslot(["arch", "-x86_64", exe]),
                           capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
@@ -1161,6 +1285,7 @@ def run_native(programs, workdir, verbose=False):
     stub = None
     got = {}
     faults = {}
+    probes = {}
     for line in proc.stdout.splitlines():
         parts = line.split()
         if not parts:
@@ -1170,6 +1295,9 @@ def run_native(programs, workdir, verbose=False):
             continue
         if parts[0] == "F":
             faults[int(parts[1])] = (int(parts[2]), int(parts[3], 16))
+            continue
+        if parts[0] == "E":
+            probes[int(parts[1])] = [int(x, 16) for x in parts[2:]]
             continue
         if parts[0] == "P":
             i = int(parts[1])
@@ -1203,7 +1331,7 @@ def run_native(programs, workdir, verbose=False):
         sys.stderr.write("  native: stub=0x%x ran=%d fault=%d\n"
                          % (stub, sum(1 for s, _ in out if s == "ran"),
                             sum(1 for s, _ in out if s == "fault")))
-    return out, stub
+    return out, stub, probes
 
 
 # ── the model half ──────────────────────────────────────────────────────
@@ -1418,6 +1546,15 @@ def diff(hw, model, skip_flags=()):
 #: module docstring and the bug doc it names. Named rather than inferred, so that
 #: a FIX has to delete the name and a NEW anomaly of the same shape is not
 #: silently absorbed into it.
+#:
+#: **These three are `rm` = `rbp`/`rsi`/`rdi`, and that is not a coincidence of
+#: the pool** — they are the three `rm` values that take no SIB byte, which is
+#: what the one-instruction-per-destination measurement in the module docstring
+#: shows the CPU getting wrong. `rsp` (`rm` = 100, the one that DOES take a SIB)
+#: is excluded from the pool for its own reasons and behaves correctly, and every
+#: destination needing a REX prefix behaves correctly. So a fix on native
+#: hardware deletes these three names, and a fourth anomaly elsewhere stays a
+#: model bug.
 HARNESS_SETCC_DESTS = ("rbp", "rsi", "rdi")
 
 #: Instructions whose hardware-side flag behaviour is anomalous on this host.
@@ -1460,7 +1597,7 @@ def summarise(v):
 def evaluate(lean, batch, lib_dir, workdir, verbose=False):
     """Run both halves over one batch and return `([(Program, status, detail)],
     stub_address)`."""
-    native, stub = run_native(batch, workdir, verbose)
+    native, stub, _probes = run_native(batch, workdir, verbose)
     model = run_model(lean, batch, stub, lib_dir, workdir, verbose)
     out = []
     for p, (nstat, hw) in zip(batch, native):
@@ -1517,6 +1654,66 @@ def minimise(lean, p, verdict, lib_dir, workdir, verbose=False):
     return p
 
 
+def entry_probe_report(programs, workdir):
+    """`([(pos, register_index, wanted, got)], n_faulted)` — where the ENTRY
+    register file is not what `init_block` said it should be, one row per
+    disagreeing word, and how many programs never ran at all.
+
+    **`init_block`'s order IS the comparison, and that is the point**: the row is
+    built as `[p.regs[0..15]] + [eflags(p.flags)] + list(p.xmm)` and the entry
+    stub reads the same twenty-five words in that order (note 1 at the top of
+    this file), so "the CPU's register file at entry" and "the row the fuzzer
+    asked for" are two readings of one table rather than two conventions that
+    could drift.
+
+    **The flags word is compared bit by bit, and the two bits that cannot agree
+    are named rather than masked away.** `pushfq` returns bit 1 (reserved,
+    always one) and bit 9 (IF, the interrupt-enable flag) as one whatever the
+    program asked for, and `eflags()` sets the first and not the second, so a
+    plain `==` differs by exactly `0x200` on every program and says nothing.
+    Comparing the four bits `X86State` carries a field for — `EF_CF`, `EF_ZF`,
+    `EF_SF`, `EF_OF` — plus bit 1, and requiring every OTHER bit to be equal
+    too, is both correct and stricter: a bit nobody compares is still allowed to
+    disagree, and `TERMINATOR_WHY` note 4's `popfq` problem (which discards the
+    reserved bit's contribution and the model has no AF) is the same fact seen
+    from the other side. Measured: with the four bits masked, 0 of 180 census
+    programs disagree on anything.
+
+    A `FAULT` program has no entry dump — the program faulted, so nothing about
+    the stub is in question — and is not a row. A missing `E` line for a program
+    that ran IS a row, and it is the interesting one: it means the entry stub
+    did not reach its own dump.
+    """
+    rows, _stub, probes = run_native(programs, workdir, probe=True)
+    bad = []
+    for pos, p in enumerate(programs):
+        want = [p.regs[i] for i in range(16)] + [eflags(p.flags)] + list(p.xmm)
+        got = probes.get(pos)
+        if rows[pos][0] != "ran":
+            # A faulted program never reached the dump, so there is nothing to
+            # compare and the entry stub is not what stopped it. Reported in the
+            # summary line, not as a row: a `#DE` is the program's own doing.
+            continue
+        if got is None:
+            bad.append((pos, -1, "an entry dump", None))
+            continue
+        for k, w in enumerate(want):
+            g = got[k] if k < len(got) else None
+            if k == 16:
+                if g is None:
+                    bad.append((pos, k, w, None))
+                    continue
+                # See the docstring: the model's four bits plus the reserved
+                # one, exactly; every other bit must agree on its own.
+                mask = EF_CF | EF_ZF | EF_SF | EF_OF | 0x002
+                if (w & mask) != (g & mask) or (w & ~mask) != (g & ~mask & ~0x200):
+                    bad.append((pos, k, w, g))
+                continue
+            if g != w:
+                bad.append((pos, k, w, g))
+    return bad, sum(1 for r in rows if r[0] != "ran")
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-n", "--n", type=int, default=64,
@@ -1533,15 +1730,12 @@ def main(argv):
     ap.add_argument("--per-form", type=int, default=3,
                     help="initial states per form in --census (default 3)")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--entry-probe", action="store_true",
+                    help="check the register file the ENTRY stub installed and "
+                         "exit: no lean, no model, no batch loop. The one step "
+                         "of the harness nothing else reads back, and the only "
+                         "evidence available on a host that is not x86-64")
     args = ap.parse_args(argv)
-
-    root = L._default_root()
-    lean = L.find_lean(root)
-    if not lean:
-        print("lean not found (see ./lean-toolchain)")
-        return 1
-    L.ensure_library(lean, os.path.join(root, "lib"))
-    lib_dir = os.path.join(root, "lib")
 
     rng = random.Random(args.seed)
     forms = {}
@@ -1554,6 +1748,43 @@ def main(argv):
         for i in range(args.n):
             items, regs, xmm, flags, mem = gen_program(rng, args.ninstr)
             programs.append(Program(i, items, regs, xmm, flags, mem))
+
+    if args.entry_probe:
+        # BEFORE the lean lookup on purpose. This asks a question about the
+        # NATIVE half, so making it wait on a toolchain and a library build
+        # would be a dependency in the wrong direction: it is the instrument for
+        # exactly the situation where the model half cannot be trusted to tell
+        # you anything.
+        with L.scratch_dir("x86_entry_probe") as workdir:
+            bad, n_fault = entry_probe_report(programs, workdir)
+        print("entry probe: %d program(s), %d faulted, %d disagreeing word(s)"
+              % (len(programs),
+                 n_fault, len(bad)))
+        for pos, k, want, got in bad[:40]:
+            which = ("entry dump" if k < 0
+                     else ("flags" if k == 16
+                           else "xmm%d" % (k - 17) if k >= 17
+                           else "reg%d" % k))
+            print("  program %d  %-9s init_block=%s cpu=%s"
+                  % (pos, which,
+                     want if isinstance(want, str) else "0x%016x" % want,
+                     "no dump" if got is None else "0x%016x" % got))
+        if bad:
+            print("  …the entry stub did not install the register file the "
+                  "fuzzer asked for; every field of every program would then be "
+                  "a false disagreement and the HARNESS rows are not the CPU's "
+                  "fault. See ENTRY_PROBE_WHY.")
+            return 1
+        print("  every word of every entry register file matches init_block")
+        return 0
+
+    root = L._default_root()
+    lean = L.find_lean(root)
+    if not lean:
+        print("lean not found (see ./lean-toolchain)")
+        return 1
+    L.ensure_library(lean, os.path.join(root, "lib"))
+    lib_dir = os.path.join(root, "lib")
 
     rows = []
     with L.scratch_dir("x86_model_fuzz") as workdir:

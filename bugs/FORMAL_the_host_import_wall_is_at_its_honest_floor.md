@@ -7,6 +7,74 @@ This is the wave note for three modules written (`formal/hostmods/{traceback,
 signal,operator}.mojo`) and it is the queue for everything the wave could not
 write, which is most of what is left.
 
+**Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
+§3 has been re-measured on this tree by it. The queue itself is unchanged: 20
+names, six capabilities, and every one of them still a project rather than a
+module.** `tools/formal_host_import_wall.py` is the instrument §5 asked for,
+it reads the backend's own readers, and it keeps `--pretend-unmodelled`, which
+§5 names as the only way to measure a delta on one tree. Four Lean-free cases in
+`test_formal_imports.py` pin the three properties that make the ranking a
+measurement rather than a fourth description to drift: that it reads
+`fire_compiler`'s tree and not `ast`'s, that `reach` and `alone` are different
+questions, and that the delta flag moves `clean` in one direction only.
+
+**The re-measure, over the whole repository (484 `.mojo`/`.py` files) rather than
+§3's 203 `not-answerable/host-import` files, so the two columns are NOT
+comparable** — a file whose only wall is a host import is in both corpora, and
+one whose wall is anything else is in neither. What is comparable is the
+`sweep` column, which is read out of the same log and which agrees with §3 row
+for row on the rows §3 lists (`importlib` 90, `copy` 13, `abc` 0, `collections`
+29, `types` 6, `resource` 0, `itertools` 14, `unittest` 16, `builtins` 2,
+`inspect` 4, `random` 5, `socket` 2, `atexit` 1, `uuid` 1, `asyncio` 1,
+`functools` 1) — which is the check that the tool ranks what §3 ranked.
+
+    $ python3 tools/formal_host_import_wall.py --sweep bugs/sweeps/sweep-arm-11.txt
+    484 files, 23 host module(s) named, 204 with no unmodelled host module left
+
+    module                  reach  alone  sweep  tier
+    collections               141     12     29  modelled
+    unittest                   17      9     16  unreachable
+    builtins                   29      2      2  unreachable
+    random                      8      2      5  modelled
+    datetime                    3      2      2  modelled
+    copy                      237      1     13  modelled
+    itertools                  21      1     14  modelled
+    socket                      2      1      2  unreachable
+    tokenize                    2      1      2  unclassified
+    functools                   1      1      1  modelled
+    pwd                         1      1      0  unclassified
+    abc                       236      0      0  modelled
+    importlib                 236      0     90  unreachable
+    types                     107      0      6  modelled
+    resource                   34      0      0  modelled
+    inspect                     8      0      4  modelled
+    atexit                      2      0      1  unreachable
+    uuid                        2      0      1  modelled
+    asyncio                     1      0      1  unreachable
+    fractions                   1      0      0  modelled
+    plistlib                    1      0      1  unclassified
+    sqlite3                     1      0      1  unclassified
+    token                       1      0      0  unclassified
+
+**§6's `unittest` re-measure is DONE and it moves that row UP, not down: 9
+`alone`, not the 7 §3 recorded.** §3's own warning was right — the cause named
+there (a subclass dropping its base's fields) was FIXED in `5cf72641`, so the 7
+were a before-measurement — and two more files have since become `unittest`-only.
+`collections` is now the largest `alone` row at 12 and is CLAIMED
+(`hostmods-platform`); `unittest` at 9 is the largest unclaimed one, and
+`datetime`/`random` at 2 are the two smallest rows that are neither
+`HOST_UNREACHABLE` nor claimed.
+
+**Two names are in this table and not in §3's, and both are why the table cannot
+be read as "what §3 measured":** `pwd` and `token`. §3's corpus is the sweep's
+`host-import` class; this tool measures every file's closure whatever the sweep
+called it, and a file whose wall is `pwd` is not in the former.
+
+**§6's item 1 (`token`/`tokenize`'s constants) is still not done**, for §3's
+reason, which §5's tool does not change: `ast.mojo` already holds the numbers, a
+second table would be a duplicate, and the two files that want them also want
+`generate_tokens`, which moves 0 either way.
+
 **The finding, in one sentence: after this wave, every remaining name on the row
 needs an object a freestanding image that links libSystem and nothing else does
 not have, so the row is not a queue of small modules any more — it is a queue of
@@ -223,12 +291,37 @@ with `formal.imports.host_module_tier` / `is_cpython_stdlib` / `INERT_MODULES` /
 for the corpus (`find_source_files`, `default_roots`), for the class prefix and
 for `_split_chain`, rather than owning a second copy of any of them.
 
-**The ability §5 used to ask for is the tool's `--unmodelled`, and it is the
-reason a delta is measurable on ONE tree**: a module landing unmasks the row
-behind it and never grows one, so a before/after across two checkouts measures
-the merge. `test_formal_host_import_wall.py` pins it on a real file —
-`tools/suite.py` imports `glob`, `formal/hostmods/glob.mojo` answers it, so
-`tools/suite.py` has no wall today and exactly one (`glob`) with the flag.
+**IT IS A TOOL: `tools/formal_host_import_wall.py`.** The three documents that
+describe it should read it instead of restating it, and the ability §5 asked
+for — pretend a module is unmodelled, which is the only way to measure a delta on
+ONE tree, because a module landing unmasks the row behind it and never grows one
+— is the tool's `--unmodelled`. A before/after across two checkouts measures
+the merge, not the change. `test_formal_host_import_wall.py` pins the flag on a
+real file: `tools/suite.py` imports `glob`, `formal/hostmods/glob.mojo` answers
+it, so `tools/suite.py` has no wall today and exactly one (`glob`) with the flag.
+`test_formal_imports.py` pins the same flag on a fixture, so the delta is a
+measurement rather than a demonstration.
+
+Two branches built this tool at the same time, as `formal_host_import_wall.py`
+and `formal_host_import_walls.py`, and ONE of them survived: two tools
+answering one question is a second thing to forget an arm of, and the pins
+written against the loser were moved onto the winner rather than left failing.
+What the loser had that the winner did not was `--scope`, which is now the
+winner's. Three properties of the walk turned out to matter and are all in the
+tool:
+
+* **it is fast enough to run over the whole repository**, by caching
+  `imported_modules` per file. The uncached version re-parsed `fire_compiler.py`
+  once per importer — 170 times — and did not finish in ten minutes. A
+  measurement that only runs on a sample is a measurement of the sample;
+* **it reports a file it cannot parse AS ITSELF**, rather than as a file with no
+  walls. One file in this corpus (`test_formal_libc_symbol.py`) is such a case,
+  and counting it as clean would have ranked it as the easiest thing here —
+  the header now prints the count, so the corpus says out loud how much of it it
+  could read;
+* **it names both wordings of the host-module refusal**, so the `sweep` column
+  is not silent about the files that are in no tier. See
+  `_HOST_MODULE_RE` at the top of the tool for the measurement.
 
 Three things the promotion changed about the measurement, each of them a
 correction rather than a refactor:
@@ -261,12 +354,22 @@ the same count over the 18 files the tool says reach it.
   `alone`, so the constants still move 0 files and the duplicate table would
   still be a duplicate.
 * **`unittest`** — **the re-measurement is DONE (§0) and the answer is that this
-  row is not modellable at all**: 17 of its 18 files spell `unittest.main()`,
-  which is a run-time type walk, so the row is `abc`'s and `builtins`'
-  capability under a second name. Nothing further to pick up here, and the
-  "inheritance plus method dispatch" cause this doc carried is withdrawn.
+  row is not modellable at all**, which supersedes the older reading of it as
+  "the largest honestly-modellable-looking row (7 alone, 16 sweep), blocked on
+  a claimed bug". That blocker — a subclass dropping its base's fields — is
+  FIXED (commit `5cf72641`), so it was never the reason; the reason is that 17
+  of `unittest`'s 18 files spell `unittest.main()`, which is a run-time type
+  walk, so the row is `abc`'s and `builtins`' capability under a second name.
+  Nothing further to pick up here, and the "inheritance plus method dispatch"
+  cause this doc carried is withdrawn.
 * **The walk** — DONE. §5's promotion note is now a tool, a test and a usage
   line, and this document no longer describes a walk.
+* **The `alone` column is a lower bound on what writing a module would move, and
+  not an upper one.** It counts files for which a name is the ONLY wall in the
+  closure — the files "writing this module makes this file build" is a true
+  statement about — and says nothing about a file that names two walls and would
+  move on the second. So the names below are not independent decisions, and
+  `collections` at 12 `alone` is not the whole of what it is worth.
 
 ## What is left that is genuinely next, and it is not a module
 

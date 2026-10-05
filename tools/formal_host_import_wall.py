@@ -114,6 +114,22 @@ _HOST_MODULE_RE = re.compile(
     r"imports '([^']+)', which is (?:a host module|a CPython standard-library"
     r" module)")
 
+#: The sub-corpora the table can be scoped to, because "what is left" is a
+#: different question for each and answering it over the whole repository for
+#: every wave is how a number stops meaning anything. `repo` is the default and
+#: is the whole walk; the rest are the directories a module landing can move,
+#: by the count of files each actually owns. Deliberately keyed on the
+#: REPO-RELATIVE path, so `--scope tools` does not depend on where this
+#: checkout lives.
+SCOPES = {
+    "repo": lambda rel: True,
+    "tools": lambda rel: rel.startswith("tools/") or rel.startswith("test_"),
+    "formal": lambda rel: rel.startswith("formal/"),
+    "runtime": lambda rel: rel.startswith("runtime/"),
+    "stdlib": lambda rel: rel.startswith("std/") or "/std/" in rel
+                          or rel.startswith("lib/"),
+}
+
 #: A parsed module's names, keyed by the resolved path they came from. One parse
 #: per source file for the whole corpus, because the closure walk visits the
 #: same module from every file that imports it and `parse_module` is the
@@ -285,6 +301,11 @@ def main(argv=None) -> int:
                     help="pretend NAME has no formal/hostmods/ source, which "
                          "is what 'before this module landed' means; repeat "
                          "for several, so one tree can answer before and after")
+    ap.add_argument("--scope", default="repo", choices=sorted(SCOPES),
+                    help="which sub-corpus to rank (default repo, the whole "
+                         "walk); 'stdlib' is the one a module landing can "
+                         "actually move, so it is the one worth re-reading "
+                         "after every wave")
     ap.add_argument("--min", type=int, default=1,
                     help="only print rows with at least this many files "
                          "reaching them (default 1, so nothing is hidden)")
@@ -298,6 +319,13 @@ def main(argv=None) -> int:
     else:
         roots, notes = SW.default_roots()
     files = SW.find_source_files(roots)
+    keep = SCOPES[args.scope]
+    scoped = [f for f in files
+              if keep(os.path.relpath(os.path.abspath(f), HERE))]
+    if len(scoped) != len(files):
+        print(f"note: --scope {args.scope} kept {len(scoped)} of "
+              f"{len(files)} files", file=sys.stderr)
+    files = scoped
     for note in notes:
         print(f"note: {note}", file=sys.stderr)
 
