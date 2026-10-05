@@ -5976,6 +5976,55 @@ BOTH_ARCH_CASES = [
      "    printf(\"eq=%d %d\", 1 if mk(1) == mk(2) else 0,\n"
      "           1 if q == mk(2) else 0)\n"
      "    return 0\n", 0, "eq=1 1"),
+    # The same construct with a call in the chain's MIDDLE, and this row is here
+    # for the three facts the fix introduces that a single-statement row cannot
+    # reach, each of which is a way the hoist could be wrong on ONE architecture:
+    #
+    #   * `hits=3` — the temporary is bound INSIDE the loop body, so it
+    #     re-evaluates per iteration the way the expression it replaced did.  A
+    #     hoist to the top of the function would answer 1 here (evaluated once),
+    #     and a hoist outside the loop would be a different program.
+    #   * `coll=7` — a source local spelled `_eq_operand1`, the name the hoist
+    #     would otherwise hand itself.  A temporary that shadowed a local would
+    #     print the frame address (or crash) instead, and it would print it only
+    #     where the ordering of the name search put the temporary first.
+    #   * `ret=1` — the chain in a `return` STATEMENT rather than in a call's
+    #     argument list, which is the case where the enclosing statement has to
+    #     be SPLIT rather than filled in.
+    #
+    # `hits=3 ret=1` is CPython's answer for this text (a `class` twin with
+    # `__eq__` defined), so the constants are the oracle's and not this
+    # backend's.
+    ("both_arch_eq_chain_with_a_middle_call_in_a_loop_and_a_return",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    var u = mk(1)\n"
+     "    var _eq_operand1 = 7\n"
+     "    var i = 0\n"
+     "    var hits = 0\n"
+     "    while i < 3:\n"
+     "        if t == mk(1) == u:\n"
+     "            hits = hits + 1\n"
+     "        i = i + 1\n"
+     "    printf(\"hits=%d coll=%d ret=%d\", hits, _eq_operand1,\n"
+     "           1 if t == mk(1) == mk(1) else 0)\n"
+     "    return 1 if t == mk(1) == u else 0\n", 1,
+     "hits=3 coll=7 ret=1"),
     # …and the case that used to REFUSE a function read as a value, in the
     # group whose docstring says a construct the two backends once disagreed
     # about belongs here.  A function value is its entry ADDRESS
@@ -17660,15 +17709,20 @@ EQ_DISPATCH_CASES = [
      "    var t = mk(1)\n"
      "    printf(\"chain=%d\", 1 if mk(1) == t == mk(1) else 0)\n"
      "    return 0\n", 0, "chain=1"),
-    # …and the call in a chain's MIDDLE, which stays an address compare, and is
-    # pinned as the ONE remaining shape rather than left to be discovered: the
-    # lowering reads each operand twice, so `t == mk(1) == u` would call `mk`
-    # three times where the source calls it twice. The remedy is a
-    # STATEMENT-level rewrite — bind the operand to a temporary in the enclosing
-    # statement, which needs its own round in the holder fixpoint — and it is
-    # written down in `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` rather
-    # than done here.
-    ("eq_chain_with_a_call_in_the_middle_stays_an_address_compare",
+    # …and the call in a chain's MIDDLE, which now reaches the method, evaluates
+    # the call ONCE, and is pinned here rather than left to be discovered.  The
+    # lowering turns a chain into the `and` of its links, and a middle operand
+    # appears in TWO of them, so `t == mk(1) == u` would call `mk` twice where
+    # `F.CompareChain` says each operand is evaluated exactly once — and it used
+    # to: the rewrite declined the shape and the operator stayed an ADDRESS
+    # COMPARE, printing 0 where CPython prints 1, silently, on both machines.
+    # `formal/build.py`'s `_hoist_eq_chain_middle_calls` binds the operand to a
+    # local in the enclosing STATEMENT first (an expression has nowhere to put
+    # one), after which the chain is three names and the dispatch is the
+    # ordinary one.  The needle pair is why this row can tell a fixed hoist from
+    # a broken one: `mid` is True only if the method ran, and `diff` is False
+    # only if it ran on the VALUES.
+    ("eq_chain_with_a_call_in_the_middle_reaches_a_declared_eq",
      "struct A:\n"
      "    var x: Int\n"
      "    var y: Int\n"
@@ -17686,8 +17740,10 @@ EQ_DISPATCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var t = mk(1)\n"
-     "    printf(\"chain=%d\", 1 if t == mk(1) == mk(1) else 0)\n"
-     "    return 0\n", 0, "chain=0"),
+     "    var u = mk(2)\n"
+     "    printf(\"mid=%d diff=%d\", 1 if t == mk(1) == mk(1) else 0,\n"
+     "           1 if t == mk(1) == u else 0)\n"
+     "    return 0\n", 0, "mid=1 diff=0"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this
