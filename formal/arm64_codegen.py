@@ -1100,6 +1100,12 @@ dylib_exports: list = None, globals_base: int = None,
         # makes a caller reserve a block the callee never writes.
         self._image_returns_frame = dict(
             getattr(f, "_image_returns_frame", None) or {})
+        # The same shape for a CONTAINER this image hands back, published beside
+        # it by the same pass (`formal/build.py`'s `check_module_symbols`) and
+        # for the same reason: the sizes belong to the CALLEE's body and the
+        # emitter asking is the caller's, with no unit in hand.
+        self._image_returns_container_bytes = dict(
+            getattr(f, "_image_returns_container_bytes", None) or {})
         # The FUNCTION NODE, not just its name.  The pointer value model reads
         # a receiver's declared type from the function being emitted — a
         # parameter annotation, a `var p: Pointer[T]`, the bindings of a name —
@@ -1306,11 +1312,34 @@ dylib_exports: list = None, globals_base: int = None,
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        # Blocks for CONTAINERS this function RECEIVES from a callee that returns
+        # one, and the COPY after each such call that fills them.  The third kind
+        # of block in the same reserved region as the constructor frames and the
+        # returned-frame blocks, for the same reason: a block reserved here is in
+        # THIS function's scratch, so it lives exactly as long as the value bound
+        # to it — which is what makes a handed-back container readable after the
+        # caller's next call rather than readable only before it.
+        #
+        # `_image_returns_container_bytes`, NOT `self._image_returns_frame`: the
+        # two tables answer different questions about the same kind of value, and
+        # one is BYTES rather than a struct.  The sizes are an over-estimate (see
+        # `model.returned_container_blob_bytes`), so the copy can read a few words
+        # past the callee's own blob; those words are past its COUNT, which is
+        # what decides how many of them any reader can reach.
+        self._ret_blob_sites = M.container_returned_blob_sites(
+            f, self._image_returns_container_bytes)
+        self._ret_blob_base = (self._frame_recv_bytes + self._ret_frame_bytes)
+        self._ret_blob_bytes = sum(v[0] for v in self._ret_blob_sites.values())
+        if self._ret_blob_base + self._ret_blob_bytes > self._blob_cap:
+            raise CodegenError(M.frame_blob_refusal(
+                "a container handed back by a call",
+                self._ret_blob_base + self._ret_blob_bytes, self._blob_cap))
         # The blob cursor starts ABOVE the receiver frames AND above the blocks
         # reserved for frames this function receives, not at the bottom of the
         # scratch: the frames live there (see above) and a blob must not land
         # on one.
-        self._list_cursor = self._frame_recv_bytes + self._ret_frame_bytes
+        self._list_cursor = (self._frame_recv_bytes + self._ret_frame_bytes
+                            + self._ret_blob_bytes)
         self._for_list_depth = 0
         self._compr_depth = 0
         self._container_ctx = 0
@@ -8483,6 +8512,37 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_frame_base(site[1])
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    def _emit_returned_blob_copy(self, nbytes: int, offset: int) -> None:
+        """X0 = the caller's own copy of the blob the call just returned.
+
+        The SOURCE is X0 (the callee's blob base, the value the call produced) and
+        the DESTINATION is the block this function reserved for that call site
+        (`model.container_returned_blob_sites`' offset), and the call's value
+        becomes the destination — so every later use of it, `len`, a subscript,
+        a `printf`, is an ordinary blob access on this function's own storage.
+
+        `LDR`/`STR` with an immediate offset and no register-offset form, for the
+        reason the rest of this file's element accesses use that form only past
+        `_BLOB_IMM_MAX`: a returned blob is bounded by this function's own frame
+        (`model.frame_blob_refusal` above, and the callee's own reservation
+        before that), so the largest copy is a few thousand bytes and the
+        scaled 12-bit immediate reaches it.  The modelled `arm64_step` covers
+        this form and the register-offset one differently, and a copy whose
+        addressing the proof model does not decode would be an image the proof
+        cannot talk about — so the form that needs no extra case is the one
+        emitted.
+
+        X16 is the word in flight and X9 the destination base.  Neither is an
+        argument register (both are caller-saved temporaries under AAPCS64), the
+        copy runs after the last argument was popped and after the outgoing area
+        was released, and nothing transient is live across it.
+        """
+        self._emit_frame_base(offset)
+        for byte in range(0, nbytes, 8):
+            self.asm.emit(encode_ldr_xt_xn_imm(16, 0, byte))
+            self.asm.emit(encode_str_xt_xn_imm(16, 9, byte))
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
     def _emit_frame_return(self, value) -> None:
         """`return <frame>` in a function the convention applies to.
 
@@ -9182,6 +9242,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         for se in side_effects:
             self._emit_expr(se)
         sret_site = self._ret_frame_sites.get(id(e))
+        blob_site = self._ret_blob_sites.get(id(e))
         nargs = len(args) + (1 if sret_site is not None else 0)
         # AAPCS passes the first eight arguments in X0..X7. A ninth has no
         # register, and this path has no stack-argument convention to fall
@@ -9372,6 +9433,25 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     here_offset=-4)
         if stack_bytes:
             _emit_add_imm(self.asm, 31, 31, stack_bytes)
+        if blob_site is not None and not is_extern:
+            # `and not is_extern` is the table's own scope stated as a guard: a
+            # name in `_image_returns_container_bytes` is a function of THIS
+            # image with a blob it reserved itself, and an `is_extern` call under
+            # the same spelling branches into a LINKED LIBRARY, whose result
+            # this table says nothing about. Copying from it would read whatever
+            # the library returned as a frame address.
+            # The callee handed back a blob in a block of ITS OWN scratch, and
+            # that scratch died with it: the values read back after this
+            # function's next call are whatever that call left there (measured,
+            # both architectures, two different wrong answers — see
+            # `model.returned_container_blob_bytes`).  So the block is copied into
+            # THIS function's scratch HERE, immediately after the call and before
+            # anything else runs, and the call's value becomes the copy's
+            # address.  Immediately is the whole of the soundness argument: the
+            # callee's frame is still intact at this point, so the bytes copied
+            # are the callee's own.
+            self._emit_returned_blob_copy(blob_site[0],
+                                          self._ret_blob_base + blob_site[1])
         if ext_return is not None:
             self._emit_extern_return(ext_return)
         elif is_extern:

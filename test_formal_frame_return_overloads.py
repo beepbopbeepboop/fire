@@ -339,12 +339,14 @@ def test_an_agreeing_overload_still_builds_and_runs(tmpdir):
 # caller reserves a block in its OWN scratch and passes its address as a hidden
 # trailing argument, and the callee copies into it
 # (`model.struct_returned_frame_sites`, `returned_frame_convention_refusal`).
-# A CONTAINER has no such copy, because its words are laid out in the frame by
-# `_blob_est` — so `return xs` hands the caller an address into memory that dies
-# with the call. The case is here because it is the same subject the rest of this
-# file is about (what a function may hand back) and a DIFFERENT answer, and
-# because the hazard is invisible: the values are right immediately after the
-# call and wrong after the next one.
+# A CONTAINER had no such copy, because its words are laid out in the frame by
+# `_blob_est` — so `return xs` handed the caller an address into memory that dies
+# with the call. It has one now (`model.container_returned_blob_sites`: the
+# CALLER reserves the block and copies the blob into it immediately after the
+# call), and this is the program that used to be the measurement of the wrong
+# answer the copy removes: `arm64` read `7 8 9` after `litter(7)` — that
+# function's own scratch — and `x86_64` read `8 9 33`, a mix of the two frames,
+# for the same source, while CPython answers `11 22 33` in both.
 CONTAINER_ESCAPE = """\
 def lit() -> List[Int]:
     return [11, 22, 33]
@@ -386,31 +388,247 @@ def main(n) -> Int:
 """
 
 
-def test_a_container_read_after_a_call_is_refused(tmpdir):
+# The two shapes the copy CANNOT own, and they are the boundary rather than an
+# oversight.  A NESTED blob puts an address into the block, and the address is
+# still into the callee's frame after the copy; a callee that does not return on
+# every path leaves whatever was in the return register, and the copy would read
+# from it.  Both keep the refusal, and both say the same sentence the copy's own
+# documentation points at.
+CONTAINER_NOT_OWNED_NESTED = """\
+def nested(n) -> List[List[Int]]:
+    var outer = []
+    var inner = [n, n + 1]
+    outer.append(inner)
+    return outer
+
+
+def litter(n) -> Int:
+    var junk = []
+    junk.append(n)
+    return len(junk)
+
+
+def main(n) -> Int:
+    var o = nested(3)
+    printf("right: %d %d\\n", o[0][0], o[0][1])
+    var k = litter(7)
+    printf("after: %d %d\\n", o[0][0], o[0][1])
+    return 0
+"""
+
+CONTAINER_NOT_OWNED_MIXED_RETURN = """\
+def maybe(n):
+    if n > 0:
+        return [11, 22]
+    return 0
+
+
+def litter(n) -> Int:
+    var junk = []
+    junk.append(n)
+    return len(junk)
+
+
+def main(n) -> Int:
+    var p = maybe(1)
+    printf("right: %d\\n", p[0])
+    var k = litter(7)
+    printf("after: %d\\n", p[0])
+    return 0
+"""
+
+
+# ── the CONTAINER table, asked directly, with no build at all ──
+#
+# `model.returned_container_blob_bytes` decides WHERE a caller reads its copy
+# from, so its interesting rows are ones an image cannot show: the shapes it
+# declines are invisible in a build because the refusal that replaces them names
+# something else. Each row is `(name, source, {callee: bytes}, {callee: why})`
+# — the accepted sizes, and the names that must be ABSENT, because "absent" is
+# the assertion a widening of the whitelist would break first.
+CONTAINER_SIZE_ROWS = [
+    # The count word plus three elements, and the over-estimate is visible here:
+    # `n` is an unannotated PARAMETER, which `_plain_word_names` accepts, so the
+    # literal is accepted and its size is the literal's own.
+    ("a_literal_of_words_is_sized",
+     "def f() -> List[Int]:\n    return [11, 22, 33]\n",
+     {"f": 32}, {}),
+    # A blob BUILT BY APPENDS: the capacity term is the append SITES (two here),
+    # because `_blob_est`'s reservation has to have room for them and the count
+    # word is one word on top. `8 * (1 + 2)`.
+    ("a_blob_built_by_appends_is_sized",
+     "def f(n) -> List[Int]:\n"
+     "    var xs = []\n"
+     "    xs.append(n)\n"
+     "    xs.append(n + 1)\n"
+     "    return xs\n",
+     {"f": 24}, {}),
+    # `return g()` takes g's size, and the fixpoint has to reach it: the callee
+    # is declared AFTER the caller in this source on purpose, so a single pass
+    # in source order would leave `f` unanswered.
+    ("a_forwarded_return_takes_the_callees_size",
+     "def f(n) -> List[Int]:\n    return g(n)\n"
+     "def g(n) -> List[Int]:\n    return [n, n + 1]\n",
+     {"f": 24, "g": 24}, {}),
+    # A nested blob puts an ADDRESS into the block, and copying the block does
+    # not move what the address names. This is the row that would fail first if
+    # the element check were dropped.
+    ("a_blob_of_blobs_is_not_sized",
+     "def f(n) -> List[List[Int]]:\n    return [[n, n + 1]]\n", {}, {"f"}),
+    # …and the same fact reached through an APPEND, where the literal has no
+    # elements at all and the word arrives from the call.
+    ("a_blob_given_an_appended_blob_is_not_sized",
+     "def f(n) -> List[Int]:\n"
+     "    var xs = []\n"
+     "    xs.append([n, n + 1])\n"
+     "    return xs\n",
+     {}, {"f"}),
+    # A LOCAL name is not a plain word: it can hold a frame address, and the
+    # tables that would say so are published by a build pass this predicate does
+    # not read. Refused, and the escape refusal still covers it.
+    ("a_blob_of_a_local_is_not_sized",
+     "def f(n) -> List[Int]:\n"
+     "    var t = n + 1\n"
+     "    return [t]\n",
+     {}, {"f"}),
+    # An annotation none of the five scalar/string vocabularies recognises is
+    # not a plain word, and a STRUCT annotation is the case that matters: the
+    # parameter is a FRAME at entry, so the address it contributes to the blob
+    # is one the copy does not move.  `n: Int` beside it is a word, so the two
+    # rows differ in a few tokens and the vocabulary `_plain_word_names` reads
+    # is the thing under test.  (The predicate has no struct table — it is a
+    # name list, not a layout — so `Point` is refused as unrecognised rather
+    # than as a struct, and the row is worded that way on purpose.)
+    ("a_blob_of_a_struct_annotated_parameter_is_not_sized",
+     "def f(p: Point) -> List[Int]:\n    return [p.a]\n", {}, {"f"}),
+    # …and `Dict` is a BLOB, not a word, which is why `formal/types.py`'s
+    # `DICT_TYPE_NAMES` is deliberately not one of the five.  Same rule, a
+    # vocabulary that could plausibly have been included by accident.
+    ("a_blob_of_a_dict_annotated_parameter_is_not_sized",
+     "def f(d: Dict) -> List[Int]:\n    return [d]\n", {}, {"f"}),
+    # A callee that does not return on every path leaves whatever the return
+    # register held, and the copy reads `nbytes` from it.
+    ("a_callee_that_does_not_always_return_is_not_sized",
+     "def f(n):\n"
+     "    if n > 0:\n"
+     "        return [1, 2]\n"
+     "    return 0\n",
+     {}, {"f"}),
+    # A concatenation sizes its result its own way (`_emit_list_concat` reserves
+    # the sum of both sides), so answering for it here would be a second answer
+    # to a question the emitters own.
+    ("a_concatenated_return_is_not_sized",
+     "def f(n) -> List[Int]:\n    return [1, 2] + [3]\n", {}, {"f"}),
+    # A name that is a blob on one path and a word on another is two kinds of
+    # value in one name.
+    ("a_name_rebound_to_a_word_is_not_sized",
+     "def f(n) -> List[Int]:\n"
+     "    var xs = [1, 2]\n"
+     "    xs = 7\n"
+     "    return xs\n",
+     {}, {"f"}),
+]
+
+
+def test_the_container_table_sizes_only_what_a_copy_can_own():
+    """`returned_container_blob_bytes` over the accepted and declined shapes.
+
+    Every row is a model call, so the declined shapes are visible here at all: in
+    a build each of them ends at `returned_container_refusal`, whose text is
+    about the READ and says nothing about why this particular callee has no size.
+    """
+    ok = True
+    for name, source, want, absent in CONTAINER_SIZE_ROWS:
+        absent = set(absent)
+        defs = parse_defs(source)
+        fns = [d for rows in defs.values() for d in rows]
+        containers = M.functions_returning_containers(fns)
+        sizes = M.returned_container_blob_bytes(
+            fns, [f for f in fns if getattr(f, "name", None) in containers])
+        ok &= check(name, {k: v for k, v in sizes.items() if k in want} == want,
+                    f"sizes={sizes} want={want}")
+        ok &= check(f"{name}__declines_what_it_must",
+                    not (absent & set(sizes)),
+                    f"{sorted(absent & set(sizes))} were sized")
+    # The site table, and it is the OTHER half of the answer: every call of a
+    # sized callee gets a block, at consecutive offsets, whether or not the call
+    # binds a name — a call in an argument position dereferences the result
+    # immediately and the block is what makes that read out of the caller's own
+    # storage.
+    defs = parse_defs(
+        "def f(n) -> List[Int]:\n"
+        "    return [n, n + 1]\n"
+        "def g(n) -> List[Int]:\n    return [n]\n"
+        "def main(n) -> Int:\n"
+        "    var a = f(1)\n"
+        "    printf(\"%d\", len(f(2)))\n"
+        "    var b = g(3)\n"
+        "    return len(a) + len(b)\n")
+    fns = [d for rows in defs.values() for d in rows]
+    containers = M.functions_returning_containers(fns)
+    sizes = M.returned_container_blob_bytes(
+        fns, [f for f in fns if getattr(f, "name", None) in containers])
+    sites = M.container_returned_blob_sites(defs["main"][0], sizes)
+    ok &= check("every_call_of_a_sized_callee_gets_a_block", len(sites) == 3,
+                f"{len(sites)} sites for three calls")
+    # Two calls of `f` (24 bytes each) and one of `g` (16), at consecutive
+    # offsets in WALK order — the third block starts where the second ended,
+    # which is what lets both backends reserve one region and start the blob
+    # cursor above the lot.
+    ok &= check("the_blocks_are_at_consecutive_offsets",
+                sorted(v[1] for v in sites.values()) == [0, 24, 48]
+                and sorted(v[0] for v in sites.values()) == [16, 24, 24],
+                f"{sorted(sites.values())} for sizes={sizes}")
+    # …and the refusal asks about exactly the sites the table fills, which is
+    # what makes the two halves one decision rather than two that can disagree.
+    # ONE escape and not two: `b` is bound by the last statement, so there is no
+    # call after it to read past — which is the shape
+    # `container_escape_sites` documents ("a caller that reads the value before
+    # calling anything else has none either").
+    escapes = M.container_escape_sites(defs["main"][0], containers)
+    ok &= check("without_the_table_the_late_read_is_an_escape",
+                len(escapes) == 1 and "`a`" in escapes[0][1],
+                f"{len(escapes)} escapes: {escapes}")
+    ok &= check("with_the_table_none_of_them_is",
+                M.container_escape_sites(defs["main"][0], containers,
+                                         set(sites)) == [],
+                "a binding the emitters copy into the caller's own block was "
+                "still reported as an escape")
+    return ok
+
+
+def test_a_container_read_after_a_call_is_OWNED(tmpdir):
     """The escape, on both architectures, and the immediate read beside it.
 
-    The measurement this pins is a WRONG ANSWER rather than a refusal, and it is
-    the reason the check exists at all: `arm64` read `7 8 9` after `litter(7)` —
-    that function's own scratch — and `x86-64` read `8 9 33`, a mix of the two
-    frames, for the same source. CPython answers `11 22 33` in both. A program
-    that builds, runs, exits 0 and prints a plausible answer is the one failure
-    mode this backend exists to prevent, so the case is a build-and-refuse on
-    both machines rather than a property read out of the model.
+    This group was a build-and-REFUSE and is a build-and-RUN, and the measurement
+    it pins is the reason that is the right direction: before the copy, `arm64`
+    read `7 8 9` after `litter(7)` — that function's own scratch — and `x86-64`
+    read `8 9 33`, a mix of the two frames, for the same source, while CPython
+    answers `11 22 33` in both.  A program that builds, runs, exits 0 and prints
+    a plausible answer is the one failure mode this backend exists to prevent, so
+    the case is differential against CPython on both machines rather than a
+    property read out of the model.
+
+    `CONTAINER_ESCAPE` is the same source that produced the two wrong answers, so
+    a copy that stopped being emitted would print them again and this row fails
+    with the values in the message rather than with a build error.
     """
     ok = True
     for backend in ("arm64", "x86_64"):
-        rc, text, _image = build(CONTAINER_ESCAPE, "container_escape",
-                                 tmpdir, backend)
+        rc, text, image = build(CONTAINER_ESCAPE, "container_escape",
+                                tmpdir, backend)
+        if not check(f"[{backend}] a container read after another call builds",
+                     rc == 0, f"rc={rc}; {text[:300]}"):
+            ok = False
+            continue
+        status, stdout = run(image)
         ok &= check(
-            f"[{backend}] a container read after another call is refused", rc != 0,
-            f"rc={rc}; the program built, so the values it read back were "
-            f"whatever the next call left there: {text[:200]}")
-        ok &= check(
-            f"[{backend}] the refusal names the frame reuse",
-            "does not outlive that function" in text
-            and "read again" in text,
-            f"{text[:400]}")
-    # The control, and it must BUILD and answer: 11 22 33 on both machines.
+            f"[{backend}] …and answers CPython's answer in BOTH lines",
+            status == 0
+            and stdout.splitlines() == ["right after: 11 22 33",
+                                        "after: 11 22 33"],
+            f"exit {status}, stdout {stdout!r}, expected 11 22 33 twice")
+    # The control, and it must still BUILD and answer: 11 22 33 on both machines.
     for backend in ("arm64", "x86_64"):
         rc, text, image = build(CONTAINER_IMMEDIATE, "container_immediate",
                                 tmpdir, backend)
@@ -423,6 +641,35 @@ def test_a_container_read_after_a_call_is_refused(tmpdir):
             f"[{backend}] …and answers CPython's answer",
             status == 0 and stdout.split() == ["11", "22", "33"],
             f"exit {status}, stdout {stdout!r}, expected 11 22 33")
+    return ok
+
+
+def test_a_container_the_copy_cannot_OWN_is_still_refused(tmpdir):
+    """The two shapes the copy declines, and they are the refusal still working.
+
+    A returned blob of BLOBS puts an address into the block, and copying the
+    block does not move what that address names; a callee that does not return on
+    every path leaves whatever the return register held, and the copy would read
+    `nbytes` from it.  Both keep `returned_container_refusal` word for word, so a
+    reword that dropped the clause the taxonomy keys on fails here rather than
+    quietly moving these two files into another row.
+    """
+    ok = True
+    for label, src, tag in (("a nested blob", CONTAINER_NOT_OWNED_NESTED,
+                             "container_not_owned_nested"),
+                            ("a callee that does not return on every path",
+                             CONTAINER_NOT_OWNED_MIXED_RETURN,
+                             "container_not_owned_mixed")):
+        for backend in ("arm64", "x86_64"):
+            rc, text, _image = build(src, tag, tmpdir, backend)
+            ok &= check(
+                f"[{backend}] {label} is still refused", rc != 0,
+                f"rc={rc}; the program built: {text[:200]}")
+            ok &= check(
+                f"[{backend}] {label} keeps the frame-reuse sentence",
+                "does not outlive that function" in text
+                and "read again" in text,
+                f"{text[:400]}")
     return ok
 
 
@@ -443,8 +690,13 @@ def main():
              lambda: test_the_hang_shape_terminates(tmpdir)),
             ("an_agreeing_overload_still_builds_and_runs",
              lambda: test_an_agreeing_overload_still_builds_and_runs(tmpdir)),
-            ("a_container_read_after_a_call_is_refused",
-             lambda: test_a_container_read_after_a_call_is_refused(tmpdir)),
+            ("the_container_table_sizes_only_what_a_copy_can_own",
+             test_the_container_table_sizes_only_what_a_copy_can_own),
+            ("a_container_read_after_a_call_is_OWNED",
+             lambda: test_a_container_read_after_a_call_is_OWNED(tmpdir)),
+            ("a_container_the_copy_cannot_OWN_is_still_refused",
+             lambda: test_a_container_the_copy_cannot_OWN_is_still_refused(
+                 tmpdir)),
         ]
         failed = 0
         for name, fn in tests:

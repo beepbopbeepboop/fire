@@ -21952,19 +21952,19 @@ def check_interpolated_literal_census(verbose=False):
                         segs = _TYPE_VALUE_MODEL.interpolated_literal_segments(
                             spelled)
                     except _TYPE_VALUE_MODEL.CodegenError:
-                        # A literal `is_interpolated_literal` accepted that the
-                        # reader cannot take apart at all — on this tree, an
-                        # ORDINARY string whose text happens to begin with `f"`
-                        # or `t`, which the prefix test cannot tell from a real
-                        # one. That is a counted row rather than a failure,
-                        # because the predicate that admitted it is the one at
-                        # fault and the reader's refusal is the correct answer
-                        # about it; the defect itself is filed
-                        # (`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts
-                        # _with_an_f_prefix.md`) and the row below is the
-                        # tripwire that goes quiet when the parser's own flag
-                        # lands. Failing here instead would report the same
-                        # thing 5 times and say less.
+                        # A literal `is_interpolated_literal` accepted that
+                        # the reader cannot take apart at all. That is no
+                        # longer the prefix test's fault — 843f1a28 gave
+                        # `StringLiteral` an `is_interpolated` the parser sets
+                        # from the SOURCE TOKEN, so an ordinary string whose
+                        # body begins with `f"` is not admitted any more —
+                        # which leaves the shapes the reader itself must
+                        # refuse (a lone `}`, an unclosed `{`, an unterminated
+                        # token, a non-quote after the prefix). A counted row
+                        # rather than a failure either way: the reader's
+                        # refusal is the correct answer about a token it
+                        # cannot take apart, and failing here would report the
+                        # same thing 5 times and say less.
                         unquotable.append((path, spelled))
                         continue
                     fields = [s for s in segs if s[0] == 'field']
@@ -22044,18 +22044,17 @@ def check_interpolated_literal_census(verbose=False):
           f"one-field, {specs} spec(s), {convs} conversion(s); "
           f"{len(foldable)} file(s) wholly foldable; {len(ts)} t-string(s) in "
           f"{len(ts_files)} file(s)")
-    # `unquotable` is REPORTED and not asserted, and the reason is that every
-    # one of them is the filed prefix-test defect rather than anything about
-    # composition: `is_interpolated_literal` tests the PREFIX of `value`, so an
-    # ordinary string whose text begins with `f"` reads as an f-string — and
-    # this repository's own `INTERPOLATED_LITERAL_PREFIXES` tuple is four of
-    # them (`'f"'`, `"f'"`, `'t"'`, `"t'"`). Measured on this tree: all of them
-    # in `formal/model.py` and `myinterpreter.py`, and 0 anywhere else. An
-    # assertion would need a baseline count, and a baseline is a number that
-    # rots the moment the parser's own flag lands
-    # (`bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`
-    # — which is where the fix belongs, and the reader here is already the
-    # shape that fix wants: it refuses the token rather than composing it).
+    # `unquotable` is REPORTED and not asserted. What is in it changed when
+    # `843f1a28` landed, and the row is here because the count is what tells you
+    # which: `is_interpolated_literal` used to test the PREFIX of `value`, so an
+    # ordinary string whose text begins with `f"` read as an f-string — this
+    # repository's own `INTERPOLATED_LITERAL_PREFIXES` tuple is four of them
+    # (`'f"'`, `"f'"`, `'t"'`, `"t'"`). The parser now sets
+    # `StringLiteral.is_interpolated` from the SOURCE TOKEN and that is what the
+    # predicate asks, so what is left here is the set the reader itself refuses
+    # to take apart — a token with no defensible chunk boundary, which is a
+    # refusal and not a wrong answer. An assertion would need a baseline count,
+    # and a baseline is a number that rots the moment a fifth shape is refused.
     # Printed unconditionally because it is the count a reader of this census
     # needs and no assertion should carry it.
     if unquotable:

@@ -31,6 +31,8 @@ import re
 from typing import NamedTuple
 
 import fire_compiler as F
+from formal.types import (BOOL_TYPE_NAMES, DTYPE_TYPE_NAMES,
+                          FLOAT_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES)
 
 
 class CodegenError(Exception):
@@ -10578,7 +10580,7 @@ def assignment_target_names(node) -> list:
     return out
 
 
-def container_escape_sites(fn, returns_container=None) -> list:
+def container_escape_sites(fn, returns_container=None, copied=None) -> list:
     """`[(line, what)]` — where a container handed back by a call is read too late.
 
     **The hazard is not the return. It is the read AFTER another call.**
@@ -10636,10 +10638,19 @@ def container_escape_sites(fn, returns_container=None) -> list:
     happening at the loop's own position, and a name read anywhere after that
     position is refused. `struct.unpack_from(…)[0]` has no binding to be late
     about and is never this shape.
+
+    **`copied` is the set of `id(call)` for the call sites the emitters MOVE into
+    the caller's own frame** (`returned_container_blob_bytes` /
+    `container_returned_blob_sites`), and a binding whose call is in it is not an
+    escape at all: the value the name holds afterwards is a block of THIS
+    function's scratch, so the next call cannot reach it. A caller with no such
+    table passes nothing and gets the refusal for every one of them, which is
+    what a test of the shape alone wants.
     """
     body = getattr(fn, "body", None)
     if not isinstance(body, list) or not returns_container:
         return []
+    copied = copied or frozenset()
     params = {name for name, _ann in function_param_shape(fn).fixed}
     # Three index sets over the TOP-LEVEL statements, and the question is
     # whether they INTERLEAVE for one name: a call between a binding and a later
@@ -10651,7 +10662,8 @@ def container_escape_sites(fn, returns_container=None) -> list:
         if isinstance(stmt, (F.AssignStmt, F.VarDecl)) \
                 and isinstance(getattr(stmt, "value", None), F.CallExpr):
             callee = call_callee_name(stmt.value.func)
-            if callee and returns_container.get(callee):
+            if callee and returns_container.get(callee) \
+                    and id(stmt.value) not in copied:
                 # A `VarDecl` records no line of its own, so the CALL's is what
                 # the message quotes: same statement, and the one a reader can
                 # find.
@@ -10675,12 +10687,12 @@ def container_escape_sites(fn, returns_container=None) -> list:
         # The FIRST such call is the one the reader has to look at: everything
         # after it is downstream of the same reclamation.
         first = late[0]
-        out.append((getattr(body[first], "line", 0) or 0,
+        out.append((_stmt_line(body, first),
                     f"`{name}`, bound at line {line} to a value a function in "
                     f"this image handed back, is read again on line "
-                    f"{getattr(body[min(r for r in reads[name] if r > first)], 'line', 0) or 0}"
+                    f"{_stmt_line(body, min(r for r in reads[name] if r > first))}"
                     f", after the call on line "
-                    f"{getattr(body[first], 'line', 0) or 0} has run"))
+                    f"{_stmt_line(body, first)} has run"))
     return out
 
 
@@ -10759,6 +10771,411 @@ def _locally_bound_containers(fn) -> set:
     return out
 
 
+def returned_container_blob_bytes(functions: list, candidates=None) -> dict:
+    """`{callee name: nbytes}` — the blob a same-image callee hands back, and
+    how many bytes of it a CALLER has to copy to own it.
+
+    **The copy is the whole of this, and it is why the size is a compile-time
+    constant rather than the run-time count.** A container this image returns is
+    a block of the CALLEE's frame scratch (`_blob_est` in each emitter), and that
+    scratch is reclaimed when it returns. The fix the escape refusal names is to
+    move the block somewhere the caller owns, and the caller reserves it in its
+    own scratch and copies it out immediately after the call — which is sound
+    precisely because nothing has been pushed over the dead region yet, so the
+    bytes are still the callee's own. After the copy the call's value is the
+    CALLER's block, so every later call is irrelevant, which is what makes the
+    immediate read and the late read the same program.
+
+    **An OVER-estimate, and that is the safe direction for the two reasons
+    there are.** The destination block is sized by this same number, so reading a
+    few words past the callee's blob fills words the count word does not reach
+    (`[count][element]…` — the count governs how many elements any reader sees),
+    and a read of the callee's own frame, or of the caller's above it, is a READ
+    and cannot corrupt a live value. An UNDER-estimate would copy the count and
+    half the elements and hand the caller a shorter list, which is the wrong
+    answer this whole family exists to replace with a refusal. So the capacity
+    term is the whole function's append SITES rather than the returned name's,
+    which is never smaller and never needs the per-name attribution
+    `_scan_list_caps` does in each backend.
+
+    **The three conditions under which there is no answer, and a function with
+    none keeps the escape refusal** (`container_escape_sites` is asked with an
+    empty `copied`), which is the safe direction for a table:
+
+      * **it does not return on every path** — `returns_on_every_path`, the same
+        predicate the returned-FRAME convention decides "may a caller treat this
+        function's result as a frame?" with. A function that falls off the end
+        leaves whatever was in the return register, and the copy would read from
+        it. This is STRICTER than `functions_returning_containers`, which only
+        asks whether SOME return is a container, and deliberately so: a set
+        membership only decides whether to refuse a read, while a size decides
+        where to read `nbytes` from.
+      * **some return is not a container of a known size** — a concatenation, a
+        comprehension, a slice and a star-splat literal each size their own way
+        in the emitters (`_emit_list_concat`, `_emit_list_star`,
+        `dynamic_splat_capacity`), so answering for them here would be a second
+        answer to a question the emitters own.
+      * **a returned NAME is not a blob on every binding** — `xs = []` on one
+        path and `xs = 5` on another is one name with two kinds of value, and
+        `blob_nodes_bound_to` answers only about the bindings that build a blob.
+        Every binding has to be one, which is why this reads the bindings itself
+        (`_blob_values_bound_to`) rather than through that helper.
+      * **an element is not a plain word** — the copy moves ONE block, and a word
+        inside it that is an ADDRESS into the callee's frame does not come with
+        it. A returned `List[List[Int]]` would therefore be copied correctly and
+        its INNER blobs would still be dead, so `p[0][1]` read late would be a
+        wrong answer with a refusal removed in front of it — a worse outcome than
+        the refusal, not a better one. `_returned_blob_is_plain_words` is the
+        test, and it is a WHITELIST of what is provably a word (`_plain_word`):
+        a literal, an operation over literals, or a PARAMETER whose declared
+        annotation is a scalar or a string. A local name, a field read and a call
+        are all refused, because each of them can be a frame or a blob address
+        and telling them apart needs the holder tables this deliberately does not
+        read — see that function for the list and for what it costs.
+
+    A fixpoint, and monotone for the same reason `functions_returning_containers`
+    is: a name's answer depends on the callees its returns name, and a callee
+    that gains an answer can only add bytes. `candidates` narrows the walk to
+    the functions `functions_returning_containers` already named, which is what
+    keeps this off the hot path of a module with no containers in it at all.
+    """
+    out: dict = {}
+    pool = [fn for fn in (candidates if candidates is not None else functions)
+            if getattr(fn, "name", None)]
+    changed = True
+    rounds = 0
+    while changed and rounds < len(pool) + 2:
+        changed = False
+        rounds += 1
+        for fn in pool:
+            name = getattr(fn, "name", None)
+            if not name or name in out:
+                continue
+            nbytes = _function_returned_blob_bytes(fn, out)
+            if nbytes:
+                out[name] = nbytes
+                changed = True
+    return out
+
+
+def _function_returned_blob_bytes(fn, table: dict):
+    """The bytes `fn` hands back, or None when this path cannot say.
+
+    See `returned_container_blob_bytes` for why each condition is there; the MAX
+    over the returns is the same over-estimate the capacity term is, for the same
+    reason — the block a caller reserves has to hold the biggest of them.
+    """
+    body = getattr(fn, "body", None)
+    if not isinstance(body, list) or not body:
+        return None
+    # A nested `def`/`lambda` carries its own `return` statements, and a walk
+    # that cannot tell them from this function's would size the outer result by
+    # the inner one's value. `_prepare_functions` lifts closures out before this
+    # is asked, so a body that still has one has no answer rather than a guess.
+    if any(isinstance(n, (F.LambdaExpr, F.FunctionDef))
+           for n in iter_nodes(body)):
+        return None
+    if not returns_on_every_path(body):
+        return None
+    spare = _append_call_sites(fn)
+    words = _plain_word_names(fn)
+    sizes = []
+    for node in iter_nodes(body):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        if node.value is None:
+            return None
+        if not _returned_blob_is_plain_words(fn, node.value, words):
+            return None
+        nbytes = _returned_blob_bytes(fn, node.value, table, spare)
+        if nbytes is None:
+            return None
+        sizes.append(nbytes)
+    return max(sizes) if sizes else None
+
+
+def _plain_word_names(fn) -> set:
+    """The parameters of `fn` whose value is provably a WORD at entry.
+
+    A parameter with no annotation is whatever the caller passed, and this path
+    passes a word unless the caller passed a frame — which is the case
+    `frame_declared_parameter_refusal` exists for and which the emitters enforce
+    per call site. An annotated one is a word only when the annotation is one of
+    the scalar or string vocabularies `formal/types.py` publishes
+    (`TYPE_NAMES`, `STRING_TYPE_NAMES`, `BOOL_TYPE_NAMES`, `FLOAT_TYPE_NAMES`,
+    `DTYPE_TYPE_NAMES`): a `Dict` is a blob and a struct is a frame, so
+    `DICT_TYPE_NAMES` is deliberately not among them, and an annotation none of
+    the five recognises is not a word either.
+    """
+    out = set()
+    for name, declared in function_param_shape(fn).fixed:
+        if declared is None:
+            out.add(name)
+            continue
+        base = _annotation_base_name(declared)
+        if base in _PLAIN_WORD_TYPE_NAMES:
+            out.add(name)
+    return out
+
+
+def _annotation_base_name(declared):
+    """The bare name an annotation's root is spelled, or None.
+
+    `Int`, `List[Int]` and `SIMD[.uint32, 4]` are three spellings of three
+    different things and only the first is a scalar word, so the root of the
+    annotation is what has to be classified.
+    """
+    text = declared if isinstance(declared, str) else None
+    if text is None:
+        return None
+    root = text.split("[", 1)[0].strip()
+    return root or None
+
+
+_PLAIN_WORD_LITERALS = (F.IntLiteral, F.FloatLiteral, F.StringLiteral,
+                        F.BoolLiteral, F.NoneLiteral)
+
+#: The annotations `_plain_word_names` accepts for a parameter, and the five
+#: vocabularies `formal/types.py` publishes rather than a list written here: a
+#: fourth copy of "what does this annotation mean" is the one that drifts.
+_PLAIN_WORD_TYPE_NAMES = (frozenset(TYPE_NAMES)
+                          | STRING_TYPE_NAMES | BOOL_TYPE_NAMES
+                          | FLOAT_TYPE_NAMES | DTYPE_TYPE_NAMES)
+
+
+def _plain_word(value, words: set) -> bool:
+    """Whether `value` is a WORD this function computed, not an address it holds.
+
+    The whitelist, and it is deliberately short: a literal, an operation whose
+    operands are themselves plain, or a parameter from `_plain_word_names`. That
+    covers `[1, 2, 3]`, `[n, n + 1]` and `["a", s]`, which is what the corpus's
+    returned containers hold, and it covers nothing else — because a LOCAL name,
+    a field read, a subscript and a call can each be a frame or blob address, and
+    the tables that would tell them apart (`_frame_holders`,
+    `_frame_candidates`, `struct_constructor_sites`) are published on the
+    function node by a build pass this deliberately does not depend on, so a
+    reader of this predicate gets the same answer with or without one.
+
+    **Refusing here is refusing a capability, not a program.** The escape
+    refusal still covers every case this declines, so a container with a nested
+    one in it is refused exactly as it was before the copy existed.
+    """
+    if isinstance(value, _PLAIN_WORD_LITERALS):
+        return True
+    if isinstance(value, F.UnaryOp):
+        return _plain_word(value.operand, words)
+    if isinstance(value, F.BinaryOp):
+        return (_plain_word(value.left, words)
+                and _plain_word(value.right, words))
+    if isinstance(value, F.IdentExpr):
+        return value.name in words
+    return False
+
+
+def _returned_blob_is_plain_words(fn, value, words: set) -> bool:
+    """Whether every word the blob `value` holds is one `_plain_word` accepts.
+
+    Three places a word enters the blob, and all three are asked because missing
+    one is the wrong answer this whole family is about:
+
+      * the ELEMENTS of each literal bound to it, for the literal the callee
+        returns or the ones a returned NAME is built from;
+      * every `append` ARGUMENT — `var xs = []; xs.append(n)` reserves room for
+        the append and puts its argument at element 0, so a literal with no
+        elements is not a literal with no words;
+      * every INDEXED STORE's value, and an in-place `+=`/`*=`/`|=` is refused
+        outright rather than reasoned about (`_emit_list_concat` builds a NEW
+        blob, so what `xs += ys` leaves bound is a question about the binding,
+        not about this one).
+
+    A word copied out of a dead frame is not merely stale: `p[0]` would still
+    read the same address and only a DEREFERENCE would be wrong, which is the
+    shape a use-after-free takes here and the reason the check is on the elements
+    and not on the count.
+    """
+    if isinstance(value, F.ListExpr):
+        nodes = [value]
+    elif isinstance(value, F.IdentExpr):
+        nodes = _blob_values_bound_to(fn, value.name)
+        if nodes is None:
+            return False
+    else:
+        # A call to a callee already in the table: its own return was asked this
+        # same question when its answer was computed, so its blob is plain by
+        # the same standard and there is nothing to re-check here.
+        return True
+    for node in nodes:
+        if isinstance(node, F.ListExpr):
+            if not all(_plain_word(el, words) for el in (node.elements or [])):
+                return False
+        elif isinstance(node, F.CallExpr) and blob_constructor_lowering(
+                subscript_callee_name(node) or _flat_callee(node),
+                node.args, node.kwargs) is not None:
+            pass
+        else:
+            # A binding that is neither a literal nor a blob CONSTRUCTOR — `xs
+            # = 7`, a slice, a concatenation — so the name is a word on that
+            # path and the blob it is returned as has no size.  Asked here rather
+            # than left to `_blob_reserved_bytes`, which would hand an
+            # `IntLiteral` to `blob_constructor_lowering` and read `.args` off it.
+            return False
+    if isinstance(value, F.IdentExpr):
+        name = value.name
+        for node in iter_nodes(getattr(fn, "body", None) or []):
+            if isinstance(node, F.AugAssignStmt) \
+                    and name in assignment_target_names(node):
+                return False
+            if isinstance(node, F.CallExpr) \
+                    and isinstance(node.func, F.MemberExpr) \
+                    and node.func.member == "append" \
+                    and isinstance(node.func.obj, F.IdentExpr) \
+                    and node.func.obj.name == name:
+                if not all(_plain_word(a, words) for a in (node.args or [])):
+                    return False
+            if isinstance(node, F.AssignStmt) \
+                    and isinstance(node.target, F.SubscriptExpr) \
+                    and isinstance(node.target.obj, F.IdentExpr) \
+                    and node.target.obj.name == name:
+                if not _plain_word(node.value, words):
+                    return False
+    return True
+
+
+def _append_call_sites(fn) -> int:
+    """How many `xs.append(…)` call sites this function has, over every name.
+
+    The over-estimate `returned_container_blob_bytes` uses for the capacity term,
+    and it is deliberately NOT `_scan_list_caps`' number: that one is per NAME and
+    gates on the name being a list kind, both of which need a value-kind table
+    only a backend has, and both of which make the number SMALLER. Small is the
+    wrong direction for a size a caller reads `nbytes` from.
+    """
+    return sum(1 for n in iter_nodes(getattr(fn, "body", None) or [])
+               if isinstance(n, F.CallExpr) and isinstance(n.func, F.MemberExpr)
+               and n.func.member == "append")
+
+
+def _blob_values_bound_to(fn, name: str):
+    """Every value this function binds `name` to, or None if the name is not
+    answerable at all.
+
+    `_binding_value` answers one BINDING SHAPE and misses a `MultiAssignStmt`
+    and a valueless declaration, both of which bind a name and neither of which
+    builds a blob — so a reader that used it would see one blob binding and miss
+    the word the name also holds. `assignment_target_names` is the one answer to
+    "does this statement bind this name" whatever the shape, and a statement that
+    binds it with no value at all (`var xs` with no initialiser) has no answer
+    here either.
+    """
+    out = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, (F.AssignStmt, F.VarDecl, F.MultiAssignStmt)):
+            continue
+        if name not in assignment_target_names(node):
+            continue
+        value = getattr(node, "value", None)
+        if value is None:
+            return None
+        out.append(value)
+    return out
+
+
+def _blob_reserved_bytes(node, spare: int):
+    """Bytes the emitters reserve for a blob-constructing NODE, plus `spare`.
+
+    `_emit_list`'s `8 * (1 + cap)` and `_emit_blob_constructor`'s
+    `BLOB_HEADER_BYTES + (count + extra_slots) * stride`, read off the same
+    helpers the emitters read (`blob_reserved_slots`, `blob_ctor_elem_stride`) so
+    the number here and the number reserved there cannot drift. `None` for a
+    node neither of those builds — a splat literal goes to `_emit_list_star`,
+    whose capacity is `dynamic_splat_capacity` and not the element count.
+    """
+    if isinstance(node, F.ListExpr):
+        if any(isinstance(el, F.UnaryOp) and el.op == "*"
+               for el in (node.elements or [])):
+            return None
+        return 8 * (1 + max(blob_reserved_slots(node), spare))
+    if not isinstance(node, F.CallExpr):
+        return None
+    ctor = subscript_callee_name(node) or _flat_callee(node)
+    if ctor is None or blob_constructor_lowering(
+            ctor, node.args, node.kwargs) is None:
+        return None
+    return (BLOB_HEADER_BYTES
+            + (blob_reserved_slots(node) + spare) * blob_ctor_elem_stride(ctor))
+
+
+def _returned_blob_bytes(fn, value, table: dict, spare: int):
+    """The bytes the blob `value` is, or None when it is not a sized blob."""
+    if isinstance(value, F.ListExpr):
+        return _blob_reserved_bytes(value, spare)
+    if isinstance(value, F.CallExpr):
+        # A blob CONSTRUCTOR first and a plain call second, and the order is the
+        # whole of it: `_flat_callee` answers the bare name of BOTH, so asking
+        # "is this a constructor?" by name alone sends every ordinary call down
+        # the constructor branch, where `blob_constructor_lowering` has no
+        # answer and the function is refused — which is how `return g()` lost its
+        # answer while `return [1, 2]` kept it.
+        ctor = subscript_callee_name(value) or _flat_callee(value)
+        if ctor is not None and blob_constructor_lowering(
+                ctor, value.args, value.kwargs) is not None:
+            return _blob_reserved_bytes(value, spare)
+        # `return g()`: the size is g's, not this function's — the block this
+        # function hands back is the one IT copied out of g, so the two copies
+        # are the same length by construction rather than by agreement.
+        name = call_callee_name(value.func)
+        return table.get(name) if name else None
+    if isinstance(value, F.IdentExpr):
+        values = _blob_values_bound_to(fn, value.name)
+        if not values:
+            return None
+        sizes = [_blob_reserved_bytes(v, spare) for v in values]
+        return max(sizes) if all(s is not None for s in sizes) else None
+    return None
+
+
+def container_returned_blob_sites(fn, sizes) -> dict:
+    """`{id(call): (nbytes, block_offset)}` — the call sites whose result the
+    emitters MOVE into this function's own scratch.
+
+    The caller's half of `struct_returned_frame_sites`, and the same shape, with
+    BYTES where that one has a struct: a returned frame's block size is a field
+    count this function can read off the struct it declared, and a returned
+    container's is an element count it has to be TOLD, because the callee is a
+    different function (`returned_container_blob_bytes`'s table).
+
+    **EVERY call site gets a block, not only the ones that bind the result**,
+    for the reason `struct_returned_frame_sites` gives: a call in a position
+    that binds no name still produces a value this function reads immediately
+    (`return lit()`, `len(lit())`, `f(lit())`), and the block is what makes that
+    read out of the caller's own scratch rather than out of the callee's. The
+    cost of covering them is reserved scratch for a result nobody keeps.
+
+    The offset is assigned in walk order, and the emitters put the blocks at the
+    bottom of the same reserved region the constructor frames and the
+    returned-frame blocks use, so one `_list_cursor` start covers all three and
+    the two backends reserve the same bytes at the same offsets.
+    """
+    if not sizes:
+        return {}
+    out, offset = {}, 0
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr):
+            continue
+        # `call_callee_name`, not `node.func.name`, for the reason
+        # `struct_returned_frame_sites` gives: a comptime specialization
+        # `lit[T]()` names the same function and emits the same call.
+        callee = call_callee_name(node.func)
+        if callee is None:
+            continue
+        nbytes = sizes.get(callee)
+        if not nbytes:
+            continue
+        out[id(node)] = (nbytes, offset)
+        offset += nbytes
+    return out
+
+
 def returned_container_refusal(fn, line: int, what: str) -> str:
     """The diagnostic for reading a handed-back container after another call.
 
@@ -10768,6 +11185,16 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
     (`formal/hostmods/struct.mojo`'s own docstring records the shape and the
     measurement). The reader is being told what their program does, not that a
     capability is missing.
+
+    **The last paragraph names the three spellings that lower, and the copy is
+    the fourth and is NOT one of them.** A container whose blob has a known size
+    and holds only words is copied into this function's own scratch right after
+    the call (`model.returned_container_blob_bytes` /
+    `container_returned_blob_sites`), so the shape this message is about is one
+    the copy declined — a blob of blobs, a callee that does not return on every
+    path, a concatenation, or an element that is not provably a word. That is
+    why the advice below is about the SOURCE's spelling rather than about the
+    copy: none of the three reaches a program this path has no size for.
     """
     who = f"{fn.name}: " if getattr(fn, "name", None) else ""
     return (
@@ -10781,14 +11208,18 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
         f"answers for one source (arm64 reads the later call's scratch whole, "
         f"x86-64 reads a mix of the two frames), which is the shape of the "
         f"defect this backend exists to prevent rather than a value anybody can "
-        f"check. `bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
-        f"the capability that closes it (a container with a run-time length, "
-        f"`malloc`'d rather than frame-resident) and "
-        f"`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md` "
-        f"records the measurement and the fix's shape. What lowers today: read "
-        f"the value before calling anything else, keep the container in the "
-        f"caller and pass a slot to fill, or take the elements as scalars one "
-        f"at a time")
+        f"check. The shape here is one the CALLER-SIDE COPY declined — "
+        f"`model.returned_container_blob_bytes` sizes a blob only when the "
+        f"callee returns it on every path, when the result is a literal or a "
+        f"blob the callee appends to rather than a concatenation or a splat, "
+        f"and when every element is provably a word — so the reader is being "
+        f"told which of those four this program is. "
+        f"`bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
+        f"the capability that closes the rest (a container with a run-time "
+        f"length, `malloc`'d rather than frame-resident). What lowers today: "
+        f"read the value before calling anything else, keep the container in "
+        f"the caller and pass a slot to fill, or take the elements as scalars "
+        f"one at a time")
 
 
 def list_repeat_operands_refusal(left: str, right: str) -> str:

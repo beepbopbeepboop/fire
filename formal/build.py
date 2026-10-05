@@ -13498,6 +13498,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # tables above.
     value_called_params = M.functions_calling_a_parameter_through_a_value(
         functions)
+    # …and how many bytes of blob each of those hands back, which is what lets a
+    # CALLER own one instead of borrowing the callee's dead frame. Measured once
+    # per unit and narrowed to the names above, because it is a fixpoint over the
+    # unit and the walk it does per candidate is the one
+    # `model.returned_container_blob_bytes` describes. Published on every
+    # function for the reason `_image_returns_frame` is published: the caller of
+    # a container-returning function is a different function from the one that
+    # returns it, and the emitters ask the question per call site with no unit in
+    # hand.
+    returned_blob_bytes = M.returned_container_blob_bytes(
+        functions, [fn for fn in functions
+                    if getattr(fn, "name", None) in returns_container])
+    for fn in functions:
+        fn._image_returns_container_bytes = dict(returned_blob_bytes)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -14726,7 +14740,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
         _refuse_try_handlers(functions, fn)
-        _refuse_returned_container_blobs(fn, returns_container)
+        _refuse_returned_container_blobs(fn, returns_container,
+                                         returned_blob_bytes)
         unstored.append(_unstored_read(fn, placed, frame_slots))
     # Raised LAST, and that ordering is the design rather than an accident of
     # where the call landed. A read-before-store is a SYMPTOM — the name has a
@@ -14951,7 +14966,8 @@ def _why_unplaced(node, fn, frame_slots: dict) -> str:
             "spelling")
 
 
-def _refuse_returned_container_blobs(fn, returns_container) -> None:
+def _refuse_returned_container_blobs(fn, returns_container,
+                                     returned_blob_bytes=None) -> None:
     """Refuse a READ of a handed-back container that comes after another call.
 
     **A wrong answer, refused rather than emitted**, which is the whole of this
@@ -14975,8 +14991,18 @@ def _refuse_returned_container_blobs(fn, returns_container) -> None:
     `model.functions_returning_containers`' answer over THIS image; a call to
     another image is not in it, which is why `os.listdir` — `malloc`s, and says
     so — is untouched.
+
+    **`returned_blob_bytes` is the half of this that no longer refuses anything
+    it can answer.** A callee whose blob has a known size gets its result copied
+    into a block in THIS function's own scratch by the emitters
+    (`model.container_returned_blob_sites`), so the name holds something the next
+    call cannot reach and there is no escape left to report. Passing nothing —
+    which is what a caller with no unit-wide size table wants, and what a test of
+    the shape alone should ask — restores the refusal for every binding.
     """
-    for line, what in M.container_escape_sites(fn, returns_container):
+    copied = M.container_returned_blob_sites(fn, returned_blob_bytes or {})
+    for line, what in M.container_escape_sites(fn, returns_container,
+                                               set(copied)):
         raise CodegenError(M.returned_container_refusal(fn, line, what))
 
 

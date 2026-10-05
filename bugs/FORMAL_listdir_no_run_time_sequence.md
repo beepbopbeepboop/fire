@@ -178,8 +178,12 @@ gone.
    returned, which has no static size to `malloc`.~~ **CORRECTED 2026-10-04: a
    container returned by a function in THIS image is frame-resident too, so this
    item was not a missing capability but a wrong answer, and it is now refused
-   at the read on both architectures — see the section above and
-   `bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.**
+   at the read on both architectures — see the section above, and note that the
+   caller-side copy landed after that section was written: a container of WORDS
+   whose blob has a known size is now copied into the caller's own frame right
+   after the call (`model.returned_container_blob_bytes`), so this item's
+   remaining remainder is the run-time-length half below and not the
+   frame-residency half.**
 4. ~~A `for` over it, and `len`.~~ **DONE**, above.
 
 That is Phase 6's tagged-value convergence arriving from the `os` side, and it
@@ -230,11 +234,13 @@ refusing the return took that module out (measured: the hostmods census went
 
 **The capability that would make it right is unchanged in substance and better
 specified than this document had it**: a `malloc`'d blob whose length is only
-known at run time (item 2) is what a copy has to copy, and the copy is the
-struct-frame convention applied to a blob. That is one piece of work for items 2
-and 3 together, and it is written down where the three pieces of it are:
-
-`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`.
+known at run time (item 2) is what a copy has to copy. The COPY half of that
+landed 2026-10-05 for a blob whose length IS a compile-time constant —
+`formal/model.py`'s `returned_container_blob_bytes` sizes it and
+`container_returned_blob_sites` gives the caller the block it is copied into —
+and what is left here is exactly item 2: a blob sized by a LOOP has no constant
+to size the copy with, so it is the `malloc` that has to come first. That is the
+one piece of work this item still needs.
 
 **Item 1 is unaffected** — a blob another IMAGE `malloc`s (`os.listdir`,
 `os.walk`) crosses the boundary and is read by subscript today, which is the
@@ -297,11 +303,14 @@ has no `free`.
 ## instructions' worth — measured on arm64, and x86-64 is the only thing left
 
 **Items 2 and 3 are implementable together and do NOT need the caller-side block
-this document's §"What is still missing" specifies.** The measurement is in
-`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`'s new
-section, which carries the whole of it; this section records what it means for
-the two items as stated here, because this document is where they are written
-down and the answer changes their shape.
+this document's §"What is still missing" specifies.** The measurement is
+`formal/model.py`'s `returned_container_blob_bytes` sizing and its
+`container_returned_blob_sites` ask, which carry the whole of it; this section
+records what it means for the two items as stated here, because this document is
+where they are written down and the answer changes their shape. The doc that
+first recorded the measurement is DELETED — the bug closed, because the blob is
+copied into the caller's own frame right after the call, or refused, and
+`7aaf56b0` re-pointed every citation at those two symbols.
 
 * **Item 2 ("a `list` LITERAL's frame reserve cannot be a run-time value, so
   `xs = []` followed by `n` appends has nowhere to put them … With (1) that
@@ -315,10 +324,11 @@ down and the answer changes their shape.
   caller can use after the callee returns") — the SAME `malloc`.** This document
   treats items 2 and 3 as one project and it is right, and it is also right that
   the two together are the run-time-length blob. What it does not say is that the
-  caller-side block of `FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`
-  §"The exact next step" is unnecessary: a callee that `malloc`s its own copy
-  needs no block from the caller, which is the difference between this being an
-  ABI change and it being two pieces in the callee.
+  caller-side block that doc's §"The exact next step" specified was unnecessary,
+  and the block it specified is what `container_returned_blob_sites` and the
+  `returned_container_blob_bytes` copy replaced: a callee that `malloc`s its own
+  copy needs no block from the caller, which is the difference between this being
+  an ABI change and it being two pieces in the callee.
 * **What is still open is x86-64 and nothing else.** The arm64 copy is correct;
   the x86-64 copy is a correct instruction stream that loses the tail of the
   blob, and the three candidates were each tested (length register, source

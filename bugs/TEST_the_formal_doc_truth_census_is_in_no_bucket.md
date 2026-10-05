@@ -46,10 +46,12 @@ file in this repository whose job is *"does the document still say what the code
 says"* is a test nobody runs, and eight of its rows have been red long enough
 for every count in them to drift by 5 to 8.
 
-This is the failure class `bugs/TEST_bracketed_method_field_set_ask_count_rows_and_the_file_is_in_no_bucket.md`
-records for a different file — **a census that is not in a bucket is not a
-census**, and the numbers it is watching are exactly the numbers a reader of
-`FORMAL.md` will quote. `FORMAL.md` is the document a new contributor reads
+This is the failure class the ask-COUNT rows of
+`test_formal_bracketed_method_field_set.py` record — **a census that is not in a
+bucket is not a census**, and the numbers it is watching are exactly the numbers
+a reader of `FORMAL.md` will quote. That file's own doc was deleted by
+`fbe18fc5`, which is this same defect closing: the rows now assert something and
+the file is registered. `FORMAL.md` is the document a new contributor reads
 first; its §1 and §2.2 are its map of the runtime ABI.
 
 **And the drift is not uniform, which is the part worth noticing.** Five of the
