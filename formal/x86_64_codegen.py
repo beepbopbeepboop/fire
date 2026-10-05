@@ -9485,7 +9485,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         # (`_load_home_from_stack`): RSP has moved a whole frame by then.
         if stack_bytes:
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
-        if blob_site is not None:
+        if blob_site is not None and not is_extern:
+            # `and not is_extern` is the table's own scope stated as a guard, for
+            # arm64's reason: a name in `_image_returns_container_bytes` is a
+            # function of THIS image with a blob it reserved itself, and an
+            # `is_extern` call under the same spelling branches into a LINKED
+            # LIBRARY, whose result this table says nothing about.
             # The callee handed back a blob in a block of ITS OWN frame, and
             # that frame died with it: the values read back after this function's
             # next call are whatever that call left there (measured, both

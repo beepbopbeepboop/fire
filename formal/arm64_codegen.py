@@ -9282,7 +9282,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     here_offset=-4)
         if stack_bytes:
             _emit_add_imm(self.asm, 31, 31, stack_bytes)
-        if blob_site is not None:
+        if blob_site is not None and not is_extern:
+            # `and not is_extern` is the table's own scope stated as a guard: a
+            # name in `_image_returns_container_bytes` is a function of THIS
+            # image with a blob it reserved itself, and an `is_extern` call under
+            # the same spelling branches into a LINKED LIBRARY, whose result
+            # this table says nothing about. Copying from it would read whatever
+            # the library returned as a frame address.
             # The callee handed back a blob in a block of ITS OWN scratch, and
             # that scratch died with it: the values read back after this
             # function's next call are whatever that call left there (measured,
