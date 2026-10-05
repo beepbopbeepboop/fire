@@ -11725,10 +11725,11 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
     comprehension's ELEMENT — `[5 for G in rows]` — which answers a different
     program, and it used to be masked rather than absent: `_names_bound_in`
     counted the comprehension's target as a local of the function, so the
-    substitution never started. Fixing that (which is
-    `bugs/FORMAL_a_local_read_before_its_first_assignment.md`'s subject, and a
-    false refusal it removes) un-masks this one, so the two halves have to land
-    together and this is the half that makes the other half safe: the generator
+    substitution never started. Fixing that (a false read-before-store refusal
+    on a comprehension's own target, which `_function_locals` now answers by
+    subtracting the comprehension's scope) un-masks this one, so the two halves
+    have to land together and this is the half that makes the other half safe:
+    the generator
     targets come OFF the site table for the comprehension's own subtree, which
     is what makes `[G for G in rows]` mean the loop variable and
     `[G for x in rows]` mean the constant — two programs, one name, and the
@@ -12644,18 +12645,20 @@ def _collect_shadowed_global_reads(functions) -> None:
        assignment lands in a local.  Measured, CPython 6 and 6; this path 10601485
        and 5 on arm64, 11 and 5 on x86-64.
 
-    **The read half is scoped to the module-global case, and the measurement is
-    why.**  The language's rule is general — reading any local before its first
-    assignment raises — and enforcing the general form was measured at **233
-    sites in 57 files of this repository** and **8 in 5 stdlib files** (a
-    syntactic scan with a call's callee, a `global` declaration and every
-    loop/with/comprehension target already excluded), which is a coverage cost of
-    a different order from the one site this fixes.  With the name ALSO bound at
-    module level the collision is unambiguous — the source is visibly asking
-    about the module's binding, and the alternative reading is the one CPython
-    rejects — and the same scan finds **0 sites in 319 repository files and 0 in
-    294 stdlib files**.  The general remainder is written down in
-    `bugs/FORMAL_a_local_read_before_its_first_assignment.md`.
+    **The read half names the module-global collision and the general half does
+    not, so the two are DIFFERENT REFUSALS with different sentences.**  What
+    this one adds over the general rule — `_unstored_read`, asked for every
+    function of every unit from `check_module_symbols`, which is where the
+    general rule's cost is measured and RE-measured — is the module-level
+    binding: the source is visibly asking about the module's name, and the
+    alternative reading, that `G` resolves in module scope, is the one CPython
+    rejects.  A reader who sees this sentence knows which of the two rules
+    spoke.  The general rule was kept out of this function for years on the
+    strength of a SYNTACTIC scan's 233 sites in 57 files; that scan was a floor
+    produced by a weaker algorithm than the "definitely stored" fixpoint that
+    enforces the general rule (`formal/model.py::read_before_store`), and
+    `test_formal_read_before_store.py::check_corpus_cost` reports the figure on
+    every run — **0 findings over `formal/hostmods`' 36 modules**.
 
     Parked rather than raised, for the reason the other five late frame checks
     are: `_prepare_functions` runs before `_resolve_imports`, so a refusal from

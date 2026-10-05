@@ -96,7 +96,7 @@ count unchanged.
 
 | files blocked | in-file | cause | owner / next step |
 |---|---|---|---|
-| **32** | 5 | a local read before its first assignment | `FORMAL_a_local_read_before_its_first_assignment` (claim `formal3-1-r2`). 26 of the 32 are the single name `pend` in `formal/hostmods/re.mojo:1401`, and the tool measures that 21 of the 25 files behind it name nothing `re.mojo` declares — so the row's value is `re.mojo` itself plus `formal/arm64.py`'s `sym_name` (3), not the 25 |
+| **32** | 5 | a local read before its first assignment | the read-before-store rule `formal/build.py` enforces for EVERY local (`_unstored_read`), so this row is a corpus measurement and not an open question. 26 of the 32 are the single name `pend` in `formal/hostmods/re.mojo:1401`, and the tool measures that 21 of the 25 files behind it name nothing `re.mojo` declares — so the row's value is `re.mojo` itself plus `formal/arm64.py`'s `sym_name` (3), not the 25 |
 | 6 | 1 | too many parameters for the register ABI (8 arm64 / 6 x86-64) | `FORMAL_x86_64_argument_registers` (claim `formal3-9-r2-r2`) — **deleted 2026-10-02, the cause is FIXED**: both ABIs now pass arguments past their register file in the caller's frame, and `fnmatch.mojo`/`pathlib.mojo` build on x86-64. The row as measured was real and the single in-file row was `formal/hostmods/fnmatch.mojo` — **the only x86-64-only finding in this slice** (§4) |
 | 3 | 3 | a module-global name has no storage | `FORMAL_module_state_no_storage` (claim `formal3-5`). `ELF_MAGIC` in `formal/elf.py`, `_MSL_FLOAT_TYPES` in `mojo/middle/metal_ops.py`, `REPO` in `tools/bootstrap_verify.py` |
 | 3 | 3 | a module's ATTRIBUTE read as a value (`sys.argv`) | `FORMAL_module_state_no_storage`, "What is left" (claim `formal3-5`) — `t_argv.mojo`, `tools/ci_line.py`, `tools/detach.py` |
@@ -207,9 +207,13 @@ Nothing below is unowned except where the table says so; this section exists so
 that the next reader does not re-derive the attribution.
 
 1. **`re.mojo`'s `pend` (26 files) and `formal/arm64.py`'s `sym_name` (3)** —
-   `FORMAL_a_local_read_before_its_first_assignment` (claim `formal3-1-r2`) says
-   the general rule is unenforced and measures what enforcing it costs. Note
-   what the tool measured here: **21 of the 25 files behind `re.mojo` name
+   the read-before-store doc then open (`FORMAL_a_local_read_before_its_first_
+   assignment`) said the general rule was UNENFORCED and measured what
+   enforcing it would cost; it was enforced, and its cost is now reported on
+   every run by `test_formal_read_before_store.py::check_corpus_cost`
+   (**0 findings over `formal/hostmods`' 36 modules**), which is why this row
+   reads 1 file on 2026-10-05 rather than 32. Note what the tool measured
+   here: **21 of the 25 files behind `re.mojo` name
    nothing it declares**, so even a complete fix moves the row by a handful of
    files and lands most of them on the next refusal in their chain.
 2. ~~**`fnmatch.mojo`'s `match_core(7)`**~~ — **DONE 2026-10-02, both halves

@@ -245,9 +245,12 @@ diagnosis rather than a patch.
 
 **Ownership** — no live claim covers this code. `formal3-6-r2` holds
 `bug:FORMAL_read_before_store_dominating_store`, whose doc **does not exist**: it
-was deleted in `1cfa8f80` together with the fix it described. `formal3-1-r2`'s
-`FORMAL_a_local_read_before_its_first_assignment.md` is about the SYNTACTIC rule
-and its next step is about making that scan cheap. Stated here because the
+was deleted in `1cfa8f80` together with the fix it described. The other doc in
+that area, `formal3-1-r2`'s, was about the SYNTACTIC form of the rule and its
+next step was to make that scan cheap; the rule itself is enforced by the
+"definitely stored" fixpoint in `formal/model.py::read_before_store`, which is a
+strictly stronger algorithm, so the syntactic figure it carried is superseded.
+Stated here because the
 reasoning is the kind an integrator should be able to check rather than trust.
 
 ## 4. The one file the sweep cannot classify, and the one it needed 90 minutes for

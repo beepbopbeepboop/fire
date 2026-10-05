@@ -110,10 +110,9 @@ that would each need re-measuring afterwards.
 
 ### 2.2 `formal: a `match` case's capture binds in ITS OWN arm` (163e9e63)
 
-`bugs/FORMAL_a_local_read_before_its_first_assignment.md` §"A FOURTH artifact
-class" names a `match` case's capture pattern as one of the two shapes the
-read-before-store scan still gets wrong, and it was: the arm was refused for
-reading its own capture. `_Block` gains a `seed` — names a block's IN set holds
+A `match` case's capture pattern was one of the two shapes the read-before-store
+scan still got wrong, and it was: the arm was refused for reading its own
+capture. `_Block` gains a `seed` — names a block's IN set holds
 for a reason other than its predecessors, added to the fixpoint's intersection
 *after* it — because a `def` entry is visible to every successor and putting the
 captures on the match head would make one case's binding visible in another
