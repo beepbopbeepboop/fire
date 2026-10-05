@@ -8,6 +8,62 @@ fixed shape and a second container shape at the same call site is itself this
 bug. Not mine — filed here with the measurement, because a reader of the two
 docs above will otherwise "simplify" a fixture into it.
 
+## Status 2026-10-04: the doc's OWN step-3 analysis is stale; re-measured, the
+## remaining failure is a DIFFERENT bug (the materialized-container element
+## type) and the unification this doc is about is no longer visible
+
+Re-measured on this tree, both pipelines, against CPython, with every fix this
+branch carries. The doc's program:
+
+```python
+def ident(x):
+    return x
+print(list(ident([1, 2, 3])))
+print(list(ident("abc")))
+```
+
+```
+CPython   [1, 2, 3]
+          ['a', 'b', 'c']
+compiled  [1, 2, 3]              <- the doc's row 1 is now RIGHT
+          [4339767536, 4339767296, 4339767312]
+```
+
+**Row 1 is fixed.** The doc's step 3 said it stopped at "the comprehension's
+RESULT list still records `char *`"; that is no longer where it stops, and the
+`list()`-of-a-call path was not what needed changing. `sorted(ident(...))` and
+`",".join(ident(...))` were already fixed by the `_passthrough_param_idx` work
+recorded below, and `list(ident([1, 2, 3]))` now takes the same per-call answer.
+
+**Row 2 is a different bug, and it is filed.** The compiled answer is three
+POINTER-shaped decimals, not three character codes — so the list really does
+hold three one-character STRINGS (`mojo_iter_boxed_list` → `mojo_str_chars`
+appends with `mojo_list_append_str`) and the READER is what is wrong:
+`_lower_ctor_from_iterable`'s comprehension emits
+`mojo_list_get_int (_t36, _t52)` because the materialized temp records no
+element type at all. That is the missing per-runtime-branch element type
+`CODEGEN_materialized_container_has_no_element_type.md` is about, down to its
+own closing sentence — "an element type that is only knowable per runtime
+branch needs a per-slot runtime read (`mojo_list_get_boxed` + the tagged
+reader)" — and it is that doc's open half, not this one.
+
+Three measurements that separate the two, so the next reader does not have to:
+
+| program | CPython | compiled |
+|---|---|---|
+| `list("abc")` (a static `char *`) | `['a', 'b', 'c']` | **correct** |
+| `list(ident([1, 2]))` | `[1, 2]` | **correct** |
+| `list(ident("abc"))` | `['a', 'b', 'c']` | three pointer decimals |
+
+So neither "a string is iterable" nor "a call result's element type" is broken
+on its own; only the COMBINATION — a boxed string reaching an iterable-typed
+slot, which is the opaque arm of `_materialize_as_list`.
+
+**Nothing here is left to do in this doc's own terms.** Its subject — one
+callee's return element type being inferred once for the whole program — is
+fixed for every row that can still show it, and the row that cannot is another
+doc's subject with its own measurement.
+
 ## Status 2026-10-02: PARTIAL — two of the four rows below are fixed; the
 ## `list()` row is not, and the measurement says exactly where it stops.
 
