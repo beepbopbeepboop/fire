@@ -74,19 +74,6 @@ stride starts at `--example-offset`. A second round over the same tree therefore
 measures a DIFFERENT set of functions with the same rule, and round 0 still means
 what it meant when round 0's numbers were taken.
 
-ONE PROCESS PER ITEM, and that is a correctness property
---------------------------------------------------------
-A verdict is a measurement, and this tool used to take its measurements with
-several at once in ONE interpreter, where `formal/model.py` keeps the current
-unit's module-level symbol table in a process global (`_MODULE_SYMBOLS`, replaced
-by `publish_module_symbols` on every `compile_formal`). Two items compiling
-concurrently therefore read each other's tables, and the reading is not a
-theoretical one: phase A, arm64, 78 items, same tree, same flags, only `-j`
-changed — **1 of 78 verdicts differs**, and it is a module-global verdict saying
-the table is empty when the unit declares a global. `_worker_pool` is the fix
-(one PROCESS per item, spawned) and its docstring is the measurement; `-j` is a
-memory decision and nothing else.
-
 TWO PHASES, because a Lean run costs 100x a codegen run
 ------------------------------------------------------
 Phase A builds each program with `prove=True, check=False`: the codegen runs and
@@ -140,7 +127,6 @@ import argparse
 import ast
 import collections
 import concurrent.futures
-import multiprocessing
 import json
 import os
 import signal
@@ -183,30 +169,17 @@ SKIP_DIRS = {".git", ".tmp", "__pycache__", "cas", "output", "lib", "build",
 # fails a test instead of quietly becoming a frontier nobody reported.
 BUILTIN_NAMES = {
     "True", "False", "None", "abs", "all", "any", "bin", "bool", "chr",
-    "divmod", "enumerate", "filter", "float", "hex", "int", "len", "list",
-    "map", "max", "min", "oct", "ord", "pow", "print", "property", "range",
-    "repr", "reversed", "round", "sorted", "staticmethod", "classmethod",
-    "str", "sum", "tuple",
+    "divmod", "enumerate", "float", "hex", "int", "len", "list", "max",
+    "min", "oct", "ord", "pow", "print", "property", "range", "repr",
+    "reversed", "round", "sorted", "staticmethod", "classmethod", "str",
+    "sum", "tuple",
 }
 
 # The names the census lets through that the formal path does NOT lower, with
 # what lowering each one would take.  NOT a copy of anything: the model's own
 # table, read through the module rather than re-spelled, so this census and the
 # two backends cannot disagree about which builtins exist.
-#
-# **`float` is filtered out, and the filter is the measurement.** This census
-# partitions the allow-list by CALL — "does `name(...)` lower" — and both
-# emitters DO lower `float(x)`, as an integer-to-double conversion, in every
-# argument position (`test_formal_run.py`'s three float rows depend on it and
-# answer what CPython answers). The model's row is in `NOT_LOWERED_BUILTINS` for
-# a different question: a `Double` is not a VALUE on this path, every value is
-# one 64-bit integer word. Both facts are true and only one of them belongs in
-# this partition, so the census reads the model's own exclusion set
-# (`LOWERED_CALL_SHAPED_BUILTINS`) rather than re-deciding which row is which —
-# the same reason the table is read through the module rather than re-spelled.
-NOT_LOWERED_BUILTINS = {
-    name: why for name, why in _model.NOT_LOWERED_BUILTINS.items()
-    if name not in _model.LOWERED_CALL_SHAPED_BUILTINS}
+NOT_LOWERED_BUILTINS = _model.NOT_LOWERED_BUILTINS
 
 # The builtins this census lets through that the path DOES lower, and why — the
 # other half of the partition, and the half that has to be WRITTEN rather than
@@ -240,15 +213,6 @@ LOWERED_BUILTINS = {
     "print": "the emitter builds its own format from the operand's kind",
     "range": "materialized as a list blob",
     "str": "the identity on an operand that is text; refused otherwise",
-    # Measured on this tree, all three argument positions, both of which are
-    # what `test_formal_run.py`'s three float rows do: `printf("%.17g\n",
-    # float(9007199254740995))` answers `9007199254740996`, as CPython does, and
-    # so does a `float(7)` bound to a `var` first. It is on THIS side of the
-    # partition for the same reason `str` is — a call that is answered for some
-    # operands and refused for others is a measurement, not a gap.
-    "float": "an integer-to-double conversion; the value is still a word and a "
-             "Double is not a value on this path, which is why the model's own "
-             "table keeps a row for it",
 }
 
 # The two markers that say "this refusal is about a CALL the build emitted and
@@ -1000,44 +964,15 @@ def run_item(item, arch, timeout, workdir, check=True):
         # lowering it take") and gets its own class and its own detail;
         # `_refusal_class`'s docstring is why the names are read off
         # `item.source` rather than off the message.
-        #
-        # **One refusal that arrives here is the PROOF LAYER's, and it used to
-        # be filed as this arm's class.** `formal/build.py` catches the
-        # generators' `NotImplementedError` — their uniform "I will not write a
-        # model I do not have" — and re-raises it as a `FormalBuildError` (its
-        # `except NotImplementedError` around the `generate_proof` call). That
-        # re-wrap is RIGHT and stays: it is what turns a forty-frame generator
-        # traceback into `build: <message>` for `fire.py`. The cost is that the
-        # shape cannot reach the `NotImplementedError` arm below, so it was filed
-        # as `codegen-refused` — "the code generator cannot lower this" — for
-        # programs `--no-prove` builds and RUNS on the same architecture, and
-        # `_refusal_class`'s own docstring names `codegen-refused` as the class a
-        # reader must not UNDER-count. So the fact is asked of the exception, and
-        # `FB.proof_refused` is the ONE reader of it — `formal/build.py`
-        # documents it, and `tools/formal_proof_fuzz.py` classifies this same
-        # shape through it rather than through a second reading of the flag.
-        if FB.proof_refused(e):
-            return verdict("proof-refused", str(e), phase="generate")
         names = _unlowered_builtins_in(item.source)
-        cls = _refusal_class(str(e), item.source)
-        # The names lead the detail only when the refusal is ABOUT a builtin,
-        # and the test for that is the class `_refusal_class` just gave — which
-        # is itself half the build's own words. Applying them whenever the
-        # source merely SPELLS a name from the table is how a ledger row comes
-        # to say a program stopped on `max` when the build refused it at the
-        # PROOF layer: the names went in front of a sentence about something
-        # else, and `builtin_frontier` — which reads the marker back out of the
-        # detail — counted a frontier the run never reached.
-        return verdict(cls, builtin_refusal_detail(
-            names if cls == "refused-builtin" else [], e))
+        return verdict(_refusal_class(str(e), item.source),
+                       builtin_refusal_detail(names, e))
     except NotImplementedError as e:
-        # The generator's own refusal, REACHABLE only where nothing re-wraps it
-        # (the arm above carries the wrapped form and classifies it by the flag).
-        # The generator is still the only thing that raises this (29 sites in
-        # `arm64_proof_gen.py`, none in `formal/build.py`, `formal/model.py` or
-        # the x86-64 generator, which CATCHES it instead — see
-        # `_no_value_model`'s docstring for what the two architectures do with a
-        # refusal). Anything else raised while generating is a crash.
+        # The generator's own refusal, and only the generator raises this (29
+        # sites in `arm64_proof_gen.py`, none in `formal/build.py`,
+        # `formal/model.py` or the x86-64 generator, which CATCHES it instead —
+        # see `_no_value_model`'s docstring for what the two architectures do
+        # with a refusal). Anything else raised while generating is a crash.
         cls = ("proof-refused" if _PHASE.generate_entered else "build-crash")
         return verdict(cls, e, phase="generate" if _PHASE.generate_entered
                        else "build")
@@ -1139,20 +1074,6 @@ def _unlowered_builtins_in(source):
     program the census emitted — which is in hand here and is the same text
     `_entry_call` wrote. A NAME that merely appears (`x = max` binds a local
     called `max`) is not a call, so the read is of call positions only.
-
-    **A CALL OF A SHAPE THIS PATH LOWERS IS NOT IN THE ANSWER**, and that is
-    `formal/model.py`'s `extremum_call_is_a_select` asked rather than
-    re-derived: `max(n, 1)` is a compare and a select and is lowered
-    (`formal/build.py`'s `_lower_builtin_extremum`), so naming `max` for a
-    program that only spells it that way puts a frontier row on a builtin that
-    stopped nothing. `max` is in the table because its OTHER THREE shapes still
-    refuse, which is exactly the case a name-only scan cannot see — so the
-    arity rule is asked from the one place that owns it, and this file keeps no
-    copy. The operand half of the rewrite's guard (purity, an integer literal)
-    is deliberately NOT re-implemented here: a call the census still names and
-    the build did not refuse costs one row its `refused-builtin` refinement and
-    nothing else, because `builtin_refusal_detail` now leads with the names
-    only when the refusal itself carries a builtin marker.
     """
     try:
         tree = ast.parse(source)
@@ -1164,9 +1085,6 @@ def _unlowered_builtins_in(source):
             continue
         func = node.func
         if isinstance(func, ast.Name) and func.id in NOT_LOWERED_BUILTINS:
-            if _model.extremum_call_is_a_select(func.id, len(node.args),
-                                                len(node.keywords)):
-                continue
             out.add(func.id)
     return sorted(out)
 
@@ -1379,75 +1297,6 @@ def disagreements(results, arch_list):
     return "\n".join(out)
 
 
-def _run_one(job):
-    """One item, in a worker. Module-level because a PROCESS pool has to pickle
-    it, and a closure over `args` cannot be pickled at all.
-
-    Every item gets its own PROCESS, which is the whole point and the reason
-    this is not a thread — `_worker_pool`'s docstring is the measurement and
-    the root cause.
-    """
-    item, arch, workdir, timeout, check = job
-    os.makedirs(workdir, exist_ok=True)
-    try:
-        return run_item(item, arch, timeout, workdir, check=check)
-    except Exception as e:                      # noqa: BLE001 — a class here
-        return Verdict(item.ident, arch, "build-crash",
-                       _first_line(f"{type(e).__name__}: {e}"), "harness",
-                       0.0, None, 0, False)
-
-
-def _worker_pool(jobs_count: int):
-    """A PROCESS pool with a SPAWN context, and why neither word is optional.
-
-    **`formal/model.py` publishes the current unit's module-level symbol table
-    into a process global** — `_MODULE_SYMBOLS`, installed by
-    `publish_module_symbols` — and three other tables are published the same way
-    beside it. One `compile_formal` call REPLACES them, which is right for the
-    case they were written for (two units compiled one after another: a dylib and
-    its dependent) and wrong for two units compiled AT ONCE, because the second
-    one's table is installed over the first one's while the first is still
-    walking.
-
-    Measured on this tree, phase A, arm64, 78 items, the same tree and the same
-    flags with only `-j` changed: **1 of 78 verdicts differs**, and the two
-    answers are about a module-level global:
-
-    ```
-    test_formal_math.py:365:combperm_source   -j 4
-      'BIG_N' has no home: the module-level symbol table is empty for this unit
-    test_formal_math.py:365:combperm_source   -j 1, and a direct build of the
-      same emitted program, which the tool prints with --list
-      'BIG_N' has storage here — it is one of the module-global slots in this
-      image's `__DATA`
-    ```
-
-    `_declared_module_names` asks that table whether the unit declares anything,
-    so an item that ran beside another unit's compile is told the table is empty
-    and prints the wrong one of two sentences. The class COUNTS were identical
-    (17 / 21 / 40), which is why this survived: the damage is to the per-item
-    detail, and one of the two is what the report's `DIFFERENT CONSTRUCTS`
-    section compares ACROSS ARCHITECTURES — so a thread artifact can be
-    published as a two-backend disagreement.
-
-    `spawn` rather than the platform default because `fork` copies whatever the
-    parent has already imported and published, which is the same hazard with an
-    extra step: a forked child would inherit the previous item's tables instead
-    of starting empty.
-    """
-    return concurrent.futures.ProcessPoolExecutor(
-        max_workers=jobs_count,
-        mp_context=multiprocessing.get_context("spawn"))
-
-
-def _interruptible_cancel(futures):
-    """Cancel what has not started, so a SIGTERM stops the queue rather than
-    the run. A no-op for the items already in flight, which is why the drain
-    above is what prints the partial counts."""
-    for other in futures:
-        other.cancel()
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n")[0],
@@ -1455,14 +1304,9 @@ def main(argv=None):
     ap.add_argument("--arch", default="both",
                     choices=["arm64", "x86_64", "both"])
     ap.add_argument("-j", "--jobs", type=int, default=2,
-                    help="concurrent items, each in its own PROCESS; each one "
-                         "can run a Lean proof, so this is a MEMORY decision "
-                         "(one proof measured at 1.7 GB, Lean's own ceiling for "
-                         "one is 6 GB). It is also the count that decides "
-                         "whether two verdicts can see each other, and the "
-                         "answer is no: `_worker_pool`'s docstring is the "
-                         "measurement, and it is why a `-j 1` ledger and a "
-                         "`-j 4` ledger are the same census")
+                    help="concurrent items; each one can run a Lean proof, "
+                         "so this is a MEMORY decision (one proof measured at "
+                         "1.7 GB, Lean's own ceiling for one is 6 GB)")
     ap.add_argument("-t", "--timeout", type=float, default=180.0,
                     help="per-proof WALL bound in seconds (run_lean's own CPU "
                          "bound is unchanged). A breach is reported as "
@@ -1539,8 +1383,7 @@ def main(argv=None):
     for arch in arches:
         for i, item in enumerate(items):
             jobs.append((item, arch,
-                         os.path.join(tmp, f"{arch}_{i:04d}"),
-                         args.timeout, not args.no_check))
+                         os.path.join(tmp, f"{arch}_{i:04d}")))
     results = []
     ledger = open(ledger_path, "a")
     ledger.write(f"# formal_proof_breadth {time.strftime('%F %T')} "
@@ -1549,6 +1392,17 @@ def main(argv=None):
                  f"example_offset={args.example_offset} repo={args.repo} "
                  f"admit_returns={args.admit_returns} "
                  f"examples={args.examples}\n")
+
+    def work(job):
+        item, arch, workdir = job
+        os.makedirs(workdir, exist_ok=True)
+        try:
+            return run_item(item, arch, args.timeout, workdir,
+                            check=not args.no_check)
+        except Exception as e:                  # noqa: BLE001 — a class here
+            return Verdict(item.ident, arch, "build-crash",
+                           _first_line(f"{type(e).__name__}: {e}"), "harness",
+                           0.0, None, 0, False)
 
     interrupted = {"flag": False}
 
@@ -1561,12 +1415,9 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     started = time.monotonic()
-    # `_worker_pool`, not a thread pool: the compiler publishes the current
-    # unit's tables into process globals, so two items in one interpreter read
-    # each other's. The measurement and the root cause are its docstring.
-    ex = _worker_pool(args.jobs)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
     try:
-        futures = {ex.submit(_run_one, job): job for job in jobs}
+        futures = {ex.submit(work, job): job for job in jobs}
         for fut in concurrent.futures.as_completed(futures):
             v = fut.result()
             results.append(v)
@@ -1583,7 +1434,8 @@ def main(argv=None):
                       f"[wall {v.wall_s}s — a cached verdict, not a run]",
                       flush=True)
             if interrupted["flag"]:
-                _interruptible_cancel(futures)
+                for other in futures:
+                    other.cancel()
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     elapsed = time.monotonic() - started

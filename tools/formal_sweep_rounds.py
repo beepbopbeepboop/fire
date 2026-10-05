@@ -460,115 +460,17 @@ def to_json(old_log, new_log, minimum=0):
     }
 
 
-def bank_baseline(log_path, out_path=None, paths=()):
-    """Record `log_path`'s per-file classes as the committed baseline.
-
-    A mode HERE rather than a `--write-baseline` flag on `formal_sweep.py`,
-    because of a measured reason that is spelled in
-    `tools/formal_sweep_parity.py`'s docstring and is worth repeating where the
-    choice is made: `formal_sweep._criteria_id()` hashes that file's OWN BYTES
-    into every build cache key, so a reader added there invalidates every cached
-    verdict and the next sweep of either arm rebuilds the whole corpus (measured
-    on this tree: 665 of 668). Refreshing the ratchet after a sweep must not
-    cost a sweep, so the log-reading half lives in the tool that already reads
-    logs and the SCHEMA and the writer are `formal_sweep.py`'s — one
-    implementation, reached from here.
-
-    `paths` is the swept FILE LIST, and it is required rather than guessed. A
-    log records the row every non-passing file printed and the COUNT of the ones
-    that did not; it never records their NAMES, and those files are the half of
-    the baseline that catches the regression this exists for — a file that
-    passed and no longer does. So the list is discovered from the same roots
-    with the sweep's own `find_source_files`, and the files in it that the log
-    printed no row for are recorded as `formal_sweep.BASELINE_UNNAMED_PASS`
-    rather than as passes: the log's own arithmetic says most of them were, but
-    a scope that has grown since the sweep leaves a few that were never swept at
-    all, and a baseline that called those passes would report a file as
-    regressing when nothing about it changed. The comparison treats that row as
-    "this baseline does not say what this file was", which is the truth, and
-    reports the files sitting in it by the class they moved TO.
-
-    Returns `(arch, files, path)`.
-    """
-    arch, rows, _causes, _counts, files, summary_pass, odd = read_round(log_path)
-    if not arch:
-        raise SystemExit(
-            f"NOT A SWEEP LOG (no `[arch] N files: PASS=… not-pass=…` summary "
-            f"line): {log_path}")
-    if odd:
-        raise SystemExit(
-            f"UNKNOWN CLASS in {log_path} ({', '.join(odd)}), so its files "
-            f"would be recorded as passes. Refusing to bank it")
-    if not paths:
-        raise SystemExit(
-            f"cannot bank {log_path} without its FILE LIST: the log records "
-            f"the row every non-passing file printed and the COUNT of the ones "
-            f"that did not, never their names. Pass --baseline-paths-from "
-            f"ROOTS (the sweep's own discovery over the same roots), or re-run "
-            f"the sweep with --write-baseline, which names every file")
-    printed = set(rows)
-    silent = [p for p in paths if p not in printed]
-    if len(paths) != files:
-        print(f"  note: {log_path} swept {files} file(s) and the roots given "
-              f"hold {len(paths)}: {len(silent) - (files - len(printed))} "
-              f"file(s) in the roots were not in that sweep's scope and are "
-              f"recorded as `{FS.BASELINE_UNNAMED_PASS}` with it rather than "
-              f"as passes")
-    verdicts = {p: (PASS if p in printed else FS.BASELINE_UNNAMED_PASS)
-                for p in paths}
-    verdicts.update({p: row.cls for p, row in rows.items()})
-    # `_refusal_family` is the sweep's OWN table and this is the sweep's own
-    # baseline, so this is its verdict and not `CAUSES.classify_message`'s — the
-    # two tables are keyed on different things (see the sweep's module
-    # docstring) and a field named `unnamed` that meant different rows in
-    # different files would be a field nobody could read.
-    unnamed = sorted(
-        p for p, row in rows.items()
-        if row.cls in (FS.CLASS_CODEGEN, FS.CLASS_CODEGEN_DEP)
-        and FS._refusal_family(row.reason) == FS._REFUSAL_OTHER)
-    out = out_path or FS.baseline_path(arch)
-    FS.write_baseline(out, arch, verdicts, source=log_path,
-                      unnamed_passes=len(silent),
-                      summary_pass=summary_pass, unnamed=unnamed)
-    return arch, len(verdicts), out
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("old", nargs="?", help="the earlier formal_sweep.py log")
+    ap.add_argument("old", help="the earlier formal_sweep.py log")
     ap.add_argument("new", help="the later formal_sweep.py log, same architecture")
     ap.add_argument("--min", type=int, default=1, dest="minimum",
                     help="only print causes reaching this many files (default 1)")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable instead of the report")
-    ap.add_argument("--write-baseline", action="store_true",
-                    help="record `new`'s per-file classes as the committed "
-                         "baseline (formal_sweep.py's schema, its writer) "
-                         "instead of comparing two rounds, so the sweep's own "
-                         "regression alarm has something to compare against. "
-                         "`old` is not needed and may be omitted")
-    ap.add_argument("--out", default=None, metavar="PATH",
-                    help="where --write-baseline writes "
-                         "(default: formal_sweep.py's per-architecture path, "
-                         "bugs/sweeps/sweep-<arch>.baseline.json)")
-    ap.add_argument("--baseline-paths-from", default=None, metavar="ROOTS",
-                    help="with --write-baseline: the swept FILE LIST, as the "
-                         "colon-separated roots the sweep ran. Discovered with "
-                         "the sweep's own find_source_files and checked "
-                         "against the log's own file total and PASS= count "
-                         "before anything is written")
     args = ap.parse_args()
-    if args.write_baseline:
-        roots = tuple(r for r in (args.baseline_paths_from or "").split(":")
-                      if r)
-        paths = [FS.rel(p) for p in FS.find_source_files(roots)] if roots else ()
-        arch, n, out = bank_baseline(args.new, args.out, paths)
-        print(f"banked {out}: [{arch}] {n} file(s) from {args.new}")
-        return 0
-    if not args.old:
-        ap.error("the earlier log is required (or --write-baseline)")
     if args.json:
         print(json.dumps(to_json(args.old, args.new, args.minimum), indent=1))
         return 0

@@ -6,11 +6,6 @@ files** — that is the finding, and it is the answer to the question the sweep
 cannot answer. What is left open is the chain, link by link, with an owner per
 link.
 
-**Status (2026-10-05, `work/formal25-5-r2`: nothing left to do here EITHER, and
-§5.1 now says why in a way a reader can check — every row of this document's
-per-file table has moved to a different wall, and all three of them are measured
-there. The document is a history; its owner column is the live part.**
-
 **Status (2026-10-04, `work/formal21-6`: nothing left to do here, and the reason
 is worth one line.** Round 2 of this scope
 (`FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`, `sweep20:std-os-io-2`)
@@ -123,7 +118,7 @@ the refusal, because none of them is behind another (§4 has the loop).
 | **1** | `std/collections/binary_heap.mojo` | **40** | **the export gate**, not a codegen refusal: `formal dylib has no public functions: binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares only the generic struct template(s) BinaryHeap, and the template itself is not a boundary symbol. Its INSTANTIATIONS are — formal/monomorph.py compiles each one an importer asks for … so this message means nothing asked for one` | `FORMAL_binary_heap_mojo_after_the_len_value.md` §2 (`formal18-2`), and behind it §2b's measurement: lifting this wall moves 8 of 10 sampled files onto link 2 and 2 onto link 3 |
 | 1′ | `std/collections/binary_heap.mojo`, built alone | (0 of this scope — it is what link 1 would hit next) | `self.clear() is a method call on a value …` — `List.clear` has no entry in the emitter's method table | same doc, §3 row 1 |
 | **2** | `std/algorithm/backend/tile.mojo` | 0 today (behind link 1) | `workgroup_function[…](…) calls a name this unit does not compile, so the brackets cannot be bound` — re-measured on BOTH architectures, unchanged | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal16-7`) and `project18:tile-specialization` |
-| **3** | `std/builtin/builtin_slice.mojo` | **3** | `self.step.or_else() is an Optional unwrap: it answers by knowing which of two words was the empty one, and on this path there is no way to know` | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) — which names this exact refusal as `builtin_slice.mojo`'s terminal cause. The two docs the first pass named here (the one-field receiver rebinding rule, `formal/build.py`'s `_collect_one_field_receiver_rebinds`, and `FORMAL_builtin_slice_optional_field_is_a_frame_holder`) are not what fires |
+| **3** | `std/builtin/builtin_slice.mojo` | **3** | `self.step.or_else() is an Optional unwrap: it answers by knowing which of two words was the empty one, and on this path there is no way to know` | `FORMAL_stdlib_optional_needs_a_representation` (`formal16-7`) — which names this exact refusal as `builtin_slice.mojo`'s terminal cause. The two docs the first pass named here (`FORMAL_one_field_receiver_rebound_propagates`, `FORMAL_builtin_slice_optional_field_is_a_frame_holder`) are not what fires |
 
 The three files behind link 3 are the same three the first pass found —
 `std/ffi/unsafe_union.mojo`, `std/io/file.mojo` and `std/pathlib/__init__.mojo`
@@ -293,40 +288,3 @@ The one thing this pass changed is the map: at the first pass two of the three
 links named a refusal that no longer fires and an owner that does not hold it,
 and a reader following the old table would have gone to fix a wall that had
 already been rebuilt into a different one.
-
-### 5.1 And every row in that table has MOVED AGAIN (2026-10-05,
-### `work/formal25-5-r2`) — so the table is now a chain of stale readings, not
-### a map
-
-**Measured, one `fire.py build --formal --no-prove` per module, arm64, on this
-tree.** All three links fire a DIFFERENT refusal from the one this document
-records, and so does link 1′:
-
-| link | this document says it is | it is NOW |
-|---|---|---|
-| link 1 | the export gate: *"binary_heap.mojo exports nothing under doc/ABI.md's rules"* | **`self.unsafe_ptr()` is a method call on a value**, and the method table the message quotes now reads `append, clear, close, write …` — `clear` has landed, so link 1′ is no longer `List.clear` either |
-| link 2 | `tile.mojo`'s bracketed specialization: *"calls a name this unit does not compile, so the brackets cannot be bound"* | **a variadic `*`-parameter**: *"the body reads 'tile_size_list', its `*`-parameter, and this path has no variadic ABI"* — `FORMAL_a_variadic_parameter_read_has_no_abi.md` (`formal28-2`) |
-| link 3 | `Optional`'s missing representation: *"self.step.or_else() is an Optional unwrap"* | **the bare-call row**: *"`FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._utils` exports"* — `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` (`formal19-1`) |
-
-**The honest reading is a FACT ABOUT THE QUEUE, and it is the same one
-`…_round2_scope_is_one_refusal_shape.md` §2's two features already make:** the
-walls behind this scope are not in this scope's packages, so they are rebuilt
-whenever their own owner lands, and a per-file table recorded at one moment goes
-stale the moment one does. This document is the second time in this family to
-arrive at that, and the first time with a measurement of it.
-
-**What is NOT claimed:** that these three are closer to being fixed. `unsafe_ptr`
-is a pointer model, the variadic ABI is a two-backend-and-ProofLib project, and
-`FormatStruct` is the 148-file row — each is a different amount of work from
-what this document recorded, and none of them is in this claim. **And no file
-of this scope is re-measured**, because §"Status" already records that round 2
-re-swept a different package set and that the three passes' 46-file lists are
-not the same scope — so this table is a reading of three MODULES' own refusals,
-which is what it always was, and not a claim about the corpus.
-
-**What this document therefore is now:** a history. Its one durable finding is
-the §Status sentence — *the work is one file per link, and every link belongs to
-someone else* — and the two sweeps behind it. The per-file refusal table is
-kept because it is what told the next worker where to look, but **a reader
-arriving here for a wall to fix should read the OWNER's doc, not this table**,
-and the three rows above are the current answer to "which wall is it".

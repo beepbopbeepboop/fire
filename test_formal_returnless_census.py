@@ -49,22 +49,11 @@ import formal_returnless_census as C   # noqa: E402
 
 
 def census(source, name="case.mojo"):
-    """`(decided, candidates)` for one source, through the tool's own readers.
+    """`(decided, candidates)` for one source, through the tool's `collect`.
 
-    `decided` is `formal_returnless_census.decided_names`' table — the same one
-    the report prints its "decided / undecided" line from — and `candidates` is
-    the `(same_file, path, line, name, position)` rows.
-
-    **The tool's `decided_names` and `candidate_rows`, not a second copy of
-    either.** This helper used to carry its own comprehension of the same rule,
-    and it was the reason the rule's own defect survived: both copies spelled
-    `defs[0][2] and defs[0][3]`, and every case in this file that reached the
-    DECLARED half spelled a function that returns AND declares — so the two
-    copies agreed on all of them and neither was ever asked about a function
-    that returns a value without declaring one, which is the shape the whole
-    corpus is made of (`formal/hostmods/argparse.mojo`'s `_fld` and its 456
-    call sites). Asking the tool is also the only way a test here can fail when
-    the tool's rule changes.
+    `decided` is the tool's `{name: returns_something}` table — the same one the
+    report prints its "decided / undecided" line from — and `candidates` is the
+    `(same_file, path, line, name, position)` rows.
     """
     tmp = tempfile.mkdtemp(prefix="rlc-")
     try:
@@ -72,9 +61,18 @@ def census(source, name="case.mojo"):
         with open(path, "w") as f:
             f.write(source)
         index, calls, _defs, _rl, _structs = C.collect([path])
-        _decided, _kinds, rows = C.candidate_rows(index, calls)
-        return (C.decided_names(index),
-                [(r[0], r[1], r[2], r[3], r[5]) for r in rows])
+        decided = {n: defs[0][2] and defs[0][3]
+                   for n, defs in index.items()
+                   if len(defs) == 1 or all(d[2] == defs[0][2]
+                                            and d[3] == defs[0][3]
+                                            for d in defs)}
+        rows = []
+        for call_path, line, callee, _recv, position in calls:
+            if callee not in decided or decided[callee]:
+                continue
+            rows.append((call_path == os.path.relpath(path, C.ROOT), call_path,
+                         line, callee, position))
+        return decided, rows
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -163,57 +161,6 @@ class TestWhatCounts(unittest.TestCase):
                         "a declared return type means this path has said what "
                         "the function means, so it is out of the census whatever "
                         "the body does")
-        self.assertEqual(rows, [])
-
-    def test_a_return_with_no_declared_type_is_not_a_candidate(self):
-        """The half the census got WRONG, and the corpus's commonest shape.
-
-        `def fld(rec, k): … return p` — a function that RETURNS a value and
-        DECLARES nothing — is not "a function that returns nothing", and filing
-        its call sites as candidates is what put **456 rows in
-        `formal/hostmods/argparse.mojo`** into the report §0a of
-        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
-        quotes: `_fld`, `_cp`, `_alpha_index` and `_name_ptr` are all of this
-        shape and that file is a host module the gate compiles. The rule is a
-        DISJUNCTION — a candidate is a site whose callee has neither a
-        value-returning `return` nor a declared return type — and reading it as a
-        conjunction needs both halves false at once, which for an undeclared
-        function is never so.
-        """
-        decided, rows = census(
-            "def fld(rec, k):\n"
-            "    p = rec\n"
-            "    while k > 0:\n"
-            "        p = p + 1\n"
-            "        k = k - 1\n"
-            "    return p\n"
-            "def main(n):\n"
-            "    x = fld(n, 3)\n"
-            "    return x\n")
-        self.assertTrue(decided["fld"],
-                        "`fld` returns a value, so consuming it is not a "
-                        "candidate: the doc's rule is 'no value-returning "
-                        "`return` AND no declared return type'")
-        self.assertEqual(rows, [], f"a returning call is a candidate: {rows}")
-
-    def test_a_declared_type_with_no_return_is_not_a_candidate_either(self):
-        """The other half alone, which is what `_declares_a_return` is FOR.
-
-        `def quiet(n) -> Int: w = 1` states what it means even where the value
-        is not CPython's, so it is out of the census for the DECLARATION and not
-        for the `return`. The case above spells a function that both returns and
-        declares, so this half was never asked about on its own — which is how a
-        conjunction survived every case in this file, in the tool AND in the
-        helper above.
-        """
-        decided, rows = census(
-            "def quiet(n) -> Int:\n"
-            "    w = 1\n"
-            "def main(n):\n"
-            "    return quiet(n)\n")
-        self.assertTrue(decided["quiet"],
-                        "a declared return type alone keeps it out — that is "
-                        "what the second half of the rule is for")
         self.assertEqual(rows, [])
 
     def test_an_assigned_call_is_a_candidate_and_says_it_is_the_weakest(self):

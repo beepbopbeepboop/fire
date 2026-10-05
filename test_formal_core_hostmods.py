@@ -26,12 +26,10 @@ otherwise — `enum-shape` says so in its own assertions. What moved is the
 subject of the refusal, which is the whole value of a module in that directory.
 
 `functools` IS HERE AS AN ABSENCE, and that is the point of its group: every
-one of its names needs either DECORATOR semantics or a TYPE/OBJECT with state —
-and a decorator on this path is parsed and never applied, so an exported
-`lru_cache` would be a program that runs and skips the work it asked
-for. (A first-class function value WAS one of the two capabilities, and stopped
-being one on 2026-10-04; the group's own docstring records the measurement that
-corrects it.) `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
+one of its names needs either a first-class function value or DECORATOR
+semantics, and a decorator on this path is parsed and never applied — so an
+exported `lru_cache` would be a program that runs and skips the work it asked
+for. `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
 and the two refusals that are measurements rather than readings.
 
 WHY THE ORACLE IS CPython AND NOT A TABLE
@@ -544,17 +542,11 @@ def group_functools_absent(tmpdir, verbose):
         nothing. So an `lru_cache` that exported successfully would build a
         program that caches nothing, which is answer-preserving for `version()`
         and wrong for everything else;
-      * a first-class CALLABLE as an ARGUMENT used to be refused outright, and
-        THAT IS NO LONGER TRUE — it is not what this group is about any more. A
-        function value is a code address on this path now
-        (`formal/build.py:13586`), and measured on both architectures in 2026-10-04
-        `var g = dbl; return g(5)` answers 10 where CPython answers 10, and
-        `call2(dbl, 5)` / `call2(neg, 5)` through the same parameter answer 10
-        and -5, so the word carries a call site and not one fixed target. The
-        names below still refuse because THE MODULE IS ABSENT, which is what this
-        group checks; `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`
-        §Status 2026-10-04 carries the re-measured census, and the two rows of it
-        that remain are DECORATOR semantics and a TYPE OR OBJECT with state.
+      * a first-class CALLABLE as an ARGUMENT is refused outright, measured on
+        both shapes — `functools.reduce(add2, [1,2,3], 0)` does not lower, and
+        neither does `def call2(f, a): return f(a)` called as `call2(dbl, 5)`
+        with both functions in the caller's own file, so it is not a
+        dylib-boundary problem.
 
     The third is the one this group cannot check and the doc says why:
     `get_cache_token()` returns `len()` of a private cache list, and there is no
@@ -590,10 +582,8 @@ def group_functools_absent(tmpdir, verbose):
         check(r.returncode != 0,
               f"functools.{name} resolved, but the module is documented as "
               f"absent — either the doc is wrong or a functools.mojo landed "
-              f"without the DECORATOR support it was measured to need. A "
-              f"first-class callable is no longer part of that: it landed "
-              f"2026-10-04 and this name refusing is now the module's absence, "
-              f"not its capability's")
+              f"without the decorator and callable support it was measured to "
+              f"need")
         msg = r.stderr or r.stdout
         check("functools" in msg,
               f"functools.{name} was refused without naming the MODULE the "

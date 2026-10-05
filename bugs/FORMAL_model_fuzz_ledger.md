@@ -108,31 +108,17 @@ was about the harness and would have been filed as a model bug.**
 5. **`x31` is not a base register in assembly text.** `[x31, #8]` is rejected
    by `as` ("invalid operand for instruction"), which took the whole 297-case
    batch down with it. The pool now spells the base `sp`.
-6. **Two `movz` encoders with the same idea and different widths, and BOTH named
-   the wrong way round.** `encode_movz_xd_imm` emitted the 32-bit word
-   (`0x52800000`) and `encode_movz_xn_imm` — named after a PARAMETER — the
-   64-bit one (`0xd2800000`); the pool had paired the 32-bit encoder with the
-   text `movz xN`, which is what this row's pairing was reading off the wrong
-   half of. Both are now named for their WIDTH (`encode_movz_xd_imm` 64-bit,
-   `encode_movz_wd_imm` 32-bit) and byte-checked against `as` for every
-   register and every immediate in `test_arm64_encoders.py` — the check whose
-   absence is why the name and the base opcode disagreed for as long as they
-   did. So §2's rule ("pair the encoder with the width its base encodes") is now
-   also what the names say, rather than a convention this tool remembers.
+6. **Two `movz` encoders with the same idea and different widths.**
+   `encode_movz_xd_imm` emits the 32-bit word (`0x52800000`) and
+   `encode_movz_xn_imm` the 64-bit one (`0xd2800000`); the pool had paired the
+   32-bit encoder with the text `movz xN`. See
+   `bugs/FORMAL_arm64_movz_encoder_is_named_xd_and_encodes_wd.md`.
 7. **`and xN, xM, #W` where `W` is a MASK WIDTH.** `encode_and_xd_xn_imm`'s
    third argument is the mask width (8/16/32 → `#0xff`/`#0xffff`/
    `#0xffffffff`), not an immediate, and the pool printed the width.
-8. **`LDP` with `Rt == Rt2` is UNPREDICTABLE**, and the encoder that claimed to
-   be an SP pair load (`encode_ldp_xn_xt_sp`) had its argument order and scale
-   both the other way round from its name: it emitted `ldp x0, x1, [x1, #16]`
-   for `(1, 0, 2)` — see §4. What replaced it is `encode_ldp_xt1_xt2_rn`,
-   whose displacement is a byte offset in the SIGNED seven-bit field at 21:15
-   (range -512 .. 504, measured: `#504` assembles and `#512` does not), and
-   `lib/ProofLib.lean`'s LDP-offset arm — which was wrong in all three of its
-   field reads, not only in the pair load's spelling — is corrected beside it.
-   §4 still says no WIRED encoder emits the form, which remains true: the
-   encoder is byte-checked against `as` and nothing lowers to it, because the SP
-   pair traffic is the writeback pair beside it.
+8. **`LDP` with `Rt == Rt2` is UNPREDICTABLE**, and `encode_ldp_xn_xt_sp`'s
+   argument order and scale are both the other way round from its name — see
+   §4 and its bug doc.
 9. **`MOV Xd, Xn` has two encodings.** `encode_mov_zr_xn` emits `ADD Xd, Xn,
    #0` where the assembler emits `ORR Xd, XZR, Xn`; 60 of 297 cases in one run
    were that single fact reported as an encoder defect. The encoder cross-check
@@ -218,23 +204,9 @@ will happily delete the guilty instruction and report a different bug.
 
 The full set of refusals is §2.1's table; `bugs/FORMAL_arm64_step_cannot_step_
 nine_wired_encodings.md` carries the count, the encoders and the order to add
-them in.
-
-**There is no `WRONG` left in this sweep**, and the one that was here was the
-unsigned-offset `LDR`/`STR` pair reading register 31 as ZERO: `ldr x0, [sp,
-#32]` answered 0 where the hardware answered the word, and `str w25, [x9, #32]`
-clobbered the four bytes above the word it stored. Both are fixed in
-`lib/ProofLib.lean` — the three arms read `Rn` through `arm64_reg_or_sp`, and
-the 32-bit store writes through the new four-byte `mem_write_u32` — and both are
-pinned by hardware rather than by prose:
-`test_formal_call_proof_gen.py`'s `TestUnsignedOffsetAccess` runs those three
-instructions on the CPU and compares `arm64_step`'s final state against it. The
-count that moved, measured:
-
-| seed | before | after |
-|---|---|---|
-| `sweepC` | AGREE 208  WRONG 2  NOSTEP 86 | AGREE 210  WRONG 0  NOSTEP 86 |
-| `sweepB` | AGREE 197  WRONG 0  NOSTEP 99 | AGREE 197  WRONG 0  NOSTEP 99 |
-
-The 86/99 `NOSTEP`s are the nine encodings
-`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` carries.
+them in. The one surviving `WRONG` is
+`bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`, whose
+§4 says why it is written down instead of landed: the fix is one identifier in
+three places, and the two `work_step_*` PROOFS it breaks need a `Rn == 31` /
+`Rn < 31` case split that a light worker cannot confirm without the
+generated-proof suite.

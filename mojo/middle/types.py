@@ -366,16 +366,6 @@ _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int
 # for a Python float, so both are in it.
 _SCALAR_FLOAT_TYPES = frozenset({'float', 'double', '__fp16'})
 _CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *'})
-# The Mojo container types a module-level global is DECLARED with. Every one of
-# them is stored in the `_<mod>_globals` struct as a boxed `int64_t`, which is
-# the rule the bare-name global read, its `submod.GLOBAL` sibling and the
-# comprehension-target shadow predicate all share. It lives HERE rather than in
-# the backend's `emit_exprs.py` because those three are not all in that one
-# file any more: the read's decision was extracted to
-# `mojo/middle/module_shared.py::bare_global_read_plan` (so the comprehension
-# lowering could ask the SAME question instead of re-deriving a weaker one), and
-# a second copy of the list there would be exactly the drift this replaces.
-_BOXED_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
 _EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
 
 def _seedable_local_ctype(t) -> bool:

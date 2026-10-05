@@ -46,10 +46,9 @@ from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
     _as_str, _gfl_declare_target_name, _pair_key, _single_loop_target_name,
     _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
-    _emit_starred_slot_from_cstr, _emit_starred_slot_from_value,
-    _emit_starred_slot_list, starred_slot_index, starred_slot_name,
-    ZipLongestFillRefusal,
+    _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
 )
+
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     args = node.iterable.args
     var  = node.target
@@ -1131,71 +1130,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._dataclass_fields_vars.discard(var)
 
 
-#: The ABSENT fill each slot type selects, keyed by `TypeLattice.list_suffix`.
-#: `None` is the `double` arm's marker for "patched to `(double)0` below", which
-#: is the pre-existing spelling for it; the two integer-ish arms share the
-#: `(int64_t)0` the select is typed in, and a string slot's 0 is the NULL that
-#: `mojo_print` already renders as `None`. It is ONE table rather than three
-#: literals in three arms because a slot that the fill cannot reach uses it too
-#: (see `_gen_for_zip_longest`), and two copies of "what absent means here" is
-#: how the two would come to disagree.
-_ZIP_LONGEST_ABSENT = {'double': None, 'str': '(int64_t)0', 'int': '(int64_t)0'}
-
-
-def _zip_longest_fill_refusal(fill_ctype: str, slot_domain: str):
-    """The one message for a `fillvalue` whose type the slot cannot hold.
-
-    One builder for three call sites, because the three are the same fact: the
-    fill's C type and the slot's own C type are different, and this model gives
-    each slot its own type rather than a box. CPython hands every slot the value
-    as given, so there is no conversion to appeal to — the alternative answer is
-    a value of the wrong type read back through the right one.
-    """
-    return ZipLongestFillRefusal(
-        f"zip_longest: `fillvalue` is {fill_ctype} and cannot fill "
-        f"{slot_domain} — CPython hands every slot the value as given, and "
-        f"this model gives each slot its own C type, so storing one in "
-        f"another is a wrong answer rather than a conversion (measured: a "
-        f"string fill in an `int64_t` slot prints the pointer's own decimal). "
-        f"Pass a `fillvalue` of that type.")
-
-
-def _zip_longest_reaches(args: list, slot: int) -> bool:
-    """Can `zip_longest`'s padded fill ever be SELECTED into `args[slot]`?
-
-    `zip_longest` iterates `max(len_a, len_b)` times and slot `i` is padded
-    exactly when that count is past `len(args[i])`, so the answer is a
-    comparison of two lengths — and both are compile-time facts when both
-    sequences are list LITERALS. When either is not (a name, a call, a
-    comprehension) the lengths are `mojo_list_len` calls read at run time and
-    the honest answer is that any slot may be padded.
-
-    A `*seq` element makes a literal's length unknown TOO, and in the direction
-    that matters: `len([1, *xs])` is `1 + len(xs)` and this can only count the
-    one, so a literal carrying a spread answers "cannot be padded" for a slot
-    that can be. Under-counting a length here would decide a refusal NOT to
-    fire, which is the silent direction, so a spread makes the answer `True`.
-
-    The distinction is what keeps a refusal from costing correct code: with it,
-    `zip_longest([1, 2], ["p"], fillvalue="-")` keeps its integer slot's
-    unreachable `(int64_t)` coercion (the iteration count is 2 and that
-    sequence has 2 elements, so the fill is never selected) while the same
-    `fillvalue` into a slot that CAN be padded is a refusal, because
-    `(int64_t)(char *)"-"` in an integer slot prints `4364407504`.
-    """
-    lens = []
-    for a in args:
-        if not isinstance(a, gimple_ctypes.ListExpr):
-            lens.append(None)
-        elif any(gimple_ctypes.is_star_spread(el) for el in a.elements):
-            lens.append(None)
-        else:
-            lens.append(len(a.elements))
-    if any(n is None for n in lens):
-        return True
-    return max(lens) > lens[slot]
-
-
 def _gen_for_zip_longest(gen, node):
     """Handle: for (a, b) in itertools.zip_longest(seq_a, seq_b
     [, fillvalue=v]): ...
@@ -1204,31 +1138,10 @@ def _gen_for_zip_longest(gen, node):
     max(len_a, len_b) times; each tuple-target slot is assigned from its
     OWN sequence's element i (read with that sequence's own tracked
     element-type accessor), or the fill value once the index runs past
-    that sequence's length.
-
-    **What a PADDED slot can hold is the whole constraint here**, because
-    CPython hands every slot the fill as given and each slot below is a C
-    local of its sequence's own element type — there is no box to put a value
-    of the wrong type into. So:
-
-      * `str` and `int` slots keep the model's long-standing 0/NULL sentinel
-        for an ABSENT fill, and a `char *` NULL is what `mojo_print` already
-        renders as `None`, so a padded string slot reads `None` as CPython
-        does. An `int64_t` has no such word, so a padded integer slot reads
-        `0` — a real, measured divergence from CPython's `None`, kept because
-        it is this model's documented representation and changing it is the
-        value-model work below, not this function's;
-      * a `double` slot has NO absent value at all — every double is a value
-        here, so `None` and `0.0` are one word — and a padded one is therefore
-        REFUSED (`ZipLongestFillRefusal`) rather than answered `0.0`;
-      * an EXPLICIT `fillvalue` is admitted only into a slot whose own read
-        type it matches, for the same reason.
-
-    Representing absence for a `double` — so the first refusal above becomes
-    an answer — is the value-model change this doc's bug names: the per-slot
-    kind byte (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-    `TypeLattice.slot_kind_byte` already names) is the precedent, and a loop
-    target would have to carry that kind alongside its value.
+    that sequence's length. The default fill is 0 — this scalar C model's
+    representation of None — so the common `if x is None:` guards after a
+    padded iteration test a genuine 0/NULL, exactly like real Python's
+    None sentinel.
 
     Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
     boxed-iterable fallback, where `itertools` is an opaque module global:
@@ -1247,9 +1160,7 @@ def _gen_for_zip_longest(gen, node):
     Any shape this narrow handler can't prove supported (non-2-arity call,
     non-tuple target, non-list sequence, non-literal fillvalue) raises;
     the caller (_gen_stmt_ForStmt) rolls back partial output transactionally
-    and falls through to the pre-existing generic path unchanged — EXCEPT for
-    `ZipLongestFillRefusal`, which is re-raised, because the generic path drops
-    the loop and answers nothing.
+    and falls through to the pre-existing generic path unchanged.
     """
     it = node.iterable
     args = list(it.args)
@@ -1278,103 +1189,40 @@ def _gen_for_zip_longest(gen, node):
             ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
         seqs.append((ptr, gen._elem_of(sv)))
 
-    # The fillvalue, LOWERED ONCE.  It used to be lowered inside the per-slot
-    # loop below, so `zip_longest(a, b, fillvalue=f())` called `f()` once per
-    # slot — CPython evaluates the default exactly once, and a fillvalue with a
-    # side effect is the shape that notices.  It is lowered here, before the
-    # loop is emitted, which is also where its value has to be computed: it is
-    # loop-invariant.
-    fill_ctype = None
-    fill_value = None
-    if fill_node is not None:
-        fill_ctype, fill_value = gen.lower_expr(fill_node)
-
     # Per-slot read + fill expressions, all selected through ONE int64_t
     # (or double) select so the fill/element type mismatch never reaches
     # GIMPLE as differing ternary operand types. The final assignment to
     # the declared target coerces back to its real declared ctype (the
     # same box/unbox dance _gen_for_list's tuple branch uses).
-    #
-    # The fill is admitted into a slot ONLY when the slot's own read type can
-    # hold it, and the reason is CPython's: `zip_longest` hands every slot the
-    # value as given, so a `fillvalue` of one type landing in a slot of another
-    # is not a conversion but a wrong answer. It used to be coerced per slot,
-    # which produced three of them and each was measured:
-    #
-    #   fillvalue="-" into an int slot  → `(int64_t)(char *)"-"`, and
-    #     `zip_longest([1], ["p", "q"], fillvalue="-")` printed `4364407504 q`
-    #     where CPython prints `- q` (the pointer, as a decimal)
-    #   fillvalue=0.0 into an int slot  → `(int64_t)0.0`, and
-    #     `zip_longest([1, 2.5], [7], fillvalue=0.0)` printed `2.5 0` where
-    #     CPython prints `2.5 0.0`
-    #   fillvalue="-" into a float slot → already a refusal here, and it stays
-    #     one (it was the only direction the old per-slot check covered)
-    #
-    # A fill that cannot REACH its slot is not this question: see
-    # `_zip_longest_reaches`, which is what keeps the doc's own first program
-    # (`zip_longest([1, 2], ["p"], fillvalue="-")`) building.
     fills = []
     slot_reads = []  # (raw_ctype, expr_with_{i} placeholder fn)
-    for si, (ptr, elem) in enumerate(seqs):
+    for ptr, elem in seqs:
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-        reaches = _zip_longest_reaches(args, si)
         if suf == 'double':
             slot_reads.append(('double', lambda p=ptr: f"mojo_list_get_double ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'double':
+                    raise ValueError("fillvalue must be float-typed to fill a float sequence")
+                fills.append(fv)
+            else:
+                fills.append(None)  # patched below with a 0.0 temp
         elif suf == 'str':
             slot_reads.append(('str', lambda p=ptr: f"mojo_list_get_str ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'char *' and not isinstance(fill_node, gimple_ctypes.StringLiteral):
+                    raise ValueError("fillvalue must be string-typed to fill a string sequence")
+                fills.append(f"(int64_t)(char *)({fv})")
+            else:
+                fills.append('(int64_t)0')
         else:
             slot_reads.append(('int', lambda p=ptr: f"mojo_list_get_int ({p}, {gen._ziptmp})"))
-        # The expression this slot's select takes when the index is past its
-        # own sequence's end. `None` means "the arm's `(double)0`", patched
-        # below, and it is the DEFAULT the absent fill has always been.
-        #
-        # A slot the fill can never reach gets that default rather than the
-        # fillvalue, and the reason is not tidiness: an unreachable slot's
-        # expression still has to COMPILE. `(int64_t)(char *)(9.0)` for a
-        # string slot in `zip_longest([1.5], ["q", "r"], fillvalue=9.0)` is not
-        # dead code to gcc, it is "cannot convert to a pointer type" — the
-        # second sequence has two elements and the loop runs twice, so slot `b`
-        # is never padded, and the program still did not build until the
-        # unreachable slot stopped naming the fillvalue at all.
-        if not reaches:
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-            continue
-        if fill_node is None:
-            if suf == 'double':
-                # The default fill is `absent`, and this is the one slot type
-                # that cannot carry it: the loop target is a C `double` and
-                # every double is a value here, so `None` and `0.0` are the
-                # same word and `zip_longest([1.5], ["q", "r"])` printed
-                # `0.0 r` where CPython prints `None r`. The `int` and `str`
-                # arms keep their 0/NULL sentinel because a C `int64_t` and a
-                # C `char *` each have one word that is not a value of their
-                # own domain. Representing absence for a `double` is a
-                # value-model change — the per-slot kind byte
-                # (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-                # `TypeLattice.slot_kind_byte` names) is the precedent, and a
-                # loop target would have to carry that kind with it — and not
-                # a tweak to this lowering.
-                raise ZipLongestFillRefusal(
-                    "zip_longest: a padded `double` slot has no value that "
-                    "means `absent` on this model — the loop target is a C "
-                    "`double`, every double is a value here, so `None` and "
-                    "`0.0` are the same word and the padded row reads `0.0`. "
-                    "Pass an explicit float `fillvalue`, or zip two float "
-                    "sequences of the same length.")
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-        elif suf == 'double':
-            if not gimple_ctypes.TypeLattice.is_float(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "a float sequence")
-            fills.append(fill_value)
-        elif suf == 'str':
-            if (fill_ctype != 'char *'
-                    and not isinstance(fill_node, gimple_ctypes.StringLiteral)):
-                raise _zip_longest_fill_refusal(fill_ctype, "a string sequence")
-            fills.append(f"(int64_t)(char *)({fill_value})")
-        else:
-            if not gimple_ctypes.TypeLattice.is_int(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "an integer sequence")
-            fills.append(f"(int64_t)({fill_value})")
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                fills.append(f"(int64_t)({fv})")
+            else:
+                fills.append('(int64_t)0')
 
     # Declare each target by its own slot's element type BEFORE the loop
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
@@ -2601,44 +2449,34 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
         # `for k, *rest in <dict>` unpacks the KEY STRING — Python says
-        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']`, because
-        # iterating a dict yields its keys and a key is a `str` — so the slots
-        # of this loop are CHARACTERS of one C string, not slots of a shared
-        # row (slot 0 is the key; every later slot is the literal 0, the
-        # starless lowering's stand-in for a pair's value). What the star adds
-        # is the before/after arithmetic `starred_slot_index` describes: every
-        # slot before the star is measured from the front of the string, every
-        # slot after it from its END, and the star takes what is left between
-        # them (`a, *mid, z` over "abcd" gives `mid == ['b', 'c']`).
+        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']` — and the
+        # slots of a dict loop here are not slots of a shared row at all
+        # (slot 0 is the key; every later slot is the literal 0, this
+        # lowering's stand-in for a pair's value). There is no row to slice a
+        # remainder out of, so this REFUSES at runtime through the standard
+        # mechanism (`_emit_unsupported_iter`: loud, and not a silently
+        # dropped body) rather than emitting the store through a pointer
+        # named `*rest` — which is a write through an UNINITIALISED pointer,
+        # i.e. a wild store that happens to be mapped.
         #
-        # This USED TO REFUSE, through `_emit_unsupported_iter`, because the
-        # interpreter bound the whole key (`for k, *vs in d` printed `abc []`
-        # where CPython prints `a ['b', 'c']`) and only one of the two engines
-        # could be moved inside a merge. Both are fixed now — the interpreter
-        # splits a `str` item in `_unpack_source`, this is the lowering — and a
-        # refusal here is what kept the comparison that checks them from
-        # existing at all.
-        #
-        # An INT-keyed dict still refuses, and that is not the same shape being
-        # put off: CPython's answer there is a `TypeError` ("cannot unpack
-        # non-iterable int object"), because an int has no characters to take
-        # one at a time. Refusing at compile time is the honest answer for a
-        # construct whose runtime error message this lowering does not carry.
+        # A refusal and not a lowering, because the two engines disagree on
+        # this shape already and only one of them can be moved here: the
+        # interpreter binds the WHOLE key (`for k, *vs in d` prints
+        # `abc []` where CPython prints `a ['b', 'c']` — see
+        # bugs/RUNTIME_starred_for_target_over_a_dict_key_is_not_unpacked.md),
+        # so implementing CPython's reading here would make the compiled path
+        # disagree with the interpreter it falls back to, which is the one
+        # comparison this project can actually check.
+        if starred_slot_index(var_names) >= 0:
+            _emit_unsupported_iter(gen, 'dict')
+            return
         # Flatten any nested tuple target the same way _gen_for_list does
         # (a naive split turned `(k, (a, b))` into the bogus fragments
-        # `(a` / `b)`, declared verbatim — hard C syntax errors). BEFORE the
-        # star is located, because the star's POSITION is what every index
-        # below is measured from and a flatten that ran after it would leave
-        # `_n_after` counting slots that are no longer there.
+        # `(a` / `b)`, declared verbatim — hard C syntax errors).
         _flat = []
         for vn in var_names:
             _gfd_flatten_target(gen, vn, _flat)
         var_names = _flat
-        star_idx = starred_slot_index(var_names)
-        if star_idx >= 0 and int_keys:
-            _emit_unsupported_iter(gen, 'dict with integer keys')
-            return
-        _n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
         # slots int64_t (not char*) so a sibling list-iteration branch over
@@ -2659,25 +2497,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `for vname, vtype in ci.captures:`).
         _slot_ctypes = []
         for i, vn in enumerate(var_names):
-            if i == star_idx:
-                # A starred slot holds a LIST of the remaining CHARACTERS of the
-                # key, so that is what it is declared as — and its element type
-                # is recorded, because `print(rest)` must print `['b', 'c']`
-                # and not the list's pointer. `_emit_starred_slot_from_cstr`
-                # declares it too, but this site's pre-pass is where the C
-                # declaration is emitted (before the loop opens) and
-                # `_declare_var` is first-decl-wins, so the call below only
-                # fills in the entry when nothing has declared it yet.
-                _gfl_declare_target_name(gen, shadow_name,
-                                         starred_slot_name(vn), 'MojoList *')
-                gen._elem_types[starred_slot_name(vn)] = 'char *'
-                _slot_ctypes.append('MojoList *')
-                continue
-            # With a star, every slot is a CHARACTER of the key, so `char *` —
-            # including the ones after the star, which the starless lowering
-            # declares `int64_t` and stores a literal 0 into.
-            _want = ('int64_t' if int_keys else 'char *') if (i == 0 or star_idx >= 0) \
-                else 'int64_t'
+            _want = ('int64_t' if int_keys else 'char *') if i == 0 else 'int64_t'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
                 or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
@@ -2744,85 +2564,29 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if int_keys:
         pass    # the integer key was stored above
     elif is_tuple:
-        if star_idx >= 0:
-            # The star's half: every slot of this target is a CHARACTER of the
-            # key, at a position that depends on the key's RUNTIME length, so
-            # the length is read once and the slots after the star are counted
-            # from its END (`a, *mid, z` over "abcd" -> `mid == ['b', 'c']`).
-            # `starred_slot_index` is the model for the arithmetic.
-            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
-            _n = gen._new_val('int64_t', f"{_n_after}LL")
-            # CPython raises ValueError when a starred target's non-starred
-            # slots outnumber the item's elements ("not enough values to unpack
-            # (expected at least 2, got 1)"), and the positions below are then
-            # NEGATIVE — `mojo_cstr_slice` resolves a negative index against the
-            # length, so without this the loop would quietly bind a slot to ""
-            # and keep going, which is a program that builds, runs and answers
-            # wrongly. The interpreter raises the same class
-            # (`_bind_comprehension_target`); this is the compiled half of that
-            # rule. Emitted only when there IS a slot after the star, because
-            # that is the only way an index can go negative — `for k, *rest in d`
-            # over any key is well-defined.
-            if _n_after:
-                _req = gen._new_val('int64_t', f"{star_idx + _n_after}LL")
-                _short = gen._new_val('_Bool', f"{_as_str(_klen)} < {_req}")
-                _bb = gen._new_bb(); _bo = gen._new_bb()
-                gen._emit(f'  if ({_short}) goto {_bb}; else goto {_bo};')
-                gen._emit_label(_bb)
-                gen._emit_call('void', '', 'mojo_raise_value_error',
-                               [('char *', gen._intern_string(
-                                   'not enough values to unpack (expected at '
-                                   f'least {star_idx + _n_after}, got a shorter '
-                                   'string)'))])
-                gen._emit(f'  goto {_bo};')
-                gen._emit_label(_bo)
-            for _si, _svn in enumerate(var_names):
-                if _si == star_idx:
-                    _stop = _klen
-                    if _n_after:
-                        _stop = gen._new_val('int64_t', f"{_as_str(_klen)} - {_n}")
-                    _from = gen._new_val('int64_t', f"{_si}LL")
-                    _emit_starred_slot_from_cstr(
-                        gen, starred_slot_name(_as_str(_svn)), key_tmp,
-                        _from, _stop)
-                    continue
-                # Front of the key for a slot before the star, END for one after:
-                # slot `_si` sits `_si - star_idx - 1` places from the end.
-                if _si < star_idx:
-                    _pos = gen._new_val('int64_t', f"{_si}LL")
-                else:
-                    _off = gen._new_val('int64_t', f"{_si - star_idx - 1}LL")
-                    _from_end = gen._new_val('int64_t', f"{_as_str(_n)} - {_off}")
-                    _pos = gen._new_val('int64_t', f"{_as_str(_klen)} - {_from_end}")
-                _plus = gen._new_val('int64_t', f"{_as_str(_pos)} + 1LL")
-                _chr = gen._new_val('char *',
-                                    f"mojo_cstr_slice ((char *) {key_tmp}, "
-                                    f"{_as_str(_pos)}, {_as_str(_plus)})")
-                gen._emit(f"  {gen._cname(_svn)} = {_chr};")
+        # Assign key to first name, NULL (zero) to remaining names
+        vn0 = var_names[0]
+        cvn0 = gen._cname(vn0)
+        # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
+        # store must use the type the slot was actually DECLARED with (see
+        # where _slot_ctypes is built).
+        vt0 = _slot_ctypes[0]
+        if vt0 in ('int64_t', 'int', 'int32_t'):
+            vp = gen._new_val('void *', f'(void *){key_tmp}')
+            box = gen._new_val('int64_t', f'(int64_t){vp}')
+            gen._emit(f"  {cvn0} = {box};")
         else:
-            # Assign key to first name, NULL (zero) to remaining names
-            vn0 = var_names[0]
-            cvn0 = gen._cname(vn0)
-            # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
-            # store must use the type the slot was actually DECLARED with (see
-            # where _slot_ctypes is built).
-            vt0 = _slot_ctypes[0]
-            if vt0 in ('int64_t', 'int', 'int32_t'):
-                vp = gen._new_val('void *', f'(void *){key_tmp}')
-                box = gen._new_val('int64_t', f'(int64_t){vp}')
-                gen._emit(f"  {cvn0} = {box};")
+            gen._emit(f"  {cvn0} = (char *) {key_tmp};")
+        for _vi in range(1, len(var_names)):
+            vn = var_names[_vi]
+            cvn = gen._cname(vn)
+            vt = _slot_ctypes[_vi]
+            if vt in ('int64_t', 'int', 'int32_t'):
+                gen._emit(f"  {cvn} = (int64_t)0;")
+            elif vt.endswith(' *'):
+                gen._emit(f"  {cvn} = ({vt})0;")
             else:
-                gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-            for _vi in range(1, len(var_names)):
-                vn = var_names[_vi]
-                cvn = gen._cname(vn)
-                vt = _slot_ctypes[_vi]
-                if vt in ('int64_t', 'int', 'int32_t'):
-                    gen._emit(f"  {cvn} = (int64_t)0;")
-                elif vt.endswith(' *'):
-                    gen._emit(f"  {cvn} = ({vt})0;")
-                else:
-                    gen._emit(f"  {cvn} = (char *)0;")
+                gen._emit(f"  {cvn} = (char *)0;")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')

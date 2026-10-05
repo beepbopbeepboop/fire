@@ -196,44 +196,6 @@ earlier run, prints how the verdicts moved: every file whose class changed is
 accounted for by name, in both directions, so a rule change can never quietly
 turn a reported failure into a differently-counted one.
 
-TWO NUMBERS THIS TOOL REFUSES TO PRINT WITHOUT A CROSS-CHECK
--------------------------------------------------------------
-Everything above is a count, and a count has two failure modes that no table
-catches. This section is about both, and both were real on the same round.
-
-THE FIRST: a bucket that means NOBODY HAS LOOKED can be the largest row in the
-corpus and read as a finding. On the 2026-10-04 b12 sweep `_REFUSAL_OTHER` held
-236 files — half of every codegen finding — and it held them because a NEW
-refusal had no row in `_REFUSAL_FAMILIES` and none in
-`tools/formal_sweep_causes.py`'s `CAUSES` either, so the two ranking tables
-agreed there was no name for it. What filled it was one edit: six lines of
-em-dash prose in a docstring in `formal/hostmods/os/_syscalls.mojo`, which the
-model's TEXT ENCODING scan read as a non-ASCII string value and refused every
-file in its import closure behind. 229 of the 236 were that one module. The
-findings were CORRECT (the sweep said those files do not build and they did not
-build) and the report was useless: a rank-1 row called `other refusal` with an
-example file and no next step, found by reading a work map afterwards rather
-than by running the sweep. So a shape over `UNCLASSIFIED_MIN_FILES` files or
-`UNCLASSIFIED_MIN_FRACTION` of the corpus is now printed as a LOUD FINDING that
-names the shape, its top example files and what the OTHER ranking table calls
-it, and it exits 4. `unclassified_report` owns the shape grouping, the bar and
-the wording; `formal_sweep_causes.py` calls the same three through its own `FS`
-handle, so there is one threshold and one printer for both tables.
-
-THE SECOND: a class count cannot say whether a round improved or regressed,
-because one edit moves files both ways. The same round's 236 files were the
-capability arriving AND the regression (`…_b12.md` §3.4), which is why that map
-prints both numbers. So every run compares its per-file classes against a
-COMMITTED baseline, `bugs/sweeps/sweep-<arch>.baseline.json`, and names every
-file that moved to a class FURTHER FROM A PASS, grouped by the refusal now in
-front of it. The ledger above cannot do this: it is keyed on arch and scope and
-lives in the CAS, so it is gone when the cache is, and comparing it needs the
-previous run to have happened on this machine. A committed baseline needs
-neither — which is the whole difference, and the reason the alarm is a file in
-`bugs/sweeps/` rather than another CAS artifact. `CLASS_SEVERITY` states the
-order the word "worse" uses, including the two boundaries a reader is most
-likely to argue with.
-
 EXIT STATUS
 -----------
   0  no codegen finding (in a file or in a dependency), no backend crash, no
@@ -241,24 +203,12 @@ EXIT STATUS
   1  at least one of those (a real finding, a backend that fell over, or a
      file the sweep could not answer for a reason that is its own problem)
   2  the sweep did not run (no input files, or another sweep of the same
-     architecture holds the lock, or the committed baseline is not a baseline
-     this tool can read — the last one refuses BEFORE any build, because a run
-     that spends half an hour and then discovers its alarm was never going to
-     fire is the worst place to find that out)
+     architecture holds the lock)
   3  the sweep was INTERRUPTED (SIGINT/SIGTERM). Everything it classified was
      printed and published, and the summary says how much of the scope it
      reached. Its own status rather than 1's because "you stopped it" and "it
      found something" are different facts, and a caller retrying on 1 alone
      would retry a run that needs no retrying
-  4  a refusal shape is over the honesty bar (`UNCLASSIFIED_MIN_FILES` /
-     `UNCLASSIFIED_MIN_FRACTION`): part of this run's findings match no row in
-     this file's `_REFUSAL_FAMILIES` AND no row in
-     `tools/formal_sweep_causes.py`'s `CAUSES`, so the counts below are not a
-     census of causes and cannot be planned from. It is a fact about the
-     INSTRUMENT rather than the backend, which is why it is its own status: it
-     is the only one of the four no change under `formal/` can clear, and it is
-     the one the 2026-10-04 b12 round should have exited with — 236 files on a
-     refusal no table named, half of every codegen finding in the corpus
 
 `not-answerable` never affects the exit status in either direction: it is a
 permanent property of the source and the target, so failing a run over it (or
@@ -266,16 +216,6 @@ passing one because of it) would both be wrong. This is a deliberate change
 from the older contract, where any FAIL at all meant exit 1 — with 170
 permanent facts in the FAIL bucket that contract could not distinguish "the
 backend regressed" from "this file imports os".
-
-A REGRESSION against the committed baseline (`bugs/sweeps/*.baseline.json`) is
-NOT a status of its own, and that is a considered omission rather than an
-oversight. It is always accompanied by 1 or 4 — a file that moved to a worse
-class is by definition no longer a `pass` — so a distinct code would separate two
-facts that cannot occur apart, while failing a run over a moved class would fire
-on every worker who sweeps a tree that is mid-edit and would drown the one run
-that regressed on purpose. It is printed at the TOP of the summary, grouped by
-the refusal now in front of the files, and it names every file: see
-`report_baseline`.
 
 
 SURVIVING, and why a sweep needs to
@@ -683,18 +623,6 @@ _EXTERN_MARK = "import(s) dyld cannot resolve"
 # agent [4] extended the same audit there, so the classifier was half-fixed
 # before and is now fully wrong.
 _EXTERN_BUILD_MARK = "symbol(s) that nothing provides"
-# The NAMES in that message's own sentence, which is what makes the marker
-# narrowable. `_unaccounted_report` spells them as a comma-joined list between
-# `so it could not be loaded: ` and the next full stop — "the image would bind 2
-# symbol(s) that nothing provides, so it could not be loaded: Bag_get, foo."
-# — so a rule that wants to ask WHICH symbols they are can read them rather
-# than pattern-match the whole diagnostic.
-#
-# The stop is the boundary because a symbol cannot contain one: `_c_export_name`
-# admits only `[A-Za-z0-9_]`, so the list cannot run past its own sentence into
-# the per-name clauses that follow.
-_UNPROVIDED_NAMES_RE = re.compile(
-    r"nothing provides, so it could not be loaded: (?P<names>[^.]*)\.")
 _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # ONE message naming SEVERAL of a file's unresolvable imports, one indented
 # line each, which is what `formal/imports.py`'s `unresolvable_import_errors`
@@ -949,24 +877,6 @@ _REFUSAL_FAMILIES = (
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("is refused on a string whose text is not ASCII",
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
-    # A CPython BUILTIN this target does not lower, refused BY NAME before any
-    # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
-    # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
-    # It has its own row because until that check existed these names were
-    # refused by the LINK AUDIT — a message about SYMBOLS, whose advice is about
-    # the link line rather than about the fact that no library on any line
-    # provides a Python builtin's semantics — and a reader who took that advice
-    # was told to bind a name that cannot be bound. `NOT_LOWERED_BUILTINS` is
-    # the table the refusal quotes, and `tools/formal_proof_breadth.py`'s
-    # `UNLOWERED_CALLEE_MARKS` includes this sentence's marker so a proof
-    # census files the row as `refused-builtin` rather than `codegen-refused`:
-    # one table, three readers, one marker.
-    #
-    # Placed here rather than lower down for the same reason every row's
-    # placement is load-bearing: the message contains "binding a symbol nothing
-    # provides", which is close to the wording rows further down key on, and
-    # this one must win.
-    ("is not lowered on this path", "a builtin this path does not lower"),
     ("multi-index subscript", "multi-index subscript"),
     # A call through a VALUE, in three shapes with three fixes: the callee's
     # declared type, the bracket, the keyword. Ahead of everything below
@@ -980,69 +890,6 @@ _REFUSAL_FAMILIES = (
      "value call: bracket unreadable"),
     ("no declaration to bind it by NAME",
      "value call: keyword unreadable"),
-    # The same construct from the other two ends: the word is not an address
-    # because the SOURCE says what it holds, rather than because a declaration
-    # says what it could hold. One message for both ends on purpose — see
-    # `formal/model.py::not_a_code_address_refusal` — so one marker and one
-    # family, and it sits with the three above rather than below them.
-    ("is called as a FUNCTION and the source says it holds",
-     "value call: the word is not an address"),
-    # A bracketed callee spelled THROUGH A MODULE (`L.Pair[Int]()`), and it has
-    # to be ABOVE `"would bind"` because the message contains "the brackets
-    # cannot bind" — which that row claims, and which would file a RECOGNISER's
-    # gap under the link line's. Measured: without this row
-    # `_refusal_family` answered `dependency binds what nothing provides` for
-    # `formal/model.py::dotted_specialization_refusal`, which is the exact
-    # mis-filing this table's precedence paragraph is about. Sibling of the
-    # bare-name row in `formal_sweep_causes.py`, which keys on a different
-    # sentence and therefore has its own rot.
-    ("is a bracketed callee spelled THROUGH A MODULE",
-     "specialization spelled through a module"),
-    # …and the BARE spelling of the same construct, which had a CAUSE row and no
-    # FAMILY row at all: `specialization_call_refusal` classified as
-    # `other refusal`, the bucket this table's own docstring calls "nobody has
-    # looked", for the largest single bracketed-callee row in the corpus. The
-    # marker is the phrase both wordings open with and it is above
-    # `"would bind"` for the same reason the row above it is — the dotted text
-    # says "cannot bind", and this one says "does not compile", so the two
-    # cannot shadow each other.
-    ("calls a name this unit does not compile, so the brackets cannot be bound",
-     "specialization of a callee this unit does not compile"),
-    # A CALL to a name the DEFINING module does not export — 148 files on the
-    # 2026-10-05 b13 sweep, the largest codegen row in the corpus, and until this
-    # row it had a CAUSE and no FAMILY, so the sweep's own by-family breakdown
-    # reported all of it as `other refusal`: the bucket whose definition, in
-    # `tools/formal_sweep_causes.py`'s module docstring, is "nobody has looked".
-    # 136 of the b12 log's 472 codegen rows — 28.8 % — are this one shape. The
-    # two tables are keyed on different things and are MEANT to disagree
-    # (`_REFUSAL_FAMILIES` groups by the shape of the message for a tool that
-    # must classify one it has never seen; `CAUSES` by what a fix would have to
-    # change), so both need the row — and the pair of refusals that make this one
-    # a CALLEE question rather than a bind question are stated in the test.
-    #
-    # **THE MARKER IS THE FACT, NOT THE ADVICE, and it is the SAME clause
-    # `formal_sweep_causes.py` keys on.** Two clauses of
-    # `formal/model.py::imported_callee_refusal` are load-bearing and survive a
-    # reword: the call "has to bind a symbol `M` exports", and "That module does
-    # not export it". The sentence that USED to follow them — "spell it as
-    # `name[<a type>](…)`" — is ADVICE, and `work/formal19-1` deletes it because
-    # it is wrong about correct Mojo (a bare template call is the spelling the
-    # stdlib uses), so a marker keyed on it would have taken the row silently
-    # back to `other refusal` the day that branch landed.
-    #
-    # Placement is above `"would bind"` and above the two specialization rows
-    # because of the first-match rule, and it is safe in BOTH directions because
-    # the two sibling messages share no substring with this one: this message
-    # never says "would bind", never says "does not compile", and never says
-    # "which is a name with no definition in hand". `test_refusal_taxonomy.py`
-    # asserts all of that rather than leaving it to this comment — the cost of
-    # getting it wrong is a 148-file row counted as a neighbour's.
-    #
-    # The label names what a fix would have to CHANGE and is spelled once, here
-    # and in the test's own `EXPORT_RULE_FAMILY`: this module's neighbours are
-    # "value call: declared type cannot hold a function" and "dependency binds
-    # what nothing provides", so this is the third of that shape.
-    ("does not export it", "callee: the defining module does not export it"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),
@@ -1161,31 +1008,7 @@ _REFUSAL_FAMILIES = (
     # the address is not the problem, the ABSENCE of storage is.
     ("has no module-global storage for it",
      "module-global name has no storage"),
-    # A `try` whose arm cannot be entered, because the body can reach a `raise`
-    # and a `raise` here is `exit(1)` rather than an exception. It is its own
-    # family and not a clause of the handler-arm refusal (which this table has
-    # no row for either, and `formal_sweep_causes.py` has one row for each of
-    # the two): the two messages describe DIFFERENT wrong programs — that one
-    # loses the arm's body, this one loses every statement the `try` was
-    # supposed to continue into — and both of them carry the clause "no edge
-    # runs from a raise site into an arm", so a shared marker would make the
-    # first match win and report this construct as that one.
-    #
-    # Keyed on the clause only this message writes. Zero files today, measured
-    # over this repository's 479 `.py`/`.mojo` files and the stdlib's 252: every
-    # file the question reaches is already refused for another reason, so this
-    # row exists to name the construct rather than to count a backlog.
-    ("cannot catch it, so the `try` is refused",
-     "a `try` that can reach a raise, whose arm cannot catch it"),
     ("takes exactly one value to convert", "wrong argument count"),
-    # A missing symbol that is a METHOD OF A STRUCT IN THE FILE THAT REFUSED.
-    # Its own family, and it is here rather than folded into the link-line story
-    # because the fix is on this side of the boundary: the definition was never
-    # emitted into the image, so no link line could have provided it and adding
-    # one would not help. `_own_unprovided_methods` is the reader and
-    # `_struct_methods` is what it reads.
-    ("are METHODS OF A STRUCT IN THIS FILE",
-     "a method of this file's own struct was never emitted"),
     # Reachable from `codegen` only through a rule that has not fired yet; it
     # is here so the breakdown has a name for the day it does, and so a future
     # message that does not match it lands in "other refusal" — visible —
@@ -1392,72 +1215,6 @@ def _source_imports(source, name: str) -> bool:
                      re.M) is not None
 
 
-def _declared_method_symbols(path) -> set:
-    """The `<Struct>_<method>` symbols this file's own structs DECLARE, or {}.
-
-    **`formal.build._struct_methods` is the reader, not a second spelling of the
-    mangling.** It is the function that decides which of a struct's methods are
-    lifted into the compiled set at all (`struct_fits_one_word` or
-    `struct_is_framed`), and each one it returns carries the name
-    `model.method_function_name` gave it — so a set built from it is exactly
-    "the method symbols this file owes its own image". Re-deriving the
-    `<Struct>_<method>` shape here would be a second answer to a question
-    `formal/` already answers, and the two would come apart the first time that
-    spelling changed.
-
-    `{}` for a file that cannot be read or parsed, and for no path at all
-    (`classify` called without one, which is most of the test suite). That is
-    the direction that matters: this narrows a rule, and a reader that cannot
-    answer must leave the caller's rule exactly as it was rather than narrow it
-    on nothing.
-    """
-    if not path:
-        return set()
-    try:
-        from formal.build import _struct_methods
-        from formal.imports import module_statements
-        return {getattr(fn, "name", "") for fn in _struct_methods(
-            module_statements(path))}
-    except Exception:
-        return set()
-
-
-def _own_unprovided_methods(detail: str, path) -> list:
-    """The unprovided symbols that are METHODS OF A STRUCT IN THIS FILE.
-
-    **This is the narrower form of `_EXTERN_BUILD_MARK` the env-family needed,
-    and it exists because the marker was right about the case it was written for
-    and wrong about a real one.** "Nothing on the link line provides this
-    symbol" is a fact about the TARGET only when the symbol's definition is
-    somewhere else. When the missing symbol is a method of a struct the file
-    itself declares, the definition was never supposed to be on any link line —
-    it was supposed to be EMITTED INTO THIS IMAGE — so its absence is a defect
-    in the backend's own lowering of this file (the shape
-    `formal/build.py::_struct_methods`'s docstring records: a method call that
-    was never rewritten falls through to a `BL` against a symbol nothing
-    defines), and the class that says "a fact about the target" is exactly
-    backwards for it.
-
-    Measured: `external_call["setenv", T]`'s bracket list put a 55-file family
-    here, and `codegen coverage` read 10.2% instead of something lower for the
-    wrong reason (`bugs/FORMAL_env_family_next_terminal.md`).
-
-    A LIST and not a boolean, because the two causes really do coexist in one
-    image — a dangling call to an unlowered builtin AND a method this file never
-    emitted — and a rule that answered "codegen" for the whole message on the
-    strength of one of them would file the other as a gap in the target. The
-    names are returned so the caller can name them.
-    """
-    declared = _declared_method_symbols(path)
-    if not declared:
-        return []
-    m = _UNPROVIDED_NAMES_RE.search(detail)
-    if not m:
-        return []
-    return sorted(n.strip() for n in m.group("names").split(",")
-                  if n.strip().lstrip("_") in declared)
-
-
 def _declared_host() -> frozenset:
     """formal.imports.HOST_MODULES — the set the build itself consults.
 
@@ -1562,219 +1319,6 @@ def _refusal_family(term: str) -> str:
         if marker in term:
             return family
     return _REFUSAL_OTHER
-
-
-# ── THE HONESTY FLOOR: a refusal shape nobody has classified ────────────────
-#
-# `_REFUSAL_OTHER` is the bucket this file's own table calls "nobody has looked",
-# and on the 2026-10-04 b12 sweep it was the corpus's LARGEST row — 236 files,
-# half of every codegen finding — with no row in `formal_sweep_causes.py`'s
-# table either, so the two instruments agreed there was no name for it. What
-# grew that row from 6 was ONE edit six lines of em-dash prose in
-# `formal/hostmods/os/_syscalls.mojo`, and it was found by reading a work map
-# rather than by the sweep: a bucket that means "unclassified" is only alarming
-# if it is checked, and nothing checked it. `…_b12.md` §3.1 is the record.
-#
-# So the bucket is now LOUD by construction, at a threshold stated here rather
-# than left to a reader's judgement. A refusal shape at or above either bound is
-# not a finding about the corpus; it is a finding about this table, and the
-# sweep reports it as one and exits 4 (`exit_status`), because a run that exits
-# 1 for "the backend refused things" and 1 for "I cannot name 146 of them" is
-# the same number for two facts a reader must not confuse.
-#
-# The threshold is a COUNT and a SHARE because the two catch different
-# mistakes, and both are strict bounds — ten files does not fire, eleven does.
-# Ten files of one shape on the 735-file b12 corpus is 1.4 % and stays quiet: a
-# count of eleven is what the bound asks for, and a tenth of the corpus behind
-# one construct is not yet a thing a reader must act on today. Three files of one
-# shape on a 30-file corpus is 10 % and IS loud, and no file-count bound says so
-# — which is the half that matters, because the shapes that hide are the ones
-# that grow, and the corpus they grow in is the whole tree. `UNCLASSIFIED_MIN_
-# FILES` is 10 rather than 5 for the same reason: a small shape is usually one
-# file behind one construct, and the per-file rows already name those.
-UNCLASSIFIED_MIN_FILES = 10
-UNCLASSIFIED_MIN_FRACTION = 0.02
-
-# A shape is the message with the things that VARY between copies of it folded
-# out: every quoted span (a `'name'`, a `` `module` ``, a string literal — three
-# delimiters, because they MEAN three different things in these messages and a
-# shape that lost the distinction would merge a refused name with a path) and
-# every number. What survives is the sentence, which is what two copies of one
-# refusal share verbatim: measured on the b12 arm64 log, the 105-file and
-# 28-file rows of `other refusal` that name different callees in different
-# modules are ONE shape, and grouping by the whole message would have reported
-# them as two shapes of 105 and 28 instead of one of 133.
-_QUOTED_SPAN_RES = (
-    (re.compile(r"'[^']*'"), "'…'"),
-    (re.compile(r"`[^`]*`"), "`…`"),
-    (re.compile(r'"[^"]*"'), '"…"'),
-)
-_NUMBER_RE = re.compile(r"\b\d+\b")
-_SPACES_RE = re.compile(r"\s+")
-
-#: The other half of the pair, named in the finding so "nobody has looked"
-#: points at the second place to look rather than leaving the reader to guess.
-_CAUSES_TOOL = "tools/formal_sweep_causes.py"
-
-
-def unclassified_shape(msg: str, width: int = 72) -> str:
-    """`msg` as the SHAPE it is: the part every copy of it shares.
-
-    Not the whole message, because the whole message is what made this invisible:
-    133 files of one refusal with 133 different callee names read as 133 shapes
-    of one file each, and a threshold over file counts then reports nothing. The
-    `width` truncation is at a word boundary and only ever merges messages that
-    agree for `width` characters, which is the part a reader would use to tell
-    them apart anyway; it is a grouping, so an over-merge shows up as a shape
-    whose count is bigger than the sum of its rows and the exact texts are
-    printed beside it in `unclassified_report`.
-    """
-    shape = _SPACES_RE.sub(" ", _NUMBER_RE.sub("#", msg.strip()))
-    for pattern, placeholder in _QUOTED_SPAN_RES:
-        shape = pattern.sub(placeholder, shape)
-    shape = _SPACES_RE.sub(" ", shape)
-    if len(shape) > width:
-        shape = shape[:width].rsplit(" ", 1)[0] + " …"
-    return shape
-
-
-def unclassified_report(pairs, total, say=print, other_classify=None,
-                        other_name=""):
-    """Print every refusal shape no row classified; True if any is LOUD.
-
-    `pairs` is `[(path, terminal message)]` over the printed codegen rows the
-    CALLING instrument's own classifier could not name — `_refusal_family` here,
-    `formal_sweep_causes.classify_message` there. The classifier is the caller's
-    and not this function's because the two tables are keyed on different things
-    (the shape of the message versus what a fix would have to CHANGE) and are
-    meant to disagree; what they share is the alarm, so the alarm is here and
-    the classification is not. `formal_sweep_causes.py` calls this through its
-    own `FS` handle rather than keeping a second threshold and a second printer.
-
-    Every shape is printed, not only the loud ones. A threshold that hides the
-    small shapes is a threshold that can be beaten by splitting one shape in
-    two, and the shapes below the bar are the ones the next edit would grow.
-
-    `other_classify` is the OTHER instrument's classifier, when the caller has it
-    to hand, and it turns the finding from a shrug into a to-do: on the b12 log
-    the largest `other refusal` shape is named by `formal_sweep_causes.py` and
-    NOT by this table, which is a one-row fix rather than a new construct — and
-    a shape neither table names is b12's own failure, said out loud.
-    """
-    groups = {}
-    for path, msg in pairs:
-        key = unclassified_shape(msg)
-        entry = groups.setdefault(key, {"files": [], "texts": {}})
-        entry["files"].append(path)
-        entry["texts"].setdefault(msg, []).append(path)
-    if not groups:
-        say(f"  no printed codegen row fell to {_REFUSAL_OTHER!r}: every "
-            f"refusal this run produced matches a row above. The rule is live "
-            f"and unfired — a shape over {UNCLASSIFIED_MIN_FILES} files or "
-            f"{UNCLASSIFIED_MIN_FRACTION:.0%} of the {total} swept is a LOUD "
-            f"finding and exit 4")
-        return False
-
-    ranked = sorted(groups.items(),
-                    key=lambda kv: (-len(kv[1]["files"]), kv[0]))
-    say(f"  {sum(len(e['files']) for _k, e in ranked)} printed codegen row(s) "
-        f"fall to {_REFUSAL_OTHER!r} — the bucket that means NOBODY HAS "
-        f"CLASSIFIED THIS — across {len(ranked)} message shape(s), "
-        f"{sum(1 for _k, e in ranked if _loud_enough(len(e['files']), total))}"
-        f" of them over the {UNCLASSIFIED_MIN_FILES}-file / "
-        f"{UNCLASSIFIED_MIN_FRACTION:.0%} bar")
-    loud = False
-    for key, entry in ranked:
-        n, texts = len(entry["files"]), entry["texts"]
-        big = _loud_enough(n, total)
-        wordings = ", ".join(
-            f"{len(ps)} file(s) in one wording" for msg, ps in
-            sorted(texts.items(), key=lambda kv: -len(kv[1]))[:3])
-        say(f"  {'LOUD FINDING' if big else 'under the bar'}: {n} file(s) of "
-            f"the {total} swept" + (f" ({n / total:.1%})" if big else "")
-            + f" — shape: {key}")
-        say(f"      {_unclassified_label(texts, other_classify, other_name)}")
-        say(f"      {wordings}" + (f"; {len(texts)} exact wording(s) in all"
-                                  if len(texts) > 3 else ""))
-        biggest = max(texts, key=lambda m: len(texts[m]))
-        say(f"      said by: {_first_sentence(biggest)}")
-        say(f"      e.g. {sorted(entry['files'])[0]}"
-            + (f", … and {n - 1} more" if n > 1 else ""))
-        loud = loud or big
-    if loud:
-        say("  (a shape over the bar is a HOLE IN THE RANKING TABLES rather "
-            "than a row of work, and closing it is adding the row — the same "
-            "two-part job the `b12` round of `bugs/FORMAL_sweep_work_map.md` §5.2 "
-            "did for the refusal that hid 229 files behind one module)")
-    return loud
-
-
-def unclassified_rows(rows):
-    """`[(path, terminal message)]` for the printed rows this table cannot name.
-
-    Over the sweep's own printed rows, `(rel, class, reason, detail)`. Two
-    things are decided here and not in the report, because both are
-    classifications and not presentation: a row counts only when its class is
-    one of the two codegen classes (`not-answerable/host-import`'s own reason
-    matches no family and must not be counted as an unclassified REFUSAL), and
-    the message is the terminal one with the chain peeled (`_split_chain` /
-    `_terminal_reason`, so a refusal three modules deep is the message that
-    carries the clause the markers key on).
-
-    One function rather than a comprehension in `main`, because
-    `formal_sweep_causes.py` reports the same rows against ITS table and the
-    test that pins the loud finding needs the same reader both tools use.
-    """
-    out = []
-    for path_, cls, _reason, detail in rows:
-        if cls not in (CLASS_CODEGEN, CLASS_CODEGEN_DEP):
-            continue
-        msg = _terminal_reason(_split_chain(detail)[1]).strip()
-        if _refusal_family(msg) == _REFUSAL_OTHER:
-            out.append((path_, msg))
-    return out
-
-
-def _loud_enough(n: int, total: int) -> bool:
-    """The threshold itself, in one place: over the file count OR the share."""
-    if total <= 0:
-        return False
-    return n > UNCLASSIFIED_MIN_FILES or n / total > UNCLASSIFIED_MIN_FRACTION
-
-
-def _first_sentence(msg: str, width: int = 200) -> str:
-    """The leading clause of a message, for a line that has to stay one line."""
-    head = msg.strip().split(". ", 1)[0]
-    if len(head) > width:
-        head = head[:width].rsplit(" ", 1)[0] + " …"
-    return head
-
-
-def _unclassified_label(texts, other_classify, other_name) -> str:
-    """One line saying what the OTHER ranking table calls this shape.
-
-    "nobody has looked" is only actionable if the reader is told where to look,
-    so the line names the other instrument's verdict when the caller passed it:
-    a shape the other table DOES name is a one-row fix in this one, and a shape
-    NEITHER names is the 2026-10-04 b12 failure itself, which is worth saying in
-    those words because it is the case where a reader's first instinct is to
-    assume the other table has it.
-    """
-    if not other_classify:
-        return (f"this table names no row for it, and {_CAUSES_TOOL} — which "
-                f"ranks the same rows by what a fix would have to change — is "
-                f"the other half of the pair to check")
-    tally = {}
-    for msg, ps in texts.items():
-        label = other_classify(msg)
-        tally[label] = tally.get(label, 0) + len(ps)
-    who = other_name or "the other ranking table"
-    parts = []
-    for label, n in sorted(tally.items(), key=lambda kv: -kv[1]):
-        parts.append(f"named `{label}` for {n} of them ({who})" if
-                     label != _REFUSAL_OTHER else
-                     f"UNNAMED for {n} of them too ({who})")
-    return ("this table names no row for it; " + "; ".join(parts))
 
 
 def _target_limit(term: str):
@@ -2056,26 +1600,6 @@ def classify(ok: bool, detail: str, cause=None, source=None,
 def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     """(class, reason) for the innermost message of a build's own answer."""
     if _EXTERN_MARK in detail or _EXTERN_BUILD_MARK in detail:
-        # FIRST, the narrower form of the marker: a missing symbol that is a
-        # method of a struct in THIS file is not a fact about the link line,
-        # because the link line was never where its definition belonged. This
-        # runs before the class is chosen rather than after it, so a message
-        # carrying one of these cannot be filed as `not-answerable` however it
-        # is worded — and `_own_unprovided_methods` returns a LIST because the
-        # message may also carry names that really are the link line's business,
-        # which then stay in the class below with their count intact.
-        mine = _own_unprovided_methods(detail, path)
-        if mine:
-            total = _EXTERN_BUILD_COUNT_RE.search(detail)
-            return CLASS_CODEGEN, (
-                f"{len(mine)} of the "
-                f"{total.group(1) if total else '?'} unprovided symbol(s) "
-                f"are METHODS OF A STRUCT IN THIS FILE "
-                f"({', '.join(mine)}), so the link line is not what is "
-                f"missing: those definitions were never emitted into this "
-                f"image at all, which means a method call here was not "
-                f"rewritten into a call on the lifted function. That is a fact "
-                f"about this file's own lowering and not about the target")
         m = (_EXTERN_BUILD_COUNT_RE if _EXTERN_BUILD_MARK in detail
              else _EXTERN_COUNT_RE).search(detail)
         caught = ("nothing on the link line provides it, caught when the build "
@@ -2643,7 +2167,7 @@ def _bind_symbols(binary: bytes) -> list:
 # all, and until 2026-10-02 the tool answered that by refusing to answer —
 # which cost 7 correct images their verdict outright and made the x86-64 sweep's
 # pass count a floor rather than a number
-# (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
+# (bugs/FORMAL_sweep_work_map_2026-10-01.md §4). Reading the trie answers the
 # same question from the same bytes, on any host. `formal/build.py`'s
 # `macho_dylib_exports` is already this project's independent reader of that
 # format (an independent one deliberately: `formal/macho_linker.py` writes these
@@ -2717,7 +2241,7 @@ def _host_cputype():
     derived entirely from a limitation of the instrument. Measured: it is the
     whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
     an image that builds and links correctly for its architecture
-    (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    (bugs/FORMAL_sweep_work_map_2026-10-01.md §4).
 
     It then became a SECOND limitation, having stopped being the first: the same
     mismatch made the tool decline to look the names up at all, filing those 7
@@ -3662,506 +3186,6 @@ def report_history(prev, verdicts: dict) -> None:
         print(f"  in the previous report, not swept this time: {len(gone)}")
 
 
-# ── THE COMMITTED BASELINE, and the regression alarm ─────────────────────────
-#
-# `report_history` above answers "what changed since the last run ON THIS
-# MACHINE", and the ledger it reads is in the CAS: keyed by arch and file list,
-# cleared with the cache, and never reviewed by anybody. That is the right
-# mechanism for "did a rule change reclassify a file" and the wrong one for
-# "did an EDIT regress the corpus", because the 2026-10-04 b12 round is the case
-# that needs the second and could not use the first: 229 of 735 files stopped
-# building behind one module because six lines of em-dash prose were added to a
-# docstring, and the only record of it was a work map written afterwards from two
-# logs by hand (the `b12` round of `bugs/FORMAL_sweep_work_map.md` §1). Nobody ran
-# the diff, because the diff needs the previous round's log, which is a file on
-# somebody's machine from three days ago.
-#
-# So the previous state is a COMMITTED FILE, `bugs/sweeps/sweep-<arch>.
-# baseline.json`, and its own git history is the provenance — which is the
-# whole difference from the ledger, and the reason this is not a CAS entry.
-# `--write-baseline` records a run there; `tools/formal_sweep_rounds.py
-# --write-baseline` records one from a log already on disk, so refreshing the
-# ratchet after a sweep does not require re-running one.
-#
-# THE ALARM IS WORSE, NOT DIFFERENT. A class count that moved is not news on its
-# own: the scope grows every round, a host model landing moves files between
-# classes in both directions at once, and `…_b12.md` §3.4 is a whole section
-# about 236 files whose capability and whose regression were the same files.
-# So every file that moved to a class FURTHER FROM A PASS is named, grouped by
-# the refusal now standing in front of it, and the direction is stated in both
-# directions so the alarm cannot be satisfied by an edit that fixes as much as it
-# breaks.
-BASELINE_TAG = "formal-sweep-baseline-v1"
-BASELINE_DIR = os.path.join(REPO, "bugs", "sweeps")
-#: Per-architecture stems, spelled the way the sweep LOGS in that directory are
-#: (`sweep-arm-12.txt`, `sweep-x86-12.txt`), so the baseline a reader looks for
-#: sits beside the log it came from rather than under a second naming scheme.
-BASELINE_STEMS = {"arm64": "sweep-arm", "x86_64": "sweep-x86"}
-#: The class a banked-from-a-log baseline records for a file the log printed no
-#: row for. NOT a verdict: it says "this file did not print a row, and a log
-#: records the COUNT of those and not their NAMES", which is a different fact
-#: from `pass` and is treated as one everywhere it is compared — a file moved
-#: out of this row is a move whose direction the baseline cannot say, and it is
-#: reported as exactly that rather than guessed in either direction. It appears
-#: only in a baseline banked from a log; a baseline banked by a sweep names
-#: every file.
-BASELINE_UNNAMED_PASS = "pass-unnamed"
-
-# HOW FAR IS A FILE FROM A PASS, in the units that matter: how much of the
-# remaining work is the BACKEND's. Read the boundaries, because each one is a
-# judgement and a reader who disagrees with one can compute the answer
-# differently; what is not negotiable is that the order is TOTAL and stated.
-#
-#   * `pass` is 0 and nothing beats it.
-#   * `built-with-admitted-contracts` is 1: the file builds, and the residue is
-#     declared trust rather than a refusal.
-#   * the two codegen classes are 2 and 3. The in-file one is nearer, because
-#     fixing the construct it names is enough to make the file build; the
-#     dependency one is further, because the refusal is not in the file and
-#     fixing the file's own construct would not have built it. That ordering is
-#     what makes "a refusal landed IN FRONT of them" (`…_b12.md` §3.3, 110
-#     files) a regression rather than a reclassification.
-#   * every `not-answerable/*` class is 4, and they are EQUAL to each other on
-#     purpose. These are facts about the target: no change to this backend makes
-#     such a file build, so a file moving off a codegen row onto one has stopped
-#     being a claim about the backend and become a permanent excuse. The
-#     consequence is stated here because it is the surprising half: the 99 files
-#     that crossed from `host-import` into codegen rows on the b12 round count
-#     as IMPROVEMENTS here — which is what they are, the backend reached them —
-#     while the coverage RATE fell over the same files, because they entered the
-#     denominator and failed there. Both numbers are printed. `…_b12.md` §2.3
-#     prints both for the same reason.
-#   * `unknown` and `tool` are 5: no verdict about the file at all, so a file
-#     that had one and no longer does is a hole in the measurement.
-#   * `backend-crash` is 6: the compiler RAISED, which is worse than refusing.
-#   * a class this tool does not know is 7, so a NEW class can never read as an
-#     improvement — the whole point of this block is to be wrong loudly.
-CLASS_SEVERITY = {
-    CLASS_PASS: 0,
-    CLASS_ADMITTED: 1,
-    CLASS_CODEGEN: 2,
-    CLASS_CODEGEN_DEP: 3,
-    CLASS_HOST: 4,
-    CLASS_UNRESOLVED: 4,
-    CLASS_EXTERN: 4,
-    CLASS_TARGET: 4,
-    CLASS_SYSCALL: 4,
-    CLASS_UNKNOWN: 5,
-    CLASS_TOOL: 5,
-    CLASS_CRASH: 6,
-}
-CLASS_SEVERITY_UNKNOWN = 7
-
-#: Exit statuses. 4 is this file's own addition and its own fact: not "the
-#: backend refused something" (1) but "I cannot name a refusal shape that a
-#: large part of the corpus is sitting on", which is a statement about the
-#: instrument and the only one of the four a caller cannot act on by fixing
-#: code in `formal/`. See EXIT STATUS in the module docstring.
-EXIT_DID_NOT_RUN = 2
-EXIT_FINDINGS = 1
-EXIT_UNCLASSIFIED = 4
-
-
-def _severity(cls: str) -> int:
-    """How far `cls` is from a pass; unknown classes are the furthest."""
-    return CLASS_SEVERITY.get(cls, CLASS_SEVERITY_UNKNOWN)
-
-
-def worse_class(before: str, after: str) -> bool:
-    """True when `after` is FURTHER from a pass than `before` was.
-
-    Strict, so two classes at the same distance — two `not-answerable/*` classes
-    swapping, which happens whenever an import resolver changes its mind — are
-    not a regression. A tie-break would report dozens of files moving between two
-    buckets that are equally far from a pass, and an alarm that fires on that is
-    an alarm nobody reads.
-    """
-    return _severity(after) > _severity(before)
-
-
-def exit_status(dirty: bool, loud: bool) -> int:
-    """The run's exit status, in one function so the table is the contract.
-
-    `loud` is `unclassified_report`'s verdict — a refusal shape over the honesty
-    bar. It outranks `dirty` because both are true whenever it happens (an
-    unclassified shape is a printed codegen row), and the more specific fact is
-    the more useful one: exit 4 says the numbers below are not a census of causes
-    and cannot be planned from until a row is added.
-    """
-    if loud:
-        return EXIT_UNCLASSIFIED
-    return EXIT_FINDINGS if dirty else 0
-
-
-def baseline_path(arch: str) -> str:
-    """The committed baseline's own path for `arch`, whether or not it exists."""
-    stem = BASELINE_STEMS.get(arch, f"sweep-{arch}")
-    return os.path.join(BASELINE_DIR, f"{stem}.baseline.json")
-
-
-def _repo_relative(path: str) -> str:
-    """`path` with this repository's own prefix dropped, for PRINTING.
-
-    The baseline is a COMMITTED file, so the line that names it belongs in a log
-    as the path a reader can open rather than as one that happens to be right on
-    the machine that wrote it — and every other committed path this tool prints
-    (`bugs/sweeps/…`, the `doc/ABI.md` it quotes) is already repo-relative.
-    """
-    try:
-        return os.path.relpath(path, REPO)
-    except ValueError:                       # a different drive, on Windows
-        return path
-
-
-def load_baseline(path: str):
-    """The baseline at `path`, or None when there is no file there.
-
-    A file that IS there and is not a baseline is a refusal, not a None: a
-    baseline read as "nothing moved" when it is really a schema this tool does
-    not know is the quietest possible way to disable the alarm, which is why
-    `BASELINE_TAG` is checked rather than trusted (`tools/formal_proof_census.py`
-    refuses on its tag for the same reason, and says why there).
-    """
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        _refuse_baseline(f"cannot read the committed baseline {path}: {exc}")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        _refuse_baseline(
-            f"{path} is not JSON ({exc}). Refusing to compare against it: a "
-            f"baseline that cannot be read must not read as 'nothing "
-            f"regressed'")
-    if not isinstance(data, dict) or data.get("tag") != BASELINE_TAG:
-        _refuse_baseline(
-            f"{path} is not a {BASELINE_TAG} baseline (tag="
-            f"{data.get('tag') if isinstance(data, dict) else 'not an object'!r}"
-            f"). Re-seed it: `--write-baseline` records a run, and "
-            f"tools/formal_sweep_rounds.py --write-baseline records a log")
-    if not isinstance(data.get("verdicts"), dict):
-        _refuse_baseline(
-            f"{path} is a {BASELINE_TAG} baseline with no verdicts dict, so "
-            f"there is nothing to compare a file against")
-    return data
-
-
-def _refuse_baseline(message: str):
-    """Print why and exit `EXIT_DID_NOT_RUN`, rather than raising with a message.
-
-    `raise SystemExit(message)` prints the message and exits **1**, which in this
-    tool is "the backend refused something": a caller retrying on 1 would retry a
-    sweep that never ran, and the status would be saying the opposite of what
-    happened. Read before any build starts, which is the other half of why.
-    """
-    print(message, file=sys.stderr)
-    raise SystemExit(EXIT_DID_NOT_RUN)
-
-
-def write_baseline(path: str, arch: str, verdicts: dict, source=None,
-                   unnamed_passes=0, summary_pass=None, unnamed=()) -> str:
-    """Record `verdicts` as the baseline at `path`, and return the path.
-
-    Written atomically through a private temporary file, because a
-    half-written baseline is worse than no baseline: it is a committed file that
-    the next run would refuse to read as a schema error, which at least is loud,
-    but only after someone has noticed that the alarm stopped firing.
-    `tools/dangling_doc_refs.py`'s `write_baseline` says the same of its own and
-    `tools/formal_proof_census.py`'s says it again — three files, one rule.
-
-    `source` is whatever the caller read the verdicts out of (a sweep log, for
-    the rounds tool), recorded because a baseline with no provenance is a number
-    nobody can check, and the git history of the file is provenance of a second
-    order: it says when the FILE changed, not which run wrote it.
-    `unnamed_passes` is the size of the `BASELINE_UNNAMED_PASS` population, kept
-    as a figure rather than derived from the rows so the report can say how much
-    of the corpus this baseline cannot speak for without counting 700 strings to
-    find out. `summary_pass` is the pass COUNT a log recorded for itself; it is
-    the one `pass` figure such a baseline has, and it is carried explicitly
-    because a `pass` row of 0 next to a real count of 131 reads as a claim that
-    nothing passed.
-
-    `unnamed` is the paths whose refusal `_REFUSAL_FAMILIES` matched no row
-    for, which is this table's own verdict and nothing else's: a class count
-    cannot see a file swap one NAMED refusal for another without moving class,
-    and on the b12 round 110 of the 229 files did exactly that. Recording which
-    files were already on a nameless refusal is what lets the comparison name
-    them; without it the loud finding says how many and the baseline alarm cannot
-    say which.
-    """
-    counts = collections.Counter(verdicts.values())
-    body = json.dumps(
-        {"tag": BASELINE_TAG, "arch": arch, "total": len(verdicts),
-         "when": datetime.datetime.now().isoformat(timespec="seconds"),
-         "source": source, "unnamed_passes": unnamed_passes,
-         "summary_pass": summary_pass, "unnamed": sorted(unnamed),
-         "classes": dict(sorted(counts.items())),
-         "verdicts": dict(sorted(verdicts.items()))},
-        indent=1, sort_keys=True)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
-                               prefix=".baseline-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(body + "\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return path
-
-
-def _terminal_group(path, detail):
-    """`(family, refusing module)` for a regressed file, or None.
-
-    None for a row that is not a construct refusal — a file that moved into
-    `not-answerable/host-import` has no terminal cause to group it by, and
-    inventing one out of its import message would put it under whatever family
-    that message's wording happens to match.
-    """
-    hops, term = _split_chain(detail or "")
-    msg = _terminal_reason(term).strip()
-    if not msg:
-        return None
-    return (_refusal_family(msg), _refuser(term) or (hops[-1] if hops else ""))
-
-
-def _example_files(paths, cap=12) -> str:
-    """The group's files, up to `cap`, and where the rest of them are.
-
-    Twelve, not all of them: a group of 229 printed in full is 229 lines of the
-    summary, which is not a finding, it is this run's own per-file output read
-    back. The twelve establish the pattern, the count above them is the number
-    to plan with, and the rest are locatable because the sweep ALREADY printed
-    every one of them — one line per file it did not pass, with the whole
-    refusal chain on it. So the tail says where they are rather than pretending
-    the list is complete.
-    """
-    paths = sorted(paths)
-    head = ", ".join(paths[:cap])
-    return head + (f", … and {len(paths) - cap} more, every one of them a "
-                   f"printed row of this run" if len(paths) > cap else "")
-
-
-def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
-                    say=print) -> bool:
-    """Name every file that moved to a WORSE class than the baseline records.
-
-    `prev` is `load_baseline`'s answer (None when there is no baseline), `rows`
-    is this run's printed rows, `(rel, class, reason, detail)`, which is where
-    the terminal refusal of each moved file comes from, and `unnamed` is the
-    paths this run put on a refusal `_REFUSAL_FAMILIES` matched nothing for.
-    Returns True when there is anything to read here, so the caller can print
-    one line about it.
-
-    FOUR SECTIONS, because a class count answers one question and the b12 round
-    showed there are four. The per-file one is every file that moved to a class
-    FURTHER FROM A PASS, grouped by the refusal now standing in front of it —
-    grouped by CAUSE rather than by class because the class is what moved and
-    the cause is what a reader has to open: `codegen/dependency 270 -> 430` is
-    not a finding and `229 file(s), refused in _syscalls.mojo, one message
-    shape` is. The second is a file whose CLASS DID NOT MOVE and whose refusal
-    became one no table names, which is 110 of the b12 229 and which a
-    class-only rule misses completely. The third is the coverage RATE with the
-    two counts that explain it, because `CLASS_SEVERITY` deliberately ranks
-    `not-answerable` beyond both codegen classes and so calls the 99 files that
-    crossed from `host-import` into a codegen row an improvement — while the
-    rate they moved is down. The fourth is the `pass-unnamed` population, whose
-    direction this baseline cannot say: those files are named by the class they
-    are in now, because that half IS known.
-
-    Files the baseline does not have, and files it has that this run did not
-    sweep, are counted in one line and are NOT regressions: a scope that grew is
-    not a regression, and reading it as one is how a real one gets lost in the
-    noise.
-    """
-    if prev is None:
-        say(f"  committed baseline: none at {path} — nothing to compare "
-            f"against, so a regression in this run can only be found by reading "
-            f"the counts. `--write-baseline` records this run there, and "
-            f"`tools/formal_sweep_rounds.py --write-baseline` records one from "
-            f"a log already on disk")
-        return False
-    say(f"  committed baseline: {_repo_relative(path)} — banked "
-        f"{prev.get('when', '?')}, [{prev.get('arch', '?')}], "
-        f"{prev.get('total', '?')} file(s)"
-        + (f", from {prev['source']}" if prev.get("source") else ""))
-
-    old = prev.get("verdicts", {})
-    # Two scopes are not two states of one corpus. A sweep of a subset — a
-    # worker checking one directory, a test sweeping a fixture — shares almost
-    # no file with the 738-file baseline, and a delta table over that prints
-    # `pass 131 -> 0` next to `codegen/dependency 430 -> 0`, which reads as a
-    # catastrophe and is arithmetic. The per-file check below is still correct,
-    # because it only ever compares files both sides name; the TABLE is what
-    # needs the scope, so the table is what the scope gates.
-    shared = len(set(verdicts) & set(old))
-    comparable = (shared >= total / 2 and shared >= len(old) / 2) if total else False
-    if not comparable:
-        say(f"    NOTE: this run swept {total} file(s) and the baseline records "
-            f"{len(old)}, and {shared} of them are the same file. The class "
-            f"counts are NOT printed: two scopes are not two states of one "
-            f"corpus, and a delta over them reads as a catastrophe. The "
-            f"per-file check below still holds — it compares only files both "
-            f"sides name. Re-sweep the same roots, or bank a fresh baseline "
-            f"with --write-baseline")
-    was, now = prev.get("classes", {}), collections.Counter(verdicts.values())
-    was_pass = (was.get(CLASS_PASS, 0) if was.get(CLASS_PASS)
-                else prev.get("summary_pass"))
-    for cls in (CLASS_ORDER + (BASELINE_UNNAMED_PASS,)) if comparable else ():
-        a, b = was.get(cls, 0), now.get(cls, 0)
-        note = ""
-        if cls == CLASS_PASS and was_pass is not None and not was.get(cls):
-            # The one number a baseline banked from a log still knows exactly,
-            # and the headline of every sweep report: it is printed from the
-            # log's own `PASS=` figure because the log's arithmetic cannot name
-            # those files (see BASELINE_UNNAMED_PASS), and it is the figure the
-            # b12 round's "145 -> 131" came from.
-            a = was_pass
-            note = (f"   <- the log's own PASS= count; this baseline does NOT "
-                    f"name those {a} file(s), so the {a} -> {b} delta cannot "
-                    f"be attributed from it (see the note below)")
-        if not a and not b:
-            continue
-        say(f"    {'  ' if a == b else '->'} {cls:<40} {a:>5} {b:>5}  ({b - a:+d})"
-            + note)
-    # THE RATE, and the two counts that explain it. `CLASS_SEVERITY` puts every
-    # `not-answerable` class BEYOND both codegen classes, so a file that moves
-    # from `host-import` into a codegen row is an IMPROVEMENT by that ladder —
-    # the backend reached a file it could not reach before — and the coverage
-    # rate still FALLS, because the file entered the denominator and failed
-    # there. Both are true and they are different questions, so both are printed:
-    # the b12 round is the case (99 files crossed in, the rate went 28.8% ->
-    # 21.7%), and a report that printed only one of them would be wrong in the
-    # direction its reader came for.
-    was_ans = sum(was.get(c, 0) for c in ANSWERABLE) + (was_pass or 0)
-    now_ans = sum(now.get(c, 0) for c in ANSWERABLE)
-    if comparable:
-        was_pct = 100.0 * (was_pass or 0) / was_ans if was_ans else 0.0
-        now_pct = 100.0 * now.get(CLASS_PASS, 0) / now_ans if now_ans else 0.0
-        say(f"    codegen coverage {was_pct:.1f}% -> {now_pct:.1f}% "
-            f"({now_pct - was_pct:+.1f} pp), over {was_ans} -> {now_ans} "
-            f"answerable file(s) — the sweep's own headline, and the two "
-            f"figures a class count cannot give")
-    entered = left = unknown = 0
-    for path_, cls in verdicts.items():
-        before = old.get(path_)
-        if before is None or before == BASELINE_UNNAMED_PASS:
-            if before == BASELINE_UNNAMED_PASS and cls != BASELINE_UNNAMED_PASS:
-                unknown += 1
-            continue
-        was_in, is_in = before in ANSWERABLE, cls in ANSWERABLE
-        entered += 1 if is_in and not was_in else 0
-        left += 1 if was_in and not is_in else 0
-    if comparable and (entered or left or unknown):
-        say(f"      of which: {entered} file(s) ENTERED the answerable "
-            f"denominator (a not-answerable class into a codegen one) and "
-            f"{left} left it; {unknown} more are in a class this baseline does "
-            f"not name, so their direction is unknown rather than counted")
-
-    detail = {r: d for r, _c, _reason, d in rows}
-    was_unnamed = set(prev.get("unnamed", ()))
-    worse, silent, better, sideways = [], [], 0, 0
-    for path_ in sorted(verdicts):
-        cls, before = verdicts[path_], old.get(path_)
-        if before is None or before == cls:
-            continue
-        if before == BASELINE_UNNAMED_PASS:
-            silent.append((path_, cls))
-        elif worse_class(before, cls):
-            worse.append((path_, before, cls))
-        elif worse_class(cls, before):
-            better += 1
-        else:
-            sideways += 1
-    # Each file lands in exactly one group: a file that moved to a worse class
-    # AND onto a nameless refusal is reported by the class group, which already
-    # carries its cause, rather than twice.
-    darker = sorted((set(unnamed_now) - was_unnamed) - {p for p, _b, _c in worse})
-    fresh = sorted(set(verdicts) - set(old))
-    gone = sorted(set(old) - set(verdicts))
-    tail = (f"{better} moved the other way, {sideways} sideways, {len(fresh)} "
-            f"not in the baseline, {len(gone)} baseline file(s) not swept")
-    if prev.get("unnamed_passes"):
-        tail += (f"; {prev['unnamed_passes']} file(s) are `{BASELINE_UNNAMED_PASS}`"
-                 f", which is this baseline's way of saying a log records the"
-                 f" COUNT of the files that printed no row and not their names")
-
-    if not worse and not silent and not darker:
-        say(f"  REGRESSION CHECK: no file moved to a worse class than the "
-            f"baseline records ({tail})")
-        return False
-    groups = {}
-    for path_, before, cls in worse:
-        group = _terminal_group(path_, detail.get(path_))
-        cause = (f"{group[0]}"
-                 + (f"  (refused in {group[1]})" if group[1] else "")
-                 if group and cls in (CLASS_CODEGEN, CLASS_CODEGEN_DEP) else
-                 f"(no terminal cause: {cls} is not a construct refusal)")
-        groups.setdefault((f"{before} -> {cls}", cause), []).append(path_)
-    by_class = collections.defaultdict(list)
-    for path_, cls in silent:
-        by_class[cls].append(path_)
-    say(f"  REGRESSION: {len(worse)} file(s) moved to a WORSE class than the "
-        f"committed baseline records"
-        + (f", {len(darker)} kept their class and lost their NAME (a refusal "
-           f"no ranking table matches replaced a named one)" if darker else "")
-        + (f", and {len(silent)} more are in a class this baseline does not "
-           f"name at all" if silent else "")
-        + f" ({tail})")
-    for (move, cause), paths in sorted(groups.items(),
-                                       key=lambda kv: (-len(kv[1]), kv[0])):
-        say(f"    {len(paths)} file(s)  {move}")
-        say(f"        {cause}")
-        say(f"        {_example_files(paths)}")
-    if darker:
-        # A same-class move onto a nameless refusal is invisible to every class
-        # count and to every cause table, because the cause table's own answer is
-        # `other refusal` for all of them — so the shape-level loud finding
-        # above says how MANY and this says WHICH. The b12 round's 110 files that
-        # swapped a named row for the docstring wall are the case this exists
-        # for, and they are the largest group of that round's 229.
-        say(f"    {len(darker)} file(s)  (class unchanged) -> a refusal this "
-            f"table does not name:")
-        by_shape = {}
-        for path_ in darker:
-            by_shape.setdefault(unclassified_shape(
-                _terminal_reason(_split_chain(detail.get(path_, ""))[1]).strip()),
-                []).append(path_)
-        for shape, paths in sorted(by_shape.items(), key=lambda kv: -len(kv[1])):
-            say(f"        {len(paths)} file(s) — shape: {shape}")
-            say(f"          {_example_files(paths)}")
-    if silent:
-        say(f"    {len(silent)} file(s) were `{BASELINE_UNNAMED_PASS}` here and "
-            f"are now something else, which this baseline cannot put a "
-            f"direction on — see the note above. They are named because the "
-            f"CLASS they moved to is known:")
-        for cls, paths in sorted(by_class.items(), key=lambda kv: -len(kv[1])):
-            say(f"        now {cls}: {len(paths)} file(s)")
-            say(f"          {_example_files(paths)}")
-    say("    (a class count that moved is not the finding; the file list is. "
-        "A host model landing moves files in BOTH directions over one edit, so "
-        "read the direction before reading the count — "
-        "the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.4 is the record)")
-    return True
-
-
-#: The summary line `main` prints, `[x86_64] 668 files: PASS=125
-#: not-pass=543`, as a pattern. Here because this file PRINTS it and every other
-#: regex it owns is a pattern of something it reads or writes; the readers are
-#: `tools/formal_sweep_causes.py` (the loud unclassified finding's denominator)
-#: and `tools/formal_sweep_parity.py`, which takes its own from here so a change
-#: to the line cannot leave one reader matching and the other not.
-SUMMARY_RE = re.compile(
-    r"^\[(?P<arch>[a-z0-9_]+)\] (?P<files>\d+) files: PASS=(?P<pass>\d+) "
-    r"not-pass=(?P<notpass>\d+)\s*$")
-
 # What each class means, in the summary. Long on purpose: the class names are
 # the tool's contract with a reader who has not read this file, and a bare
 # count of 170 files called `not-answerable/host-import` is only honest if the
@@ -4361,7 +3385,7 @@ def _drain_in_flight(futs, collect) -> None:
     pool had taken. Each of those publishes its verdict to the CAS before
     `run_one` returns, so a drain that ignored them would leave verdicts in the
     cache that the run's own output never mentions — which is what forced
-    the `b6` round of `bugs/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
+    `bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §2.3 to reconstruct a run's
     numbers from the cache instead of reading its log.
 
     Waited for rather than killed, and the cost is bounded: each in-flight build
@@ -4520,19 +3544,6 @@ def _report_partial(arch, files, results, timeouts=None, mem_gb=0.0) -> None:
             print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
     _report_tool_causes(done, results, timeouts or Timeouts(), mem_gb, arch,
                         emit=lambda s: print(s, file=sys.stderr))
-    # The two honesty instruments did NOT run, and an interrupted summary that
-    # simply omits them reads as a run where they found nothing. Both are
-    # computed over the WHOLE scope: the loud unclassified shape's share half
-    # would be measured against the files this run never reached, and the
-    # baseline's comparison would see `swept - classified` files as missing
-    # rather than as not-yet-run. `--write-baseline` is refused here for the
-    # same reason — a baseline banked from a partial scope would report every
-    # unclassified file as a pass.
-    print("    the unclassified-refusal finding and the committed-baseline "
-          "regression check did NOT run: both are computed over the whole "
-          "scope, and this run classified "
-          f"{len(done)} of {len(files)} file(s). Nothing was banked.",
-          file=sys.stderr)
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -4653,29 +3664,11 @@ def main():
                          "run's machine rather than about the source")
     ap.add_argument("--allow-concurrent", action="store_true",
                     help="sweep even if another sweep of the SAME architecture "
-                    "is running. They share the formal module-dylib "
-                    "directory and the ledger, and a manifest there is "
-                    "rewritten in place, so a reader in one can see the "
-                    "other's half-written JSON. Different architectures "
-                    "are independent and never need this")
-    ap.add_argument("--baseline", metavar="PATH", default=None,
-                    help="the committed class baseline to compare this run "
-                         "against (default: bugs/sweeps/sweep-<arch>."
-                         "baseline.json). Every file that moved to a WORSE "
-                         "class than the baseline records is named at the top "
-                         "of the summary, grouped by the refusal now in front "
-                         "of it, which is how a one-edit regression of 229 "
-                         "files is caught by running the sweep rather than by "
-                         "diffing two logs by hand. The ledger's own history "
-                         "answers the machine-local version of this question "
-                         "and cannot answer this one: it lives in the CAS, so "
-                         "it is gone when the cache is")
-    ap.add_argument("--write-baseline", action="store_true",
-                    help="record THIS RUN's per-file classes as the baseline "
-                         "at --baseline, overwriting it. Bank a completed run "
-                         "rather than a work-in-progress tree; to bank a log "
-                         "you already have without re-running the sweep, use "
-                         "`tools/formal_sweep_rounds.py --write-baseline`")
+                         "is running. They share the formal module-dylib "
+                         "directory and the ledger, and a manifest there is "
+                         "rewritten in place, so a reader in one can see the "
+                         "other's half-written JSON. Different architectures "
+                         "are independent and never need this")
     ap.add_argument("paths", nargs="*",
                     help="files or dirs (default: this repo plus the stdlib's "
                          f"{','.join(DEFAULT_STDLIB_SUBTREES)}/ — the roots "
@@ -4692,14 +3685,6 @@ def main():
     if unusable:
         print(unusable, file=sys.stderr)
         sys.exit(2)
-
-    # The committed baseline is resolved and READ before any build starts, so a
-    # baseline this tool cannot read is a refusal in seconds rather than after a
-    # half-hour of compiles: it would otherwise fail the run at the point where
-    # the alarm is printed, which is the worst possible moment to discover that
-    # the alarm was never going to fire.
-    baseline_file = args.baseline or baseline_path(arch)
-    prev_baseline = load_baseline(baseline_file)
 
     # Roots: explicit paths win outright, otherwise repo + stdlib subtrees.
     notes = []
@@ -4858,37 +3843,6 @@ def main():
         print(f"  {mark} {cls:<28} {counts[cls]:>4}   {CLASS_BLURB[cls]}")
     print(f"  (classes sum to {sum(counts.values())} = {total} files swept)")
 
-    # ── The two honesty instruments, FIRST ─────────────────────────────────
-    # Both are printed above every explanation on purpose. Everything below this
-    # point is a reading of the counts, and both of these say a count cannot be
-    # read yet: the regression block says the corpus moved somewhere worse than
-    # the committed record, and the unclassified block says part of it has no
-    # name in either ranking table. A summary that buries either one under the
-    # per-module breakdowns is a summary in which the finding that matters is the
-    # one you scroll past.
-    # One list, two readers: the loud finding below and the baseline's
-    # "kept their class and lost their name" group both read it, and
-    # `formal_sweep_causes.py` reports the same rows against ITS table.
-    unclassified = unclassified_rows(rows)
-    regressed = report_baseline(baseline_file, prev_baseline, verdicts, rows,
-                                total, [p for p, _m in unclassified])
-    loud = unclassified_report(unclassified, total)
-    if args.write_baseline:
-        print(f"  wrote baseline "
-              f"{write_baseline(baseline_file, arch, verdicts, unnamed=[p for p, _m in unclassified])}"
-              f" ({len(verdicts)} file(s))")
-    if regressed or loud:
-        why = []
-        if regressed:
-            why.append("a regression against the committed baseline, whose fix "
-                       "is the edit that moved those files")
-        if loud:
-            why.append("a refusal shape no ranking table names, whose fix is "
-                       "adding the row and which no change under formal/ "
-                       "clears")
-        print("  (this run's counts are not a census of causes: "
-              + "; ".join(why) + ")")
-
     # WHY each unanswerable file is unanswerable. "170 files" is a number
     # without a cause; "170 files, 60 of them because of `os`" is the fact a
     # reader can act on (and the shape of the stdlib-host dependency this repo
@@ -4961,31 +3915,6 @@ def main():
         print("    None of this is close, and none of it is in the rate "
               "above: the point is to size the work, not to improve the "
               "number")
-
-        # The FOURTH tier, in neither count above, and named for the same reason
-        # the admitted one is: a file importing one of these would drop out of
-        # both halves of this line with nothing to say where it went.
-        # `HOST_NOT_A_MODULE` is a name with nothing to IMPLEMENT (`this`,
-        # `antigravity`, `turtledemo`), so it is neither work nor a permanent
-        # fact about the target — it is the absence of a question, and this
-        # report's first half is built out of questions about reachability.
-        # A file that imports one is still refused (the tier is in the host
-        # union), so the count above still contains it; what changes is that the
-        # `…and {N} one that needs a host process` half is not the right
-        # description of it, and printing nothing would leave the reader to
-        # assume it was.
-        try:
-            from formal.imports import HOST_NOT_A_MODULE
-            notamodule = sorted(n for n in HOST_NOT_A_MODULE
-                                if n.split(".")[0] in host_modules)
-        except Exception:
-            notamodule = []
-        if notamodule:
-            print(f"    neither, because there is nothing to implement and "
-                  f"nothing missing: {', '.join(notamodule)} — a name whose "
-                  f"only content is documentation or a demonstration, so it is "
-                  f"in NEITHER count above and a file importing one is refused "
-                  f"for that reason rather than for a missing capability")
 
     # ── A codegen finding in a file no backend change can make build ────────
     # A construct refusal is `codegen` and that is right: the construct is in
@@ -5185,12 +4114,8 @@ def main():
     # target and never gate the run; a codegen finding, an unclassifiable
     # verdict, or a file nobody answered for all do. See EXIT STATUS in the
     # module docstring — this is a deliberate change from "any FAIL means 1",
-    # which could not tell a backend regression from `import os`. `loud` adds
-    # the one status that is about this tool rather than the backend: a refusal
-    # shape over the honesty bar has no row in either ranking table, so the
-    # findings below cannot be planned from until a row is added, and that is a
-    # different thing for a caller to be told than "the backend refused things".
-    sys.exit(exit_status(bool(dirty), loud))
+    # which could not tell a backend regression from `import os`.
+    sys.exit(1 if dirty else 0)
 
 
 if __name__ == "__main__":

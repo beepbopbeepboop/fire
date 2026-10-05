@@ -1,119 +1,5 @@
 # CODEGEN_bootstrap_stage2_dump_is_empty: the self-hosted binary exits 0 and writes no dump
 
-## Status (2026-10-04, work/gatefix9 — the `TypeError` is FIXED and was never
-## in `gen_module_impl`: it was `id()`, and what is left is a SIGSEGV)
-
-**Still open, and still the right owner of this class. The `TypeError` class
-below is closed — its own entry, further down, says where it actually was,
-because the localisation in the gatefix8 entry above it ("`gen_module_impl`'s
-prologue, input-independent") was WRONG and cost most of a session to
-overturn.**
-
-Measured on `work/gatefix9`, same command as the entry below:
-
-    $ python3 tools/suite.py bootstrap-stage2-dumps --no-cache
-    suite: 4 passed, 1 failed, 0 skipped  (5 tests, 95 jobs, 229.7 s)
-
-| | gatefix8 | gatefix9 |
-|---|---|---|
-| items failing | 45 of 46 | **40 of 46** |
-| `TypeError: unhashable type: 'list'` | 20 inputs | **gone** (`mojo_id`) |
-| `Unexpected SEMICOLON(';')` at `fire_compiler.py:1301:38` | 2 inputs | **gone** (`mojo_cstr_cmp_word`) |
-| silent SIGSEGV / SIGABRT / SIGBUS, no diagnostic | (not counted separately) | **all 40** |
-| passing | `mojo_failures.mojo` | 6 inputs: `array_ops_jit.mojo`, `bootstrap_test_single_expr.mojo`, `generated_dispatch.py`, `mojo_failures.mojo`, `t1.mojo`, `test_jit.mojo` |
-
-**Every loud class is now closed and what remains is one silent-crash
-class.** That is a change in KIND, not in count — 40 items failed before the
-last fix too — and it is worth saying plainly, because "the count did not move"
-is the least informative thing about it: the two `.py` closure inputs used to be
-refused with a diagnostic and now reach the codegen and crash (`fire_compiler.py`
-SIGSEGVs, `fire.py` SIGABRTs on `method_receiver_kind: unavailable in compiled
-mode`).
-
-TWO of the SIGSEGVs are closed, one per fix, and each was found by the same
-four-command `lldb` recipe at the top of this file rather than by reading the
-compiled-path source:
-
-* **`mojo_id` (item 0 in "What was fixed")** — 45 to 43.
-* **a struct type tag read was never validated** — 43 to 40.
-  `mojo_read_type_tag`/`_safe` read eight bytes at an address and returned
-  them unvalidated. A heap string passes every check those readers make (it is
-  8-aligned and `malloc_size` is at least 8), so `type(node)` over a plain
-  `str` field of an AST node returned the eight bytes of the STRING — for
-  `hello.mojo` that is `"print"`, i.e. the integer `0x746e697270`, which is
-  inside `[2^31, 2^47)` and therefore accepted by every pointer predicate in
-  the runtime. `_WALK_DATACLASS_CACHE.get(type(node))` then classified that
-  integer as a boxed string and handed it to `strcmp`: a SIGSEGV on an address
-  that was never mapped. A tag is 31 bits by construction
-  (`_struct_type_id` is `h * 31 + c & 2147483647`), and the codegen already
-  returns a literal 0 for a `char *`/container receiver for exactly this
-  reason (`emit_exprs.py`'s `__class__` arm) — so the check is that same rule
-  applied where the receiver is boxed and the codegen cannot see it. Both
-  readers now share one `_mojo_tag_at`.
-
-**What the remaining 40 have in common, as far as it is measured:** they are
-crashes, not diagnostics, so the census needs one crash at a time and the
-`lldb` recipe is the instrument. The next two measured, both AFTER the two
-fixes above, so both are still open:
-
-1. `mojo_dict_order_indices` dereferencing `0x4d4a424f58310001` — that is
-   `MOJO_BOX_MAGIC`, a `MojoBox`'s first field, so a box's CONTENTS reached a
-   caller as the box. Reached from `gen_module_impl` →
-   `infer_return_elem_type` → `_scratch_vt.update(_as_dict(_base_var_types))`
-   (`mojo/middle/resolve_shared.py:1141`), i.e. the SECOND argument of
-   `mojo_dict_update` is the magic, not a dict. Same family as
-   `bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`'s "a value
-   read out of a heterogeneous container" case: something hands a struct's
-   first word to a consumer that expected the pointer.
-2. the `SEMICOLON` refusal, which was NOT a parser bug at all: the token
-   stream was right and the parser was right, and the divergence was in
-   `_lower_binary`'s `==` lowering comparing an `int64_t` slot holding a boxed
-   string by its LOW BYTE. Fixed as item 3 in "What was fixed".
-
-So the remaining class is a CRASH, not a diagnostic, and it is now the whole of
-what is left: 41 of the 46 inputs take the binary down with no message, and
-the two `.py` closure inputs are the `SEMICOLON` refusal. `bootstrap-stage2-dumps`
-carries a count-checked `expect=` marker again (43 of 46), and the count is
-checked against the per-item verdicts — see the 2026-10-04 entry in
-`tools/suite.py`'s marker history for why that job is red again after a day of
-carrying no marker at all.
-
-### How the `TypeError` was located (the instrument, for the next person)
-
-The entry below sends you to a C main linked against `stage1/fire.ci`. The
-cheaper half of that is **lldb on `stage2/mojo` itself**, and it is four
-commands:
-
-    $ cd stage2
-    $ lldb -b -o 'breakpoint set -n mojo_dict_key_for' -o run -o 'bt 6' -o quit \
-          -- ./mojo --dump ../.tmp/one.mojo
-    frame #0: mojo`mojo_dict_key_for
-    frame #1: mojo`_kw_kind
-    frame #2: mojo`mojo_dict_set_str_kw        <- or mojo_dict_contains_kw
-    frame #3: mojo`_mojo_middle_types_toplevel  <- the first hit, NOT the crash
-    frame #4: mojo`main
-
-Two things about that, both of which cost time here:
-
-* **The FIRST hit is not the crash.** `mojo_dict_key_for` is called for every
-  container dict key, and the first one — `_MODULE_ATTR_CTYPES`'s
-  `('os', 'environ')` tuple key, which is a legitimate tuple — is fine. The
-  crash is the SECOND hit. `continue` once and read the backtrace again.
-* **The `TypeError` was never in `gen_module_impl`.** `mojo_dict_key_for`
-  raises `unhashable type: 'list'` for a list used as a dict key, and the key
-  the compiled path handed it was a live list HANDLE. Reading the list's slots
-  out of the debugger is what named it: patch `mojo_dict_key_for` in a COPY of
-  `runtime/fire_runtime.c` to print the list it was given (its length and its
-  slots), relink `stage1/fire.ci` against the copy (25 s, one `gcc -fgimple`
-  command — see the entry below for the exact argv), and the answer is one
-  line. What it showed was a ONE-element list holding pointer bytes, used as
-  the key of `if id(body) in cache` in `mojo/middle/lambdareduce.py`.
-
-`id()` was the defect; see "What was fixed" below for the fourth item. The
-whole `TypeError` class was ONE line of generated code (`static int64_t id
-(int64_t x) { return x; }`) that no amount of reading `gen_module_impl` would
-have found.
-
 ## Status (2026-10-04, work/gatefix8 — the class is much narrower: THREE root
 ## causes found and fixed, `.tok`/`.ast` are now byte-identical, and what is
 ## left is a `TypeError` inside the compiled `gen_module`)
@@ -191,25 +77,7 @@ for that file is byte-identical, so the divergence is in
 `fire_compiler.py::_split_on_separators` or in phase 2's sub-statement loop, not
 in the lexer.
 
-### What was fixed (five root causes, each with its own evidence)
-
-0. **`id()` returned the VALUE instead of an identity** (`work/gatefix9`, the
-   fourth and last of this class's non-crash defects). The generated stub was
-   `static int64_t id (int64_t x) { return x; }`, so `id(x)` on a container
-   handed back the live HANDLE — and the container registries
-   (`mojo_is_registered_list` and its siblings) then read that token as the
-   container itself. `mojo/middle/lambdareduce.py`'s `if id(body) in cache`
-   therefore reached `mojo_dict_key_for`, which is right to refuse a list as a
-   dict key, and the compiler raised `TypeError: unhashable type: 'list'`.
-   Fixed with `mojo_id` (runtime): an INTERNED box holding the word, which is
-   this runtime's existing representation for "an int64_t that is not
-   self-describing", and which every classifier already reads as an integer
-   (`mojo_boxed_is_str` excludes boxes, `_value_kind` matches only the
-   container registries). Interning is load-bearing rather than tidy: it is
-   what makes `id(x) == id(x)`, which `cache[id(body)]` — read then written —
-   depends on. Test: `gimple_id_is_an_integer` in `test_gimple_runner.py`,
-   CPython as the oracle; it fails on the old stub by dying at exactly the
-   membership test.
+### What was fixed (three root causes, each with its own evidence)
 
 1. **`str`'s optional `[start[, end]]` window was dropped** by every arm of
    `_lower_str_method` (`startswith`/`endswith`/`find`/`index`/`rfind`/
@@ -227,21 +95,7 @@ in the lexer.
    `mojo_regex_split` (runtime) + the `split` arm + `regex_prog_for`
    (consolidated out of `emit_loops` so `finditer`/`findall`/`sub`/`split` share
    one program per pattern).
-3. **`c == in_str` compared an `int64_t` slot by its low byte** when the
-   other side was a `char *` value (`work/gatefix9`). `_to_char_star`'s
-   char-code path emitted `mojo_char_to_str((char)w)`, which TRUNCATES a boxed
-   string POINTER to one byte and builds a 1-character string from it — so a
-   quote character never matched itself. `fire_compiler.py`'s
-   `_strip_inline_comment` and `_split_on_separators` both leave a string open
-   on exactly that comparison (`c == in_str`, where `in_str` is an
-   unannotated local widened to `int64_t` and assigned a `char *` LATER IN THE
-   LOOP BODY than the read, so no single-pass `_actual_types` entry exists),
-   and with every single-quoted string left open the `;` separator after
-   ``in_str !='`'`` read as string content. Fixed with `mojo_cstr_cmp_word`
-   (runtime), asked only where the codegen cannot decide: `mojo_boxed_is_str`
-   tells a boxed string from a byte code exactly, and the byte-code arm answers
-   what the old path answered, so nothing that was right changed.
-4. **A defaulted POINTER parameter was padded with the integer 0**, which for a
+3. **A defaulted POINTER parameter was padded with the integer 0**, which for a
    `char *` parameter `_emit_call` coerces through `mojo_cstr_or_int_str` into
    the one-character string `"0"` — a true, non-null pointer. So
    `Parser._expect(self, kind, value: str = None)` called as
@@ -249,15 +103,8 @@ in the lexer.
    file with `Expected '0' got ')'`. Fixed at every padding site
    (`_default_expr_to_pair(param_ctype=...)`), which is why `.ast` is now real.
 
-### The instrument, for whoever picks this up
-
-(The `lldb` recipe is at the top of this file and is the cheap half — four
-commands, no rebuild. What follows is the expensive half, needed only to reach
-the stages before `gen_module`.)
-
-**The instrument, for whoever picks this up** (it is ~25 s per rebuild — the
-~100 s in the gatefix8 entry was measured on an older tree — and it is what
-made four fixes possible across two sessions):
+**The instrument, for whoever picks this up** (it is ~100 s per rebuild and it
+is what made three fixes possible inside one session):
 
 1. `python3 -c "from gimple_codegen import compile_to_gimple; compile_to_gimple(open('fire_compiler.py').read(), do_imports=False, filename='fire_compiler.py')"`
    — 2.1 s, 1.9 MB of C for the whole front end. Two edits make it gcc-able:

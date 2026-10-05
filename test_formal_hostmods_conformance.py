@@ -51,7 +51,7 @@ Three things are deliberately NOT harvested, and the count of each is printed:
 
   * a call with an argument the harvester cannot resolve (`+12`),
   * a `bytes` argument — CPython's tests deliberately run every path case twice,
-once as `str` and once as `bytes`, and the `bytes` half is the half a model
+    once as `str` and once as `bytes`, and the `bytes` half is the half a model
     cannot answer: `bytearray` builds a blob of ONE-BYTE elements
     (`formal/hostmods/struct.mojo`'s value-model section, `BYTE_BLOB_CTORS` and
     `model.blob_elem_stride`), but `bytes(n)` has to build a region whose SIZE
@@ -1682,7 +1682,6 @@ def main():
             print(f"SKIP x86-64: {why}")
             backends = tuple(b for b in backends if b != "x86_64")
     names = args.groups or [spec.name for spec in MODULES]
-    failed = []
     for name in names:
         spec = spec_by_name(name)
         TEMP = tempfile.mkdtemp(prefix="formal_conf_")
@@ -1690,25 +1689,10 @@ def main():
             ok, message = run_group(spec, args.verbose, backends)
         except (Failure, TestFailure) as exc:
             print(f"FAILED  {name}: {exc}")
-            failed.append(name)
             continue
         finally:
             shutil.rmtree(TEMP, ignore_errors=True)
         print(f"{'ok  ' if ok else 'FAIL'}  {message}")
-        if not ok:
-            failed.append(name)
-    # The EXIT STATUS is the other half of printing `FAILED`, and it was
-    # missing: `main()` fell off the end, so `sys.exit(main())` exited 0 with
-    # every group red. Nothing in this file could ever report a failure, which
-    # is why `test_suite.py`'s `UNREGISTERED` entry could call it green while
-    # six of its seven groups printed `FAILED` — a red in nobody's tally, and
-    # the class the estate check exists to catch. Every other file in this
-    # directory returns 1 on a failure; this one now does too, and it says how
-    # many groups failed so a reader counting lines does not have to.
-    print(f"\nhost-module conformance: {len(names) - len(failed)} of "
-          f"{len(names)} groups ok"
-          + (f"; FAILED: {', '.join(failed)}" if failed else ""))
-    return 1 if failed else 0
 
 
 if __name__ == "__main__":

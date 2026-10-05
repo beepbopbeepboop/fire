@@ -1,87 +1,5 @@
 # PERF_formal_import_asks_are_products_of_the_closure: a formal build asked per-MODULE questions about the module ONCE, and the tokenizer was half the build
 
-## Status 2026-10-04: §2, §3, §4a and §4c are LANDED; §4b and §4d are DECLINED with a measurement; §4e is still unmeasured
-
-| § | subject | state |
-|---|---|---|
-| §2 | `template_names` asked per module of the consumer's closure | **LANDED** (`a829a0b7`) |
-| §3 | a template LOCATED 300 times over 4 (source, name) pairs | **LANDED** (`dcc27620`) |
-| §4a | `module_templates_by_path` walked once per imported module | **LANDED** 2026-10-04 — and it was far bigger than §4a's own measurement said |
-| §4b | `_attach_declared_census` recomputing the field evidence per struct | **DECLINED**, below: the shape §4b describes no longer happens, and what is left is 2% |
-| §4c | `struct_receiver_stores` over `iter_nodes` | **LANDED on master** (`078ecbed`) while this pass ran |
-| §4d | `_bracket_depth_by_line` scanning a whole module per caller | **DECLINED**, below: 0.6% and it is in the self-host closure |
-| §4e | the proof path | **STILL NOT MEASURED** — this worker may not launch lean |
-
-**§4a, the one that mattered, measured before and after on this tree** by
-attributing `module_templates_by_path` to its caller:
-
-| file | before | after | build |
-|---|---|---|---|
-| `std/math/math.mojo` | 32 calls, 2.12 s | **16 calls, 0.39 s** | 4.61 s → 3.91 s |
-| `std/simd.mojo` | 44 calls, 2.49 s | **22 calls, 0.61 s** | 6.33 s → 5.59 s |
-| `std/collections/string/string.mojo` | 42 calls, 2.12 s | **22 calls, 0.52 s** | 3.85 s → 3.73 s |
-
-and 16 of the 32 on `math.mojo` came from `imported_instantiations` alone —
-**1.56 s, 34% of the build**. §4a's own figure (491 375 internal calls,
-0.63 s) was measured after §2 had already made the per-module ask a digest and
-a dict lookup, so it saw the walk's leaf cost and not the walk.
-
-**What landed** is `formal/imports.py`'s `template_closure(roots, …)` — ONE walk
-of a SET of roots, recording each module's templates AND its direct re-exports —
-plus `_closure_template_slice`, and `instantiation_demands(…, closure=)`.
-`module_templates_by_path` is now the one-root view of those two, so the three
-single-module callers are untouched. The slice's correctness argument and its
-verification are in the commit that landed it: 999 (file, dep) pairs over 221
-stdlib files compare equal to the standalone walk **including order** (order is
-load-bearing — `imported_instantiations`' `demap.setdefault((base, args),
-mangled)` keeps the FIRST owner's body), and 24 files' artifacts are
-byte-identical (1 image, 23 refusals with identical exit code, stdout and
-stderr).
-
-**§4b is declined, and the reason is that its shape is gone.** §4b says
-"`_attach_declared_census` … calls `M.unit_field_evidence(…)` once per struct it
-collects, and the answer is a function of the module — so a module declaring S
-structs pays S whole-module walks." Measured on this tree, four files:
-
-| file | `unit_field_evidence` | `_attach_declared_census` | distinct module parses |
-|---|---|---|---|
-| `std/math/math.mojo` | 92 calls / 136 ms | 3 304 calls / 228 ms | 176 |
-| `std/simd.mojo` | 87 / 128 ms | 4 625 / 215 ms | 179 |
-| `std/collections/string/string.mojo` | 94 / 114 ms | 4 400 / 201 ms | 172 |
-| `std/python/bindings.mojo` | 90 / 109 ms | 2 860 / 195 ms | 173 |
-
-`unit_field_evidence` is asked ~90 times over ~175 distinct module parses — about
-half of them, and once each — so it is NOT being paid S times per module and a
-memo saves nothing. The 2 860-4 625 `_attach_declared_census` calls are the
-per-STRUCT caller hitting the `_field_evidence is not None` guard that function's
-own docstring describes ("the guard above keeps the first answer"), at ~0.05 µs
-each; the per-module attach behind it runs 87-94 times. That is ~4% of a 4-6 s
-build, and hoisting the guard to a per-path memo would recover about half of it.
-`bugs/FORMAL_build_cost_2026-10-03.md` §6.2 declined the sibling residue of this
-one at 0.003 s for the same reason.
-
-**§4d is declined at 0.6%.** `_bracket_depth_by_line` is called **8-12 times**
-per build on the same four files (26-34 ms of 3.9-6.6 s), against §3's 600 calls
-at 5.4 s — §3 removed the callers, so the memo §4d asks for would now fix eight
-calls. It is also `elaborate.py`, which `cas.selfhost_inputs()` lists: a change
-there owes `mojoc`, the three `stage*` steps, `stdlib-dylib`'s skip count and
-`stdlib-syntax`'s unexpected count, for 0.6%. §4d's own note is right that the
-memo would fix every caller at once; there are eight of them.
-
-**§4e is still not measured** and this is unchanged: `formal/lean.py::run_lean`
-is a thing this worker may not launch, so nothing here is a measurement of the
-proof path and §6's 9-300 s is untouched by anything above.
-
-**The next step that IS worth taking, with its measurement:** the calls that
-remain from `module_templates_by_path` are `formal/build.py`'s
-`_resolve_imports`, one level of the closure per module in its own recursion —
-**16 calls, 0.41 s of `math.mojo`'s 3.91 s**. That chain starts in another file
-and `instantiation_demands`' `closure=` is already the parameter it needs, so the
-change is to thread one table through `build.py`'s recursion rather than to make
-this file's walk cheaper again.
-
-## Original filing (2026-10-02)
-
 **Class:** performance. **Area:** `formal/monomorph.py` — **the two costs below
 are FIXED**, in `a829a0b7` and `dcc27620`, byte-identical on both
 architectures. What is left is four residues, each MEASURED, each with its
@@ -380,53 +298,21 @@ which is the obvious "make the hot loop cheaper" move, is **not** faster —
 is not the cost; the per-node Python work is. So a future pass should look for
 fewer NODES, not a faster descent.
 
-### d. `_bracket_depth_by_line` is a whole-module scan inside `elaborate.py` — FIXED 2026-10-05 (`work/bugs7-4`)
+### d. `_bracket_depth_by_line` is a whole-module scan inside `elaborate.py`
 
-§3 fixed the CALL SITE; the root is that three readers in `elaborate.py`
-recompute it about the same module — `extract_fn_source` (`:129`),
-`extract_overloads` (`:159`) and `extract_struct_source` (`:432`).
-**`type_param_names` is not one of them**: it takes `template_src` and goes
-through `mm.head_match` alone, so this doc's list of four readers was three.
+§3 fixed the CALL SITE; the root is that `elaborate.extract_struct_source`,
+`extract_fn_source`, `extract_overloads` and `type_param_names` each recompute
+it. A memo there would fix every caller at once, including
+`formal/comptime_runner.py:96` and `tools/elab_fail_census.py`.
 
-The memo is now there, and the two decisions in it are the whole of it:
-
-* **A TUPLE, not a list.** The memo hands every reader the SAME object, and a
-  reader that mutated it would corrupt every later one — the hazard this same
-  doc's own "the memo's hazards" section states for a shared list. A tuple
-  removes it structurally rather than by a check a future caller could forget:
-  `_find_block_end` only READS it, so nothing has to be migrated.
-* **Keyed by the source TEXT, bounded to 8 entries in an insertion-order LIST
-  beside the dict.** Keyed by the text rather than by `id()` because an address
-  can be handed to a different object once the first is freed (this doc's
-  hazard 2), and hashing the text costs far less than the scan it stands in
-  for. The ORDER is a list and not `next(iter(the_dict))` — which is the
-  spelling `formal/monomorph.py::_derived_from_source` uses and which this file
-  may NOT, because `elaborate.py` is inside the self-host closure
-  (`cas.selfhost_inputs()` lists it, `formal/*` does not) and `next()` over a
-  container is one of the constructs the self-hosted codegen does not lower.
-  Measured, not argued: with `next(iter(...))` the self-hosted compile fails
-  with a GCC error; with the list it compiles and `test_selfhost.py`'s failure is
-  the pre-existing `exit=-11` one.
-
-Measured on this tree, which has no stdlib checkout beside it, so the largest
-sources available stand in for `std/simd.mojo`:
-
-| source | bytes | cold | warm |
-|---|---|---|---|
-| `formal/model.py` | 2 111 422 | 85.8 ms | 0.001 ms |
-| `formal/build.py` | 1 097 043 | 46.8 ms | 0.022 ms |
-
-and 12 interleaved sources asked three times each: 0 wrong answers, cache 8,
-order 8, at the cap. `d[0] = 999` on a returned value raises `TypeError`, which
-is the point.
-
-Equivalence evidence: **208 artifacts byte-identical** (every
-`formal/examples/*.mojo`, both backends, `compile_formal`'s emitter text),
-`test_formal_monomorph.py` 23/0, `test_comptime_parity.py` 9/9,
-`test_x86_64_examples.py` 52/52, and `test_selfhost.py`'s failure is the
-pre-existing `exit=-11` with and without the diff. Still owed by the integrator:
-`make bootstrap`'s three stage trees and `stdlib-dylib`'s skip count, which no
-light worker may run.
+**Not taken here because of where it is:** `elaborate.py` is in the self-host
+closure (`cas.selfhost_inputs()` lists it, `formal/*` does not), so a change
+there owes `make gate`'s `mojoc`/`stage*` steps and `stdlib-dylib`'s skip count
+— this pass's changes are all in `formal/monomorph.py`, which is not
+self-hosted, so they owe nothing beyond the formal steps the integrator runs
+anyway. The win after §3 is one call per instantiation on the TEMPLATE's own
+text rather than the module's, so it is small until something else starts
+asking more of these.
 
 ### e. The proof path was NOT measured, and why
 

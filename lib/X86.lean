@@ -62,9 +62,7 @@ at all.
 What it costs to be exact is stated where it is paid: `x86_cond` approximates
 the parity conditions (there is no PF field, and nothing this backend emits
 sets one a program can observe), and `x86_div128`/`x86_idiv128` return `none`
-on a zero divisor or a quotient that does not fit in 64 bits rather than
-modelling the #DE fault — which is the model's own contract (`none` means the
-machine cannot continue), and which is what the hardware's silence means.
+on a zero divisor rather than modelling the #DE fault.
 
 The model is checked against the hardware, not against itself:
 `formal/x86_64_model_test.py` builds every formal/examples/*.mojo for x86-64,
@@ -502,19 +500,10 @@ def x86_narrow_extend (narrow : UInt64) (sz : Nat) (sign : Bool) : UInt64 :=
   else if sz = 2 then x86_sign_extend16 narrow
   else x86_sign_extend32 narrow
 
--- These four are GROUND facts over `Nat`/`UInt64` literals — `x86_mask n` is
--- `if n ≥ 8 then … else UInt64.ofNat (2^(8n) - 1)`, and every argument here is a
--- literal — so the KERNEL discharges them and no generated axiom is introduced.
--- `native_decide` was compiling a decision procedure to C and asserting the
--- answer, which on this toolchain is one axiom per use
--- (`x86_mask_one._native.native_decide.ax_1_N`); the statement is byte-identical
--- and only the tactic differs.  Measured, standalone through
--- `formal/lean.py::run_lean`: all four elaborate and `#print axioms` answers
--- "does not depend on any axioms" for each — not even `propext`/`Quot.sound`.
-@[simp] theorem x86_mask_one : x86_mask 1 = 0xff := by decide
-@[simp] theorem x86_mask_two : x86_mask 2 = 0xffff := by decide
-@[simp] theorem x86_mask_four : x86_mask 4 = 0xffffffff := by decide
-@[simp] theorem x86_mask_eight : x86_mask 8 = 0xffffffffffffffff := by decide
+@[simp] theorem x86_mask_one : x86_mask 1 = 0xff := by native_decide
+@[simp] theorem x86_mask_two : x86_mask 2 = 0xffff := by native_decide
+@[simp] theorem x86_mask_four : x86_mask 4 = 0xffffffff := by native_decide
+@[simp] theorem x86_mask_eight : x86_mask 8 = 0xffffffffffffffff := by native_decide
 
 /-- `cqo`: RDX = the SIGN EXTENSION of the whole 64-bit RAX — all ones if bit
     63 is set, zero otherwise.  This is NOT `x86_sign_extend32`, which is
@@ -599,23 +588,15 @@ def x86_shift_post (s : X86State) (i digit : Nat) (a : UInt64) (k : Nat) :
     -- right (for `sar` too -- the bits that leave are the same bits).
     let bitOut :=
       if digit = 4 then x86_bit a (64 - k) else x86_bit a (k - 1)
-    -- OF is DEFINED only for a count of one: the carry INTO the sign bit for
+    -- OF is DEFINED only for a count of one: the carry into the sign bit for
     -- `shl`, the old sign bit for `shr`, and always false for `sar` (the bit
     -- shifted in IS the sign).  For any larger count Intel leaves it undefined
     -- and `false` is the value that asserts least about a program that cannot
     -- observe it -- which is why `formal/x86_64_model_fuzz.py` treats OF as
     -- don't-care for a shift whose count it cannot see to be one.
-    --
-    -- `shl`'s OF is the carry INTO bit 63, which is `MSB(src) XOR MSB(res)` --
-    -- and this used to be `x86_msb res`, i.e. the carry OUT of the top bit.
-    -- The two agree exactly when the source is non-negative, which is why no
-    -- `formal/examples` program caught it (nothing there shifts a negative
-    -- value by one) and why the fuzzer did: `formal/x86_64_model_fuzz.py -n 48
-    -- --seed 11` minimises to `movsx R10, R15 ; << RCX, 1` with OF differing on
-    -- its own.  See `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
     let ofBit :=
       if k != 1 then false
-      else if digit = 4 then (x86_msb a != x86_msb res)
+      else if digit = 4 then x86_msb res
       else if digit = 5 then x86_msb a
       else false
     x86_set_flag4 (x86_set_reg s i res) res bitOut ofBit
@@ -647,53 +628,21 @@ def x86_split128 (p : Int) : UInt64 × UInt64 :=
   let hi := (p - lo) / (x86_two64 : Int) % (x86_two64 : Int)
   (UInt64.ofNat lo.toNat, UInt64.ofNat hi.toNat)
 
-/-- The largest and smallest `Int` a 64-bit register can hold: the range a
-    quotient has to be inside for the instruction not to fault. -/
-def x86_int64_min : Int := -9223372036854775808
-def x86_int64_max : Int := 9223372036854775807
-
-/-- Does this quotient fit in 64 bits?  `DIV`/`IDIV` raise `#DE` when it does
-    not, and the fault leaves RAX and RDX UNCHANGED — which is what the model's
-    own contract already means by `none`.
-
-    Two shapes of the check, because the two instructions overflow on opposite
-    sides and getting that wrong makes a legal divide refuse: `IDIV` is signed,
-    so its quotient may be as low as `-2^63`; `DIV` is unsigned, so its
-    quotient may be as high as `2^64 - 1` and a negative bound is meaningless
-    there. -/
-def x86_fits_int64 (q : Int) : Bool :=
-  x86_int64_min ≤ q && q ≤ x86_int64_max
-
-def x86_fits_nat64 (q : Nat) : Bool :=
-  q < x86_two64
-
 /-- Unsigned RDX:RAX / divisor, as (quotient, remainder). `none` on a zero
-    divisor and on a quotient that does not fit in 64 bits — both are the divide
-    error the hardware raises, and both leave the destination registers alone.
-
-    The overflow half was added 2026-10-05 (`work/formal40-7`) after
-    `formal/x86_64_model_fuzz.py` minimised a random program's `WRONG` row to a
-    `div r64` whose quotient needs more than 64 bits: the model wrote the
-    quotient's low 64 bits where the CPU raises `#DE`.  See
-    `bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md`. -/
+    divisor, which is the divide error the hardware raises. -/
 def x86_div128 (hi lo d : Nat) : Option (Nat × Nat) :=
   if d = 0 then none
   else
     let n := hi * x86_two64 + lo
-    let q := n / d
-    if x86_fits_nat64 q then some (q, n % d) else none
+    some (n / d, n % d)
 
 /-- Signed IDIV: the 128-bit dividend is signed, and the quotient truncates
-    toward zero (Int.tdiv), not toward -inf as Int.ediv would.
-
-    `none` on a zero divisor and on a quotient outside the signed 64-bit range,
-    for the reason `x86_div128` gives. -/
+    toward zero (Int.tdiv), not toward -inf as Int.ediv would. -/
 def x86_idiv128 (hi lo d : Int) : Option (Int × Int) :=
   if d = 0 then none
   else
     let n := hi * (x86_two64 : Int) + lo
-    let q := Int.tdiv n d
-    if x86_fits_int64 q then some (q, Int.tmod n d) else none
+    some (Int.tdiv n d, Int.tmod n d)
 
 /-! ## The step function -/
 

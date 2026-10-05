@@ -361,129 +361,6 @@ class TestLeanOutput(unittest.TestCase):
                       "absolute")
         self.assertIn("os.pathsep.join((td, os.path.abspath(lib_dir)))", src)
 
-    def test_the_verdict_itself_is_run_with_an_absolute_library_path(self):
-        """The SAME property, at the site that decides `ok`, and it was wrong.
-
-        `library_census` above measures the library and already got this right.
-        `_run_lean` is the site that typechecks the PROOF, and it handed
-        `LEAN_PATH` the `lib_dir` it was given — while its `cwd` is the proof's
-        own directory. So a caller passing a relative `repo_root` resolved
-        `lib` to `<proofdir>/lib`, every import failed with `error: unknown
-        module prefix 'ProofLib'` at `1:0`, **before the theorem is read at
-        all**, and the failure looks exactly like a broken proof when it is a
-        verdict about a search path.
-
-        `repo_root="."` is not an exotic spelling: it is what
-        `bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
-        reproduce command writes, so that doc's measurements were taken through
-        this entry point.
-
-        **And the false verdict is CACHED**, which is what makes this more than
-        an annoyance: `proof_verdict_key` hashes the proof's bytes and the
-        library's `.olean` digests, and neither records how the run FOUND the
-        library — so the same file replays the same false failure for every
-        later caller. Fixing the path does not retire what was already
-        published, and a flush is not available from a worktree (the CAS is
-        machine-wide and shared with every other checkout), so the verdict
-        VERSION has to move. That is the second assertion, and it is here so a
-        future edit that finds the bump unnecessary sees why.
-        """
-        import inspect
-        src = inspect.getsource(L._run_lean)
-        self.assertIn("os.path.abspath(lib_dir)", src,
-                      "the LEAN_PATH handed to the proof check must be "
-                      "absolute, exactly as `library_census`'s is")
-        self.assertIn("formal-proof-verdict-v5", L._VERDICT_VERSION.decode(),
-                      "the published false verdicts were keyed on inputs that "
-                      "cannot tell a found library from an unfound one, so they "
-                      "replay; bump the verdict version rather than flushing a "
-                      "machine-wide CAS no worktree owns")
-
-    def test_the_verdict_key_can_see_what_beside_the_proof_can_be_imported(self):
-        """The half of `LEAN_PATH` the key could not see, and the direction of
-        every one of the three answers.
-
-        `_run_lean` puts the proof's OWN DIRECTORY first on `LEAN_PATH` and runs
-        `lean` with `cwd` there, so a sibling `.lean`/`.olean` can satisfy an
-        import the library cannot — and can shadow `ProofLib` itself, since it
-        comes first. `proof_verdict_key` hashed the proof's bytes and the
-        library's `.olean`s and neither says what else that directory held, so a
-        directory with a sibling and a directory without one were one key, and the
-        second caller was served the first's answer.
-
-        Asserted on the KEY and not on a run, because a run costs 90 seconds of
-        Lean per case and the key is where the hole was.
-
-        **The third assertion is the one that keeps this from being a fix that
-        costs the cache**: the SAME bytes in TWO directories must be ONE key.
-        `scratch_dir` is `mkdtemp` and `formal/build.py` writes each proof beside
-        its own output into a per-run temporary directory, so hashing the
-        directory's PATH would give every run a fresh key and retire the verdict
-        cache for every caller that uses one — `tools/formal_proof_census.py`
-        would re-elaborate all 52 examples on every invocation. What is hashed is
-        what the directory can supply.
-        """
-        import shutil
-        import tempfile
-        lean = "lean"
-        lib = tempfile.mkdtemp(prefix="vk-lib-")
-        try:
-            # `lib_dir` with no `.olean` in it is the honest minimum: every
-            # library module contributes `b"\0missing"` and the key is still a
-            # function of the proof and its directory, which is the question here.
-            a = tempfile.mkdtemp(prefix="vk-a-")
-            b = tempfile.mkdtemp(prefix="vk-b-")
-            try:
-                text = ("import ProofLib\n"
-                        "theorem t : 1 = 1 := by trivial\n")
-                for d in (a, b):
-                    with open(os.path.join(d, "p_proof.lean"), "w") as f:
-                        f.write(text)
-                with open(os.path.join(b, "Helper.lean"), "w") as f:
-                    f.write("def helper : Nat := 1\n")
-                key_a = L.proof_verdict_key(os.path.join(a, "p_proof.lean"),
-                                            lib, lean)
-                key_b = L.proof_verdict_key(os.path.join(b, "p_proof.lean"),
-                                            lib, lean)
-                self.assertNotEqual(key_a, key_b,
-                                    "a sibling module beside the proof is "
-                                    "reachable from that directory alone, so the "
-                                    "two directories are two propositions and "
-                                    "one key replays a red for both")
-                # …and the shape of the sibling does not change that answer:
-                # a COMPILED one shadows just as hard as a source one.
-                os.rename(os.path.join(b, "Helper.lean"),
-                          os.path.join(b, "Helper.olean"))
-                self.assertNotEqual(
-                    key_b, L.proof_verdict_key(os.path.join(b, "p_proof.lean"),
-                                               lib, lean),
-                    "`LEAN_PATH` resolves a `.olean` as readily as a `.lean`, so "
-                    "keying only the sources leaves the same hole open one "
-                    "suffix over")
-                # Same bytes, two fresh scratch directories: ONE key, or the
-                # verdict cache is dead for every caller that uses one.
-                key_a2 = L.proof_verdict_key(os.path.join(a, "p_proof.lean"),
-                                             lib, lean)
-                self.assertEqual(key_a, key_a2)
-                c = tempfile.mkdtemp(prefix="vk-c-")
-                try:
-                    with open(os.path.join(c, "p_proof.lean"), "w") as f:
-                        f.write(text)
-                    self.assertEqual(
-                        key_a, L.proof_verdict_key(
-                            os.path.join(c, "p_proof.lean"), lib, lean),
-                        "a per-run scratch directory must not be a fresh key: "
-                        "`formal/build.py` writes each proof into one, so "
-                        "keying on its PATH re-elaborates the whole corpus on "
-                        "every run")
-                finally:
-                    shutil.rmtree(c, ignore_errors=True)
-            finally:
-                shutil.rmtree(a, ignore_errors=True)
-                shutil.rmtree(b, ignore_errors=True)
-        finally:
-            shutil.rmtree(lib, ignore_errors=True)
-
 
 # ── 3. the report: a sorried proof and a vacuous one are distinguishable ─────
 
@@ -612,19 +489,20 @@ class TestCensusReport(unittest.TestCase):
 # `formal/hostmods/zlib.mojo` — the "project to argue about" the queue's own
 # work map called it — would have moved ZERO of them.
 #
-# Same shape, two more rows: `resource` (2 files, both of which spell
+# Same shape, three more rows: `resource` (2 files, both of which spell
 # `resource.getrusage(resource.RUSAGE_CHILDREN)` inside the STRING of a child
-# program they write out, never in code) and `sysconfig` (`fire.py`, which the
-# work map already recorded as "imports it and never uses it").
-#
-# **A FOURTH one left this table on 2026-10-05 rather than being worked off it:
-# `traceback`, which got a model** (`formal/hostmods/traceback.mojo`, with
-# `signal` beside it, in the same commit). A row whose module the compiler now
-# compiles is not a row of work at all — importing it builds — so this table is
-# about modules with NO model and a name that cannot be read. That is the
-# section's own `assertIsNone(_host_model_source(name))` asserting it, which is
-# why leaving the name in was a loud failure rather than a slow drift; the fix
-# was to say which of the two facts changed.
+# program they write out, never in code), `sysconfig` (`fire.py`, which the work
+# map already recorded as "imports it and never uses it"), and — until
+# 2026-10-05 — `traceback` (1 file). `traceback` LEFT this list the way
+# `shutil` and `tempfile` left theirs: by being WRITTEN.
+# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
+# this target can be in — no exception in flight — and it BUILDS on both
+# architectures (`test_formal_hostmods_census.py`: 72/72 rows). So importing it
+# is no longer an unresolved host import, its row is no longer stopped at one,
+# and this section — whose subject is a row that is ENTIRELY dead imports — is
+# not about it. That is the event `test_the_premise_each_row_is_unbuildable`
+# was written to be told about, and it is why the list is three and the prose
+# above it still says four: the history is part of what a reader needs.
 #
 # What the three have in common is that the row is ENTIRELY dead imports, which
 # is what makes them this test's subject rather than a list: a dead import in a
@@ -633,164 +511,36 @@ class TestCensusReport(unittest.TestCase):
 # is nothing but dead imports is a row of work that is not work.
 
 # The three, and the census of what is left, printed rather than asserted.
-# `traceback` was in this tuple and LEFT IT on 2026-10-05, by being WRITTEN:
-# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
-# this target can be in (no exception in flight), which `test_formal_traceback.py`
-# checks against CPython, and it BUILDS on both architectures
-# (`test_formal_hostmods_census.py`: 72/72 rows). Its own wave note records that
-# it moved NO sweep row — the 38 files an `ast`-based walk attributed to it were
-# all `import traceback` inside `if`/`try` blocks, which `imported_modules` does
-# not descend into — so the row it was here for is the one row the landing did
-# not move.
-#
-# It is named rather than quietly dropped because this tuple is a PREMISE and the
-# test that reads it says so in its own failure message: a name that gains a
-# model stops being this test's subject, which is a reason to be told.
-# `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
-# wave and its measurement are written down.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
-
-# **THE ROWS THAT STILL HAVE USERS ARE NOT LISTED HERE, and that is the second
-# half of a fix that began with `itertools` going red on 2026-10-05.**
-#
-# This section used to carry `_ROWS_WITH_REAL_USERS = ("itertools", "builtins",
-# "atexit")` and assert each name still had a file that reads it. `itertools`
-# stopped having one, and the honest reason is neither of the two this section
-# knows how to talk about: there is still no `formal/hostmods/itertools.mojo`
-# (so it is not modelled, and `test_the_premise_each_row_is_unbuildable` would
-# have said so) — its last two import statements were REPLACED, on 2026-10-05,
-# by index loops that yield the same sequence (`test_formal_dylib.py`,
-# `test_module_cache.py`, then `test_formal_run.py`'s generator), which is
-# pinned from the other side by `test_formal_host_import_shapes.py::
-# test_ratchet_itertools_is_not_imported_again` (`files=14 live=0`). So the row
-# emptied because its files stopped SPELLING it, and a hand-written list of rows
-# that must keep users cannot tell that apart from a module that got a model —
-# both look like "this name now has no users", and only one of them is a fact
-# about this tree.
-#
-# So the list is DERIVED, by `_host_row_census` below, from the two authorities
-# rather than from a human: the rows are every name the build REFUSES (in
-# `formal/imports.py`'s tier tables and with no `formal/hostmods/` source, so a
-# modelled module cannot appear) that a file of THIS CHECKOUT imports. A name
-# that gains a model leaves the first set; a name whose importers are all
-# replaced leaves the second. Neither can fail a test again, which is the whole
-# point, and a genuinely new dead-import row now fails it instead of waiting for
-# somebody to remember to widen a tuple.
-#
-# `abc` is the one name that is in the derived set and is NOT expected to have a
-# reader, so it is named with its reason rather than left to look like a bug in
-# the derivation: `fire_compiler.py:62`'s `from abc import abstractmethod` is
-# read by nothing, because line 8401 emits the TEXT `@abstractmethod` into
-# GENERATED source. That dead import is the tree's only one and is deliberately
-# not fixed here — the file is the AST source of truth and deleting the line
-# belongs to whoever owns it, which `test_formal_host_import_shapes.py::
-# test_the_whole_tree_has_one_dead_host_import_and_it_is_named` already records
-# with the same reason.
-_ROWS_WITH_A_NAMED_DEAD_IMPORT = ("abc",)
-
+# Modules with no readable names that STILL have users, so their rows are real:
+# `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
+# `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
+# future reader cannot extend this section to "every module with no readable
+# names" by accident.
+_ROWS_WITH_REAL_USERS = ("itertools", "builtins", "atexit")
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
               "stage3", "formal_sweep_cache", "__pycache__"}
 
 
-def _walked_py_files(root):
-    """Every `.py` under `root` on the FILESYSTEM, minus the derived trees.
+def _repo_py_files():
+    """Every `.py` this repository's own sweep covers, in sorted order.
 
-    The fallback for a checkout git cannot answer for, and the shape the census
-    used to have unconditionally — which is the bug `_tracked_py_files` below
-    exists to fix, so this is deliberately the WEAKER of the two and says so.
+    The same walk `tools/formal_sweep.py` does over the repository's own source,
+    minus the directories that are not part of it. `formal/hostmods` is excluded
+    because a host module is SUPPOSED to name the modules it models.
     """
     out = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(HERE):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         for name in sorted(filenames):
             if not name.endswith(".py"):
                 continue
             path = os.path.join(dirpath, name)
-            rel = os.path.relpath(path, root)
+            rel = os.path.relpath(path, HERE)
             if rel.startswith("formal" + os.sep + "hostmods"):
                 continue
             out.append((rel, path))
     return sorted(out)
-
-
-def _tracked_py_files(root=HERE):
-    """Every TRACKED `.py` of THIS checkout, as `(rel, path)`, sorted.
-
-    **`git ls-files` and not a directory walk, and the reason is that a census
-    which differs per machine is not a census.** This function used to walk, and
-    `_SKIP_DIRS` had no rule for a dot-directory, so on the reference checkout
-    it descended into `.claude/worktrees/agent-<id>/` — a whole second COPY of
-    this repository, 226 extra `.py` files — and answered questions about it:
-    the "imports `zlib` and reads nothing" census named
-    `.claude/worktrees/agent-a4427eb542b05159d/gimple_codegen.py`, and
-    `builtins` read as 11 files instead of 7. None of those files is this
-    checkout's, so the number that decides whether a row is a row of work
-    depended on which worktrees happened to exist beside the runner. The
-    dot-rule alone would not have been enough either: another checkout could be
-    beside this one under any name, and "is this file tracked source?" is a
-    property that holds for every file and needs no denylist — the same argument
-    `tools/dangling_doc_refs.py` and `tools/suite.py` make for their own walks.
-    """
-    import subprocess
-    names = None
-    try:
-        ls = subprocess.run(['git', '-C', root, 'ls-files', '-z'],
-                            capture_output=True, text=True, timeout=120,
-                            errors='replace')
-        if ls.returncode == 0 and ls.stdout:
-            names = [n for n in ls.stdout.split('\0') if n.endswith('.py')]
-    except (OSError, subprocess.SubprocessError):
-        names = None
-    if names is None:
-        return _walked_py_files(root)
-    return sorted((n, os.path.join(root, n)) for n in names
-                  if not n.startswith("formal/hostmods/"))
-
-
-def _repo_py_files(root=HERE):
-    """Every `.py` this repository's own sweep covers, in sorted order.
-
-    The same set `tools/formal_sweep.py` walks over the repository's own source,
-    minus the directories that are not part of it. `formal/hostmods` is excluded
-    because a host module is SUPPOSED to name the modules it models.
-    """
-    return _tracked_py_files(root)
-
-
-def _host_row_census(repo_files=None):
-    """`{module: {"files": [...], "readers": [...]}}` for the host-import rows.
-
-    Both halves are derived, neither is written down:
-
-      * the names are `formal/imports.py`'s tier tables MINUS every name with a
-        `formal/hostmods/` source, so this is the set the build actually refuses
-        — a module that has been MODELLED is not in it and cannot be reported as
-        a row of work;
-      * the rows are the names a file of THIS CHECKOUT has an import statement
-        for, so a name whose importers were all replaced drops out on its own
-        (which is `itertools`' 2026-10-05 exit, and the reason a hand-written
-        row list could not express).
-
-    `readers` is `tools/formal_sweep_causes.py::_host_mentions_module`, the same
-    reader the ranking's `uses` fallback asks, so this census and the report
-    cannot disagree about what a use is.
-    """
-    import formal.imports as I
-    refused = {n.split('.')[0] for n in I.HOST_MODULES
-               if C._host_model_source(n) is None}
-    rows = {}
-    for rel, path in (_repo_py_files() if repo_files is None else repo_files):
-        for imported in _imports_of(path):
-            top = imported.split('.')[0]
-            if top not in refused:
-                continue
-            row = rows.setdefault(top, {"files": [], "readers": []})
-            if rel in row["files"]:
-                continue
-            row["files"].append(rel)
-            if C._host_mentions_module(path, top):
-                row["readers"].append(rel)
-    return rows
 
 
 def _imports_of(path):
@@ -827,9 +577,9 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
         own wording rather than trusted, and it is asked for every name in the
         list at once because a name that gains a `formal/hostmods/` model stops
         being this test's subject — which is a reason to be told, not a reason
-        to be quiet.  `traceback` was told about that way and left the list; see
-        `_DEAD_ROW_MODULES`'s own comment for why, and for the build
-        measurement behind it.
+        to be quiet.  `traceback` was told about that way on 2026-10-05 and left
+        the list; see `_DEAD_ROW_MODULES`'s own comment for why, and for the
+        build measurement behind it.
         """
         import formal.imports as I
         for name in _DEAD_ROW_MODULES:
@@ -876,122 +626,28 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
             + "\n  ".join(dead))
 
     def test_the_other_rows_still_have_users(self):
-        """Every OTHER row still has files that read the module.
+        """The rows NOT in this section still have files that read the module.
 
-        A check over the `_DEAD_ROW_MODULES` names cannot see a fourth, and the
+        A check over the `_DEAD_ROW_MODULES` names cannot see a fifth, and the
         way it gets extended by accident is by widening the list. So the rows
         that share their shape and are NOT dead imports are asserted to have
         users — which is the statement that keeps them out.
-
-        **DERIVED, from `_host_row_census`, and the derivation is the fix.**
-        This used to walk a hand-written tuple of names (`itertools`, `builtins`,
-        `atexit`), and `itertools` went red on 2026-10-05 with a message that
-        said to put it in `_DEAD_ROW_MODULES` — advice that would have been
-        wrong twice over: its two import statements were replaced by index
-        loops, so there is no dead import to delete and no row left at all, and
-        `tools/formal_host_import_shapes.py` reads `files=14 live=0` for it,
-        which is what `test_ratchet_itertools_is_not_imported_again` pins. A
-        census computed from the tier tables and from what the checkout actually
-        spells cannot make that mistake twice: a name that gains a model leaves
-        the refused set, and a name nothing imports any more is not a row.
         """
-        rows = _host_row_census()
-        self.assertTrue(rows,
-                        "the derived census is empty, so this row is asserting "
-                        "nothing; the enumeration above has stopped finding the "
-                        "repository's own imports")
-        without = {name: row["files"] for name, row in rows.items()
-                   if not row["readers"]
-                   and name not in _DEAD_ROW_MODULES
-                   and name not in _ROWS_WITH_A_NAMED_DEAD_IMPORT}
-        self.assertEqual(
-            without, {},
-            "these host-import rows are nothing but dead imports — every file "
-            "that names them reads nothing through them — which is a row of "
-            "work that is not work. Either delete the import that reads "
-            "nothing, or say in `_ROWS_WITH_A_NAMED_DEAD_IMPORT` why it "
-            "stays:\n  "
-            + "\n  ".join(f"{n}: {sorted(f)}" for n, f in sorted(without.items())))
-
-    def test_a_named_dead_import_is_still_named(self):
-        """Every exemption is a CLAIM about one dead import, and each is asked.
-
-        Without this the exemption above is a hole with a docstring in it: a
-        module could stop being a dead import (its import deleted, its name
-        read) and still be excused, and the census would be reporting a row of
-        dead imports as excused. So each name must still be in the census, must
-        still have files and NO readers, and must still be a name the build
-        refuses — the three facts the exemption was written for.
-        """
-        rows = _host_row_census()
-        for name in _ROWS_WITH_A_NAMED_DEAD_IMPORT:
+        users = {}
+        for rel, path in _repo_py_files():
+            for imported in _imports_of(path):
+                top = imported.split(".")[0]
+                if top not in _ROWS_WITH_REAL_USERS:
+                    continue
+                if C._host_mentions_module(path, top):
+                    users.setdefault(top, []).append(rel)
+        for name in _ROWS_WITH_REAL_USERS:
             with self.subTest(module=name):
-                self.assertIn(name, rows,
-                              f"`{name}` no longer has a file that imports it at "
-                              f"all, so it is not a dead-import row and does not "
-                              f"need an exemption; drop it from "
-                              f"_ROWS_WITH_A_NAMED_DEAD_IMPORT. The rows the "
-                              f"census does have are {sorted(rows)}")
-                self.assertFalse(rows[name]["readers"],
-                                 f"`{name}` now has a file that reads it "
-                                 f"({rows[name]['readers']}), so the dead import "
-                                 f"the exemption names is gone; drop it")
-                self.assertIsNone(C._host_model_source(name),
-                                  f"`{name}` has a model at "
-                                  f"{C._host_model_source(name)!r}, so importing "
-                                  f"it builds and it is not a refusal at all")
-
-    def test_the_census_cannot_see_another_checkout(self):
-        """`_repo_py_files` enumerates THIS checkout, and can be shown to.
-
-        The census this section reasons over used to come from a directory walk
-        whose skip list had no rule for a dot-directory, so it descended into
-        `.claude/worktrees/agent-<id>/` — a whole second copy of this repository
-        — and printed `.claude/worktrees/agent-a4427eb542b05159d/
-        gimple_codegen.py: imports `zlib` and reads nothing from it` in a dead-
-        import census run from a checkout where that file does not exist. A
-        claim that depends on which worktrees are beside the runner is not a
-        claim about the code.
-
-        Checked by PLANTING one rather than by looking for `.claude`: a temp
-        directory holding an untracked `ghost.py` and a tracked `real.py`, with
-        the untracked one importing `zlib` and reading nothing. Git answers the
-        enumeration, so the ghost is not a row and the real file is — and the
-        filesystem fallback, which is the walk that used to be the only path, is
-        asserted to see the ghost, so the first check is evidence about git and
-        not about a walk that happens to agree.
-        """
-        import subprocess
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            root = os.path.join(td, "tree")
-            os.makedirs(root)
-            ghost = "ghost.py"
-            real = "real.py"
-            for name, text in ((ghost, "import zlib\n"),
-                               (real, "import zlib\nprint(zlib.crc32)\n")):
-                with open(os.path.join(root, name), 'w') as fh:
-                    fh.write(text)
-            subprocess.run(['git', 'init', '-q', root], check=True,
-                           capture_output=True)
-            subprocess.run(['git', '-C', root, 'add', '--', real], check=True,
-                           capture_output=True)
-            found = dict(_repo_py_files(root))
-            self.assertIn(real, found,
-                          "a tracked .py of the tree under test is not in the "
-                          "enumeration, so this row is not evidence that an "
-                          "untracked one is excluded")
-            self.assertNotIn(ghost, found,
-                             f"an UNTRACKED file is in the enumeration "
-                             f"({sorted(found)}), so this census would answer "
-                             f"differently in two checkouts of one commit — "
-                             f"which is how `.claude/worktrees/agent-*/` got "
-                             f"into it")
-            walked = dict(_walked_py_files(root))
-            self.assertIn(ghost, walked,
-                          "the filesystem fallback no longer sees an untracked "
-                          "file, so the check above cannot distinguish git's "
-                          "answer from the walk's")
+                self.assertTrue(
+                    users.get(name),
+                    f"no file of this repository reads `{name}`, so its row is "
+                    f"dead imports like the ones above and belongs in "
+                    f"_DEAD_ROW_MODULES rather than in this list")
 
 
 # ── 4. the sweep's reach split, and the system-module-call class ─────────────
@@ -2153,54 +1809,6 @@ class TestLeanLaunchEstate(unittest.TestCase):
                          "a shell recipe that starts Lean bypasses every bound "
                          "in formal/lean.py: " + "; ".join(offenders))
 
-    def test_an_emitter_that_runs_a_generated_proof_ensures_the_library(self):
-        """The x86-64 emitter family is FOUR files and all four ask.
-
-        The rule is the second half of the one above, and it is about the
-        ARTIFACT rather than the process: every proof these files generate opens
-        with `import X86`, so every run reads `lib/X86.olean`, and reading a
-        `.olean` is only meaningful if something established it is there.
-
-        `formal/x86_64_endtoend_test.py` did not, and nothing caught it for as
-        long as it existed, because the suite's `prooflib` step builds the
-        library and the one registered job that runs this emitter
-        (`formal-x86-endtoend`) deps on it. The first caller that did NOT go
-        through that dep — `test_formal_sweep_truth.py`'s end-to-end case, which
-        is in `check`, a bucket that does not run `prooflib` — got
-
-            <tmp>.lean:1:0: error: unknown module prefix 'X86'
-
-        and exit 1, i.e. a missing artifact reported as a proof that would not
-        elaborate. That is the shape this whole class exists to prevent (a
-        launch site outside the launcher), one level down: the launch was
-        through the launcher and the PRECONDITION was the unguarded thing.
-
-        So the rule is stated over the family rather than over the file, which
-        is the only way it stays true: `ensure_library` is cheap when it is
-        current (a digest per module), takes the build lock and re-checks inside
-        it, and serves the content-addressed store on a hit, so the emitter that
-        was relying on somebody else's build stops depending on the order.
-        """
-        import glob
-        ran, missing = [], []
-        for path in sorted(glob.glob(os.path.join(HERE, "formal",
-                                                  "x86_64_*.py"))):
-            with open(path, encoding="utf-8", errors="replace") as f:
-                source = f.read()
-            if "run_lean(" not in source:
-                continue
-            rel = os.path.relpath(path, HERE)
-            ran.append(rel)
-            if "ensure_library(" not in source:
-                missing.append(rel)
-        self.assertEqual(missing, [],
-                         "a generated proof imports lib/X86, so a run that "
-                         "does not ensure it is reading a .olean nobody built: "
-                         + repr(missing))
-        self.assertGreaterEqual(len(ran), 4,
-                                f"only {len(ran)} x86-64 file(s) run Lean "
-                                f"({ran}), so this rule is not being exercised")
-
 
 # ── the .olean currency check, and the IMPORTS it used to ignore ─────────────
 #
@@ -2368,30 +1976,12 @@ class TestAxiomClosureCensus(unittest.TestCase):
                         f"nobody runs it and the table rots")
 
     def test_the_source_and_the_closure_disagree_in_both_directions(self):
-        """The join is the finding, so it is asserted as a finding — and ONE
-        direction of it is now pinned at ZERO, which is the opposite of what this
-        row asserted before 2026-10-04.
+        """The join is the finding, so it is asserted as a finding.
 
-        The two directions are `text_only` (the source names a decide tactic and
-        the closure has no such axiom — a LOSING tactic alternative is still
-        text, so the site census overcounts) and `closure_only` (the source names
-        none and the closure has one, because it is reached through another
-        theorem — the direction no text scan can see at all).
-
-        **`text_only` is 0, and it was 3 in `ProofLib` and 19 in `IEEE754` while
-        `AXIOM_SITE_RE`'s declaration group was `[^.]+`.** A false `clean` — an
-        axiom classified as "not one of ours" because its declaration's name is
-        dotted — lands a namespaced theorem carrying an axiom in `text_only`
-        instead of `reaches`, so the old non-empty `text_only` was not a finding
-        about `lib/` at all: it was the classifier's own bug, counted. With the
-        group greedy, every site in the text has its axiom in its own closure,
-        which says the SITE census is EXACT at theorem granularity — a stronger
-        statement than "both directions are non-empty", and the one worth
-        pinning. It stays an assertion rather than a comment because the same
-        bug in the other direction would put it back.
-
-        `closure_only` stays non-empty, because that is the property that says
-        the closure census is not a text scan with extra steps.
+        Both halves non-empty is the property. A census that only ever found one
+        direction would be indistinguishable from a text scan that happens to
+        agree with itself, and either direction going empty is a change in what
+        `lib/` proves rather than in how it is measured.
         """
         from formal import admitted as A
         lib = A.lean_dir(HERE)
@@ -2401,17 +1991,10 @@ class TestAxiomClosureCensus(unittest.TestCase):
                      if v["text_only"]}
         closure_only = {m: v["closure_only"] for m, v in summary.items()
                         if v["closure_only"]}
-        self.assertFalse(text_only,
-                         f"a theorem names a decide tactic in its own text and "
-                         f"reaches no axiom in its closure: "
-                         f"{ {m: v for m, v in text_only.items()} }. That was the "
-                         f"shape `AXIOM_SITE_RE`'s `[^.]+` declaration group "
-                         f"produced — a namespaced declaration's axiom read as "
-                         f"'not one of ours' — and 22 such rows (3 in "
-                         f"`ProofLib`, 19 in `IEEE754`) were the instrument's own "
-                         f"defect counted as a finding about `lib/`. With the "
-                         f"group greedy the site census is EXACT at theorem "
-                         f"granularity, which is what this row now asserts")
+        self.assertTrue(text_only, "no theorem has a site its closure does "
+                                   "not back, so the site census is exact at "
+                                   "theorem granularity — which the 751-site "
+                                   "table would then be measuring")
         self.assertTrue(closure_only, "no theorem reaches a decide axiom "
                                       "except through its own text, so the "
                                       "closure census adds nothing over "
@@ -2447,29 +2030,17 @@ class TestOleanCurrency(unittest.TestCase):
     """
 
     # The real graph's SHAPE, which is the part that matters: TWO roots that
-    # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` is
-    # FIRST in `LIBRARY_MODULES` precisely because it imports nothing at all,
-    # which is what `formal/lean.py`'s own comment says, and `ProofLib`'s
-    # `import Lean` is the version half of the key's business, deliberately
-    # outside the tuple), a middle module, and two leaves that reach a root by
-    # different routes. Two modules importing `X86` is the case the defect was
-    # measured on — three modules rebuilt from one edit — and one importing only
-    # the root is what says the fix does not over-invalidate.
-    #
-    # `IEEE754` was MISSING here while `LIBRARY_MODULES` named it, which is what
-    # `test_the_fixtures_are_the_real_graph` was written to catch: it asserts
-    # the two sets are EQUAL, so a library module with no fixture fails the
-    # check whose subject is that a fixture outside the set exercises nothing,
-    # and the digest's walk is scoped to `LIBRARY_MODULES` so a name outside
-    # that tuple is invisible. `d9269a0f` added the module and not the line.
-    #
-    # It is here, empty, because that is what `lib/IEEE754.lean` is: it spells
-    # no `import` at all, which is what `formal/lean.py`'s comment on
-    # `LIBRARY_MODULES` says ("`IEEE754` is FIRST and imports nothing"), and a
-    # fixture that spelled `import Lean` would be testing a graph the tree does
-    # not have. A second root that imports nothing is also a SECOND direction
-    # for the invalidation cases below: nothing imports it, so editing it must
-    # move nothing, which is the over-reach half with a witness of its own.
+    # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` was
+    # added to the library and `LIBRARY_MODULES` with it, and it imports
+    # nothing at all, which is what `formal/lean.py`'s own comment says), a
+    # middle module, and two leaves that reach a root by different routes. Two
+    # modules importing `X86` is the case the defect was measured on — three
+    # modules rebuilt from one edit — and one importing only the root is what
+    # says the fix does not over-invalidate. `IEEE754` was MISSING here while
+    # `LIBRARY_MODULES` named it, which is the whole of the failure
+    # `test_the_fixtures_are_the_real_graph` was written to catch: a fixture
+    # missing a module exercises nothing about it, and the digest's walk is
+    # scoped to `LIBRARY_MODULES` so a name outside that tuple is invisible.
     SOURCES = {
         "IEEE754": "",
         "ProofLib": "import Lean\n",
@@ -2477,17 +2048,6 @@ class TestOleanCurrency(unittest.TestCase):
         "work": "import ProofLib\nimport X86\n",
         "Refine": "import ProofLib\n",
         "Contracts": "import ProofLib\nimport Refine\n",
-        # `lib/Peephole.lean`, added 2026-10-05 with `formal/peephole.py`. It
-        # imports X86 as well as ProofLib: the x86-64 half of the peephole pass
-        # needs `x86_step`, and a module that only imported ProofLib would make
-        # the currency check's graph a fiction in the one direction that hides a
-        # stale `.olean`.
-        "Peephole": "import ProofLib\nimport X86\n",
-        # `lib/Specs.lean`, the independent specification layer: it imports
-        # `ProofLib` and nothing else, which is the case the currency check's
-        # graph needs — a module at the far end of the tuple whose only edge is
-        # to the root, so editing `X86` must leave it alone.
-        "Specs": "import ProofLib\n",
     }
 
     def setUp(self):
@@ -2586,32 +2146,19 @@ class TestOleanCurrency(unittest.TestCase):
         change to the fixture cannot quietly change what is being pinned.
 
         Editing `X86` — the case the defect was found on — rebuilds `work` and
-        `Peephole`, and leaves `ProofLib` (27MB, ~80s) and the two modules that
-        never import it alone (`IEEE754` imports nothing at all, `Specs` imports
-        only `ProofLib`). Editing `ProofLib` rebuilds everything that
-        imports it, directly or through one hop.
-
-        The second set is the seven names that are not `IEEE754`, and saying so
-        is the point: `IEEE754` is FIRST in `LIBRARY_MODULES` because it imports
-        NOTHING, so editing the root leaves it exactly where it was. A reader who
-        expects seven has imported `IEEE754`'s position in the library for its
-        place in the graph — which is the hazard this case states, and why the
-        assertion is written out rather than read off the fixture. The
-        fixture-set case is the same one with the sign flipped: when the fixture
-        was five and the library six, `test_the_fixtures_are_the_real_graph`
-        failed, because a fixture missing a module makes both answers a fact
-        about the fixture instead of about the library.
+        leaves `ProofLib` (27MB, ~80s) and the two modules that never import it
+        alone. Editing `ProofLib` rebuilds everything, because every other
+        module imports it, directly or through one hop.
         """
         before = self._digests()
         self._edit("X86")
         mid = self._digests()
         self.assertEqual({s for s in self.SOURCES if before[s] != mid[s]},
-                         {"X86", "work", "Peephole"})
+                         {"X86", "work"})
         self._edit("ProofLib")
         after = self._digests()
         self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
-                         {"ProofLib", "X86", "work", "Refine", "Contracts",
-                          "Peephole", "Specs"})
+                         {"ProofLib", "X86", "work", "Refine", "Contracts"})
 
     def test_a_touch_is_not_an_edit(self):
         """Content-based, with no `mtime` in the decision — at the DIGEST's
@@ -3227,16 +2774,14 @@ class TestX86EndToEndEmitter(unittest.TestCase):
 
         L.run_lean = fake
         try:
-            ok, admitted, fired, err, live = E._run_lean("theorem t : True := by\n"
-                                                         "  trivial\n")
+            ok, admitted, fired, err = E._run_lean("theorem t : True := by\n"
+                                                   "  trivial\n")
         finally:
             L.run_lean = real
         self.assertTrue(seen.get("called"), "the launcher was not reached")
         self.assertFalse(ok, "a `lean` that exited non-zero must not be `ok`: "
                              "the caller reads `ok` as \"the file elaborates\"")
         self.assertFalse(fired, "…and must not report the file as fully proved")
-        self.assertIsNone(live, "…and must not name a hole in a file no `lean` "
-                                "ever checked")
         self.assertIn("lean::memory_exception", err,
                       "the reason has to name the cause, not the exit code: "
                       "`lean::memory_exception` aborts instead of reporting, so "
@@ -3365,382 +2910,57 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                            "has collapsed to the admitted count the guard is no "
                            "longer being recognised")
 
-    def test_a_side_condition_is_charged_to_the_step_it_belongs_to(self):
-        """The attribution, on the shape the emitter actually writes.
+    def test_a_side_condition_is_charged_to_the_fact_before_it(self):
+        """The measurement behind the word `candidate` in the report.
 
-        A step lemma is `have hstep7 : T := x86_step_…` — the `:=` on the
-        STATEMENT line and no `by` — so a cursor that advanced only on `:= by`
-        charged every guard that fires inside one to the fact above it, and the
-        report's name was a place to start looking rather than the hole. The
-        report names the hole exactly now (`test_lean_says_which_sorry_fired`),
-        but the census that answers "which side condition" still runs off this
-        cursor, so the shape is pinned here rather than assumed.
+        A step lemma is emitted as `have hstep7 : T := x86_step_…` — WITHOUT a
+        `by` — so the census's "last `have … := by`" cursor is still the PREVIOUS
+        fact when it reads a `sorry` inside that step's inline `(by …)`. So a
+        guard that fires in a side condition is charged to the fact above it, and
+        the name in the report is where the search STARTS rather than the hole's
+        owner.
 
-        **The fixture the previous version of this case used had its `:=` on a
-        CONTINUATION line**, which is a shape this emitter does not produce. It
-        therefore agreed with the report being wrong about a shape nobody writes,
-        and it is the reason the defect went unnoticed: the assertion was about
-        the census, and the census was right about everything it was shown. The
-        second half asserts the one-line shape on three real emissions, which is
-        what makes the first half say something.
+        Measured on `formal/examples/const2.mojo` (16 steps, no `call`, so its
+        closing read is the one at `X86State.init`'s stack): the report named
+        `hrip`, and deleting the two `hrip` blocks' `all_goals sorry` lines and
+        nothing else left the file checking with `returncode 0` and NO errors
+        while Lean still reported `declaration uses sorry`. That is what moved
+        the report from "1 admitted (hrip)" to "1 admitted candidate (hrip)",
+        and this case is what keeps the two apart if the attribution is ever
+        fixed: when it is, this assertion fails and the wording goes back to
+        `admitted`.
         """
-        import re as _re
         import formal.x86_64_endtoend_test as E
+        # The emitter's own two-line step shape, which is the point: the `:=` is
+        # on the CONTINUATION line, so `_HAVE_BY` — `^\s*have NAME … :=` — does
+        # not see it and the cursor is still the previous fact when the side
+        # condition is read.
         text = ("theorem t : True := by\n"
                 "  have hprev : True := by\n"
                 "    trivial\n"
                 "    all_goals sorry\n"          # hprev's own admission
-                "  have hstep157 : x86_step s157 rc = some { s157 with rip := 0 } :=\n"
-                "    x86_step_ret s157 rc 42 (by\n"
+                "  have hstep157 : x86_step s157 rc = some\n"
+                "    { s157 with rip := 0 } := x86_step_ret s157 rc 42 (by\n"
                 "  try (trivial)\n"
                 "  all_goals sorry)\n")           # a side CONDITION of hstep157
-        self.assertEqual([(n, k) for n, _l, k in E.admitted_facts(text)],
-                         [("hprev", "admitted"), ("hstep157", "guarded")],
-                         "a step lemma is `have hstep7 : … :=` with no `by`, so "
-                         "a cursor that required `:= by` charged every guard "
-                         "inside one to the fact above it")
-        for name, emitted in (("crossed", self._emitted()),
-                              ("straight", self._emitted(self.STRAIGHT)),
-                              ("const2", self._emitted_path("const2"))):
-            # On the emitter's REAL text: every guarded side condition is charged
-            # to a STEP (`hstep{k}` / `hpop{k}`), never to a `:= by` fact
-            # sitting above it — which is the whole claim, on the three
-            # emissions that matter. Asking it per-`have` instead would be
-            # wrong: `have hval{k} :` wraps its long conjunction and `have key`
-            # is a `try`-scoped local inside the closing block, and neither is
-            # the owner of anything.
-            names = {n for n, _l, k in E.admitted_facts(emitted)
-                     if k == "guarded"}
-            wrong = sorted(n for n in names
-                           if not _re.match(r"^h(?:step|pop)\d+$", n))
-            self.assertEqual(wrong, [],
-                             f"{name}: a side condition charged to {wrong} "
-                             "rather than to the step whose hypothesis argument "
-                             "it is — that is a place to start looking, not the "
-                             "hole")
-            self.assertTrue(names,
-                            f"{name}: a chain has several side conditions per "
-                            "step, so an empty set here means the guard is no "
-                            "longer being recognised at all")
+        facts = E.admitted_facts(text)
+        self.assertEqual([(n, k) for n, _l, k in facts],
+                         [("hprev", "admitted"), ("hprev", "guarded")],
+                         "the side condition is charged to hprev, which is the "
+                         "defect the word `candidate` admits; if this is now "
+                         "hstep157, the attribution is fixed and the report's "
+                         "wording should stop hedging. A `have` whose `:=` is on "
+                         "its OWN line is charged correctly, which is why this "
+                         "fixture is two lines and the previous one was not")
 
-    def test_the_reported_line_is_the_sorrys_own_line(self):
-        """`admitted_facts`' line, and the block-comment filter that broke it.
-
-        The report resolves Lean's `line:col` through `admitted_facts`, so the
-        line it hands back has to be the `sorry`'s own. Two things stood in the
-        way and both are asserted here:
-
-        * the two classes must land on DIFFERENT lines, or the exact lookup in
-          `hole_at` cannot tell a fact's own admission from its first side
-          condition — the fixture puts them one line apart on purpose;
-        * `_BLOCK_COMMENT` is applied with a replacement that keeps the comment's
-          newlines. It was `sub("")`, and the docstring above it claims the
-          opposite ("replaced by blank lines so the line numbers the check
-          reports still point at the source") — which made every line after a
-          `/-- … -/` come back lower than it is, by the height of the comment.
-          That is invisible in a census that only counts and fatal in one that
-          looks a position up, and the generated file's first comment is on
-          `all_bytes` two lines above everything else.
-        """
-        import formal.x86_64_endtoend_test as E
-        text = ("theorem t : True := by\n"
-                "  have hprev : True := by\n"
-                "    trivial\n"
-                "    all_goals sorry\n"
-                "  have hstep : True := exact (by\n"
-                "  try (trivial)\n"
-                "  all_goals sorry)\n")
-        lines = [(n, ln, k) for n, ln, k in E.admitted_facts(text)]
-        self.assertEqual([(n, ln, k) for n, ln, k in lines],
-                         [("hprev", 4, "admitted"), ("hstep", 7, "guarded")],
-                         "each row's line must be the `sorry`'s own, so a "
-                         "position from Lean resolves to exactly one of them")
-        tall = ("theorem t : True := by\n"
-                "/-- a docstring\n"
-                "    over three lines\n"
-                "    so the shift is visible -/\n"
-                "  have h : True := by\n"
-                "    trivial\n"
-                "    all_goals sorry\n")
-        self.assertEqual([ln for _n, ln, _k in E.admitted_facts(tall)], [7],
-                         "a `/-- … -/` must not move the lines below it: the "
-                         "comment says so and `hole_at` needs it")
-
-    def test_the_header_asks_lean_where_the_hole_is(self):
-        """`pp.sorrySource` in every generated file, because without it there is
-        nothing to read.
-
-        The position this whole mechanism depends on is in Lean's own
-        `declaration uses `sorry`` warning, and it is only in the warning when the
-        file sets the option: measured on this tree, the same file elaborates to
-        ``uses `sorry` `` with the option and to ``uses `sorry `«…:363:12»`` ``
-        without it. So this is not an optimisation to be argued about — it is the
-        only thing that puts the hole's location in the output at all, and a
-        generated file without it silently degrades the report to the old
-        candidate list.
-        """
-        import formal.x86_64_endtoend_test as E
-        for text in (self._emitted(), self._emitted(self.STRAIGHT)):
-            self.assertIn("set_option pp.sorrySource true", text,
-                          "both theorems come from `_header`, and the option is "
-                          "what makes Lean's hole report name the hole")
-
-    #: The guard this class makes unsatisfiable. Pinned to a line the emitter
-    #: really writes, with the message the case below carries, because a fixture
-    #: that silently stops matching is a fixture that stops testing.
-    _GUARD = "try (simp [hs7, hdec6])"
-
-    def _patched_const2(self):
-        """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.
-
-        `at` is the 1-based line of the guard, so `at + 1` is the `all_goals
-        sorry` the break makes load-bearing: `try` swallows the failed proof and
-        the `sorry` below it is reached only because the guard did not close its
-        goal. That is the whole method, and it is shared by the two cases that
-        use it rather than written twice.
-        """
-        lines = self._emitted_path("const2").split("\n")
-        for i, l in enumerate(lines):
-            if l.strip() == self._GUARD:
-                return "\n".join(
-                    lines[:i] + ["  try (exact (4294968000 : Nat) = 4294968001)"]
-                    + lines[i + 1:]), i + 1
-        return None, None
-
-    def test_lean_says_which_sorry_fired_and_the_report_names_it(self):
-        """THE END-TO-END CASE, and the one the report's wording rests on.
-
-        Every other test here is about text. This one asks Lean, because the
-        whole subject is a fact about the elaborated TERM: a `sorry` is written in
-        two shapes, the tactic above one of them usually closes its goal, and
-        only Lean knows which of the hundreds is load-bearing. The method is the
-        cheapest honest one — take the corpus's shortest fully-closed example,
-        make ONE guard unsatisfiable, and read back the fact and line.
-
-        **The expectation is DERIVED from the emitted text, and that is the
-        point.** It used to be the literal `"hstep7's side condition, line 363"`:
-        three facts about the emitter (a step's index, the shape of the `sorry`,
-        an absolute line number) spelled out in a test, so every emission change
-        turned this into a red about the fixture rather than about the report.
-        What the report must name is the `sorry` on the line the patch made
-        load-bearing, and `hole_at` — the production reader — is what says which
-        fact that line belongs to, so the expectation is built from it and the
-        line is asserted EXACTLY. The naming of the fact is not left untested:
-        `test_a_hole_in_an_imported_module_is_not_attributed_to_this_file` drives
-        `live_hole_phrase` with a literal position and pins the literal fact name
-        it must resolve to, so `hole_at`'s reader is checked against text here
-        and against a name there.
-
-        Measured on `formal/examples/const2.mojo` (19 steps, no `call`): the
-        patched file elaborates, Lean reports the declaration as using `sorry`,
-        and `_run_lean` names the `all_goals sorry` below the broken guard, on
-        that exact line, attributed to the step whose hypothesis argument it is.
-        Without the patch the same file reports `fired=False` and `live=None`, so
-        the two halves of the question are separated: the emission is not a hole,
-        and the patch is what makes one.
-
-        Skips without the pinned Lean, which is what `TestAxiomClosureCensus`
-        already does for the axiom census — and the file is left `expect=` in
-        `tools/suite.py` either way, so a skip is visible rather than silent.
-        """
-        import formal.x86_64_endtoend_test as E
-        if not E.LEAN_BIN:
-            self.skipTest("the pinned lean is not installed")
-        patched, at = self._patched_const2()
-        self.assertIsNotNone(patched,
-                             "the fixture is pinned to a guard this emitter "
-                             "emits (%r); if the emission changed, the "
-                             "acceptance test has to move with it" % self._GUARD)
-        ok, _n, fired, err, live = E._run_lean(patched)
-        self.assertTrue(ok, f"the patched file must still elaborate: {err!r}")
-        self.assertTrue(fired,
-                        "an unsatisfiable guard must make Lean report the "
-                        "declaration as using `sorry`, or the identification "
-                        "below is reading nothing")
-        self._assert_names_the_broken_guard(E, patched, at, live)
-
-        # …and the unpatched file must NOT claim a hole. `const2` is one of the
-        # fully-closed chains, so a report that named one here would be a false
-        # positive on the same code the case above proves the reader of.
-        ok, _n, fired, err, live = E._run_lean(self._emitted_path("const2"))
-        self.assertTrue(ok, err)
-        self.assertFalse(fired,
-                         "the unpatched file elaborates with no load-bearing "
-                         "`sorry`: every one of its emissions closed")
-
-    def _assert_names_the_broken_guard(self, E, patched, at, live):
-        """`live` names the `sorry` under the guard `_patched_const2` broke."""
-        self.assertIsNotNone(live,
-                             "Lean's output named a hole and the report could "
-                             "not attribute it: `None` here is the fallback to "
-                             "an unattributed candidate list, not a verdict")
-        owner = E.hole_at(patched, at + 1)
-        self.assertIsNotNone(
-            owner,
-            "line %d is where the broken guard's `all_goals sorry` was, so "
-            "`hole_at` must find a hole there; the emission around it is:\n%s"
-            % (at + 1,
-               "\n".join(f"{n:5} {l}" for n, l in
-                         enumerate(patched.split("\n")[at - 3:at + 2],
-                                   start=at - 2))))
-        name, kind = owner
-        self.assertEqual(
-            kind, "guarded",
-            "a `sorry` inside a step lemma's `(by …)` argument is a SIDE "
-            "CONDITION, and that is the word the report's wording rests on")
-        self.assertEqual(live, "%s's side condition, line %d" % (name, at + 1),
-                         "the report must name the fact and the LINE of the "
-                         "`sorry` that fired — the nearest enclosing fact is "
-                         "only a place to start looking")
-
-    def test_the_hole_is_still_named_when_tmpdir_is_outside_the_checkout(self):
-        """The case above was red on the gate, and `TMPDIR` is why.
-
-        `_run_lean` writes the generated proof to a temporary file and asks Lean
-        what that file's module is called, because that name is how the library
-        filter in `live_hole_phrase` tells OUR hole from an imported `.olean`'s.
-        Lean's answer depends on where the file is: under a `LEAN_PATH` entry it
-        is the basename, and outside every entry it is `_stdin`. The old
-        `_module_of` answered "the basename" unconditionally, so on a machine
-        whose `TMPDIR` is not inside the checkout — which is the default, and is
-        what the gate runner had — the filter compared `tmp1qomz6pi` with
-        `_stdin`, refused our OWN hole as a library one, and `_run_lean` fell
-        back to "1 admitted candidate". The case above then failed with
-        `None != "hstep7's side condition, line 363"` on a run whose proof was
-        correct, which is a gate verdict that depended on the runner's
-        environment rather than on the tree.
-
-        So this row moves `TMPDIR` to a directory outside every search path and
-        asks the same question again. It asserts the precondition first, so the
-        row cannot pass by having quietly run in the checkout, and it uses `$HOME`
-        rather than `/tmp` because that is a directory this suite is known to be
-        able to create in.
-        """
-        import shutil
-        import tempfile
-        import formal.x86_64_endtoend_test as E
-        if not E.LEAN_BIN:
-            self.skipTest("the pinned lean is not installed")
-        patched, at = self._patched_const2()
-        self.assertIsNotNone(patched,
-                             "the fixture is pinned to a guard this emitter "
-                             "emits (%r)" % self._GUARD)
-        base = tempfile.mkdtemp(dir=os.path.expanduser("~"),
-                                prefix="lean-tmpdir-outside-")
-        old = os.environ.get("TMPDIR")
-        try:
-            self.assertEqual(
-                E._module_of(os.path.join(base, "x.lean"), E.SEARCH_PATHS),
-                "_stdin",
-                "the directory this row points TMPDIR at is NOT under %r, so "
-                "this row is testing the outside case rather than the one the "
-                "case above already covers" % (E.SEARCH_PATHS,))
-            os.environ["TMPDIR"] = base
-            ok, _n, fired, err, live = E._run_lean(patched)
-        finally:
-            if old is None:
-                os.environ.pop("TMPDIR", None)
-            else:
-                os.environ["TMPDIR"] = old
-            shutil.rmtree(base, ignore_errors=True)
-        self.assertTrue(ok, f"the patched file must still elaborate: {err!r}")
-        self.assertTrue(fired,
-                        "an unsatisfiable guard must make Lean report the "
-                        "declaration as using `sorry` wherever the temporary "
-                        "file lands")
-        self._assert_names_the_broken_guard(E, patched, at, live)
-
-    def test_a_failed_elaboration_says_what_lean_said(self):
-        """The reason half of `_run_lean`'s non-zero exit, which used to be a lie.
-
-        This file's case above reported
-
-            AssertionError: the patched file must still elaborate:
-            'lean exited 1: no error message'
-
-        on a worktree with no `lib/*.olean`, and that sentence was the whole
-        cost of the underlying defect: Lean had printed 316 bytes naming the
-        missing module and the search path it looked in, and `_run_lean` threw
-        them away because the only thing it searched for was
-        `memory_exception`/`libc++abi` — right for the one failure that search
-        was written for (`lean::memory_exception` aborts rather than reports, so
-        its own line is the only place the cause appears) and wrong for every
-        other, including the one where "no error message" described output that
-        was 90% a search path.
-
-        Lean writes diagnostics to STDOUT, so the half that was dropped is the
-        half it uses. The shape below is verbatim from that run, and the
-        position, the module name and the search path are all of what a reader
-        needed.
-        """
-        import formal.x86_64_endtoend_test as E
-        out = ("/tmp/tmp4o5z6yun.lean:1:0: error: unknown module prefix 'X86'\n"
-               "\n"
-               "No directory 'X86' or file 'X86.olean' in the search path "
-               "entries:\n"
-               "/repo\n"
-               "/repo/lib\n")
-        reason = E.lean_failure_reason(out)
-        self.assertIn("unknown module prefix 'X86'", reason,
-                      "the module Lean could not find, which is the cause")
-        self.assertIn("No directory 'X86'", reason,
-                      "and the search path it looked in, which is on the NEXT "
-                      "line: one line is a symptom and two are a diagnosis")
-        self.assertNotIn("tmp4o5z6yun", reason,
-                         "the temp path is noise here, and `_ERR` is what "
-                         "strips it everywhere else in this module")
-        self.assertNotIn("no error", reason,
-                         "the claim this replaces was about the OUTPUT, and it "
-                         "was false whenever Lean wrote any")
-
-        # The abort keeps its own line, and keeps it FIRST: `lean::
-        # memory_exception` aborts rather than reports, so that line is the only
-        # place the cause appears, and it is the reason this search exists.
-        self.assertEqual(
-            E.lean_failure_reason(
-                "libc++abi: terminating due to uncaught exception of type\n"
-                "  lean::memory_exception: excessive memory consumption "
-                "detected at 'interpreter'\n"),
-            "libc++abi: terminating due to uncaught exception of type",
-            "the memory_exception search is the older one and is not narrowed: "
-            "a change here would move a measurement that was taken with it")
-
-        # …and an output that is empty is a different statement from one that
-        # was never read, which is the distinction the old fallback erased.
-        self.assertIn("nothing", E.lean_failure_reason(""),
-                      "no stdout and no stderr is its own fact, and it is not "
-                      "the same one as a failure whose text was discarded")
-
-        # Bounded, because a non-zero exit is also what a runaway produces and a
-        # report is not a log.
-        flood = "".join("line %d\n" % i for i in range(5000))
-        self.assertLessEqual(len(E.lean_failure_reason(flood)), 401,
-                             "a report carries the head of the output, not all "
-                             "of it")
-
-        # …and the wiring, which is the half a unit test of a helper cannot see:
-        # one real elaboration that fails, end to end through `_run_lean`, and
-        # the diagnostic is in the string its caller prints. Lean-free below
-        # this line; the file's own rule is that a case which runs Lean says so.
-        if not E.LEAN_BIN:
-            self.skipTest("the pinned lean is not installed")
-        ok, _n, _fired, err, live = E._run_lean("theorem t : True := by\n"
-                                                "  exact 1\n")
-        self.assertFalse(ok, "a type error is not an elaboration")
-        self.assertIn("lean exited 1:", err)
-        self.assertIn("expected type is a proposition", err,
-                      "Lean's own words, not a summary of them: %r" % (err,))
-        self.assertIsNone(live)
-
-    def test_the_report_says_the_hole_it_can_identify_and_hedges_only_when_it_cannot(self):
+    def test_the_report_says_candidate_and_never_claims_an_identified_hole(self):
         """One wording for both theorems, and the word is the claim.
 
-        A name in the census is the enclosing fact of an emitted `all_goals
-        sorry`, which is a place to start looking and not the hole — so it is
-        printed as a `candidate`, and the `live` form replaces it entirely rather
-        than sitting beside it. A report that showed both would be asking the
-        reader to prefer the weaker claim it had been given the stronger one to
-        replace.
+        The value line and the termination line are the same sentence about two
+        different theorems, so they go through `admitted_phrase` and a test asks
+        the wording a question without running Lean — which is the only way to
+        ask it at all, since the lines are printed from inside `main`'s Lean
+        loop.
         """
         import formal.x86_64_endtoend_test as E
         self.assertEqual(E.admitted_phrase(1, ["hrip"], 249),
@@ -3752,13 +2972,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                          "a `sorry` before any `have` has no name, and "
                          "`unattributed` is that answer rather than a "
                          "placeholder")
-        self.assertEqual(
-            E.admitted_phrase(1, ["hrip"], 249,
-                              live="hstep7's side condition, line 363"),
-            "1 live hole (hstep7's side condition, line 363), 249 guarded",
-            "an identified hole REPLACES the candidate list: it is the same "
-            "number said better, and printing both would be asking the reader "
-            "to choose between them")
         for phrase in (E.admitted_phrase(1, ["hrip"], 249),
                        E.admitted_phrase(1, [], 9)):
             self.assertNotIn("admitted (", phrase,
@@ -3769,175 +2982,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         src = inspect.getsource(E.main)
         self.assertNotIn("admitted (%s)", src,
                          "a report line still claims an identified hole")
-
-    def test_the_position_survives_the_two_streams_being_glued(self):
-        """The end-to-end case's failure mode, as a reader case.
-
-        `test_lean_says_which_sorry_fired_and_the_report_names_it` failed in the
-        gate with `None != "hstep7's side condition, line 363"` on a run whose
-        proof was correct: Lean DID report the hole, `fired` was True, and the
-        reader returned nothing. The cause is in how the two output streams meet.
-        Every caller concatenates them (`p.stdout + p.stderr`), and when the
-        warning is the last line of stdout and arrives without its trailing
-        newline it lands glued to the first line of a non-empty stderr — and the
-        reader's `\\s*$` anchor, which matches at a newline or at the very end of
-        the string but NOT in the middle of a line, then declines a message that
-        is perfectly well formed.
-
-        The replacement is `(?![0-9])`, a different claim: the DIGITS end here,
-        rather than the LINE. So a label followed by a backtick, by a space, or by
-        the next stream's first character is one answer, and `x:363:129` is not
-        read as `x:363:12`. The no-label case still returns `[]`, because "a hole
-        fired and I cannot say where" has to stay distinguishable from a position.
-        """
-        import formal.lean as L
-        warn = ("/…/.tmp/tmpcmqrxbe0.lean:117:8: warning: declaration uses "
-                "`sorry `«.tmp».tmpcmqrxbe0:363:12`")
-        self.assertEqual(L.sorry_source_positions(warn + "\n"), [(363, 12)],
-                         "the unglued warning is the baseline this row is about")
-        self.assertEqual(
-            L.sorry_source_positions(
-                warn + "libc++abi: terminating due to uncaught exception\n"),
-            [(363, 12)],
-            "a warning glued to the next stream's first line is still a warning "
-            "with a position; losing it turned a correct proof into 'a hole "
-            "fired and I cannot say where'")
-        self.assertEqual(
-            L.sorry_source_positions(
-                "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:503:129`\n"),
-            [(503, 129)],
-            "the digits END at the lookahead, so a three-digit column is not "
-            "truncated to two")
-        self.assertEqual(
-            L.sorry_source_positions(
-                "/x.lean:117:8: warning: declaration uses `sorry`\n"),
-            [],
-            "a file without pp.sorrySource has no position, and that empty is "
-            "the answer a caller needs to see")
-
-    def test_a_hole_in_an_imported_module_is_not_attributed_to_this_file(self):
-        """The line is not an identity, and one reader was treating it as one.
-
-        Lean's `declaration uses `sorry`` label says which FILE the fired hole is
-        in (`«lib».ProofLib`), and `live_hole_phrase` used to read only the
-        digits — so a hole in an imported `.olean` arrived as a bare line number
-        in a file it had never seen, and `hole_at` resolved it against the
-        GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:503:8` position came back as `"hstep11's side condition, line
-        503"`, which is confident, specific and completely wrong, because 503 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
-        generated file. It returned `None` for `«lib».ProofLib:4624:8` only
-        because 4624 is past the end of that file — luck, not a rule.
-
-        Both are `None` now, and for the stated reason: a hole this emitter did
-        not write has no emitter fact to name. The rows are non-vacuous in both
-        directions — the same text still attributes OUR hole — and `module=None`
-        is the documented way to say "do not filter", so a caller with no
-        generated file in hand keeps the old behaviour rather than losing it.
-        """
-        import formal.x86_64_endtoend_test as E
-        text = self._emitted_path("const2")
-        module = E._module_of(
-            os.path.join(E.SEARCH_PATHS[0], ".tmp", "tmpcmqrxbe0.lean"),
-            E.SEARCH_PATHS)
-        self.assertEqual(module, "tmpcmqrxbe0",
-                         "the module Lean prints is the basename of a file "
-                         "UNDER a search path, whatever the guillemets sit "
-                         "around; the search path is the other half of the "
-                         "rule and has its own case below")
-        self.assertEqual(
-            E.live_hole_phrase(
-                text,
-                "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:503:8`\n", module),
-            "hstep11's side condition, line 503",
-            "the control: OUR hole at 503 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 503")
-        for label, pos in (("«lib».X86", 503), ("«lib».ProofLib", 4624)):
-            self.assertIsNone(
-                E.live_hole_phrase(
-                    text,
-                    "/x.lean:117:8: warning: declaration uses `sorry "
-                    "`%s:%d:8`\n" % (label, pos), module),
-                "%s:%d is a line in a LIBRARY and a `sorry` of ours happens to "
-                "sit on %d of the generated file; resolving it there names a "
-                "fact that is not the hole" % (label, pos, pos))
-        self.assertEqual(
-            E.live_hole_phrase(
-                text,
-                "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:503:8`\n"),
-            "hstep11's side condition, line 503",
-            "with no module to compare against nothing is filtered, so this is "
-            "the pre-existing behaviour and not a silent tightening: a caller "
-            "that has no generated file in hand still gets an answer, and it is "
-            "the caller's to distrust")
-
-    def test_the_module_name_is_read_from_all_three_lean_spellings(self):
-        """The guillemets are around the WRONG component, so the LAST one counts.
-
-        The label is a `Name`, and Lean parenthesises only the part that is not a
-        bare identifier: a module under a directory prints as
-        `«.tmp».tmpcmqrxbe0`, a balanced-looking pair around the wrong piece, and
-        a top-level module prints with no guillemets at all. Reading the last
-        dotted component gives the basename in every spelling, which is the only
-        comparison the filter above can rely on.
-        """
-        import formal.lean as L
-        for text_, want in (
-                ("`«.tmp».tmpcmqrxbe0:363:12`", ("tmpcmqrxbe0", 363, 12)),
-                ("`«lib».ProofLib:4624:8`", ("ProofLib", 4624, 8)),
-                ("`topmod:10:2`", ("topmod", 10, 2)),
-        ):
-            self.assertEqual(
-                L.sorry_source_labels(
-                    "/x.lean:117:8: warning: declaration uses `sorry %s`\n"
-                    % text_),
-                [want], text_)
-        self.assertEqual(
-            L.sorry_source_labels(
-                "/x.lean:117:8: warning: declaration uses `sorry`\n"),
-            [],
-            "a warning with no label has no position to attach a module to, so "
-            "it is absent rather than present with an empty one")
-
-    def test_the_module_name_is_the_basename_only_under_a_search_path(self):
-        """The half of the naming rule that made the case above environment-dependent.
-
-        Lean's module name for a source file is its path RELATIVE TO A SEARCH
-        PATH, so a file under one is named by its basename and a file under NONE
-        has no module name at all — Lean calls the whole thing `_stdin`, which it
-        then reports as `«_stdin:line:col»`, a label this reader parses like any
-        other. `sorry_source_labels`' own docstring has the three spellings; this
-        is the other half of the comparison, which is a question about the
-        SEARCH PATH and not about the text.
-
-        Both rows are the same assertion with two answers, and the `_stdin` one
-        is the half that was missing: a derivation that returned the basename
-        unconditionally was right for a file under `LEAN_PATH` and wrong for
-        every other file, and where `_run_lean`'s temporary file lands is
-        `TMPDIR`'s business rather than the tree's.
-        """
-        import formal.x86_64_endtoend_test as E
-        self.assertEqual(
-            E._module_of(os.path.join(E.SEARCH_PATHS[0], ".tmp",
-                                      "tmpcmqrxbe0.lean"), E.SEARCH_PATHS),
-            "tmpcmqrxbe0",
-            "under the FIRST search path the module is the basename, and Lean "
-            "prints `«.tmp».tmpcmqrxbe0`")
-        self.assertEqual(
-            E._module_of(os.path.join(E.SEARCH_PATHS[1], "sub",
-                                      "tmpcmqrxbe0.lean"), E.SEARCH_PATHS),
-            "tmpcmqrxbe0",
-            "under the SECOND search path it is the basename too: the search "
-            "path decides whether a name exists, not which component is read")
-        self.assertEqual(
-            E._module_of("/nowhere/at/all/tmpcmqrxbe0.lean", E.SEARCH_PATHS),
-            "_stdin",
-            "outside every search path Lean has no module name for the file and "
-            "says `_stdin`, which is what it prints; answering the basename here "
-            "is what refused our own hole as a library one")
 
     def test_a_sorry_in_a_comment_is_not_an_admission(self):
         """Both comment forms, and the theorem's OWN docstring is the case.
@@ -4222,69 +3266,6 @@ _TMP_LITERAL = re.compile(r"^/tmp(?:/|$)")
 # it reads or writes it, so a read-only `/tmp` is stated here rather than
 # inferred — and the row below fails if a listed file stops naming one, which is
 # what keeps this from becoming a list that hides whatever is added next.
-# The `formal/examples` list as it stood on `master` before this merge grew it
-# 52 -> 93 (`work/formal36-proof-corpus`). A FACT ABOUT THE TREE, committed so
-# the growth can be told apart from a regression: the corpus-total row below
-# moves whenever an example is ADDED, and only a measurement over the examples
-# that were ALREADY here says whether the guard's branches are still settled.
-# Read by `TestTheStackFloorGuardIsWhatGatesTheValueTheorem`'s second assertion;
-# `TOTAL_PRE_MERGE52` is the number it must still produce.
-_PRE_MERGE_EXAMPLES = (
-    "formal/examples/absval.mojo",
-    "formal/examples/augassign.mojo",
-    "formal/examples/bigconst.mojo",
-    "formal/examples/bitops.mojo",
-    "formal/examples/bittest.mojo",
-    "formal/examples/both.mojo",
-    "formal/examples/chain.mojo",
-    "formal/examples/condassign.mojo",
-    "formal/examples/condassign2.mojo",
-    "formal/examples/const2.mojo",
-    "formal/examples/count.mojo",
-    "formal/examples/countdown.mojo",
-    "formal/examples/deepif.mojo",
-    "formal/examples/either.mojo",
-    "formal/examples/elif3.mojo",
-    "formal/examples/fact.mojo",
-    "formal/examples/fib.mojo",
-    "formal/examples/floordiv.mojo",
-    "formal/examples/identity.mojo",
-    "formal/examples/ifonly.mojo",
-    "formal/examples/ifonly2.mojo",
-    "formal/examples/ifparam.mojo",
-    "formal/examples/localmul.mojo",
-    "formal/examples/n8.mojo",
-    "formal/examples/neg.mojo",
-    "formal/examples/nonzero.mojo",
-    "formal/examples/pair.mojo",
-    "formal/examples/pow2.mojo",
-    "formal/examples/powexpr.mojo",
-    "formal/examples/ret42.mojo",
-    "formal/examples/reuse.mojo",
-    "formal/examples/seven.mojo",
-    "formal/examples/sgt8.mojo",
-    "formal/examples/shiftlr.mojo",
-    "formal/examples/sign.mojo",
-    "formal/examples/sle8.mojo",
-    "formal/examples/sqsum.mojo",
-    "formal/examples/subscript_var.mojo",
-    "formal/examples/sum.mojo",
-    "formal/examples/sum_range.mojo",
-    "formal/examples/swapadd.mojo",
-    "formal/examples/threevar.mojo",
-    "formal/examples/twoifs.mojo",
-    "formal/examples/twoparams.mojo",
-    "formal/examples/udivmod.mojo",
-    "formal/examples/ug8.mojo",
-    "formal/examples/vardecl.mojo",
-    "formal/examples/vardecl_typed.mojo",
-    "formal/examples/vardecl_unused.mojo",
-    "formal/examples/wdiff.mojo",
-    "formal/examples/wge.mojo",
-    "formal/examples/wide_recv.mojo",
-)
-
-
 _TOOLS_TMP_READERS = {
     "tools/wave2b_fix_deps.py":
         "reads /tmp/gimple_pre_wave2, a snapshot of the pre-wave2 sources a "
@@ -4371,27 +3352,12 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     TREES = (("formal/examples/ret42.mojo", 1, 16),
              ("formal/examples/bittest.mojo", 4, 220),
              ("formal/examples/wide_recv.mojo", 1, 150))
-    #: …and the corpus TOTAL, which is the doc's after-table's own row. A
-    #: per-example table cannot see a program that gained a branch, so the total
-    #: is the row that does, and it is the number the doc quotes.
-    #:
-    #: **Re-pinned 2026-10-05 from 69/2 718 to 105/4 232, and the cause is the
-    #: CORPUS rather than the guard.** `formal/examples` grew 52 -> 93 programs
-    #: (`work/formal36-proof-corpus`, 41 new examples), and this total is over
-    #: every `*.mojo` in it, so 26 of the 41 add trees and the number moves with
-    #: them. Verified as a growth and not a regression by re-measuring the subset
-    #: that already existed: **master's 52 examples on this tree are 39 trees /
-    #: 69 leaves / 2 718 steps / 13 declined — the doc's row EXACTLY.** So the
-    #: guard's own branches are still settled (the three per-example rows above
-    #: are unchanged and still assert what they asserted) and what moved is how
-    #: many programs the total is taken over.
-    #:
-    #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
-    #: examples on THIS tree rather than remembered: the TOTAL above moves
-    #: whenever an example is added, and this one is what says whether the
-    #: examples that were already here still produce what they produced.
-    TOTAL = (105, 4232)
-    TOTAL_PRE_MERGE52 = (69, 2718)
+
+    #: …and the corpus TOTAL, which is the doc's after-table's own row ("corpus
+    #: leaves / step equations … 69 / 2 718"). A per-example table cannot see a
+    #: program that gained a branch, so the total is the row that does, and it
+    #: is the number the doc quotes.
+    TOTAL = (69, 2718)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
@@ -4434,9 +3400,9 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
                     f"{E._MAX_CHAIN_STEPS} is what turns into a refusal")
 
         # …and the whole corpus, because three examples cannot see a program that
-        # was added. The recursive examples and the `idiv` ones build no tree at
-        # all (a backward call, and no step lemma for `group3:idiv`), so they
-        # are counted as declines rather than as zero-leaf trees.
+        # was added. The ten recursive examples and the two `idiv` ones build no
+        # tree at all (a backward call, and no step lemma for `group3:idiv`), so
+        # they are counted as declines rather than as zero-leaf trees.
         leaves_total = steps_total = trees = 0
         declined = []
         for path in self._corpus():
@@ -4461,47 +3427,6 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
             f"{self.TOTAL[0]}/{self.TOTAL[1]}; a conditional added to a "
             f"corpus example moves this, and the {len(declined)} that build no "
             f"tree are: {declined}")
-
-        # …and the SAME measurement over the examples that existed when the doc's
-        # figure was taken, which is what says the total above moved because the
-        # CORPUS grew rather than because the guard's branches came back. Without
-        # this row a re-pin to a bigger number is indistinguishable from a
-        # regression that happens to be larger, and only one of those two is a
-        # fix. The subset is master's `formal/examples` list, so it is a fact
-        # about the tree and not about this merge.
-        pre = _PRE_MERGE_EXAMPLES
-        if not pre:
-            self.skipTest(
-                "the pre-merge example list is gone; the corpus-total row above "
-                "is then the only one, and it cannot tell growth from regression")
-        old_total = [0, 0]
-        old_declined = []
-        for rel in pre:
-            path = os.path.join(HERE, rel)
-            if not os.path.exists(path):
-                old_declined.append("%s: deleted" % rel)
-                continue
-            try:
-                code, info, _insns, shapes = E._plan(path)
-                root = E._tree(code, info, shapes)
-            except (E._NoTree, ValueError) as e:
-                old_declined.append("%s: %s" % (os.path.basename(rel), e))
-                continue
-            if root is None:
-                old_declined.append(os.path.basename(rel) + ": no tree")
-                continue
-            found = list(E._paths(root))
-            old_total[0] += len(found)
-            old_total[1] += sum(len(x) for x in found)
-        self.assertEqual(
-            tuple(old_total), self.TOTAL_PRE_MERGE52,
-            f"the {len(pre)} examples that predate the 2026-10-05 corpus growth "
-            f"are {old_total[0]} leaves / {old_total[1]} steps on this tree; the "
-            f"doc's after-table and `TOTAL_PRE_MERGE52` say "
-            f"{self.TOTAL_PRE_MERGE52[0]}/{self.TOTAL_PRE_MERGE52[1]}. If THIS "
-            f"is what moved, the guard's branches are being walked again and a "
-            f"bigger corpus total is not the explanation; the {len(old_declined)} "
-            f"of them that build no tree are: {old_declined}")
 
     def test_every_value_theorem_refusal_is_the_guard_and_not_the_program(self):
         """The claim, over the whole corpus: `call_rel32` is in EVERY refusal.

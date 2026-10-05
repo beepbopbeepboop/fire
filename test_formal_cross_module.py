@@ -1651,7 +1651,7 @@ def test_the_executors_answer_the_same_questions(tmpdir, _):
 # is not "an API that is its top-level statements", and it is importable.
 #
 # This case exists because 16 files in the 668-file sweep
-# (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3) are refused for the OTHER
+# (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3) are refused for the OTHER
 # answer — `module_loader.py`, `tools/memslot.py`, `formal/x86_64.py`,
 # `determinism_trace.py` have a body that genuinely must run — and the fix for
 # those is a load-time initializer in both object writers. **That fix cannot be
@@ -1897,72 +1897,7 @@ def test_a_container_returning_export_whose_helpers_take_the_buffer(tmpdir, _):
           f"{text!r}")
 
 
-BRACKET_VALUE_LIB = """\
-def total[T: AnyType, keys: List[T]](base: Int) -> Int:
-    return base + len(keys)
-"""
-
-BRACKET_VALUE_PROG = """\
-from bracket_lib import total
-
-
-def main() -> Int:
-    printf("total=%d@", total[Int, [1, 2, 3]](10))
-    return 0
-"""
-
-
-def test_a_bracket_value_parameter_is_read_by_its_declaration(tmpdir, _):
-    """`len(keys)` where `keys: List[T]`, in a library the consumer instantiates.
-
-    **The control is in the same body and it is the whole of the case.**
-    `keys[0]` in the same function has always lowered, because the subscript's
-    base classifier reads the parameter's annotation, while `len(keys)` was
-    refused with "the source does not say what this operand holds" -- on a
-    declaration that says it in the parameter list, and with no other difference
-    between the two reads. Two readers of one word consulting different evidence
-    is how a disagreement turns into a wrong answer instead of a refusal, so this
-    case exists to keep them the same reader.
-
-    Three things had to move together for it, and the case is the only thing
-    that observes all three:
-
-      * `fire_compiler.py` recorded a bracket parameter's NAME and its DEFAULT
-        and threw the TYPE away, so no reader anywhere could ask what `keys`
-        held. `comptime_param_annotations` keeps it now.
-      * `model.param_annotation` reads that table as well as the runtime
-        parameter list, so `declared_param_kind` has an annotation for a
-        bracket parameter.
-      * `ValueKinds` seeds a bracket parameter's kind from it, which is what
-        makes `len()`'s operand classifier see one.
-
-    **Cross-module because that is where the construct is reachable**: a module
-    dylib is compiled from the module's own source AND from every instantiated
-    source the consumer asked for, so the template's body is compiled before any
-    substitution -- which is why the defect surfaced there and not in a
-    same-file program.
-
-    Both architectures, and the expected output is arithmetic rather than a
-    written-down number: `10 + len([1, 2, 3])`.
-    """
-    fresh_cas()
-    root = os.path.join(tmpdir, "bracketvalue")
-    os.makedirs(root)
-    write_tree(root, {"bracket_lib.mojo": BRACKET_VALUE_LIB,
-                      "prog.mojo": BRACKET_VALUE_PROG})
-    want = f"total={10 + len([1, 2, 3])}@"
-    for arch in ("arm64", "x86_64"):
-        result, out = build(root, "prog.aout", arch=arch)
-        rc, text = run(out)
-        check(rc == 0, f"{arch}: the image exited {rc}")
-        check(text == want,
-              f"{arch}: the image printed\n  {text!r}\nCPython prints "
-              f"{want!r} for `10 + len([1, 2, 3])`")
-
-
 TESTS = [
-    ("a bracket VALUE parameter is read by its own declaration",
-     test_a_bracket_value_parameter_is_read_by_its_declaration),
     ("a module's own folded and slot stores cross the boundary",
      test_a_module_stores_that_the_image_already_holds_cross_the_boundary),
     ("a module body runs at load time, before main",

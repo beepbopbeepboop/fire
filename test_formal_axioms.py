@@ -75,14 +75,7 @@ from formal import lean as L                      # noqa: E402
 # binary64 semantics over the `UInt64` bit pattern, and `group_census` has to
 # cover it for the same reason it covers every other module: a module outside
 # this tuple is a module whose axioms nobody counts.
-# `Specs` is last for the same reason it is last in `formal/lean.py`'s tuple:
-# it is the independent specification layer, imports only `ProofLib`, and is
-# covered here for the reason every module in the tuple is — a module outside
-# it is a module whose axioms nobody counts. `Peephole` sits ahead of it and
-# imports `ProofLib` and `X86`, like `work`, because its rules are stated over
-# the two step functions.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts",
-                   "Peephole", "Specs")
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep
@@ -191,7 +184,7 @@ def _library_declarations():
         with open(path, encoding="utf-8") as f:
             code = A.lean_code_regions(f.read())
         yes, no = [], []
-        for _line, name, public, _kind in A._declarations(code):
+        for _line, name, public in A._declarations(code):
             if not public:
                 no.append(name)
             elif name.endswith(UNASKABLE_SUFFIX):
@@ -218,7 +211,7 @@ def _dropped_with_sites(dropped):
         with open(os.path.join(lib, mod + ".lean"), encoding="utf-8") as f:
             code = A.lean_code_regions(f.read()).split("\n")
         decls = A._declarations("\n".join(code))
-        for i, (line, name, _public, _kind) in enumerate(decls):
+        for i, (line, name, _public) in enumerate(decls):
             if name not in names:
                 continue
             last = decls[i + 1][0] if i + 1 < len(decls) else len(code) + 1

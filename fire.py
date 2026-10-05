@@ -84,16 +84,6 @@ def _usage_text() -> str:
   {tool} --formal [-n <int>] <file.mojo>
                                     Same, then run it (bare form = build and run)
   {tool} --no-prove <file> [...]     Formal backend only: skip proof generation/checking
-  {tool} --check-contracts <file>    Formal backend only: lower every @requires/@ensures
-                                    into a run-time check; on `build` it also emits
-                                    the f_contract theorems into the proof. A contract
-                                    found FALSE stops the build. Without the flag a
-                                    false contract is still REPORTED, with the input
-                                    that breaks it. On `dylib` the theorem half does
-                                    not apply -- that path's contract is derived from
-                                    the machine (lib/Contracts.lean), not from a
-                                    source model -- so the run-time check and the
-                                    reported verdicts are what you get.
   {tool} --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
   {tool} --backend=gimple ...        Select the gimple backend (default)
   {tool} dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
@@ -227,36 +217,17 @@ def _extract_gpu_flags(args: list):
 
 
 def _extract_formal_flags(args: list):
-    """`--formal`, `--no-prove`, `--check-contracts`, `--opt`, and the rest.
-
-    `--check-contracts` asks for the host contracts' assumption TEXT rather
-    than their count; `--opt` turns on `formal/peephole.py`, the verified
-    peephole pass. Both are off by default and both defaults are deliberate.
-    For `--opt` the reason is that every rewrite the pass performs is licensed
-    by a theorem in `lib/Peephole.lean` saying the machine model is unchanged,
-    but a proved rewrite is only as good as the pass's ability to decide the
-    rewrite's side conditions, and the flag is how the corpus and the
-    differential fuzzer are run both ways so the OUTPUT can be compared.
-    `bugs/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
-    is not.
-    """
     formal = False
     prove = True
-    check_contracts = False
-    opt = False
     remaining = []
     for a in args:
         if a == '--formal':
             formal = True
         elif a in ('--no-prove', '--no-proof'):
             prove = False
-        elif a == '--check-contracts':
-            check_contracts = True
-        elif a == '--opt':
-            opt = True
         else:
             remaining.append(a)
-    return formal, prove, check_contracts, opt, remaining
+    return formal, prove, remaining
 
 
 def _pop_flag_value(argv: list, flag: str):
@@ -396,9 +367,7 @@ def _trust_note(result) -> str:
 
 
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
-                       run_it: bool, link_dylibs=None, arch: str = "arm64",
-                       check_contracts: bool = False,
-                       opt: bool = False) -> int:
+                       run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
     """The one formal executable path: `fire build --formal` and bare
     `fire --formal <file>` both land here, and nothing else builds one.
 
@@ -414,13 +383,7 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                                     test_input=test_input,
                                     prove=prove, check=prove,
                                     arch=arch,
-                                    check_contracts=check_contracts,
-                                    link_dylibs=list(link_dylibs or []),
-                                    opt=opt)
-        if result.get("peephole"):
-            fired = ", ".join(f"{k}×{v}" for k, v
-                              in sorted(result["peephole"].items()))
-            print(f"peephole: {fired}")
+                                    link_dylibs=list(link_dylibs or []))
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
         return 1
@@ -433,9 +396,6 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
     trust = _trust_note(result)
     if trust:
         print(trust)
-    contracts = _contract_note(result, check_contracts)
-    if contracts:
-        print(contracts)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -448,55 +408,6 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         print(f"build: cannot run {result['path']}: {e}", file=sys.stderr)
         return 1
     return completed.returncode
-
-
-def _contract_note(result: dict, checked: bool) -> str:
-    """What this build's SOURCE-LANGUAGE CONTRACTS said, as one printed block.
-
-    Printed ALWAYS, including when the build did not check them, and that is
-    the point.  A contract in the source is a claim about the program; a build
-    that silently ignored it would be indistinguishable from a build of a file
-    that promised nothing, and this project has measured what that costs four
-    times over (a `sorry` over a false statement, a `Total` that was false for
-    every dylib, a `fun n => n` spec that typechecked for a function computing
-    `n * 3`).
-
-    A REFUTED verdict reaches this function in the default build (it is a
-    failure only under `--check-contracts`, where `_search_contracts` raises
-    first), so a REFUTED line here is a promise this build found FALSE and
-    named the input for. UNKNOWN is printed for the same reason and with the
-    same weight: an undecided contract is not a passing one.
-    """
-    entries = list(result.get("contracts") or [])
-    if not entries:
-        return ""
-    lines = []
-    for e in entries:
-        head = f"contract {e['name']}: {e['status'].upper()}"
-        extra = ""
-        if "counterexample_inputs" in e:
-            extra = f" at {e['counterexample_inputs']}"
-        lines.append(f"  {head}{extra} — {e['why']}")
-    # The mode line is DERIVED from the entries, not from the flag alone.  A
-    # flag says what was asked for and the entries say what was done, and on
-    # the library path the two differ -- `dylib --formal --check-contracts`
-    # checks at run time and emits no theorem -- so a line derived from the flag
-    # would claim "and in the proof" for a path that wrote none.
-    partial = any(e.get("status") == "not-applicable" for e in entries)
-    if not checked:
-        mode = ("NOT checked in the image; pass --check-contracts for that, "
-                "which also makes a REFUTED one fail the build. The search "
-                "below runs either way, so a false promise is reported on "
-                "every build")
-    elif partial:
-        mode = ("checked in the image; a REFUTED one fails the build. The "
-                "theorem half does not apply on this path -- the row below "
-                "says why")
-    else:
-        mode = ("checked in the image and in the proof; a REFUTED one fails "
-                "the build")
-    return (f"contracts: {len(entries)} declared ({mode}):\n"
-            + "\n".join(lines))
 
 
 def _formal_run_argv(path: str, arch: str) -> list:
@@ -1175,7 +1086,7 @@ def main():
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
-    formal, prove, check_contracts, opt, rest = _extract_formal_flags(rest)
+    formal, prove, rest = _extract_formal_flags(rest)
     # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
     # @gpu/@kernel code is unaffected. Extracted here, alongside the other
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
@@ -1305,23 +1216,7 @@ def main():
         # would get an arm64 answer and conclude "the same argument applies",
         # which is precisely the hypothesis the document says must not be
         # assumed.  So refuse it, and name what is missing.
-        #
-        # The `--formal` in the condition is what makes the sentence below TRUE.
-        # This guard used to fire on the `--backend` value alone, so it also fired
-        # for `dylib --no-prove --backend=x86_64` — and its own diagnostic ends
-        # "For a x86_64 library without a contract, drop --formal: `dylib
-        # --no-prove` is that", which is the command already running. Measured on
-        # `master` at `77b24183`:
-        #
-        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
-        #   fire dylib --formal: x86_64 has no per-export contract ... drop
-        #   --formal: `dylib --no-prove` is that.                      [exit 2]
-        #
-        # and the second guard took `--no-prove --backend=arm64` too, so there
-        # was NO command line that produced an x86-64 formal library at all, only
-        # the python call behind one (`formal.build.compile_formal_dylib`). A
-        # consumer of a dylib is exactly who cannot use that.
-        if formal and backend not in ('gimple', 'arm64'):
+        if backend not in ('gimple', 'arm64'):
             print(f"{_tool_name()} dylib --formal: {backend} has no per-export "
                   f"contract, so there is nothing --formal could prove. Two "
                   f"separate things, and keeping them apart is the point: the "
@@ -1339,39 +1234,35 @@ def main():
                   f"`build --formal --backend=x86_64`.",
                   file=sys.stderr)
             sys.exit(2)
-        # A `--backend` on this command names a FORMAL library's architecture,
-        # and there is nothing else it could mean: without `--formal` this
-        # command is the gimple/C path, which compiles through gcc for the
-        # HOST's architecture and has no `--backend` at all. So the refusal that
-        # used to sit here -- "`--backend=arm64` without `--formal` is refused,
-        # because 'the gimple path for arm64' is right by coincidence on an arm64
-        # host and silently wrong on any other" -- was refusing the one reading
-        # of the flag that was left, and it fired for `--backend=x86_64` too, so
-        # no command line produced an x86-64 formal library at all. Measured on
-        # `master` at `77b24183`, both exits 2 with a message contradicting the
-        # flag that was passed:
-        #
-        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
-        #   fire dylib --formal: x86_64 has no per-export contract ... For a
-        #   x86_64 library without a contract, drop --formal: `dylib
-        #   --no-prove` is that.                                    <-- the command
-        #
-        # The branch above is what that sentence promises, and it now delivers.
-        dylib_arch = 'arm64' if backend == 'gimple' else backend
-        if formal or backend != 'gimple':
+        if not formal and backend != 'gimple':
+            # The gimple path has no formal backend to select: it compiles
+            # through gcc for the HOST's architecture.  So `--backend=arm64`
+            # here is right by coincidence on an arm64 host and silently wrong
+            # on any other -- which is the same defect as the branch above,
+            # from the other side, and the same reason it has to be refused
+            # rather than ignored.  Measured: on this (arm64) host
+            # `dylib --backend=arm64` builds an arm64 image, so nothing fails
+            # here; on an x86-64 host the same command would build an x86-64
+            # image and say nothing.
+            print(f"{_tool_name()} dylib: this command has no "
+                  f"--backend. Without --formal it is the gimple/C path, which "
+                  f"compiles through gcc for this machine's architecture "
+                  f"({platform.machine()}), and the formal backends belong to "
+                  f"`build`. For an arm64 dylib WITH a per-export contract, "
+                  f"ask for `dylib --formal`, which is arm64-only and says so "
+                  f"if --backend names anything else.",
+                  file=sys.stderr)
+            sys.exit(2)
+        if formal:
             _fb = _load_formal_build()
             try:
                 result = _fb.compile_formal_dylib(
-                    dylib_inputs, output=dylib_output, arch=dylib_arch,
-                    prove=prove, check=prove,
-                    check_contracts=check_contracts)
+                    dylib_inputs, output=dylib_output,
+                    prove=prove, check=prove)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)
                 sys.exit(1)
             print(f"Built: {result['path']}")
-            contracts = _contract_note(result, check_contracts)
-            if contracts:
-                print(contracts)
             if result.get("proof_path"):
                 cached = " (verified from cache)" if result.get("proof_cached") else ""
                 print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -1452,8 +1343,7 @@ def main():
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=False, link_dylibs=build_link_dylibs,
-                arch=backend, check_contracts=check_contracts, opt=opt))
-
+                arch=backend))
         try:
             import driver
             rc = driver.compile_program(
@@ -1624,8 +1514,7 @@ def main():
             sys.exit(_formal_executable(
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
-                prove, run_it=True, arch=backend,
-                check_contracts=check_contracts, opt=opt))
+                prove, run_it=True, arch=backend))
         try:
             import driver
             rc = driver.compile_program(

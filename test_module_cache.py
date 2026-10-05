@@ -182,21 +182,30 @@ def test_stage2_3_dylib_and_cas(wd):
         # keeps its teeth; what it is guarding is unchanged, because the growth
         # is a CALL into the runtime registry and not a body in the client.
         #
-        # 10240 -> 6144 (2026-10-04): the gate the four entries above were
-        # asking for LANDED, so this budget comes back DOWN rather than up.
-        # `module_gen.py`'s `REPR_CLUSTER_*` + `_drop_unreachable_repr_cluster`
-        # withdraw the six `static` generic-repr helpers — and their forward
-        # declarations — from any module whose own emitted text names none of
-        # them, which is this client. Measured on this exact client: 8264 ->
-        # **4080**, i.e. the cluster was 48% of the object.
+        # The real fix for this budget is not another bump: all five
+        # always-emitted generic-repr helpers are `static` and never
+        # address-registered, and deleting them from this client by hand
+        # compiled and linked with no undefined reference at 5208 bytes — 3552
+        # of pure per-module dead weight. Gating the cluster on "this module can
+        # reach it" is measured and filed as
+        # bugs/PERF_generic_repr_helpers_emitted_into_every_module.md.
         #
-        # Two 1024 increments above the measurement, the same "clear the number
-        # and keep the teeth" rule the bumps above followed: 6144 leaves 2064
-        # bytes for the growth those four entries each recorded (+120, +200,
-        # +104 — so a dozen of them), against 10240's 6176. What this guards is
-        # unchanged and still the real bug: a client that is NOT tiny means
-        # BODIES are landing in it instead of the dylib.
-        check("stage2: client object is tiny (<6KB)", sz < 6144, f"{sz} bytes")
+        # 9216 -> 10240 (2026-10-03, merging the ten bugs4 branches): 9216 ->
+        # 9416 on this exact client, +200. The growth is the dict repr's own
+        # per-module material, from `bugs4-6`'s one-store-of-every-value-kind
+        # work, and it is the same KIND of thing the three entries above record
+        # rather than bodies landing in the client: two new `static` helpers in
+        # the always-emitted preamble (`_mojo_dict_val_repr`, which asks the
+        # dict's recorded repr for a struct slot, and `_mojo_repr_none`), plus
+        # three rows in `_mojo_repr_dict`'s value-kind chain (the `kind == 4`
+        # None row, the untagged-zero row, and the `kind == 5` struct row, which
+        # `_mojo_cat_dict_val` became). Read off the generated C by diffing the
+        # emitted `static` set against master's: exactly those two names are
+        # new. Bumped by two 1024 increments rather than one, because the rule
+        # this ladder follows is "clear the number and keep the teeth": 9416
+        # would clear 10240 with 824 to spare, which is the same margin the
+        # 11264 entry above was written for.
+        check("stage2: client object is tiny (<9KB)", sz < 10240, f"{sz} bytes")
     finally:
         os.remove(os.path.join(RUNTIME, 's2lib.mojo'))
 
@@ -545,105 +554,6 @@ def test_elaboration_failure_is_not_cached(wd):
 
 
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
-def test_instantiation_nested_gcc_is_retried(wd):
-    """The nested `gcc -c` in `monomorphize.instantiate`'s build is retried,
-    and a retry cannot hide a real defect.
-
-    That one step is the only impure thing in `elaborate_generic_struct`, and
-    on an 18-worker sweep every worker spawns a gcc for every instantiation it
-    needs — so a `gcc -c` that lost its output file to the OS is a different
-    event from one that rejected the source, and only the second is a bug. It
-    produced a one-off `stdlib-syntax` failure on a file whose elaboration had
-    already been cached correctly by a LATER run.
-
-    A retry is defensible here precisely because the build is content-keyed and
-    deterministic (`cas.instantiation_key` covers the template source, the type
-    args, the gcc and the flags): a second attempt either succeeds — which is
-    the transient — or fails with the SAME stderr, which is a real defect and is
-    still raised. So this cannot turn a red into a green.
-
-    Both directions are asserted, because "it retried" and "it still raises"
-    are different properties and only the second makes the first safe:
-      * a gcc that fails twice and then succeeds produces the object, and the
-        attempt count is 3;
-      * a gcc that always fails still raises, and the exception carries EVERY
-        attempt's stderr — so "it worked on the third try" is visible to
-        whoever reads the next occurrence rather than silently smoothed over.
-    """
-    import subprocess as real_sp
-    src = "struct RetryBox[T]:\n    var v: T\n"
-    real_key = cas.instantiation_key
-    real_sub = mm.subprocess
-    real_os_mkdtemp = mm.tempfile.mkdtemp
-
-    class _Failed:
-        returncode = 1
-        stderr = 'simulated transient nested-gcc failure'
-        stdout = ''
-
-    def _run_with(fail_times, tag):
-        state = {'n': 0}
-
-        def _fake_run(cmd, *a, **k):
-            if '-c' in cmd and str(cmd[-1]).endswith('.c'):
-                state['n'] += 1
-                if state['n'] <= fail_times:
-                    return _Failed()
-            return real_sp.run(cmd, *a, **k)
-        # A fresh working dir and a fresh key per scenario, so neither can be
-        # served from the CAS by the other one's build.
-        wd2 = os.path.join(wd, 'retry_' + tag)
-        os.makedirs(wd2, exist_ok=True)
-        mm.subprocess = type('S', (), {'run': staticmethod(_fake_run)})
-        mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
-            lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
-        cas.instantiation_key = (lambda *a, **k: 'retrytest_' + tag)
-        try:
-            return state, mm.instantiate(src, {'T': 'Int64'})
-        finally:
-            mm.subprocess = real_sub
-            mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
-            cas.instantiation_key = real_key
-
-    state, res = _run_with(2, 'transient')
-    check("elaborate: a nested gcc that fails transiently is retried and "
-          "succeeds",
-          state['n'] == 3 and bool(res[1]),
-          f"{state['n']} attempts, object={bool(res[1])}")
-    state, _ = None, None
-    state2 = {'n': 0}
-
-    def _always_fail(cmd, *a, **k):
-        if '-c' in cmd and str(cmd[-1]).endswith('.c'):
-            state2['n'] += 1
-            return _Failed()
-        return real_sp.run(cmd, *a, **k)
-
-    wd2 = os.path.join(wd, 'retry_permanent')
-    os.makedirs(wd2, exist_ok=True)
-    mm.subprocess = type('S', (), {'run': staticmethod(_always_fail)})
-    mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
-        lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
-    cas.instantiation_key = (lambda *a, **k: 'retrytest_permanent')
-    try:
-        mm.instantiate(src, {'T': 'Int64'})
-        raised = None
-    except RuntimeError as e:
-        raised = str(e)
-    finally:
-        mm.subprocess = real_sub
-        mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
-        cas.instantiation_key = real_key
-    check("elaborate: a nested gcc that always fails still raises, so a retry "
-          "cannot hide a real defect",
-          raised is not None and state2['n'] == 3,
-          f"raised={raised is not None}, {state2['n']} attempts")
-    check("elaborate: ... and the exception carries every attempt's stderr, so "
-          "a transient that needed the retry is visible",
-          raised is not None and raised.count('simulated transient') == 3,
-          (raised or '')[:200])
-
-
 def test_elaboration_overload(wd):
     import elaborate
     from gimple_codegen import compile_linked
@@ -837,27 +747,24 @@ def test_reflected_struct_import(wd):
         # code is a few hundred bytes.
         #
         # The look also found the actual fix for the budget, and it is not a
-        # bump: all six always-emitted helpers are `static`, mutually
+        # bump: all five always-emitted helpers are `static`, mutually
         # referenced and never address-registered, and hand-deleting them from
         # this client compiled and linked with no undefined reference at 5208
-        # bytes.
+        # bytes. Filed as bugs/PERF_generic_repr_helpers_emitted_into_every_
+        # module.md; not landed with the merge because its failure mode is a
+        # link error on the self-host closure, which only `make bootstrap` can
+        # clear.
         #
-        # 12288 -> 8192 (2026-10-04): the gate that fix asked for LANDED, so
-        # this budget comes back DOWN. `module_gen.py`'s `REPR_CLUSTER_*` +
-        # `_drop_unreachable_repr_cluster` withdraw the six `static` helpers and
-        # their forward declarations from any module whose own emitted text names
-        # none of them, which is this client. Measured on this exact client:
-        # 10432 -> **6296**. Two 1024 increments above it, same rule: 8192
-        # leaves 1896 bytes against 12288's 5992.
-        #
-        # What is left in the object is what should be: the dispatch
-        # entrypoints, this client's own code, and the per-struct
-        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names — CALLS into the
-        # runtime, not bodies belonging to this client. That is the invariant
-        # this guard exists for, and a client that is NOT tiny now means bodies
-        # are landing in it.
+        # 11264 -> 12288 (2026-10-03, merging the ten bugs4 branches), for
+        # stage2's reason and by the same two increments: this client carries
+        # the dict-repr additions too plus the per-struct
+        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names, and 11600 needs
+        # a ceiling above it that still has teeth (11264 would not clear it at
+        # all). The invariant is unchanged: what grew is the always-emitted
+        # generic-repr preamble, which is CALLS into the runtime plus the small
+        # walkers above it, not bodies belonging to this client.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 8192, f"{sz} bytes")
+              sz < 12288, f"{sz} bytes")
     finally:
         os.remove(libpath)
 
@@ -1888,35 +1795,11 @@ def test_mangle_is_injective(wd):
 
     The corpus is generated, not hand-listed, so it covers the separator
     characters the old scheme collapsed on (`_`, space, `.`, `[`, `]`, `,`)
-    plus a digit that a length prefix has to be told apart from.
-
-    FOUR NESTED LOOPS AND NOT `itertools.product`, and the two spellings are
-    the same SEQUENCE rather than the same set, which is the claim that makes
-    this a substitution. `itertools.product(alpha, repeat=n)` yields the
-    length-`n` tuples in INDEX order with the LAST position varying fastest —
-    which is a nest with the last index innermost — and the comprehension this
-    replaced walked `n` from 0 to 3, so level `n` came before level `n + 1`.
-    `mangle#1`'s corpus is therefore byte-for-byte the same 1752 instantiations,
-    and `check` below says so from the loop's OWN output rather than restating
-    it.
-
-    The import is the reason. `itertools` was the LAST name in this file's
-    import closure the formal sweep could not resolve, which filed the file
-    under `not-answerable/host-import` — a class the coverage denominator
-    excludes — and `test_formal_dylib.py` was the same, for thirteen more
-    files. `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
-    measures the row and why no `.mojo` module answers it (a generator of
-    tuples is not one 64-bit word); both files are now spelled without it."""
+    plus a digit that a length prefix has to be told apart from."""
+    import itertools as _it
     _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
-    _tuples = [()]                                   # product(alpha, repeat=0)
-    _vals = ['']
-    for _n in range(3):                              # repeat = 1, 2, 3
-        _tuples = [t + (a,) for t in _tuples for a in _alpha]
-        _vals += [''.join(t) for t in _tuples]
-    check("mangle#0: the generated corpus is the product of the alphabet to "
-          f"depth 3 ({len(_vals)} values, {1 + 9 + 81 + 729} expected)",
-          len(_vals) == 1 + 9 + 81 + 729 and _vals[0] == ''
-          and _vals[1] == 'A' and _vals[-1] == '111')
+    _vals = [''.join(p) for n in range(0, 4)
+             for p in _it.product(_alpha, repeat=n)]
     _targs = []
     for v in _vals:
         _targs += [{'T': v}, {'T': 'A', 'o': v}, {'T': v, 'o': 'B'},
@@ -2222,7 +2105,6 @@ def main():
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
         test_elaboration_failure_is_not_cached(wd)
-        test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)

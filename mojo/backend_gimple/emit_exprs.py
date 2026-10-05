@@ -41,11 +41,15 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
-from mojo.middle.module_shared import builtin_module_constant, bare_global_read_plan
-# `_BOXED_CONTAINER_CTYPES` now lives in `mojo.middle.types` next to
-# `_CONTAINER_KIND_TYPES` (see its own comment for why it left this file) and
-# is imported under its own name: `import *` would drop the leading underscore.
-from mojo.middle.types import _BOXED_CONTAINER_CTYPES
+from mojo.middle.module_shared import builtin_module_constant
+
+# The Mojo container types a module-level global is DECLARED with. Every one of
+# them is stored in the `_<mod>_globals` struct as a boxed `int64_t`, which is
+# the rule the three read/route sites below share — so it is named once here
+# rather than written out at each of them (they were three copies of one list,
+# and the new `_imp_pending` gate needed the same answer to decide whether a
+# type is derivable without the owner's own field triple).
+_BOXED_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -645,17 +649,134 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         gen._func_value_names[t] = name
         return 'void *', t
     # Module-level global variable (persistent type known across functions).
-    # Also catches `global x` declarations inside functions
-    # (_func_declared_globals). The DECISION — which module's
-    # `_<mod>_globals.<name>` field a bare read of `name` loads, and
-    # whether it loads one at all — is `module_shared.bare_global_read_plan`'s,
-    # not this function's: `emit_infra._compr_target_is_shadowed` asks the same
-    # question to decide whether a comprehension target may reuse the C
-    # variable that a bare read of that name would resolve to, and two
-    # derivations of one rule is how they drift apart.
-    (_gwins, _imp_home, _imp_field, _imp_fields, _imp_pending,
-     _global_owner_mod) = bare_global_read_plan(gen, name)
-    if _gwins:
+    # Also catches `global x` declarations inside functions (_func_declared_globals).
+    #
+    # A BARE (unqualified) identifier can only legitimately refer to a
+    # global belonging to THIS module — real Python scoping never lets
+    # a plain name resolve to some OTHER module's global (that needs
+    # `othermodule.name` qualification, handled entirely separately by
+    # MemberExpr lowering). `_global_var_types`/`_global_to_module` are
+    # shared, whole-transitive-tree-scoped dicts (populated once per
+    # name, first writer wins, across every module ever compiled in
+    # the closure — see gen_module's "Phase 1.7 pre-scan" and "Module-
+    # level globals" passes) — deliberately a superset for cross-
+    # module `mod.attr` MEMBER access to work regardless of which
+    # level first discovers a given module. Using that same superset
+    # to decide whether a BARE name is a global at all is wrong: if
+    # some OTHER module (anywhere in the whole closure) happens to
+    # ALSO declare a same-named top-level global, `_global_to_module`
+    # already recorded which module actually owns it — skip this
+    # branch (fall through to the ordinary "unknown identifier"
+    # placeholder below) unless it's OUR OWN module's global. Found
+    # via `fire.py`'s self-host build: a lambda inside gimple_codegen.
+    # py's own `compile_to_gimple_cached` closing over its enclosing
+    # function's `filename` PARAMETER (an ordinary, if imperfectly-
+    # supported, closure capture — see the sibling `mojo_src`/
+    # `do_imports` captures right next to it, which already correctly
+    # fall through to the same placeholder) got misresolved as
+    # `_gimple_codegen_globals.filename` — a field gimple_codegen.py
+    # never declares — because `fire_compiler.py`'s OWN unrelated
+    # top-level `filename = sys.argv[1] if ... else "<stdin>"` (inside
+    # its `if __name__ == "__main__":` block) is also named `filename`
+    # and is reachable via the whole-tree scan. See bugs/CODEGEN_
+    # generator_function_Lib_weakref.md.
+    # Direct attribute access (not `getattr(gen, '_global_to_module', {})`):
+    # the field carries an annotation-seeded `char *` value type, so `.get`
+    # returns a real string here instead of a boxed int64_t that compares
+    # unequal to every module name.
+    _g2m = gen._global_to_module
+    _global_owner_mod = _g2m.get(name) if name in _g2m else None
+    # Explicit `len(...) > 0`, not `X or "root"`: the self-hosted `or` keeps
+    # an empty-but-non-null `char *` rather than falling through to "root",
+    # so `_this_mod` was "" and disagreed with the "root"-keyed owner map —
+    # a bare `global counter` read then fell to the `(int64_t)0` placeholder.
+    _this_mod = gen.module_name if len(gen.module_name) > 0 else "root"
+    # `name in gen._own_global_var_types`: THIS compile's own Phase-1.7 scan
+    # concluded a type for `name` as a module global. Unambiguous "it's ours"
+    # even when the shared, name-keyed `_global_to_module` superset reads
+    # back a boxed/garbage owner under self-compile (`_global_owner_mod ==
+    # _this_mod` then spuriously fails and a bare `global counter` read fell
+    # through to `(int64_t)0`). `_flatten_resolved_conditionals` already
+    # drops an imported module's `if __name__ == '__main__':`-guarded
+    # top-level globals from this scan, so it stays this-module-scoped.
+    _owned_here = name in gen._own_global_var_types
+    # `_as_str(_global_owner_mod)`: the shared `_global_to_module` dict's
+    # VALUE erases to a boxed pointer on the self-hosted compiled path, so
+    # a bare `_global_owner_mod == _this_mod` compared a stale heap address
+    # to a fresh "root" string and always failed — the bare-name global
+    # read then fell to `(int64_t)0` (`import sys` receivers in
+    # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
+    # `_imp_home`: the module this one IMPORTED the bare `name` from with a
+    # top-level `from b import K`, or '' when there is no such import. This is
+    # the ONE case in which a bare name is legitimately not this module's own
+    # field and still has to load a globals struct: real Python binds b's
+    # object into this module's namespace, so `K` here IS `_b_globals.K`. It
+    # is deliberately NOT derived from `_global_to_module` -- that map is
+    # whole-tree and name-keyed, so it would also answer for a sibling's
+    # same-named global this module never imported, which is precisely the
+    # mis-resolution the `_owned_here` gate above exists to refuse (the
+    # `filename` case in its own comment). The recorded home is additionally
+    # required by `_gmi_scan_imported_global_homes` to be a module whose
+    # struct provably DECLARES the field, so this cannot route a read to a
+    # field that does not exist.
+    #
+    # `_as_str` on both halves for the same reason as everywhere else in this
+    # file: a boxed `char *` read back out of a dict compares unequal to every
+    # real name on the self-hosted compiled path.
+    _imp_home = _as_str(getattr(gen, '_own_imported_global_home', {}).get(name) or '')
+    _imp_field = _as_str(getattr(gen, '_own_imported_global_field', {}).get(name) or '')
+    # The owner's own `(c_decl, mojo_type)` triple -- the exact pair its struct
+    # typedef, its initializer and its `_<mod>_mojo_global_get_<name>`
+    # accessor were generated from, so the load agrees with the field BY
+    # CONSTRUCTION. Same source, and the same argument, as the `submod.GLOBAL`
+    # branch of `_lower_MemberExpr` further down; this is the bare-name half
+    # of that pair. `None` when the name is not an imported value, and then
+    # everything below behaves exactly as it did before.
+    _imp_fields = gen._module_global_field_type(_imp_home, _imp_field) \
+        if (_imp_home and _imp_field) else None
+    # The owner's struct is registered at the END of the owner's own
+    # `gen_module_impl`, so in a closure with an import CYCLE the importer
+    # can be compiled while the owner is still an ancestor on the compile
+    # stack and `_module_global_field_type` has no entry to answer from.
+    # `_gmi_scan_imported_global_homes` records the (home, field) pair
+    # provisionally in exactly that case; this is the flag that lets the
+    # read act on it, and it is deliberately narrow — ALL of:
+    #
+    #   * the owner is still unregistered, so "no field" cannot mean "the
+    #     owner provably declares none" (the gate's load-bearing case, which
+    #     must keep refusing);
+    #   * the owner's own answer still does not exist (if it does, `_imp_fields`
+    #     is the strictly better source and this never applies);
+    #   * the name is one `_gmi_scan_imported_global_homes` recorded, so this
+    #     module really did `from <owner> import <field>` and did not
+    #     redeclare it;
+    #   * the shared `_global_var_types` conclusion — Phase 1.7's own reading
+    #     of the OWNER's top-level assignment — is a CONTAINER type, whose C
+    #     storage is the boxed `int64_t` every container global is declared
+    #     with (see the `gtype in _BOXED_CONTAINER_CTYPES` rule below). That
+    #     restriction is what makes this safe without the owner's triple: a
+    #     scalar's field C type (`char *`, `int`, `_Bool`, a struct pointer)
+    #     is NOT derivable from the Mojo type alone, so those keep the
+    #     placeholder rather than guess.
+    #
+    # Measured on the self-host closure without this: `gimple_codegen.py`'s
+    # `_run_pipeline` reads `DESUGARED_GENEXP_NAMES` (a `list` global in
+    # `fire_compiler.py`, populated by `desugar_genexps` two statements
+    # earlier) and got the unknown-identifier `(int64_t)0`, so the compiled
+    # binary's `--dump-full` of a TWO-LINE program died in
+    # `mojo_iter_boxed_list` with `TypeError: object is not iterable`.
+    # `len(...) > 0` on both halves, NOT bare truthiness: this file's own
+    # rule (see `_this_mod` above) is that on the self-hosted compiled path a
+    # boxed `char *` is truthy even when it is the empty string, and an empty
+    # `_imp_home` reaching the route below would emit `__globals.NAME`.
+    _imp_pending = (len(_imp_home) > 0 and len(_imp_field) > 0
+                    and _imp_home not in gen._module_globals
+                    and _imp_fields is None
+                    and gen._global_var_types.get(name) in _BOXED_CONTAINER_CTYPES)
+    if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod
+            or _owned_here or _imp_fields is not None or _imp_pending) and \
+            (name in gen._func_declared_globals or name not in gen.var_types) \
+            and (name in gen._global_var_types or _imp_fields is not None):
         # WHICH module's `_<mod>_globals.<name>` field this read must load, in
         # strict precedence order:
         #   1. THIS module's own struct, whenever it declares the name (the
@@ -3971,54 +4092,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 ip = gen._new_val('int64_t', f'(int64_t){_v}')
                 cp = gen._new_val('char *', f'(char *){ip}')
                 return cp
-
-            def _is_undecided_word(typ, var, is_other_str_lit):
-                """True for the int64_t slot whose REPRESENTATION is undecided
-                here: not statically a char, not tracked as holding a pointer,
-                and with no string LITERAL on the other side (a literal already
-                forces the pointer cast above, which is the BUG-2026-048 fix).
-
-                Such a slot holds either a boxed string pointer or a byte code,
-                and the difference decides the comparison completely -- which is
-                why the two are asked at RUN time instead of guessed here."""
-                if typ not in ('int', 'int64_t'):
-                    return False
-                actual = gen._actual_types.get(_as_str(var))
-                if actual == 'char' or (actual and actual.endswith(' *')):
-                    return False
-                return not is_other_str_lit
-
-            lw = _is_undecided_word(lt, lv, rv_is_str_lit)
-            rw = _is_undecided_word(rt, rv, lv_is_str_lit)
-            if lw != rw and (lt == 'char *' or rt == 'char *'):
-                # Exactly one side is an undecided word and the other a string
-                # VALUE (`char *`): `mojo_str_eq_word` answers it from the word
-                # itself. `_to_char_star`'s char-code path used to answer it by
-                # truncating the word to a byte, so a boxed string compared
-                # equal only to whichever 1-character string shares its low
-                # byte -- and `fire_compiler.py`'s `_strip_inline_comment` /
-                # `_split_on_separators` leave a single-quoted string open on
-                # exactly that comparison, so the `;` after ``in_str !='`'``
-                # read as string content and the self-hosted parser refused
-                # the file with `Unexpected SEMICOLON(';')`. The byte-code arm
-                # of the runtime helper is the SAME answer this path used to
-                # give for a real char (and it answers with `mojo_cstr_cmp`'s
-                # own convention, 0 = equal), so nothing that was right here
-                # changes.
-                if lw:
-                    s_side = _to_char_star(rt, rv, True)
-                    eq_t = gen._call_expr(
-                        'int', 'mojo_cstr_cmp_word',
-                        [('char *', s_side), ('int64_t', _as_str(lv))])
-                else:
-                    s_side = _to_char_star(lt, lv, True)
-                    eq_t = gen._call_expr(
-                        'int', 'mojo_cstr_cmp_word',
-                        [('char *', s_side), ('int64_t', _as_str(rv))])
-                t = gen._new_temp('_Bool')
-                cmp = '== 0' if op == '==' else '!= 0'
-                gen._emit(f'  {t} = {eq_t} {cmp};')
-                return '_Bool', t
             ls = _to_char_star(lt, lv, rv_is_str_lit)
             rs = _to_char_star(rt, rv, lv_is_str_lit)
             eq_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
@@ -4620,41 +4693,18 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
 def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     """Lower `<template> % <dict>` to the runtime dict-keyed formatter.
 
-    Both operands are lowered normally (side effects preserved), then EACH
-    is coerced to the parameter type its callee declares: the LHS to `char *`,
-    the RHS to `MojoDict *`. A no-op cast for a genuinely-typed operand, and
-    for an int64_t-mistyped one (the pervasive unknown-call-return fallback
-    typing, and what every CONTAINER global reads back as — see
-    `bare_global_read_plan`'s boxed-`int64_t` rule) the cast is still
-    semantically safe because `% dict` on a non-dict RHS is a TypeError in
-    real Python — no VALID program ever reaches this call with a real integer
+    Both operands are lowered normally (side effects preserved), then the
+    LHS is coerced to `char *`: for a genuinely char*-typed template that
+    is a no-op cast, and for an int64_t-mistyped template (the pervasive
+    unknown-call-return fallback typing) the cast is still semantically
+    safe because `% dict` on a non-string LHS is a TypeError in real
+    Python — no VALID program ever reaches this call with a real integer
     in the slot. The alternative (refusing / falling through) keeps
-    emitting invalid GIMPLE `%` on MojoDict*, which cannot link.
-    The RHS cast is through its own temp and not inline in the argument list,
-    because that is the shape the LHS above already uses and the shape
-    GIMPLE has been shown to accept in a call argument (`_compr_list_loop`'s
-    `it_val` notes the same constraint for a different position, an
-    assignment RHS). Emitting the boxed word straight through was a build
-    failure: "passing argument 2 of 'mojo_str_format_dict' makes pointer from
-    integer without a cast", which is what stopped
-    `gimple_dict_repr_kinds_agree_with_cpython` from building at all — the
-    whole program, including the four lines above it that were already right."""
+    emitting invalid GIMPLE `%` on MojoDict*, which cannot link."""
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     lvs = lv if lt == 'char *' else gen._new_val('char *', f"(char *){lv}")
-    rvs = rv if rt == 'MojoDict *' else gen._new_val(
-        'MojoDict *', f"(MojoDict *){rv}")
-    # `_mojo_repr_dict`, the GENERATED per-TU dict walker, as the third
-    # argument: it is how an UNKEYED spec (`'%s' % d`) renders the mapping,
-    # which CPython defines as `str(d)`. It travels in because this runtime
-    # cannot render a dict — each slot's kind and the recorded `val_repr` are
-    # only in the generated block — which is the same bargain
-    # `MojoDict.val_repr` and `mojo_list_set_elem_repr` make, and the reason
-    # there is still one implementation of "what a dict looks like". A NULL
-    # is tolerated by the callee (it degrades to copying the spec through),
-    # so a caller in a TU with no reflection block is not made worse by this.
-    t = gen._new_val('char *',
-                     f"mojo_str_format_dict ({lvs}, {rvs}, _mojo_repr_dict)")
+    t = gen._new_val('char *', f"mojo_str_format_dict ({lvs}, {rv})")
     return 'char *', t
 
 
@@ -5541,10 +5591,8 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # container table is already keyed by the container's lowered name
         # (`t`), so recording it is one call. A non-callable element is a
         # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret` — the ONE helper for
-        # "a callable stored in a container, so a later `c[k](...)` can call
-        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
-        # and `gimple_call_through_a_list_subscript_callee` pin it.
+        # `ginf.note_container_callable_ret`; the dict half of the same
+        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
         ginf.note_container_callable_ret(gen, t, ev, et, el)
         # A list whose elements are TUPLES (`[(a, b), (c, d)]`) — record
         # the tuple's own element type so a later `for x, y in lst:`
@@ -5884,26 +5932,30 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
-    # THE store, for every value kind — including a `char *`, whose setter arm
-    # used to live HERE and at two other sites and at neither of the other two
-    # consistently (see `emit_dict_int_value_store`'s own comment; the fourth
-    # site, an opaque-receiver `d[k] = v`, had none at all and stored a pointer
-    # with `kind == 0`). It picks the setter from the key's domain (`bytes_` or
-    # not), from `is_python_bool_expr` — the one bool predicate every consumer
-    # uses — and from the value's own type, so a bool VALUE lands in a slot of
-    # its own (`mojo_dict_set_bool`, `kind == 3`) and this dict's OTHER values
-    # are untouched. This arm used to emit the whole-dict marker
-    # `mojo_mark_dict_bool_values` instead, which the runtime deleted with that
-    # per-slot replacement, so `{'k': True}` compiled to a call to a function
-    # that does not exist — a hard build failure on an ordinary literal.
-    #
-    # `_kw_key` needs no spelling here: the shared store emits through
-    # `_emit_call`, which is what resolves the `_char_to_cstr` placeholder for
-    # a container key by swapping in the `_kw` twin. That is the reason IT
-    # uses `_emit_call` and not a raw emit, and it is why handing the `char *`
-    # case to it changed no generated text — the raw emit this arm used for a
-    # non-container key and `_emit_call` agree there.
-    gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
+    # A FLOAT is not handled here: `emit_dict_int_value_store` is the one store
+    # of a NON-STRING value, and a float is one of the kinds it owns (it used
+    # to be this site's own float arm, which was a second spelling of it and
+    # the only one of the six that got the `kind == 1` tag right).
+    if vt == 'char *':
+        if vv.startswith('_slit_'):
+            vv_tmp = gen._new_val('char *', f"{vv}")
+            vv = vv_tmp
+        if _kw_key:
+            gen._emit_call('void', '', 'mojo_dict_set_str',
+                           [('MojoDict *', t), ('char *', kv), ('char *', vv)])
+        else:
+            gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
+    else:
+        # The ONE shared non-str dict store: `emit_dict_int_value_store`
+        # picks the setter from the key's domain (`bytes_` or not) and from
+        # `is_python_bool_expr` — the one bool predicate every consumer uses —
+        # so a bool VALUE lands in a slot of its own (`mojo_dict_set_bool`,
+        # `kind == 3`) and this dict's OTHER values are untouched. This arm
+        # used to emit the whole-dict marker `mojo_mark_dict_bool_values`
+        # instead, which the runtime deleted with that per-slot replacement,
+        # so `{'k': True}` compiled to a call to a function that does not
+        # exist — a hard build failure on an ordinary literal.
+        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
@@ -6036,10 +6088,8 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # container table is already keyed by the container's lowered name
         # (`t`), so recording it is one call. A non-callable element is a
         # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret` — the ONE helper for
-        # "a callable stored in a container, so a later `c[k](...)` can call
-        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
-        # and `gimple_call_through_a_list_subscript_callee` pin it.
+        # `ginf.note_container_callable_ret`; the dict half of the same
+        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
         ginf.note_container_callable_ret(gen, t, ev, et, _el)
         # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
         # needs the same two maps `_lower_list_literal` records for

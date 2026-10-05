@@ -307,39 +307,30 @@ def gen_alu(rng, free):
 def gen_moves(rng, free):
     """The move-immediate family, one encoder per width.
 
-    `formal/arm64.py` has TWO `movz` encoders, one per width, and they are not
-    interchangeable: `encode_movz_xd_imm` is the 64-bit one (base `0xd2800000`)
-    and `encode_movz_wd_imm` is the 32-bit one (base `0x52800000`), which is
+    `formal/arm64.py` has TWO `movz` encoders and they are not
+    interchangeable: `encode_movz_xn_imm` is the 64-bit one (base `0xd2800000`)
+    and `encode_movz_xd_imm` is the 32-bit one (base `0x52800000`), which is
     what every `arm64_codegen.py` call site emits. The pool pairs each encoder
     with the WIDTH ITS OWN BASE ENCODES, because the alternative — pairing a
     32-bit encoder with the text `movz xN` — makes every one of those draws an
     `ENC-MISMATCH` and buries the real findings under a defect in the pool.
-
-    **The two names used to be the other way round**, which is why the pairing
-    is worth stating: the 32-bit encoder was called `encode_movz_xd_imm` and the
-    64-bit one `encode_movz_xn_imm` — one named after a WIDTH and one after a
-    PARAMETER, both meaning the opposite of what they said — so pairing by
-    NAME gave the wrong width for both and `ENC-MISMATCH 8 of 60` on the first
-    sweep. Each is named for the width it encodes now, and
-    `test_arm64_encoders.py` checks both against the assembler on every
-    register and every immediate, so the names cannot drift back without that
-    suite going red — which is to say this pool's rule is now also the encoder
-    table's, rather than a convention this one file remembers.
+    (`bugs/FORMAL_arm64_movz_encoder_is_named_xd_and_encodes_wd.md` is the
+    encoder half of this, measured by the same check.)
     """
     d, n = _dst(rng, free), _r(rng, free)
     i = rng.randrange(0x10000)
     k = rng.randrange(5)
     if k == 0:
-        return "movz x%d, #%d" % (d, i), A.encode_movz_xd_imm(d, i)
+        return "movz x%d, #%d" % (d, i), A.encode_movz_xn_imm(d, i)
     if k == 1:
-        return "movz w%d, #%d" % (d, i), A.encode_movz_wd_imm(d, i)
+        return "movz w%d, #%d" % (d, i), A.encode_movz_xd_imm(d, i)
     if k == 2:
         return "mov x%d, x%d" % (d, n), A.encode_mov_zr_xn(d, n)
     if k == 3:
         p = 16 * rng.randrange(4)      # the encoder's `pos` is a BIT offset
         return "movk x%d, #%d, lsl #%d" % (d, i, p), \
             A.encode_movk_xd_imm(d, i, p)
-    return "movn w%d, #%d" % (d, i), A.encode_movn_wd_imm(d, i)
+    return "movn w%d, #%d" % (d, i), A.encode_movn_xd_imm(d, i)
 
 
 def gen_flags(rng, free):
@@ -385,87 +376,6 @@ def gen_muldiv(rng, free):
     if k == 3:
         return "sdiv x%d, x%d, x%d" % (d, n, m), A.encode_sdiv_xd_xn_xm(d, n, m)
     return "neg x%d, x%d" % (d, n), A.encode_neg_xd_xn(d, n)
-
-
-def gen_branches(rng, free):
-    """The pc-only branches, each to the NEXT instruction.
-
-    Every branch here targets `pc + 4`, which is what the x86 sibling's pool
-    does for `jcc` (`"jcc rel8:0"` there, with the same reason given). It is
-    not timidity: a branch that SKIPS an instruction makes the two engines take
-    different numbers of steps to reach the end of the case, and `arm64_steps`
-    is driven by a FIXED step count (`Case.n`), so the skipping engine runs off
-    the end of the code buffer and the model answers `none` — a refusal that
-    says nothing about the branch. A branch to the next instruction cannot
-    diverge, so the case still checks the two things a straight-line harness can
-    check about a branch: that `arm64_step` decodes it at all (a `NOSTEP` here
-    is a refusal of an instruction the backend emits, which is the worst
-    failure this harness has), and that the pc ends where both engines agree it
-    should. The CONDITION is covered by `gen_select`'s `CSET`, which reads the
-    same flags into a register the case then compares.
-
-    `B.cond`, `TBZ` and `TBNZ` therefore read the flags the case's leading `cmp`
-    established (`gen_flagseed`), so the flags under test are equal on both
-    sides by construction rather than by arrangement.
-
-    `BL` is here as the unconditional pair with `BL`'s link register left out on
-    purpose: X30 is `pc + 4`, a pc-RELATIVE value, and the two engines' pcs
-    differ by the load slide, so the harness cannot compare it. `tools/
-    formal_isa_census.py`'s `EXCLUSIONS` says the same thing for `encode_bl`.
-    """
-    n = _r(rng, free)
-    k = rng.randrange(6)
-    if k == 0:
-        # `encode_b`'s offset is in FOUR-BYTE UNITS (imm26 counts words) while
-        # every other branch encoder here takes bytes, so `+4` bytes is
-        # `encode_b(1)` and `encode_bl(1)`.
-        return "b .+4", A.encode_b(1)
-    if k == 1:
-        return "bl .+4", A.encode_bl(1)
-    if k == 2:
-        return "cbz x%d, .+4" % n, A.encode_cbz_xn(4, n)
-    if k == 3:
-        return "cbnz x%d, .+4" % n, A.encode_cbnz_xn(4, n)
-    if k == 4:
-        c = rng.choice(CONDS)
-        return "b.%s .+4" % c, A.encode_b_cond(c, 4)
-    bit = rng.randrange(32)
-    mn, enc = ("tbz", A.encode_tbz_xn_bit) if rng.random() < 0.5 else \
-        ("tbnz", A.encode_tbnz_xn_bit)
-    return "%s x%d, #%d, .+4" % (mn, n, bit), enc(bit, n, 4)
-
-
-def gen_flagged_alu(rng, free):
-    """The ALU forms that SET FLAGS, and the two SCALED register adds.
-
-    `ADDS` is the signed-overflow test for `+` — `formal/model.py::
-    int_overflow_traps` asks for it — and it shares the model branch with
-    `CMN` (`Rd = 31` is the same word with the result discarded), which is why
-    the census's LEAN column already reads `yes` for it. `SMULH` is the other
-    half of the overflow question and the model has NO arm for it, so a case
-    that draws it is a `NOSTEP`: that is the finding, not a pool bug, and
-    `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` is where the model side
-    is written down.
-    """
-    d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
-    imm = rng.randrange(0x1000)
-    k = rng.randrange(6)
-    if k == 0:
-        return "adds x%d, x%d, x%d" % (d, n, m), A.encode_adds_xd_xn_xm(d, n, m)
-    if k == 1:
-        return ("smulh x%d, x%d, x%d" % (d, n, m),
-                A.encode_smulh_xd_xn_xm(d, n, m))
-    if k == 2:
-        return ("add x%d, x%d, x%d, lsl #3" % (d, n, m),
-                A.encode_add_xd_xn_xm_lsl3(d, n, m))
-    if k == 3:
-        return ("add x%d, x%d, x%d, lsl #4" % (d, n, m),
-                A.encode_add_xd_xn_xm_lsl4(d, n, m))
-    if k == 4:
-        return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
-                A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
-    return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
-            A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
 
 
 def gen_select(rng, free):
@@ -591,29 +501,11 @@ def gen_memreg(rng, free):
 #:     every one of them the harness's fault and none of them a fact about
 #:     `arm64_step`. `arm64_step` has arms for both (0xa9800000, 0xa8c00000) and
 #:     they are untested here.
-#:   * `LDP Xd1, Xd2, [<Rn|SP>, #imm]` (signed offset, 0xa9400000), which the
-#:     model DOES step. No wired encoder emits it, and that is now a decision
-#:     with a reason rather than an accident. The encoder that claimed it under
-#:     the name `encode_ldp_xn_xt_sp` emitted something else: it never set the
-#:     base register, overwrote the base field with its first argument, packed
-#:     the displacement into `Rt2`'s field rather than `imm7`'s, and took its
-#:     arguments in the opposite order from the mnemonic — a single-register
-#:     load off a REGISTER base, so a caller that used it would have got a
-#:     proof about one instruction (the model's 0xa9400000 arm) and an image
-#:     containing another. It was DELETED, because nothing wants the
-#:     instruction — frame traffic is the writeback pairs above and a single
-#:     SP-relative word is `encode_ldr_xt_sp_imm` — and a correct encoder no
-#:     lowering calls is a table entry rather than an instruction any image can
-#:     contain. What replaced it is `encode_ldp_xt1_xt2_rn`, byte-checked against
-#:     `as` in `test_arm64_encoders.py` and STILL unwired, so this pool does not
-#:     draw it either. The model's own side had the same defect and is now
-#:     correct: its three field reads were all wrong (the base register read as
-#:     a destination, the first destination read as the second, and the
-#:     displacement read out of `imm7 | Rt2` as an unsigned 12-bit count of
-#:     eighties), and `lib/ProofLib.lean` now shares the pre-index STP arm's
-#:     `imm7`-at-21:15 reading. This absence is therefore permanent until a
-#:     lowering wants the form, and the byte-exact `ldp`/`stp` cases in
-#:     `test_arm64_encoders.py` are what would catch it if one landed wrong.
+#:   * `LDP Xd1, Xd2, [SP, #imm]`, which the model DOES step (0xa9400000). No
+#:     wired encoder emits it, so a pool built from the wired encoders cannot
+#:     produce it — and the one encoder that claims to (`encode_ldp_xn_xt_sp`)
+#:     emits something else: see
+#:     `bugs/FORMAL_arm64_ldp_sp_encoder_emits_a_single_register_load.md`.
 MIXES = {
     "alu": (gen_alu, gen_moves),
     "flags": (gen_flags, gen_alu),
@@ -623,18 +515,6 @@ MIXES = {
     "ext": (gen_ext, gen_alu),
     "mem": (gen_mem, gen_alu),
     "memreg": (gen_memreg, gen_mem),
-    # The two mixes that closed the last of the census's FUZZ gaps on the forms
-    # a straight-line case can run: the pc-only branches
-    # (`tools/formal_isa_census.py`'s FUZZ column is an AST read of this file,
-    # so a form missing here is a form the fuzzer never executes) and the
-    # flag-setting / scaled ALU forms. What is still missing after these two is
-    # in `EXCLUSIONS` in that tool, each with the reason it is the harness's
-    # limit rather than work nobody did: `svc` traps in EL0, `adrp`/`blr`/`bl`
-    # produce or consume a pc-relative value the two engines cannot share, the
-    # SP write-back pairs move the window, and the IEEE-754 forms have no
-    # register file in a harness that dumps X0-X30.
-    "branch": (gen_branches, gen_flags),
-    "flagged": (gen_flagged_alu, gen_alu),
 }
 
 

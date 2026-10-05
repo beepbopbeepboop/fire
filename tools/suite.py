@@ -486,9 +486,9 @@ MEASURED_PEAK_GB = {
     'formal-target-queries':  (0.08, 'measured'),   # 5 s, 25 cases
     'formal-small-hosts':     (0.08, 'measured'),   # 5 s, 4 groups
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
-    'formal-method-param-field': (0.07, 'measured'),  # 21.5 s, 35 cases
+    'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
-    'formal-receiver-position': (0.07, 'measured'),  # 16 s, 38 cases (was "2 s, 12 cases")
+    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 33 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
@@ -544,20 +544,6 @@ MEASURED_PEAK_GB = {
     # that measures it.
     'formal-read-before-store': (0.08, 'measured'),  # 8.5 s, 61 cases, no builds
     'formal-receiver-spelling': (0.08, 'measured'),  # 2.8 s, 3 differential cases
-    # …and `formal-bracketed-method-field-set`, registered 2026-10-04 off the
-    # same measurement (`/usr/bin/time -l`, 3.73 s real, 52 559 872 B maximum
-    # RSS): 26 rows of a struct's field set, both backends for the last two, no
-    # Lean. It was in `test_suite.py`'s UNREGISTERED under the reason for the
-    # per-construct suites that build and run for MINUTES, which is not a
-    # measurement of this file.
-    'formal-bracketed-method-field-set': (0.05, 'measured'),  # 3.7 s, 26 rows
-    # …and `formal-reproducible`, measured on the day it was registered under
-    # `python3 tools/memslot.py --gb 8 -- python3 test_formal_reproducible.py`:
-    # 3.9 s, `PASS=7 FAIL=0`, memcap `peak 0.1 GB`. Twelve formal builds across
-    # both backends (four of them in child processes, so the peak is the tree's
-    # and not one process's) and no Lean — which is why it sits with the 4-7 s
-    # rows above rather than with the `formal-argparse` ones.
-    'formal-reproducible': (0.1, 'measured'),  # 3.9 s, 12 builds, both backends
     # …and `formal-field-walk`, the third file the estate check named, measured
     # 2026-10-04 the day it was registered. `/usr/bin/time -l` rather than
     # memcap's own poll, because the run is 0.08 s long and a poll with a 0.5 s
@@ -566,20 +552,6 @@ MEASURED_PEAK_GB = {
     # RSS of the tree), measured by the kernel instead of by a sampler, and
     # three runs agreed to within 2 MB: 30.4, 29.8, 30.3.
     'formal-field-walk': (0.03, 'measured'),  # 0.08 s, 3 cases, no builds
-    # …and `formal-host-import-wall`, the fourth file the estate check named
-    # (2026-10-04, with `work/formal27-6`'s tool), measured the same way:
-    # three runs, `/usr/bin/time -l` because 0.46 s is shorter than memcap's
-    # own poll interval. 0.46-0.47 s wall and 48.3-50.1 MB maximum RSS —
-    # `tiny` by 80x over its 4 GB ceiling.
-    'formal-host-import-wall': (0.05, 'measured'),  # 0.46 s, 17 cases
-    # …and `formal-per-struct-asks`, named by the same estate check on the same
-    # day and for the same reason — a test in NO bucket and NO `UNREGISTERED`,
-    # so seven assertions about a per-FUNCTION ask of a per-STRUCT table were
-    # red in nobody's tally. Measured the same way: 0.95-0.98 s and 42.1-42.5 MB
-    # maximum RSS over three runs, `tiny` by 95x, no build and no Lean (it
-    # measures `formal/model.py`'s own predicates with the per-struct tables
-    # stubbed).
-    'formal-per-struct-asks': (0.04, 'measured'),  # 0.96 s, 7 checks
     # `formal-glob` is the other file the same estate check named on 2026-10-04,
     # measured the same way (three runs, two instruments): 40.7 s wall and
     # 65.6 MB maximum RSS, which memcap's own poll rounds to the 0.1 GB its
@@ -1346,22 +1318,11 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'],
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
-# `build_stdlib_dylib.py` are in `extra` because the check READS them, not
-# because the scanner does: `test_runtime_header_scan.py`'s census check
-# compares the figures those three quote in prose with `runtime_abi()`, and an
-# edit to any of them can make it red (it went red four ways on 2026-10-04 that
-# way). Without them in the key, `cache=True` would replay a recorded PASS over
-# exactly the edits that break it — the failure mode `extra` exists for, and one
-# the `cache key: cached spec X hashes its own test` check cannot see, because
-# that check only asks whether the spec hashes ITS OWN test.
 test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
-            'runtime/fire_python.h',
-            'formal/model.py', 'bugs/FORMAL_known_limits.md',
-            'build_stdlib_dylib.py'],
+            'runtime/fire_python.h'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
@@ -1500,39 +1461,28 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # Marked `expect=` rather than `disabled=`, and the reason is what the two
-# markers are FOR: this job's answer is not known, only three of its cases are
+# markers are FOR: this job's answer is not known, only four of its cases are
 # (the TOTAL moves as cases are added — 378 when this was written, 380 after the
 # merge of work/bugs-segfaults-r2 — which is why it is prose and not the
-# count the runner CHECKS, which is the 3), and it is the only instrument in the
+# count the runner CHECKS, which is the 4), and it is the only instrument in the
 # tree that compiles a real Mojo program and EXECUTES it. `disabled=` would stop
-# every case for the sake of the 3, trading ~380 passing rows of signal for a
+# every case for the sake of the 4, trading ~376 passing rows of signal for a
 # tidier screen — which is the
 # coverage hole the marker exists to prevent, not create. Cost is not the
 # blocker `disabled=` is for either: 0.2 GB and 270 s is not a machine-sized
 # reservation being spent on a known answer.
 #
-# The 3 are not bugs in the branch that added them — each passes there — but
+# The 4 are not bugs in the branch that added them — each passes there — but
 # interactions the merge of ten branches exposed, so the marker is a count-
-# CHECKED claim: a 4th failure, or a fix that leaves 2, is a FAILURE rather
-# than silently absorbed, and a run where all 3 are fixed reports "marked
+# CHECKED claim: a 5th failure, or a fix that leaves 3, is a FAILURE rather
+# than silently absorbed, and a run where all 4 are fixed reports "marked
 # expect= … but it PASSES". Each has its reproduction and next step in
 # bugs/MERGE_bugs4_gimplerunner_four_remaining.md.
-#
-# The count was 4 until 2026-10-04 (`work/bugs7-1`). The fourth,
-# `gimple_dict_repr_kinds_agree_with_cpython`, was the last line of an otherwise
-# passing program: `'%s' % d` lowered its dict operand to an `int64_t` and
-# emitted it straight into a `MojoDict *` parameter — "passing argument 2 of
-# 'mojo_str_format_dict' makes pointer from integer without a cast", which is a
-# build failure and so took out the three correct lines above it. Both halves of
-# that are now right (the operand is coerced to the parameter type, the way the
-# LHS already was; and an unkeyed spec renders the mapping, because CPython's
-# rule for `'%s' % d` is `str(d)` — the doc's "CPython TypeError" claim was
-# measured false), and the row is green. The doc's §3 records what landed.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     expect='3 failing: compile-and-execute rows the merge of ten branches '
+     expect='4 failing: compile-and-execute rows the merge of ten branches '
             'left red — none fails on the branch that added it; see '
             'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
@@ -1558,24 +1508,8 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
 # Without those in the key a fix to emit_loops.py would serve a recorded PASS for
 # a test whose whole subject is emit_loops.py, which is the one failure mode
 # `extra` exists to prevent.
-# `timeout=1500`, measured rather than chosen (2026-10-04, and the same
-# discipline the `memclass` ledger follows). This job was registered at 900 s,
-# which is UNDER what the job needs: `test_silent_noop_iter.py` is 26
-# compile-and-execute cases and takes **18m42s (1122 s) ALONE**, with nothing
-# else running, measured on this tree and on a pristine `git archive` copy of
-# the merge base — so it was over its own timeout before any change of mine,
-# and a `TIMEOUT` is a FAILURE in its own class (it is listed under `FAILED:`
-# tagged `[TIMEOUT]` and is deliberately not something an `expect=` marker can
-# forgive). 1500 s is 1122 s plus a third; the content passes.
-#
-# NOT a "make the red go away": the job's CONTENT was green in every
-# measurement, and the clock was the only thing failing. Where the time goes
-# is measured too — 4m36s of user CPU inside 18m42s of wall is 24% of one
-# core, i.e. the job is WAITING-bound (its subprocesses: gcc, the compiled
-# binaries), not computing. Making it cheaper is a separate project; the
-# registration is the thing that was wrong.
 test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True,
-     deps=['preflight'], timeout=1500,
+     deps=['preflight'], timeout=900,
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
                              RUNTIME_SRC, RUNTIME_HDR],
      desc='the silent no-op class: no loop may iterate zero times, read a '
@@ -1695,9 +1629,8 @@ test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
             "batch-1 tree (the rule and its call site are byte-identical to "
             "b13a01b2), and NOT this job's construct — the nested-comprehension "
             "cluster this marker originally named is closed and its doc "
-            "deleted. c8ae1555 is the commit that made the read-before-store "
-            "rule GENERAL and deleted that doc, so this names the commit rather "
-            "than the path",
+            "deleted. See bugs/FORMAL_a_local_read_before_its_first_"
+            "assignment.md",
      desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'], mem='tiny',
      deps=['preflight'],
@@ -1863,40 +1796,16 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # is where a reader of the tally will actually see this. The constant is kept,
 # renamed, because its text is still the truest short description of the class
 # in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
-#
-# 2026-10-04: and now the fanout is RED and carries a marker again, for a
-# reason worth writing down, because it is the THIRD move of this marker and
-# the rule that produced it. What the 2026-10-03 entry above reasoned about
-# was a fanout that could not see the class: the compiled binary wrote an
-# EMPTY `.ci` and exited 0, so `reject=` had nothing to match and the per-item
-# exit code said 0. That is no longer the shape. gatefix8 fixed the tokenizer
-# and the parser, so `.tok`/`.ast` are now byte-identical to stage1's and the
-# failure has moved INTO the compiled codegen, where it is no longer silent:
-# `compile_to_gimple` raises `TypeError: unhashable type: 'list'`, or the
-# parser refuses with `SEMICOLON`, or the binary dies on SIGSEGV/SIGBUS.
-# 45 of the 46 items now exit non-zero and only `mojo_failures.mojo` passes.
-#
-# So the general rule the three moves add up to: "this job cannot SEE the
-# defect" was true on 2026-10-03 and stopped being true on 2026-10-04, and the
-# honest response to a job that has become RED is a marker on THAT job — not a
-# comment explaining why it is not red, and not a marker left off because the
-# defect "really" belongs to a sibling job. A RED job with no marker is a hole
-# in the gate: nothing reports it, and `expect=` costs 4 s here.
 SELFHOST_STAGE2_EMPTY_DUMP = (
     'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
     'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) and no longer '
     'emits `mojo_unsupported_iter` (re-measured 2026-10-03: the per-item '
     'fanout rejects none), but `--dump` on the compiled binary writes a correct '
-    '`.pyi` and a `.tok`/`.ast` BYTE-IDENTICAL to stage1\'s and then fails: 43 '
-    'of its 46 inputs exit non-zero — 41 of them die on SIGSEGV/SIGBUS with no '
-    'output at all, and the two `.py` closure inputs are refused with '
-    '`Unexpected SEMICOLON(\';\')` — so no `.ci` is written. (Re-measured '
-    '2026-10-04: this text said the `.tok`/`.ast` were ABSENT and the `.ci` '
-    'EMPTY, which was the shape before the tokenizer and parser fixes landed, '
-    'and 45 of 46 before `mojo_id` closed the `TypeError` class.) stage2 and '
-    'stage3 agree with each other exactly '
-    '(0 diffs), so it is the binary computing something other than the '
-    'reference, deterministically. See '
+    '`.pyi`, an EMPTY `.ci` and NO `.tok`/`.ast`, and exits 0 — so '
+    '`bootstrap-stage2-dumps` passes while 87 of its products are not dumps. A '
+    'silent-wrong-answer class no exit code reports; stage2 and stage3 agree '
+    'with each other exactly (0 diffs), so it is the binary computing something '
+    'other than the reference, deterministically. See '
     'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
@@ -2147,42 +2056,23 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # never close to this workload — it was ~48x it — and what made the number
 # matter was never the ceiling, it was the reservation the class stands for.
 #
-# `expect=` WAS HERE until 2026-10-03, was deliberately NOT here from then
-# until 2026-10-04, and is here again. The middle paragraph of that history is
-# kept because the reasoning was correct FOR THE SHAPE THAT EXISTED: this
-# fanout passed, and could not be made to fail by the defect it was marked
-# for, because `reject` is a regex over a child's OUTPUT (`run_job`) and a
-# child that opens a `.ci` and writes nothing into it prints nothing — the
-# measured shape was a correct `.pyi`, a 0-byte `.ci`, no `.tok`/`.ast`,
-# exit 0. Nothing about the fanout changed; the COMPILER did. The fixes to the
-# tokenizer and the parser made `.tok`/`.ast` byte-identical and moved the
-# failure into the compiled codegen, where it is loud.
-#
-# `expect=` IS here, and it is COUNT-CHECKED, because this fanout is RED:
-# measured 2026-10-04, 43 of the 46 items exit non-zero (45 of them before
-# `mojo_id` closed the `TypeError` class) and only `mojo_failures.mojo`,
-# `t1.mojo` and `bootstrap_test_single_expr.mojo` pass. See the 2026-10-04 entry in the history block
-# above for why the "this fanout cannot see the class" reasoning that retired
-# the marker on 2026-10-03 stopped being true: the compiled binary no longer
-# writes a silent empty `.ci`, it fails. The count is what makes the marker a
-# claim rather than a category — as items go green this has to be updated (or
-# dropped, which the runner says out loud), and a NEW failure inside the
-# already-marked sweep is a FAILURE rather than an absorbed EXPECTED.
+# `expect=` WAS HERE until 2026-10-03 and is deliberately NOT here now. This
+# fanout PASSES and cannot be made to fail by the defect it used to be marked
+# for: `reject` is a regex over a child's OUTPUT (`run_job`), a child that opens
+# a `.ci` and writes nothing into it prints nothing, and the measured shape is
+# exactly that — a correct `.pyi`, a 0-byte `.ci`, no `.tok`/`.ast`, exit 0.
+# Keeping the marker would have meant either a FAILURE every gate ("marked
+# expect= but it PASSES") or dropping a claim that is still true of the
+# capability; the marker is on `bootstrap-verify`/`bootstrap-validate` instead,
+# which compare the trees and can see it. So do not read this row passing as
+# evidence that the self-hosted binary dumps correctly — it is evidence that
+# this row does not look at what it produced.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
-              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — all 40 '
-              'die on SIGSEGV/SIGABRT/SIGBUS with no diagnostic, which is the '
-              'whole of what is left (the loud classes are gone: no more '
-              '`TypeError: unhashable type: \'list\'`, no more `Unexpected '
-              'SEMICOLON`). Re-measured 2026-10-04: 45 of 46 before `mojo_id` '
-              'closed the TypeError class, 43 before the struct-tag read was '
-              'validated. See '
-              'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
@@ -2331,36 +2221,6 @@ test('formal', [PY, 'test_formal.py'], j=True,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
-# REPRODUCIBILITY. Its own file because the assertion is about BYTES rather than
-# about what an image computes, so every other formal suite is structurally
-# blind to it: they all ask "does this program answer the right number", and an
-# image that is wrong in byte 49160 and right everywhere else passes all of
-# them. This is what it found on its first run, measured on this tree, both
-# backends: `codesign` derives an ad-hoc signature's identifier from the file's
-# BASENAME when no `-i` is given, so the same source published as `alpha.aout`
-# and as `zzz9.aout` differed in one byte inside the CodeDirectory — and
-# `cas.formal_build_key` correctly does not carry the output path, so nothing
-# could have made that true except fixing the emitter. Fixed in
-# `formal/build.py::_signature_identity`; the same sweep found `LC_UUID`'s 16
-# payload bytes left zero by all three Mach-O builders, now a digest of the
-# image (`formal/macho_linker.py::_stamp_content_uuid`).
-#
-# `mem='tiny'` and no `deps` beyond `preflight`, from its MEASURED cost: 3.9 s
-# and 0.1 GB for 12 formal builds (both backends, plus a dylib, plus an
-# importing program and its module dylib) and no Lean. It is in `check` and
-# `proofs` for `formal-sys`'s reason — cheap formal coverage with no Lean, so
-# it belongs on the side of the line the everyday loop can afford — and it is
-# `extra`-listed on the two jobs whose subject it reads, because a recorded PASS
-# replayed over an edited emitter is exactly the wrong answer for a test whose
-# whole claim is that the emitter's bytes changed.
-test('formal-reproducible', [PY, 'test_formal_reproducible.py'],
-     deps=['preflight'],
-     mem='tiny',
-     extra=['test_formal_reproducible.py', 'formal/build.py',
-            'formal/macho_linker.py', 'formal/arm64_codegen.py',
-            'formal/x86_64_codegen.py', 'formal/imports.py', 'cas.py',
-            'fire.py', 'fire_compiler.py'],
-     desc='the same input produces the same bytes, on both backends')
 # Module-global state. Its own file rather than more rows in `formal-run`
 # because it is the only formal test that runs each case THREE ways — the two
 # backends' images plus the Mojo interpreter — and that is the assertion: a
@@ -2414,24 +2274,6 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'],
      desc='formal import surface')
-# The formal dylib boundary seen by a CONSUMER, which is the half
-# `formal-dylib` above cannot see from the inside: that one checks the emitted
-# library and this one BINDS it, from a real C program and from `ctypes`, on each
-# architecture, with the declarations generated from the library's manifest. It is
-# a separate job because the failures are a different class — a boundary that
-# LINKS and answers wrong is not a library that fails to emit.
-#
-# `deps=['prooflib']` because it builds the library through `formal/build.py`,
-# and `mem='tiny'` from the 0.1 GB peak its own branch measured; the 1800 s
-# timeout is the `formal-dylib` sibling's, for the same reason (a Lean-backed
-# build on a loaded machine).
-test('formal-interop', [PY, 'test_formal_interop.py'],
-     deps=['preflight', 'prooflib'],
-     mem='tiny', timeout=1800,
-     extra=['test_formal_interop.py', 'formal/model.py', 'formal/build.py',
-            'formal/macho_linker.py', 'reflect.py', 'exec_budget.py',
-            'doc/ABI.md'],
-     desc='the formal dylib boundary, bound and called on both architectures')
 # The hostmod claim: `ast` left HOST_MODELLED, and this is what says the module
 # behind it is CPython's tokenizer rather than a plausible one — every case run
 # through the built arm64 image AND through this process's `tokenize`, with the
@@ -2453,38 +2295,10 @@ test('formal-sweep', [PY, 'test_formal_sweep.py'],
 # The two suites that pin the reach claims and the bind audit.  Unregistered
 # until now, and the second is the one standing between a real backend defect
 # and a `codegen` misclassification on the executable path, so its absence
-# from the gate was the gap worth closing.
-#
-# `formal-sweep-truth` DOES reach Lean, through the one case that elaborates a
-# generated proof (`formal/x86_64_endtoend_test.py`'s end-to-end `sorry`
-# attribution), so the sentence that used to sit here — "Neither needs
-# `prooflib` to do anything" — was a claim about the file as it was then, and
-# it stopped being true when that case landed in it.  It was not visible
-# because the registered job that runs THAT emitter (`formal-x86-endtoend`)
-# deps on `prooflib`, and this one does not: `make check` does not pay for the
-# library build, so on a tree with no `lib/*.olean` the case ran anyway and
-# reported `unknown module prefix 'X86'` as `lean exited 1: no error message`.
-# The library is a PRECONDITION of a generated proof, so it is established
-# where the proof is elaborated — `ensure_lean_ready` →
-# `formal/lean.py::ensure_library`, the lock + content-addressed-store path the
-# other three x86-64 emitters already open with — and not by a bucket's
-# dependency list.  `deps=['prooflib']` is therefore still wrong here, and
-# adding it would put an 80 s / 27 MB build in the everyday loop.
-#
-# `mem='module'` follows from that, and is the same argument `prooflib`'s own
-# registration makes: the guard is free on a warm store (measured 0.3 s, and
-# 1.4 GB peak for the whole job WITH the library, on 2026-10-05) and is one
-# ~80 s / 7.8 GB `lib/ProofLib.lean` build on a cold one, so the class is sized
-# for the build this job can now start rather than for the warm case.  An 8 GB
-# ceiling over a 7.8 GB build is a RESOURCE verdict, and `expect=` forgives
-# neither that nor a skipped dep.
+# from the gate was the gap worth closing.  Neither needs `prooflib` to do
+# anything: the one case that wants a library census SKIPs loudly without it.
 test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
-     deps=['preflight'], mem='module',
-     memwhy='may reach Lean\'s 27 MB lib/*.olean build through '
-            'formal/lean.py::ensure_library (measured 1.4 GB warm, 7.8 GB on a '
-            'cold store), so it is capped like the `prooflib` step whose work '
-            'it can now do itself rather than like the pure-python check it '
-            'mostly is. See ' + MEM_DEBT_DOC,
+     deps=['preflight'],
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'],
@@ -2547,6 +2361,10 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
+     expect='1 of 45 WRONG: udivmod — the x86-64 machine model returns '
+            '7905747460161236410 where the hardware returns 4 '
+            '(bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md). '
+            'Found by running this file for the first time, 2026-10-02.',
      desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
@@ -2861,65 +2679,41 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
 # family covers it.
 #
-# **GREEN, and the `expect=` it carried is GONE. Both facts are the same event:
-# the marker forgave three cases whose subject was a comptime specialization
-# defeating the frame-escape refusals — all three of which assert a REFUSAL —
-# and all three refuse again, with the sentences their rows pin, so the count it
-# stated stopped being true in KIND rather than in number. That doc is deleted
-# with its fix, and so is the DOCS doc filed against it for still reporting three
-# reds that had started passing: its subject was a stale transcript INSIDE that
-# file, and both things it asked to be changed (this marker, and the transcript)
-# had already been changed here.** Since an expect-marked job that PASSES is reported as
-# a FAILURE whose text is "it PASSES — drop the marker", every `proofs` run was
-# reporting this job red for the right reason and nobody runs `proofs`. The job
-# is in `check` below, so the next red is visible in the everyday gate; that
-# placement is the half of the fix that keeps it from rotting back.
-#
-# All three are answered on this tree, each by a case that asserts something
-# TRUE rather than by the case being dropped, and the file is 38/38 green —
-# measured here, both backends, three runs at 14.8-17.4 s. 38 cases, 16 s,
-# 0.05 GB, no Lean (`build --formal --no-prove`), which is the cost shape
-# `formal-shlex` (40 s) and `formal-receiver-spelling` (2.8 s) are in `check`
-# for:
-#
-#     $ python3 tools/memslot.py --gb 8 --label rp -- \
-#           python3 test_formal_receiver_position.py
-#     formal receiver position: PASS=38 FAIL=0
+# **The `expect=` this registration carried is GONE, and it is the anti-rot rule
+# that removed it: an `expect`-marked test that PASSES is reported as a
+# FAILURE.** All three cases it forgave are answered on this tree, each by a
+# case that asserts something TRUE rather than by the case being dropped, and
+# the file is 33/33 green (measured, both backends, `python3
+# test_formal_receiver_position.py`):
 #
 #   * a specialized call that hands a RECEIVED frame address back now BUILDS,
 #     because the creator of a returned holder is an ancestor of the CALLER —
 #     every channel that would let it outlive the creator is still refused, and
 #     the case moved to `test_formal_returned_frame.py` as
 #     `received_frame_handed_back_through_a_specialized_parameter` (a
-#     differential against CPython, both backends, 46/46 green here) because
-#     what it adds there is new: a comptime parameter SHIFTS the argument
-#     positions, so the hidden trailing word the convention adds has to land
-#     after the last of them;
+#     differential against CPython, both backends) because what it adds is new
+#     there: a comptime parameter SHIFTS the argument positions, so the hidden
+#     trailing word has to land after the last of them;
 #   * the value-only-callee case stopped being about `origin_of` — that became
 #     `FRAME_IDENTITY_CALLS` and `_rewrite_identity_intrinsic_calls` erases it
 #     to its operand, so there is no value-only callee in the program and what
 #     it does is hand a received frame out of the ENTRY. It is
 #     `refuse_a_received_frame_returned_out_of_the_entry`, and the needle is
-#     that sentence rather than an edit — which is what §6 item 1 of the doc
-#     that recorded the defect asked for;
+#     that sentence rather than an edit;
 #   * the dotted specialization stopped at a module-state refusal before
 #     reaching the specialization check its needle wanted, which was the
 #     "stopped at the wrong check" half. `refuse_a_method_with_parameters_and_
 #     no_receiver` and `refuse_a_method_call_on_a_subscripted_receiver` are the
 #     two shapes it now answers, and the argument-binding off-by-one that made
-#     the first report a false refusal (`Box_run(bx, 0, r)` passes the literal
-#     0, which it does not) is fixed in `model.method_declares_receiver`.
-#
-# None of the three ROWS is in the file any more, so a reader who goes looking
-# for them finds the replacements the bullets name. That is also why the doc
-# that recorded the defect is deleted rather than left with a Status: a fixed
-# bug still listed is indistinguishable from an open one.
+#     the first of them report a false refusal (`Box_run(bx, 0, r)` passes the
+#     literal 0, which it does not) is fixed in
+#     `model.method_declares_receiver`.
 #
 # What the marker was FOR, and why its absence is not a hole: the defect it
 # named was that a construct with no representation BUILDS instead of being
 # refused, and the measured symptom of that is a case in this file going from a
 # refusal to a differential that disagrees with CPython. `run_diff_case` is what
-# catches that, and it is in the file.
+# catches it, and it is in the file.
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_receiver_position.py', 'formal/build.py',
@@ -3030,42 +2824,6 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # read of the second returns the first's word. No image, no Lean, no sweep: a
 # parse and two walks, 0.08 s. The registration is further down, beside
 # `formal-glob`, which arrived with it.
-
-# The field set of a struct, and the ONE store census it is derived from. Four of
-# this file's rows are the only place in the tree that asserts the ask COUNT, and
-# they were red on all four for a year and a half: they wrapped
-# `struct_receiver_stores` around a second `struct_field_names`, which for a
-# `parse_module`-prepared struct reads the PUBLISHED merge and asks nothing, so
-# the counter saw 0 where it wanted 1. They now count where the derivation runs
-# (inside `parse_module`, one per struct whatever the method count) and separately
-# assert that every read after it asks nothing — both halves verified to fail when
-# the merge stops being published and when the derivation happens twice.
-#
-# Registered rather than excused, which is `test_suite.py`'s UNREGISTERED row for
-# this file getting `_FORMAL_SUITE_REASON` — a reason written for a file that
-# builds and RUNS images for minutes per group, and this one does that for its
-# last two rows only. 3.7 s and 0.05 GB measured (26 rows, both backends, no
-# Lean), which is `formal-read-before-store`'s and `formal-receiver-spelling`'s
-# cost shape and the reason both are registered rather than excused. What it
-# protects is a frame laid out one slot short: `struct_receiver_stores` missing an
-# assignment demotes a real field name, and every read of that slot returns
-# another field's word.
-#
-# It was also the one file in the estate that no gate ran at all while
-# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
-# `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
-# ("minutes of real compilation") — a rule made about the file rather than about
-# its expensive part, since only two of the 26 rows build. The `module table`
-# group is what that document actually leans on: the same source parsed twice
-# with and without eight padding functions, asserting every per-struct ask COUNT
-# is unchanged, so a derivation that started being asked per function again
-# fails rather than merely getting slower.
-test('formal-bracketed-method-field-set',
-     [PY, 'test_formal_bracketed_method_field_set.py'], mem='tiny',
-     deps=['preflight'],
-     extra=['test_formal_bracketed_method_field_set.py', 'formal/model.py',
-            'formal/build.py'] + FORMAL_BUILD_INPUTS,
-     desc='a struct\'s field set, and the one store census it is derived from')
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
 # to compute the same thing, which is what stops the file from passing for the
 # wrong reason (a build that stopped taking ANY receiver would satisfy "the
@@ -3153,8 +2911,8 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # and what keeps the measurement honest are not the same job, and folding them
 # together would make the cheap one pay for the expensive one.
 #
-# `formal-proof-census` is the ratchet. `tools/formal_proof_census.py` runs
-# every `formal/examples/*.mojo` through `formal.build.compile_formal(prove=True,
+# `formal-proof-census` is the ratchet. `tools/formal_proof_census.py` runs all
+# 52 `formal/examples/*.mojo` through `formal.build.compile_formal(prove=True,
 # check=True)` — the call `fire.py build --formal` makes — through
 # `formal/lean.py::run_lean`'s bounds, and compares the result against the
 # committed `tools/formal_proof_census_baseline.json`, failing when an example's
@@ -3191,21 +2949,8 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
-# `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
-# reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
-# by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
-# `-j 1` is about the WALL CLOCK of a cold run rather than about the
-# measurement).  Measured over the 42 new examples on that day: 1 033 s of Lean
-# CPU and 1 274 s of wall at `-j 1` on a box at load 10-14, of which the 19
-# refusals cost nothing (no Lean run at all) and the rest ran 21.4-177.5 s each.
-# So the cold-cache cost of the corpus is now roughly double what 3600 s was
-# sized for, and a timeout that fires is a job killed for having done nothing
-# wrong -- `CLAUDE.md`'s rule about bounds.  The per-example cost did NOT grow:
-# the new rows are 1.65-2.35 GB and 21-60 s each, inside the band the
-# registration above already states, and the two that were not (806 s / 2.2 GB
-# and 4.2 GB) are documented and NOT in the corpus.
 test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
-     mem='small', timeout=7200, deps=['preflight', 'prooflib'],
+     mem='small', timeout=3600, deps=['preflight', 'prooflib'],
      memwhy='4.40 GB is LEAN, not this job: it is one elaboration of '
             '`formal/examples/sqsum.mojo` (4552 lines, 505 native_decide '
             'sites) under `formal/lean.py`\'s own `LEAN_MEMORY_MB = 6144`, '
@@ -3334,47 +3079,6 @@ test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
-# The host-import WALL's READERS, not its numbers. `tools/formal_host_import_wall.py`
-# was promoted out of scratch by `work/formal27-6` and three bug docs had already
-# described it in prose, which is the shape a measurement's readers drift in: an
-# `ast`-based walk calls `traceback` a 38-file row where the backend says 0, and
-# a "could not be read" that returns `[]` reads as "imports nothing". So what is
-# pinned is the SET OF READERS — `imported_modules` really wants the node classes,
-# an unreadable file is `None`, `--unmodelled` is the before/after instrument,
-# `alone` means the only wall and not the first found. The numbers themselves are
-# deliberately NOT pinned; a snapshot of one is red within a week and means
-# nothing when it goes green.
-#
-# Registered rather than excused: 17 cases, 0.36 s, peak 0.0 GB, no build and no
-# Lean (`test_formal_host_import_wall.py`'s own docstring says so), so it is in
-# `check` for the `formal-field-walk` reason — at this price an excuse is the
-# wrong answer — and in `proofs` so the formal bucket is the whole picture.
-test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
-     mem='tiny',
-     deps=['preflight'],
-     extra=['test_formal_host_import_wall.py', 'formal/imports.py',
-            'tools/formal_host_import_wall.py',
-            'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
-     desc='the host-import wall tool: which readers it asks, not its numbers')
-# The other file the same estate check named on the same day, registered on
-# the same reasoning rather than excused: seven assertions that a per-STRUCT
-# predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
-# not asked once per FUNCTION — the shape 43 508 redundant derivations on
-# `myinterpreter.py` measured, and the two surviving per-function askers the fix
-# left behind are what this pins. 0.96 s, no build, no Lean, so `check`.
-#
-# `cache=True` is right HERE and wrong for most of the formal suite: this job
-# has no build, no Lean and no artifact, so its inputs are its `extra` list and
-# nothing else, and at 0.96 s re-running it every gate buys nothing. The `extra`
-# names the two modules whose tables are under test plus the parser inputs,
-# because the check counts asks made BY `formal/build.py` while it parses
-# `myinterpreter.py` — an edit to any of them must not replay a recorded PASS.
-test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
-     mem='tiny', cache=True,
-     deps=['preflight'],
-     extra=['test_formal_per_struct_asks.py', 'formal/model.py',
-            'formal/build.py'] + FORMAL_BUILD_INPUTS,
-     desc='a per-struct predicate is asked once per struct, not once per function')
 # `glob`, differential against CPython's own. Registered rather than excused
 # twice over: this name was registered by two commits that each registered two
 # test files nobody had registered before (5b2e62c3 and 574d9135), and because
@@ -3535,15 +3239,10 @@ BUCKETS = {
               'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
               'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
-              # The host-import WALL's readers. 17 cases, 0.36 s, no build and
-              # no Lean, so the `formal-field-walk` rule puts it in the everyday
-              # loop; it arrived with `work/formal27-6` in NO bucket and NO
-              # `UNREGISTERED`, which is what the estate check named.
-              'formal-host-import-wall',
-              # …and `formal-per-struct-asks`, named by the estate check on the
-              # same day for the same reason: in NO bucket and NO
-              # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
-              'formal-per-struct-asks',
+              # Builds nothing and costs 0.05 s, so it belongs in the everyday
+              # loop; `formal-glob` is deliberately NOT here (31.8 s, two
+              # machines per group).
+              'formal-field-walk',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`
               # never executed either — and `suite-self-test` is where the
@@ -3646,40 +3345,8 @@ BUCKETS = {
               # missed assignment there is two real struct fields sharing one
               # slot, so this is a coverage hole and not a stale entry — which
               # is the distinction `test_suite.py` draws between registering a
-              # file and excusing one. Also in `proofs`, like the two above it,
-              # and `formal-glob` is deliberately NOT here (31.8 s, two machines
-              # per group).
-              'formal-field-walk',
-              # …and `formal-receiver-position`, 38 cases on both backends at
-              # 16 s and 0.05 GB with no Lean. It is here because of what
-              # happened to it rather than what it is: it carried an `expect=`
-              # whose three forgiven cases stopped failing, so `proofs` — the
-              # only bucket that ran it, and a bucket nobody runs — reported it
-              # red as "marked expect=… but it PASSES". A marker nobody can
-              # observe rotting out is not a marker, so the job joined the
-              # everyday gate with the marker removed and the reasons for both
-              # written at its registration. `formal-read-before-store` (8.5 s)
-              # and `formal-receiver-spelling` (2.8 s) are the two beside it on
-              # cost; the subject — a frame address at an argument position of a
-              # specialization — is the reason it is not merely another row here.
-              'formal-receiver-position',
-              # …and `formal-bracketed-method-field-set`, 26 rows at 3.7 s and
-              # 0.05 GB. It is here for the same reason as the row above and one
-              # more: its four ask-COUNT rows were red on all four, in no bucket,
-              # and so nothing in the everyday gate ever saw that the store
-              # census a struct's field set is derived from could have become a
-              # per-method-squared one. `formal-field-walk` is its subject-mate
-              # and its neighbour — the statement walk that census reads through.
-              'formal-bracketed-method-field-set',
-              # …and `formal-reproducible`, whose 12 builds cost 3.9 s and
-              # 0.1 GB with no Lean — `formal-field-walk`'s cost class and its
-              # subject's importance: it is the only formal job that compares
-              # BYTES, so it is the only one that can see an emitter change
-              # which leaves every computed answer right. It is here beside the
-              # others because `proofs` is the whole formal picture in one
-              # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
-              # seconds.
-              'formal-reproducible'],
+              # file and excusing one. Also in `proofs`, like the two above it.
+              'formal-field-walk'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -3711,11 +3378,6 @@ BUCKETS = {
 
     'proofs': ['formal', 'formal-call-proofgen',
                'formal-run', 'formal-globals', 'formal-dylib', 'formal-imports',
-               # The same container from the OUTSIDE: `formal-dylib` checks the
-               # emitted library, this one binds it and calls it. Beside it rather
-               # than after it, because a boundary that LINKS and answers wrong is
-               # a failure neither of the other two can see.
-               'formal-interop',
                'formal-sweep', 'formal-sweep-truth',
                'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
@@ -3754,18 +3416,6 @@ BUCKETS = {
                # difference between an absent value and a value, and a wrong one
                # is a program that runs and answers the wrong thing.
                'formal-optional',
-               # …and `formal-host-import-wall`, which arrived with
-               # `work/formal27-6`'s tool in neither a bucket nor
-               # `UNREGISTERED`. It pins WHICH READERS
-               # `tools/formal_host_import_wall.py` asks and not the numbers it
-               # prints, and it is in `check` rather than only here for the
-               # `formal-field-walk` reason: no build, no Lean, 0.36 s.
-               'formal-host-import-wall',
-               # …and `formal-per-struct-asks`, in both buckets for the
-               # `formal-field-walk` reason — the estate check named it in NO
-               # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
-               # excuse is the wrong answer.
-               'formal-per-struct-asks',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test
@@ -3790,6 +3440,10 @@ BUCKETS = {
                 'formal-monomorph',
                 'formal-target-queries', 'formal-value-model',
                 'formal-x86-dylib',
+                # …and the two the estate check named on 2026-10-02, for the
+                # same reason and with the same cost measurement: cheap enough
+                # that `check` runs them and `proofs` is only naming them.
+'formal-read-before-store', 'formal-receiver-spelling',
                 # …and the one the estate check named on the merge of the
                 # formal5 batch: `test_formal_core_hostmods.py` came with
                 # `work/formal5-hostmods-core` and was named by no bucket.
@@ -3849,27 +3503,17 @@ BUCKETS = {
                 # in both buckets, argues for `check`. What a test costs and
                 # what it is ABOUT are different questions, and only the second
                 # one should decide where it lives.
-                # `formal-glob`, `formal-optional` and `formal-field-walk` are
-                # named HERE, in the estate-check block above, each with its own
-                # reason — this bucket is the whole formal picture in one place,
-                # and expansion schedules a test once per run, so being in
-                # `check` as well costs nothing. Spelled once per bucket rather
-                # than twice in one: a name listed twice is a second comment
-                # claiming the reader has been told something they have not,
-                # which is what `test_suite.py`'s "the buckets: no name is in
-                # one twice" checks.
                 'formal-admitted', 'formal-fcntl', 'formal-math',
-                'formal-shutil', 'formal-stat',
-                # …and `formal-bracketed-method-field-set`, in `check` above
-                # because 3.7 s is what that bucket costs for a field-set table,
-                # and here because `proofs` is the whole formal picture.
-                'formal-bracketed-method-field-set',
-                # …and `formal-reproducible`, in both buckets for the same two
-                # reasons stated once: it is cheap enough for the everyday loop
-                # (3.9 s, no Lean) and it is the only formal job that compares
-                # BYTES, so `proofs` is where the rest of the formal picture
-                # lives and it belongs beside it.
-                'formal-reproducible'],
+                'formal-shutil', 'formal-stat', 'formal-glob',
+                # …and `formal-optional`, named here for `formal-shutil`'s
+                # reason: it is in `check` (above) for the cost, and `proofs` is
+                # where the whole formal picture is.
+                'formal-optional',
+                # …and `formal-field-walk`, named in `check` above and here for
+                # `formal-read-before-store`'s reason: `proofs` is where the
+                # whole formal picture is, and expansion schedules a test once
+                # per run, so the second bucket costs nothing.
+                'formal-field-walk'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             'formal-x86-machine-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
@@ -4869,12 +4513,12 @@ def marker_failures(reason: str):
     """The failing-case count an `expect=` reason claims, or None.
 
     None means the marker states no count, and this is a real answer rather
-    than a failure: the markers that describe a whole-job CONDITION rather
-    than a set of cases (`native-dumpfull`'s bootstrap pre-pass cost,
-    `ptrreg-boxed-str`'s segfault, `formal-struct`'s arity refusal) are the
-    ones where "how many cases" is not the question. What is NOT allowed is
-    for a marker that does state a count to be unchecked, and that is what
-    `observed_failures` / `observed_fanout_failures` below are for.
+    than a failure: four markers in the registry describe a whole-job
+    condition (`native-dumpfull`'s bootstrap pre-pass cost,
+    `bootstrap-stage2-dumps`' silent-wrong-answer class, `ptrreg-boxed-str`'s
+    segfault, `formal-struct`'s arity refusal) where "how many cases" is not
+    the question. What is NOT allowed is for a marker that does state a count
+    to be unchecked, and that is what `observed_failures` below is for.
     """
     m = _MARKER_FAILURES.search(reason or '')
     return int(m.group('n')) if m else None
@@ -4898,27 +4542,6 @@ def observed_failures(output: str):
     return best
 
 
-def observed_fanout_failures(spec, results):
-    """The failing-case count a FANOUT produced: its own per-item verdicts.
-
-    A fanout is N independent processes (`bootstrap-stage2-dumps` is 46 runs of
-    the stage2 binary — its argv is `['./mojo', '--dump', '../{file}']` with
-    `cwd='stage2'`, so the name in it is the compiled stage, not this tool),
-    so it has no harness, no summary line and nothing for `observed_failures` to
-    read — and feeding it the LONGEST item's output would be reading one file's
-    compiler diagnostic as a count of the sweep.
-    The number a fanout's marker can be checked against is the one this runner
-    already decided per item: how many items came back FAIL or ERROR, the two
-    verdicts `expect=` forgives. A RESOURCE or TIMEOUT item is not counted,
-    for the same reason neither is forgiven — those are facts about the
-    machine, not a known bug — and in fact they make the whole test's status
-    something no marker can absorb, so they never reach this.
-    """
-    prefix = spec.name + ':'
-    return sum(1 for key, res in (results or {}).items()
-               if key.startswith(prefix) and res.status in (FAIL, ERROR))
-
-
 def _expect_count_drift(spec, reason, results):
     """Why this EXPECTED verdict is not the one its marker described, or ''.
 
@@ -4929,17 +4552,13 @@ def _expect_count_drift(spec, reason, results):
     claimed = marker_failures(reason)
     if claimed is None:
         return ''
-    got = None
-    if isinstance(spec, Fanout):
-        got = observed_fanout_failures(spec, results)
-    else:
-        seen = None
-        for key, res in (results or {}).items():
-            if key == spec.name or key.startswith(spec.name + ':'):
-                seen = res.output if res.output and (seen is None or
-                                                    len(res.output) > len(seen)) \
-                    else seen
-        got = observed_failures(seen)
+    seen = None
+    for key, res in (results or {}).items():
+        if key == spec.name or key.startswith(spec.name + ':'):
+            seen = res.output if res.output and (seen is None or
+                                                len(res.output) > len(seen)) \
+                else seen
+    got = observed_failures(seen)
     if got is None:
         return (f'marked expect={reason!r} for {claimed} failing case(s), '
                 f'but the run printed no failure count this runner can read, '

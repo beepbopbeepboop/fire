@@ -63,27 +63,15 @@ the compiler's own sources. To iterate on the second layer, keep the artifact
 and compile it separately with the directives stripped, so gcc reports
 GENERATED line numbers and a 30 s syntax-only pass replaces the 110 s build:
 
-    python3 tools/memslot.py --gb 8 --label sh-ci -- python3 -c \
-      "from gimple_codegen import compile_to_gimple_cached; \
-       open('.tmp/sh/fire.ci','w').write(compile_to_gimple_cached(\
-       open('fire.py').read(), do_imports=True, filename='fire.py'))"
+    python3 tools/memslot.py --gb 8 --label sh-build -- python3 .tmp/sh_build.py
     cd .tmp/sh && sed 's/^#line .*$//' fire.ci > fire_nl.ci
     /opt/local/bin/gcc-mp-15 -x c -fsyntax-only -fgimple -w -std=gnu11 \
         -I<repo>/runtime fire_nl.ci 2>&1 | grep 'error:'
 
-The first step is the codegen half of `fire.build_executable` verbatim, and it
-is now written out rather than left as a side effect: `build_executable` puts
-its `.ci`/`.o`/`_gen.cpp` intermediates in a private scratch directory beside
-the artifact and DELETES it on every return path, because they were named off
-a bare module basename and used to land in the process's CWD — two builds of
-two modules sharing a basename overwrote each other's `gen.ci` with no lock,
-and `tools/suite.py` runs `-j18` out of a common checkout. The call was
-`fire.build_executable(<repo>/fire.py, src,
+where `.tmp/sh_build.py` is `fire.build_executable(<repo>/fire.py, src,
 output=<repo>/.tmp/sh/mojo_selfhost)` run with the cwd set to `<repo>/.tmp/sh`
-and the recipe then read `fire.ci` out of that cwd; the artifact it left
-behind was the only reason the cwd mattered. ~2m45s / 1.3 GB, and the result is
-the same 42 MB `.ci`. Every count below is from that syntax-only pass, and they
-are strictly comparable to each other.
+(the writer puts `mojo.{ci,o}` in the CWD). Every count below is from that
+pass, and they are strictly comparable to each other.
 
 ## Root cause, and the fix
 

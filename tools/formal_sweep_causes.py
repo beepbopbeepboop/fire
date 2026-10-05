@@ -24,9 +24,9 @@ THE COUNT IS AN UPPER BOUND, and this tool says so rather than implying
 otherwise. A file's terminal cause is the FIRST refusal the build's walk
 reaches, so a module is typically behind a stack of two to four of them, and
 fixing one moves the file to the next with the count unchanged. Two causes were
-measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see the
-`2026-09-30` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1. The current
-map, which every number below comes from, is that document's §1.
+measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. The current map, which every
+number below comes from, is `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`.
 Nothing here can tell you a cause's real value; only re-sweeping the files it
 blocks can.
 
@@ -404,7 +404,7 @@ CAUSES = (
     # what is left in that second arm is a member whose VALUE is not a literal
     # — a true refusal about a value this path cannot materialise. So the label
     # still claims neither: the per-file split is in
-    # the `b3` round of `bugs/FORMAL_sweep_work_map.md`, and a reader who trusts
+    # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.
     ("a field the struct does not declare (missing, or a comptime member)",
@@ -457,13 +457,6 @@ CAUSES = (
     # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
     ("a bracketed specialization of a callee this unit does not compile",
      (("so the brackets cannot be bound",),)),
-    # …and its DOTTED sibling, which is a different sentence about a different
-    # thing: the bare name is a symbol this unit does not compile, and the dotted
-    # one is a spelling the ONE recogniser of a bracketed callee cannot see. The
-    # marker is a phrase that only the new text has, so the two cannot shadow
-    # each other in either order.
-    ("a bracketed specialization spelled through a module",
-     (("is a bracketed callee spelled THROUGH A MODULE",),)),
     # A CALL to a name the DEFINING module does not export, which is the largest
     # row in the corpus and had NO row at all until 2026-10-04: 170 of the 710
     # files on the b10 sweep, 55% of every codegen finding in the tree, all of
@@ -489,42 +482,6 @@ CAUSES = (
     # landed, which is the failure the comments above this table warn about twice.
     ("a call to a name the defining module does not export",
      (("does not export it",),)),
-    # A symbol this image BINDS and nothing provides, where the symbol is a
-    # method of a struct IN THE FILE THAT REFUSED. Its own row because the
-    # underlying build message is the ordinary link-audit refusal and the
-    # DISTINCTION lives in the sweep's own classification
-    # (`formal_sweep._own_unprovided_methods`): the definition was never emitted
-    # into the image, so no link line could have provided it. Without this row
-    # such a file lands in `other refusal` — the bucket this module's docstring
-    # defines as "nobody has looked" — which is how a real 55-file codegen gap
-    # once sat under a class that said the opposite
-    # (`bugs/FORMAL_env_family_next_terminal.md`). It sits ABOVE every row keyed
-    # on the ordinary refusal text, because those texts do not appear in this
-    # message at all: what is printed for a file in this row is the sweep's own
-    # sentence.
-    ("a method of this file's own struct was never emitted into the image",
-     (("are METHODS OF A STRUCT IN THIS FILE",),
-      ("a method call here was not",))),
-    # A CPython BUILTIN this target does not lower — `sorted`, `map`, `filter`,
-    # `sum`, `all`, `any`, `min`, `max`, `reversed`, `list`, `tuple`, … — refused
-    # BY NAME before any emitter (`formal/model.py::not_lowered_builtin_refusal`).
-    #
-    # Its own row because until that check existed every one of these names was
-    # refused by the LINK AUDIT four stages after emission, from a message about
-    # SYMBOLS whose advice ("bind the name from a library that provides it") is
-    # about the link line rather than about the construct: no library on any line
-    # provides a Python builtin's semantics, so the advice cannot be taken. The
-    # fix is `formal/model.py::NOT_LOWERED_BUILTINS` gaining a reader, and the
-    # table quotes that table's reason verbatim — so the message, the ledger row
-    # `tools/formal_proof_breadth.py` builds and this label are three readers of
-    # one set of sentences.
-    #
-    # ABOVE the rows keyed on the link audit's own wording, which this message
-    # deliberately mentions ("the emitter treated it as an ordinary call to a C
-    # symbol"): the question behind the finding is which of the two happened, and
-    # this one is the construct.
-    ("a builtin this path does not lower",
-     (("is not lowered on this path",),)),
     # ── a call through a VALUE: three shapes, three rows, and the distinction
     #    is which DECLARATION is missing. They used to be one refusal, so all
     #    three sat in `other refusal`, which is the bucket that means nobody has
@@ -547,12 +504,6 @@ CAUSES = (
      (("is a bracketed call through a VALUE",),)),
     ("a keyword argument in a call through a value",
      (("no declaration to bind it by NAME",),)),
-    # …and the two ends that need no DECLARATION: the source's own statements
-    # say what the word holds. One cause and one marker, because the two ends
-    # share a message (`formal/model.py::not_a_code_address_refusal`), and a
-    # planner reading a file blocked by this wants the one row.
-    ("a call through a word the source says is not an address",
-     (("is called as a FUNCTION and the source says it holds",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",
@@ -708,30 +659,6 @@ CAUSES = (
     # this message carries.
     ("a handler arm with a body (no unwinder to emit it into)",
      (("is a handler arm with a body this path cannot put in the image",),)),
-    # The SAME missing edge, seen from the raise site rather than from the arm,
-    # and it is a second row rather than a wider marker on the one above because
-    # the two messages describe different programs: that one is an arm whose
-    # BODY would be missing, this one is a `try` whose SUCCESSOR would be. The
-    # shape is `except: pass` around a call that raises — the arm loses nothing
-    # by being dropped (which is why that row does not fire) and the control
-    # flow after the `try` loses everything, because the raise ends the process
-    # where CPython runs the arm and continues. Landed 2026-10-05
-    # (`formal/model.py`'s `uncatchable_raise` / `refuse_uncatchable_raise`).
-    #
-    # Keyed on a clause only THIS message carries, for the reason the row above
-    # gives: both messages say "no edge runs from a raise site into an arm", so
-    # a marker on that shared clause would swallow this row's files into the one
-    # above and make a census read as a target.
-    #
-    # **Cost: zero files, measured.** Asking the question over this repository's
-    # 479 `.py`/`.mojo` files and the stdlib's 252 `.mojo` takes 43 files, and
-    # every one of the 43 is already refused for another reason on this tree
-    # (25 of them by an import: `fire_compiler`, `formal.build`, `collections`,
-    # `socket`; the rest behind the row above or a module that exports nothing).
-    # That is the number to re-measure if this row ever grows: a refusal that
-    # takes files nothing else had is a different kind of row from this one.
-    ("a `try` that can reach a raise, whose arm cannot catch it",
-     (("cannot catch it, so the `try` is refused",),)),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the
@@ -749,15 +676,12 @@ CAUSES = (
     # with no address to compute from. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
-    # A local read before anything in the function stores it, which
-    # `formal/build.py` enforces for EVERY local (`_unstored_read`, asked for
-    # every function of every unit) and not only for a name that is also a
-    # module-level binding. The row exists because a corpus CAN still hit it —
-    # the enforcement is per-unit and a file the sweep refuses earlier never
-    # reaches this question — so the marker is what tells a reader which of the
-    # two rules a file is sitting behind. 1 file, in-file; below the bar a cause
-    # clears to be worth a row, and here anyway: a cause with no marker is a
-    # cause nobody can find from the table.
+    # A local read before anything in the function stores it. `formal/build.py`
+    # enforces this for module-global names and not for locals, which is what
+    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` measures; 1
+    # file, in-file. Below the bar a cause clears to be worth a row, and here
+    # anyway: a cause with a doc and no marker is a cause nobody can find from
+    # the table.
     ("a local read before its first assignment",
      (("before anything in this function stores it",),)),
     # ── the two x86-64-only refusals, which are arch DRIFT rather than a
@@ -893,7 +817,7 @@ CAUSES = (
     # DOCSTRINGS, whose bytes nothing can name, so six lines of em-dash in one
     # hostmod's prose made this refusal fire over the whole corpus. That is
     # `formal/model.py::is_docstring_statement`, and
-    # the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.2 has the measurement.
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §3.2 has the measurement.
     # The row STAYS, because the refusal is CORRECT for a real non-ASCII value —
     # `s[i]` on `"héllo"` would read a continuation byte, and `len` would answer
     # 5 where the byte count is 6 — and a queue that emptied this row by deleting
@@ -983,18 +907,11 @@ _REFUSED_NAME_RE = re.compile(r"'([A-Za-z_]\w*)'")
 # it says the row is not that project's priority.
 CAUSE_NO_BOUNDARY_SYMBOL = "module exports no public functions"
 
-#: The bucket a message lands in when no cause in `CAUSES` claims it, named here
-#: because `formal_sweep.py`'s loud unclassified-shape finding — its
-#: `unclassified_report`, which owns the shapes, the threshold and the sweep's
-#: exit 4 — is fed this same string from this side, and two spellings of one
-#: bucket would be two buckets.
-UNCLASSIFIED = "other refusal"
-
 DEFAULT_MIN = 1
 
 
-def classify_message(msg: str):
-    """The cause label for one terminal message, or `UNCLASSIFIED`.
+def classify_message(msg):
+    """The cause label for one terminal message, or `"other refusal"`.
 
     ANY alternative matching is enough; every marker WITHIN an alternative must
     be present. See the module docstring for what happens when either half is
@@ -1004,7 +921,7 @@ def classify_message(msg: str):
         for markers in alternatives:
             if all(marker in msg for marker in markers):
                 return label
-    return UNCLASSIFIED
+    return "other refusal"
 
 
 # ── `uses:` — of the files a refusing module blocks, how many name anything it
@@ -1186,16 +1103,7 @@ def _uses_table(rows_for_label):
 
 
 def rank(log_path):
-    """`([{cause, files, in_file, refused_in, example, text}], lines, unclassified)`.
-
-    `lines` is the total this table accounted for, and `unclassified` is
-    `[(path, terminal message)]` for every row this table could not name — which
-    is what `formal_sweep.py`'s loud unclassified-shape finding is fed, so that
-    the alarm is ONE implementation reached from both instruments rather than a
-    threshold and a printer that have to be kept in step here. Returns a third
-    value because the pairs are read off the same pass over the log as the
-    counts; a second pass would be a second reader of the same file.
-    """
+    """`[{cause, files, in_file, refused_in, example, text}]`, biggest first."""
     rows = []
     with open(log_path, errors="replace") as f:
         for raw in f:
@@ -1203,7 +1111,6 @@ def rank(log_path):
             if m and m.group("cls") in ("CODEGEN", "CODEGEN/DEPENDENCY"):
                 rows.append((m.group("cls"), m.group("path"), m.group("detail")))
 
-    unclassified = []
     blocked = collections.Counter()
     in_file = collections.Counter()
     where = collections.defaultdict(collections.Counter)
@@ -1225,8 +1132,6 @@ def rank(log_path):
         refuser = FS._refuser(term) or FS.refusing_module(msg)
         label = classify_message(msg)
         blocked[label] += 1
-        if label == UNCLASSIFIED:
-            unclassified.append((path, msg))
         if cls == "CODEGEN":
             in_file[label] += 1
         # Where the refusal really came from, which is NOT the file the sweep
@@ -1255,7 +1160,7 @@ def rank(log_path):
             "example": path,
             "text": msg,
         })
-    return out, sum(blocked.values()), unclassified
+    return out, sum(blocked.values())
 
 
 # ── the HOST row: `not-answerable/host-import`, ranked by the MODULE ─────────
@@ -1580,35 +1485,6 @@ def _host_tier(name: str):
         return ""
 
 
-def _host_verdict_label(name: str) -> str:
-    """What this table's `tier` column prints for `name`, from ONE accessor.
-
-    A module with a source is WRITTEN, which is a third state and not a missing
-    one: it is in neither tier because `HOST_MODELLED`'s rule is "a name LEAVES
-    here by being WRITTEN" and `HOST_ADMITTED`'s is "a name is here iff it has a
-    source", and its import resolves before either set is consulted. So the
-    column prints `written` for those, and `host_module_tier`'s `''` — which is
-    ambiguous between "written" and "nobody classified it" — is not read here at
-    all.
-
-    **It used to be read here, and inferred from `formal/hostmods/`.** That is a
-    THIRD definition of the same fact: a name this repository answers with a
-    sibling `.py`, or with a package `__init__.mojo` outside `formal/hostmods/`,
-    came out `UNTIERED` — which is a defect claim about a module that is
-    answered. `formal.imports.host_module_verdict` is the one classification,
-    every answer named, and this is a label over it rather than a second answer.
-    """
-    try:
-        from formal.imports import host_module_verdict
-        answer, _detail = host_module_verdict(name)
-    except Exception:                                   # noqa: BLE001
-        return "UNTIERED"
-    # `unclassified` is the answer that means "CPython ships it and no tier says
-    # which kind of name it is", and it is what this table has always printed as
-    # UNTIERED with the refusal's own words spelled out underneath the row.
-    return "UNTIERED" if answer == "unclassified" else answer
-
-
 def _host_use_names(path: str, module: str, declared):
     """The declared names of `module` this file binds, as a set.
 
@@ -1706,34 +1582,24 @@ def host_rank(log_path):
             "files": len(files),
             "uses": uses,
             "mentions": mentions,
-            # Sorted by (count, name) and not left to `most_common`, which
-            # breaks a TIE in insertion order — and the insertion order comes
-            # out of a `set` of names read from a `dict`, so two runs of the
-            # same log printed `module_from_spec x4, spec_from_file_location x4`
-            # and then the other way round (measured, same tree, same log). A
-            # column that reorders itself between runs is a table nobody can
-            # read as a diff, which is the same reason the `example` row below
-            # is sorted rather than taken first.
-            "names": sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))[:8],
+            "names": names.most_common(8),
             "declared_known": declared is not None,
             "declared": declared or (),
             "tier": _host_tier(mod),
-            "verdict": _host_verdict_label(mod),
             "model": _host_model_source(mod),
-            # IN NO TIER is only a DEFECT when the name is UNCLASSIFIED, which
-            # is what `host_module_verdict` says rather than what the absence of
-            # a tier entry says: a module that has been WRITTEN is in no tier by
-            # design (`HOST_MODELLED`'s rule is "a name LEAVES here by being
-            # WRITTEN", `HOST_ADMITTED`'s is "a name is here iff it has a
-            # source"), and its import resolves before either set is consulted.
-            # `os`, `sys` and `re` are in no tier for that reason and are not
-            # mis-diagnosed; `datetime` and `builtins` are in no tier because
-            # nobody classified them, and every file that wants one is told it is
-            # a CPython standard-library module this tree has no source or tier
-            # for — a name with no owner and no next step, which is the state
-            # worth printing. The WORDS of that are asked for rather than written
-            # here, for the reason `_host_refusal_clause` states.
-            "untiered": _host_verdict_label(mod) == "UNTIERED",
+            # IN NO TIER is only a DEFECT when there is no model: a module that
+            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule is
+            # "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a name
+            # is here iff it has a source"), and its import resolves before
+            # either set is consulted. `os`, `sys` and `re` are in no tier for
+            # that reason and are not mis-diagnosed; `datetime` and `builtins`
+            # are in no tier because nobody classified them, and every file that
+            # wants one is told it is a CPython standard-library module this
+            # tree has no source or tier for — a name with no owner and no next
+            # step, which is the state worth printing. The WORDS of that are
+            # asked for rather than written here, for the reason
+            # `_host_refusal_clause` states.
+            "untiered": not _host_tier(mod) and not _host_model_source(mod),
             # ONE of the files the row blocked, and the subject of the note
             # printed under it. Sorted, so the note names the same file on every
             # run of the same log — a row whose note quoted a different file each
@@ -1750,9 +1616,12 @@ def print_host_table(table, minimum, lines=0, files_all=0):
         if r["files"] < minimum:
             continue
         # A module with a source is WRITTEN, which is a third state and not a
-        # missing one, and the label comes from `formal.imports.host_module_verdict`
-        # so this table and the build cannot answer differently about one name.
-        tier = r["verdict"]
+        # missing one: it is in neither tier because `HOST_MODELLED`'s rule is
+        # "a name LEAVES here by being WRITTEN" and `HOST_ADMITTED`'s is "a name
+        # is here iff it has a source", and its import resolves before either
+        # set is consulted. Printing it as UNTIERED would report `os` and `sys`
+        # as mis-diagnosed.
+        tier = r["tier"] or ("written" if r["model"] else "UNTIERED")
         model = r["model"] or "—"
         uses = r["uses"] if r["declared_known"] else (
             "?" if r["mentions"] is None
@@ -1813,12 +1682,8 @@ def print_host_table(table, minimum, lines=0, files_all=0):
           "a row waiting on one module.")
     print("`tier` is read from formal/imports.py::host_module_tier and `model` "
           "from formal/hostmods/;\nneither is copied here. 'unreachable' is a "
-          "fact about the target, 'modelled' is a gap\nwith an owner, "
-          "'admitted' is a module that answers under a declared contract, "
-          "'not-code'\nasserts nothing about reachability — CPython ships it and "
-          "its content is not code,\nso neither WORK nor a permanent fact — and "
-          "'not-a-module' is a typo or a gap in this\nrepository rather than a "
-          "statement about the target at all.")
+          "fact about the target, 'modelled' is a gap\nwith an owner, and "
+          "'admitted' is a module that answers under a declared contract.")
     print("`UNTIERED` quotes formal/imports.py::unresolvable_import_error rather "
           "than the build's wording\nwritten out here, so the clause under a "
           "row is the one that file was given.")
@@ -1848,90 +1713,55 @@ def main():
             print_host_table(table, args.minimum, lines, files_all)
         return 0
 
-    table, total, unclassified = rank(args.log)
+    table, total = rank(args.log)
     shown = [r for r in table if r["files"] >= args.minimum]
     if args.json:
         json.dump(shown, sys.stdout, indent=1)
         print()
-        return 0
-    print(f"{'files':>5} {'in-file':>7}  cause")
-    for r in shown:
-        print(f"{r['files']:>5} {r['in_file']:>7}  {r['cause']}")
-        print(f"        refused in: "
-              f"{', '.join(f'{k} x{v}' for k, v in r['refused_in'])}")
-        if r["refused_names"]:
-            print("        names:      "
-                  + ", ".join(f"{k} x{v}"
-                              for k, v in r["refused_names"][:8]))
-        for refuser, src, blocks, uses, declared in r["uses"]:
-            if src is None:
-                note = ("NOT MEASURED: the chain names this module by "
-                        "basename only and that basename is absent or "
-                        "ambiguous in this tree")
-            elif not declared:
-                note = ("measured 0, and it cannot be otherwise: the "
-                        "module declares no name the export rule could "
-                        "exclude")
-            elif uses == 0:
-                note = ("the refusal is about the import CLOSURE, not "
-                        "about these files — see the module docstring")
-            elif uses == blocks:
-                note = "every blocked file uses it, so the row is work"
-            else:
-                note = (f"{blocks - uses} of the {blocks} name nothing it "
-                        f"declares; the rest of the row is closure")
-            print(f"        uses:        "
-                  f"{'not measured' if src is None else uses} "
-                  f"of {blocks} blocked by {refuser} name anything it "
-                  f"declares"
-                  + (f" ({', '.join(declared[:6])})" if declared else "")
-                  + f"  [{note}]")
-        print(f"        example:    {r['example']}")
-    shown_files = sum(r["files"] for r in shown)
-    print(f"\n{shown_files} of {total} codegen/dependency lines "
-          f"accounted for, in {len(shown)} cause(s) of "
-          f"{len(table)}")
-    print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
-          "first refusal reached,\nso fixing one usually moves it to the "
-          "next. Measure a cause's real value by\nre-sweeping the files it "
-          "blocks — the census is "
-          "`bugs/FORMAL_sweep_work_map.md` §1, which supersedes every "
-          "per-round map.")
-
-    # THE UNCLASSIFIED BUCKET, LOUDLY, and it is `formal_sweep.py`'s alarm
-    # rather than a second one: its `unclassified_report` owns the shape
-    # grouping, the threshold and the wording, and this table calls it with ITS
-    # OWN classifier's unclassified rows and with the sweep's family table as the
-    # other opinion — so a shape this table cannot name but the sweep's can is
-    # reported here as a one-row fix in `CAUSES`, and a shape NEITHER can name
-    # is reported as what it is, which is the 2026-10-04 b12 failure: 236 of this
-    # table's files, the corpus's largest row, found by reading a work map
-    # afterwards instead of by running anything.
-    #
-    # The exit status is unchanged, and the module docstring's rule is why: this
-    # tool reports on another tool's output and has no opinion about it. The
-    # sweep that produced the log is the thing that exits 4, over the same rows
-    # measured by the same function.
-    print()
-    FS.unclassified_report(unclassified, _swept(args.log),
-                           other_classify=FS._refusal_family,
-                           other_name="formal_sweep.py's _REFUSAL_FAMILIES")
-    return 0
-
-
-def _swept(log_path):
-    """The file total from a sweep log's own summary line, or 0 if it has none.
-
-    Read for the SHARE half of the honesty bar, and a missing line is 0 rather
-    than a guess: with no denominator the bar is the file count alone, which is
-    the stricter of the two, so a log without a summary line under-reports the
-    finding instead of inventing one.
-    """
-    with open(log_path, errors="replace") as f:
-        for raw in f:
-            m = FS.SUMMARY_RE.match(raw)
-            if m:
-                return int(m.group("files"))
+    else:
+        print(f"{'files':>5} {'in-file':>7}  cause")
+        for r in shown:
+            print(f"{r['files']:>5} {r['in_file']:>7}  {r['cause']}")
+            print(f"        refused in: "
+                  f"{', '.join(f'{k} x{v}' for k, v in r['refused_in'])}")
+            if r["refused_names"]:
+                print("        names:      "
+                      + ", ".join(f"{k} x{v}"
+                                  for k, v in r["refused_names"][:8]))
+            for refuser, src, blocks, uses, declared in r["uses"]:
+                if src is None:
+                    note = ("NOT MEASURED: the chain names this module by "
+                            "basename only and that basename is absent or "
+                            "ambiguous in this tree")
+                elif not declared:
+                    note = ("measured 0, and it cannot be otherwise: the "
+                            "module declares no name the export rule could "
+                            "exclude")
+                elif uses == 0:
+                    note = ("the refusal is about the import CLOSURE, not "
+                            "about these files — see the module docstring")
+                elif uses == blocks:
+                    note = "every blocked file uses it, so the row is work"
+                else:
+                    note = (f"{blocks - uses} of the {blocks} name nothing it "
+                            f"declares; the rest of the row is closure")
+                print(f"        uses:        "
+                      f"{'not measured' if src is None else uses} "
+                      f"of {blocks} blocked by {refuser} name anything it "
+                      f"declares"
+                      + (f" ({', '.join(declared[:6])})" if declared else "")
+                      + f"  [{note}]")
+            print(f"        example:    {r['example']}")
+        shown_files = sum(r["files"] for r in shown)
+        print(f"\n{shown_files} of {total} codegen/dependency lines "
+              f"accounted for, in {len(shown)} cause(s) of "
+              f"{len(table)}")
+        print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
+              "first refusal reached,\nso fixing one usually moves it to the "
+              "next. Measure a cause's real value by\nre-sweeping the files it "
+              "blocks — the census is "
+              "bugs/FORMAL_sweep_work_map_2026-09-30_r2.md, which replaced "
+              "§3 of the 2026-09-30 original.")
     return 0
 
 

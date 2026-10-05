@@ -1,97 +1,9 @@
 # FORMAL_declared_parameter_against_its_call_sites: the 13-file row, split by what each call site actually hands over
 
-**Status: MEASURED AGAIN (2026-10-05, `formal28-3`), and the conclusion is
-UNCHANGED — 0 of the 13 still reach it — but §3's MECHANISM is stale and the
-class mix moved.** The row's own verdict does not depend on either, and the check
-is still live and still load-bearing (a two-field `Cell` reached with a plain
-word refuses identically on both backends, measured today). What moved is which
-wall each file is behind, and the reason §3 gives for the largest group.
-
-## RE-MEASURED 2026-10-05 (`formal28-3`): 0 of 13 still, one class changed, and
-## §3's `String` mechanism is no longer true
-
-Same 13 files, `tools/formal_sweep.py` with the sweep's own argv, arm64:
-
-| class | 2026-10-03 | **2026-10-05** | what it is |
-|---|---|---|---|
-| `codegen/dependency` | 9 | **9** | a module the file IMPORTS is refused first — `_io.mojo`, `constants.mojo`, `_unicode_lookups.mojo` and `std.collections` / `std.memory` / `std.os` all "module exports nothing" |
-| `not-answerable/host-import` | 4 | **3** | the `.py` files importing CPython host modules — now `importlib` ×2 and `copy` ×1 |
-| `codegen` | 0 | **1** | **`elaborate.py`**, which moved: it imports `monomorphize`, which imports `cas.py`, and `cas.py` is refused for `an f-string literal on line 451` — `FORMAL_string_composition_has_no_buffer`'s row, a claim about a construct IN a module it imports, which is a different diagnosis from a host import |
-| **on `frame_declared_parameter_refusal`** | **0** | **0** | — |
-
-**So the row's conclusion is the same and the population's composition is
-not.** The one file that changed class changed it because its import chain
-reached a construct-level refusal rather than a module-level one, and the
-verdict history line says so in the sweep's own words (`codegen/dependency ->
-codegen: 1`, `not-answerable/host-import -> codegen/dependency: 1`,
-`unchanged: 11`). Neither move is this construct's doing.
-
-### §3's `String` mechanism is STALE, and what replaced it
-
-§3's sharpest case says a parameter DECLARED `String` is compiled as a
-**3-slot frame** (`_ptr_or_data`, `_len_or_data`, `_capacity_or_data`) while
-`String()` lowers as a **type CONVERSION** yielding one **word** — "one name is a
-word where it is constructed and a frame where it is declared".
-
-**Measured on this tree, a `String` parameter is a plain WORD and nothing
-refuses the disagreement**, both architectures:
-
-```
-def take(s: String) -> Int:
-    return len(s)
-def main(n: Int) -> Int:
-    var s = String()
-    s = "hello"
-    printf("len=%d", take(s))
-```
-
-→ `Built` on arm64 and x86-64, printing `len=5`, which is CPython's answer.
-`formal/model.py::_parameter_frame_contract`'s own docstring says why: an entry is
-`None` — "an ordinary word" — unless the parameter's name is in the module's
-`declared` table of ITS OWN structs, and `String` is not one. `String` is in
-`IDENTITY_TYPE_CTORS`, so it is a conversion on both sides and there is no
-disagreement to refuse.
-
-**What this does to §3.** The word-versus-frame question it poses is still real
-and still not this construct's to answer — it is now plainly visible in a
-program with no stdlib in it at all, which is a better reproducer than the one
-§3 used:
-
-```
-struct Cell:                      # two fields, so a FRAME on this path
-    var a: Int
-    var b: Int
-def fill(c: Cell) -> Int:         # declared as a frame
-    c.a = 7
-    return c.a * 10 + c.b
-def main(n: Int) -> Int:
-    var raw = 5                   # a plain WORD
-    return fill(raw)
-```
-
-refused identically on both backends: *"`fill()` declares 'c' as Cell, so it is
-compiled with 'c' as the ADDRESS of a frame of 8-byte slots … and every call site
-in this image hands it something else: `fill(raw)` passes a name, 'raw'"*. The
-control is the one-field version — `struct Cell: var v: Int` with the same body
-— which **builds**, because a one-field struct IS a word and there is nothing to
-disagree about (`_parameter_frame_contract`'s `["one-word"]` entry). So the
-refusal is still discriminating correctly, and §3's actual conclusion — that
-closing this needs a **call-site coercion in both emitters** (reserve a block
-per site, copy the value's slots in, pass the address), keyed on the callee's
-published `fn._frame_param_contract` — is unchanged and still worth **0 of these
-13 files**, because every one of them is behind an import.
-
-**What is NOT measured here**, so a reader does not assume it: the call-site
-coercion itself. It is §3's own scoping, and this re-measurement did not attempt
-it — what it did is check that the refusal it would lift is still live and still
-discriminating, which it is.
-
----
-
-**THE ORIGINAL STATUS (2026-10-03), kept because the re-measurement above is
-only a diff against it.** `frame_declared_parameter_refusal`
-(`formal/model.py`, raised from `formal/build.py`'s
-`_check_declared_parameter`) named 13 files in the 630-file arm64 sweep. The
+**Status: MEASURED AGAIN (2026-10-03), and the row has moved off this refusal
+entirely: 0 of the 13 files now reach it.** `frame_declared_parameter_refusal`
+(`formal/model.py:7109`, raised from `formal/build.py`'s
+`_check_declared_parameter`) names 13 files in the 630-file arm64 sweep. The
 construct is `construct:declared-param-vs-call-sites`; this doc is its
 measurement and it answers the question the enqueue asked — **"is a row of
 programs that are already wrong a stdlib bug or a compiler gap?"** — with
@@ -186,7 +98,7 @@ FILE .../stdlib/std/base64/base64.mojo
 … 13 rows
 ```
 
-**13 files, matching the `b3` round of `bugs/FORMAL_sweep_work_map.md` §2's row
+**13 files, matching `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md` §2's row
 exactly**, on the same tree (`e695183a`), with no build at all. Worth keeping as
 a tool: the sweep's own ledger records only path → class, so the CAUSE text is
 in the per-file `.result` entries and nowhere else.
