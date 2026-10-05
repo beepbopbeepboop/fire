@@ -8522,12 +8522,14 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
    arrived as address 0 and `mojo_fnptr_call_1((void *)0, ...)` called through
    a null pointer: SIGSEGV, exit 139, no output.
 
-   This is that case's honest answer, and it follows
-   `mojo_unsupported_iter`'s convention exactly: print loudly, and let
-   execution continue with the same behaviour the null pointer would have
-   produced had it survived — so a program that never CALLS the parameter is
-   completely unaffected, and one that does gets a greppable diagnostic
-   instead of a signal.
+   This is that case's honest answer, and it is a CATCHABLE
+   `NotImplementedError` — the same decision `mojo_module_not_compiled` makes
+   for a method call on a bare-imported module this compile did not include,
+   which is this situation one level out. It used to follow
+   `mojo_unsupported_iter`'s convention instead: print loudly, and let
+   execution continue with the 0 the null pointer would have produced had it
+   survived. That was the wrong trade HERE, and the difference is what the
+   body's own comment says; see the function.
 
    ONE function, not a family per arity, because the call reaches it through
    `mojo_fnptr_call_N`'s `int64_t (*)(int64_t...)` cast: a callee that
@@ -8551,15 +8553,36 @@ void mojo_set_unavailable_callable_name(const char *name) {
 }
 
 int64_t mojo_unavailable_callable(void) {
-    if (!_unavailable_callable_reported) {
-        _unavailable_callable_reported = 1;
-        fprintf(stderr, "mojo_unavailable_callable: '%s' is a callable that is "
-                         "not available in compiled mode (it names an imported "
-                         "module's function, which this translation unit may "
-                         "not contain); calling it returns 0\n",
-                _unavailable_callable_name);
-    }
-    return 0;
+    /* A CATCHABLE NotImplementedError, not a printed line and a 0. The
+     * stub was originally "loud but continuing", mirroring
+     * `mojo_unsupported_iter`, and that was the wrong trade here: the
+     * difference is that `mojo_unsupported_iter` answers a question the
+     * program asked about its own data (the loop body simply does not run,
+     * and nothing downstream treats the result as a value it computed),
+     * while this is the RETURN VALUE of a call the program made. A 0 handed
+     * back from `g(x)` is indistinguishable from a real 0 the function
+     * could have returned, so every number derived from it is wrong and
+     * exit code says nothing -- `def probe(x, *, g=os.walk): return g(x)`
+     * printed `0` where CPython prints a generator object.
+     *
+     * Raising is the same decision `mojo_module_not_compiled` already makes
+     * for a method call on a bare-imported module this compile did not
+     * include, which is the identical situation one level out: a name that
+     * resolved to nothing here. It is catchable, so a program that
+     * legitimately probes for the capability (`if os.walk is available`)
+     * can still say so, and a program that does not gets a named,
+     * greppable exception instead of a plausible number.
+     *
+     * It is still ONE stub for every arity 0..4, for the reason the
+     * comment above gives. */
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "%s is a callable that is not available in compiled mode (it "
+             "names an imported module's function, which this translation "
+             "unit may not contain)", _unavailable_callable_name);
+    _unavailable_callable_reported = 1;
+    mojo_raise_not_implemented(msg);
+    return 0;               /* unreachable; mojo_raise does not return */
 }
 
 void *mojo_unavailable_callable_ptr(void) { return (void *)mojo_unavailable_callable; }

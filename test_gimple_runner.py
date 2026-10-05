@@ -2570,35 +2570,55 @@ main()
     # TypeError from an unrelated failure (and the signal it replaced was
     # exit 0 with a wrong list).
     # A callable-valued parameter default naming an IMPORTED module's function
-    # (`def probe(x, *, g=os.walk)`) was padded with 0, so `g` arrived as
-    # address 0 and the callee called through a null pointer: SIGSEGV, exit
-    # 139, no output. Whether `os.walk` was compiled into this translation
-    # unit at all is a property of the whole import closure, not of the
-    # expression, so "0" is the one answer that is always available and
-    # always wrong.
+    # (`def probe(x, *, g=os.walk)`) has no address in this translation unit:
+    # whether `os.walk` was compiled in at all is a property of the whole
+    # import closure, not of the expression. The padded default was 0, so `g`
+    # arrived as address 0 and the callee called through a null pointer:
+    # SIGSEGV, exit 139, no output.
     #
-    # The honest answer follows `mojo_unsupported_iter`: say so, loudly, and
-    # carry on. `n > 0` printing False is what the null pointer WOULD have
-    # printed had it survived — the loop's own "unsupported iterable"
-    # diagnostic says the body runs zero times, which is pre-existing
-    # behaviour, not something this change introduced.
-    test_gimple_diagnostic("gimple_imported_callable_default_is_diagnosed", """\
+    # Then it became a stub that printed a line and returned 0 — which stopped
+    # the signal and made the answer WORSE, because 0 handed back from
+    # `g(x)` is indistinguishable from a real 0 the function could have
+    # returned: `probe('/r')` printed `0` where CPython prints a generator
+    # object, and every number derived from it downstream was wrong with exit
+    # 0. So the stub RAISES a catchable NotImplementedError naming the
+    # callable, which is what `mojo_module_not_compiled` already does for a
+    # method call on a bare-imported module this compile did not include —
+    # the identical situation one level out.
+    #
+    # Both halves are asserted: the uncaught form (exit non-zero, name in the
+    # message) and the CAUGHT one, because "catchable" is the property that
+    # lets a program probe for the capability instead of dying, and a test
+    # that only checked the crash could not tell a catchable raise from a
+    # hard abort.
+    test_gimple_runtime_error("gimple_imported_callable_default_raises", """\
 def probe(x, *, g=os.walk):
     return g(x)
 
 def main():
-    r = probe(".")
-    n = 0
-    for a, b, c in r:
-        n = n + 1
-    print(n > 0)
+    print(probe("."))
 main()
-""", "mojo_unavailable_callable: 'os.walk'", "False\n")
+""", "NotImplementedError: os.walk is a callable that is not available in compiled mode")
+
+    test_gimple_stdout("gimple_imported_callable_default_raise_is_catchable", """\
+def probe(x, *, g=os.walk):
+    return g(x)
+
+def main():
+    try:
+        r = probe(".")
+    except NotImplementedError as e:
+        print('NotImplementedError')
+        print('os.walk' in str(e))
+    else:
+        print('no exception')
+main()
+""", "NotImplementedError\nTrue\n")
 
     # The same default in a callee that NEVER CALLS the parameter must be
-    # completely unaffected: the diagnostic lives inside the stub, so it fires
-    # on a call, not on a padding. Without this the fix would trade a crash
-    # for a spurious message in every program that merely mentions a callable
+    # completely unaffected: the raise lives inside the stub, so it fires on a
+    # call, not on a padding. Without this the fix would trade a crash for a
+    # spurious exception in every program that merely mentions a callable
     # default.
     test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
 def probe(x, *, g=os.walk):

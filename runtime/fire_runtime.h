@@ -1734,10 +1734,13 @@ char *mojo_repr_bool(int b);
 
 /* A callable-valued parameter default naming an IMPORTED module's function
  * (`def probe(x, *, g=os.walk)`) — see the block comment on
- * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was a
- * SIGSEGV and why ONE no-parameter function is the right stub for every
+ * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was
+ * a SIGSEGV and why ONE no-parameter function is the right stub for every
  * arity. `mojo_set_unavailable_callable_name` arms the name the diagnostic
- * prints; the codegen emits it immediately before the call it belongs to. */
+ * prints; the codegen emits it immediately before the call it belongs to.
+ * Calling it RAISES a catchable NotImplementedError naming the callable: a 0
+ * returned to the caller was indistinguishable from a real 0 the function
+ * could have returned, so every number derived from it was wrong with exit 0. */
 void    mojo_set_unavailable_callable_name(const char *name);
 int64_t mojo_unavailable_callable(void);
 void   *mojo_unavailable_callable_ptr(void);
