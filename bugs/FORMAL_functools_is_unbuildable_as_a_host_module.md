@@ -6,6 +6,55 @@ step" has LANDED.** Found on `construct:sweep5:hostmods-core` (2026-10-02), whos
 brief was to add `functools` to `formal/hostmods/` alongside `collections`,
 `enum` and `contextlib`. `enum` and `contextlib` landed; this is the other two.
 
+**Status 2026-10-05 (`work/formal23-4`): `reduce` is WRITABLE and the module is
+blocked by ONE thing that is not a `functools` capability at all — the module was
+WRITTEN, measured on both architectures, and not landed, and the reason is
+`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`.** Read
+this before §"The exact next step", which is now two steps out of date.
+
+    $ printf 'import functools\n\ndef add2(a, b):\n    return a + b\n\ndef main() -> int:\n    printf("r=%d\\n", functools.reduce(add2, [1, 2, 3, 4], 0))\n    return 0\n' > .tmp/ft/fmod.mojo
+
+With a `formal/hostmods/functools.mojo` exporting `reduce` and `functools`
+removed from `formal/imports.py`'s host-module set:
+
+| shape | this tree | CPython |
+|---|---|---|
+| `reduce(add2, [1,2,3,4], 0)` | `r=10` arm64, `r=10` x86-64 | 10 |
+| `reduce(mul2, [1,2,3,4], 1)` (non-commutative) | `m=24` arm64, `m=24` x86-64 | 24 |
+| `reduce(add2, [7], 100)` (one element) | `o=107` | 107 |
+| `reduce(add2, [], 5)` (empty) | `e=5` | 5 |
+| `reduce(add2, [1,2,3,4])` (CPython's 2-arg form) | refused: `missing required argument 'initial'` | 10 |
+| `@functools.lru_cache(maxsize=1)` on a function | **BUILDS, exit 0, prints 89** | memoised |
+
+So every capability §"The exact next step" lists as missing is now present —
+a first-class CALLABLE (step 1, 2026-10-04) and `len()` of a list PARAMETER
+(this tree, `model.parameter_kinds_by_call_site`) — and one refusal has MOVED
+rather than gone: CPython's two-argument `reduce` cannot be a defaulted
+`initial`, because a default is not materialised across a dylib boundary
+(`FORMAL_default_argument_not_applied_across_a_dylib`) and a probe module with
+`initial = 0` answers **0** to `reduce(mul2, [1,2,3,4])` where CPython answers
+24. A required `initial` turns that into a refusal, which is the safe direction.
+
+**What stops the module, then, is the last row, and it is a different bug from
+anything in this document.** A decorator on this path is parsed and dropped, so
+the module's ABSENCE is the only thing refusing `@functools.lru_cache`; publish
+a `functools` and that program builds and runs and does not memoise. The bare
+attribute read `functools.lru_cache` refuses correctly and well (naming the
+module, the missing name and what the module publishes), so the refusal
+machinery is there — it is only the DECORATOR spelling that never asks. That is
+`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`, and its
+§"The exact next step" also carries the row that constrains the fix
+(`test_dataclasses_formal.py`'s `@dataclasses.dataclass` passes for the SAME
+reason and must keep passing).
+
+**What this session did NOT do, deliberately:** land the module. Writing one
+whose 19 absent names are honestly refused and whose 1 present name is checked
+against CPython is a day's transcription, and it would have turned a green
+`functools-absent` group red — a REGRESSION, because the group's own comment
+says the decorator spelling is the one program that would build and skip the
+work it asked for. A missing capability that refuses is better than a present
+one that lies, and this is the case where that ordering is the whole decision.
+
 **Status 2026-10-04 (`work/formal29-3`): step 1 is DONE — a first-class function
 value is a CODE ADDRESS on this path — so §"What I saw" §2's headline measurement
 is inverted, and the blocker `reduce` hits is a different one entirely.** Read this
@@ -214,6 +263,18 @@ the target as a gap in the backend.
 
 ## The exact next step
 
+**SUPERSEDED by the Status at the top — read that first.** What is below is the
+plan as written on 2026-10-02 and it is wrong about two of its three steps.
+Step 1 LANDED on 2026-10-04 (a function value is a code address) and the
+`len()`-of-a-list-parameter step it did not know about landed on 2026-10-05, so
+the list below is one step long and its order is stale. What survives, and is
+now the whole of the remaining work, is step 2 — with the addition the 2026-10-05
+Status measured: step 2 alone is not enough, because "a decorator is parsed and
+never applied" is only safe while every decorator a caller can spell is ALREADY a
+refusal. The next step is therefore
+`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`'s, whose
+§"The exact next step" carries the check and the pinned row that constrains it.
+
 Not a module. The root capability is **a first-class function value**, and it is
 the same one `collections` needs for a different reason and that
 `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §2 already
@@ -224,16 +285,25 @@ and not a design.
 
 Order of work, if it is picked up:
 
-1. A function value as a parameter and as a return — a lowering in both backends
-   plus a representation rule, since a callee and a caller must agree on what a
-   function IS (a code address; `formal/model.py`'s `pointer_value_model` already
-   says what a word can and cannot denote).
+1. ~~A function value as a parameter and as a return — a lowering in both
+   backends plus a representation rule, since a callee and a caller must agree
+   on what a function IS (a code address; `formal/model.py`'s
+   `pointer_value_model` already says what a word can and cannot denote).~~
+   **DONE, 2026-10-04.** See the 2026-10-04 Status at the top.
 2. Decorator application — separately, and before any decorator is exported by a
    hostmod. The two are related (a decorator IS a function value) but a
    half-working version of this that unblocks `reduce` and leaves `@wraps`
-   silently dropped is worse than neither.
+   silently dropped is worse than neither. **AND, measured 2026-10-05: a
+   decorator whose name does not resolve must be REFUSED rather than ignored, or
+   publishing any `functools` name turns `@functools.lru_cache` into a program
+   that runs and skips the memoisation it asked for** — that is
+   `bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`, and it
+   is the actual gate on step 3.
 3. `functools` then follows, and `test_formal_core_hostmods.py` grows a group
-   for it the way `enum` and `contextlib` grew theirs.
+   for it the way `enum` and `contextlib` grew theirs — with `reduce` removed
+   from its `absent` list and a `functools` group beside `ctx` that compares
+   `reduce` against CPython's own over the four shapes the 2026-10-05 Status
+   measured, including the empty sequence and the one-element one.
 
 Until step 2, no `functools` name may be exported, and the test's
 `functools`-shaped absence group is what keeps that true.
