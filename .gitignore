@@ -71,6 +71,12 @@ abt*_*.pyi
 # `pixi run prooflib` / `tools/proof.sh <stem>` / `fire.py formalbuild`)
 *.olean
 *.olean.srcsha256
+# A build's PRIVATE temp `.olean`, written beside the real one and renamed into
+# place (`formal/lean.py::ensure_library`'s private-temp discipline). A build that
+# is killed mid-write leaves one behind, and it is 31 MB of build output: it was
+# committed by accident once on this branch and the `*.olean` rule above does not
+# match a name that does not END in `.olean`.
+*.olean.tmp.*
 # The flock file `formal.lean.ensure_library` takes while building an .olean.
 # Never meaningful between runs, and it must NOT be gitignored as a pattern
 # that would also swallow a real build product — hence the explicit name.
