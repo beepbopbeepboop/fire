@@ -1,5 +1,43 @@
 # FORMAL_stack_floor_does_not_guard_an_acyclic_chain: CLOSED for programs — every prologue of an image that has an entry carries the guard
 
+**Status 2026-10-05 (`work/formal27-5`): the RULE is unchanged and its
+MEASUREMENT had drifted in three places, one of them contradicting the instrument
+it cites. Re-measured with `python3 tools/formal_call_depth_census.py` (12 s, no
+build) and corrected in `formal/model.py`, `test_formal_run.py` and here.**
+
+| the corpus figure | as published | measured 2026-10-05 |
+|---|---:|---:|
+| deepest image, `formal/arm64_codegen.py` | 76 | **89** |
+| deepest image, `formal/x86_64_codegen.py` | 69 | **78** |
+| …as a multiple of the 60 frames arm64 affords | 1.3x | **1.5x** |
+| images measured over the repository | 413 | **474** |
+| median / p90 repository depth | 3 / 6 | **3 / 6** (unchanged) |
+| **deepest chain the guard does NOT reach** | **7** | **7** (unchanged) |
+
+**The last row is the one this document leaves OPEN, and it has not moved: the
+module dylib's residual is a bounded 7 frames, median 3.** So the re-measurement
+moved the number the closed half is argued from and left the open half exactly
+where it was — which is the useful shape for a reader: the risk on programs is
+concentrated in two files and the guard catches them (`deep(89)` is
+`STACK_TRAP_STATUS`, not a SIGSEGV), and the module dylib is still the
+`lib/Refine.lean` project at the end of this document.
+
+**The drift was in three directions and one of them was a plain error.**
+`test_formal_run.py` carried the residual as **12 frames** in two places
+(14,000 lines apart) while the census's own docstring, `formal/model.py`'s
+`body_has_conditional_branch`, `stack_floor_guarded_names` and this document all
+said **7**; a fresh run says 7. And `formal/model.py` named the census's column
+**`no-brch`**, which the tool does not print — the column is `unguard`, and it is
+a depth rather than a per-image flag. All three are corrected in place, each with
+the date and the command beside it, because **a figure copied between files is a
+figure that stops agreeing with the instrument it cites** and nothing in the tree
+compared them. What is deliberately NOT done is pinning these numbers in a test:
+the guard's argument is about the corpus, so a test that asserted them would go
+red on an unrelated merge — which is why the census exists as an instrument to
+re-run rather than as a fixture to assert. That trade is stated at
+`test_formal_run.py`'s `_STACK_FLOOR_DEPTH_PROBES`, and this re-measurement is
+what it looks like when the corpus moves under a published figure.
+
 **Area:** FORMAL (the stack-floor guard, both architectures).
 **Status: MEASURED, WIDENED and then CLOSED (2026-10-03, `work/formal13-6` then
 `work/formal16-6`).** The guard landed in `formal/model.py`
@@ -119,7 +157,7 @@ and `tools/formal_call_depth_census.py` (new — parse plus one graph per file,
 680 files, no sweep and no build). Over this repository and the stdlib:
 
 ```
-deepest image: 76 frames
+deepest image: 76 frames                                    <- RE-MEASURED 2026-10-05: 89
   arm64  traps at  60 frames; deepest measured is 76 = 1.3x the budget
   x86-64 traps at 480 frames; deepest measured is 76 = 0.2x the budget
 deepest chain the guard does NOT reach (bodies with no branch, no cycle): 7
@@ -131,6 +169,28 @@ repository   413 images; median depth 3, p90 6, max 76
 stdlib       181 images; median depth 3, p90 7, max 16
 ```
 
+**Re-measured on this tree (2026-10-05, `work/formal27-5`), same command, and
+every line of it a `Counter` over the same graphs:**
+
+```
+89    242   1631   4    formal/arm64_codegen.py   <-- AT/OVER the arm64 budget
+78    228   1462   5    formal/x86_64_codegen.py <-- AT/OVER the arm64 budget
+44    206    733   3    fire_compiler.py
+23    865   2351   4    formal/model.py
+22    128    385   5    formal/hostmods/re.mojo
+...
+repository   474 images; median depth 3, p90 6, max 89
+stdlib       181 images; median depth 3, p90 7, max 16
+```
+
+**89 is 1.5x the 60 an arm64 budget affords** (it was 1.3x), the deepest
+branch-free chain is **still 7**, the median and p90 are unchanged, and the
+repository has grown from 413 images to 474 — so the risk on programs is exactly
+as concentrated as this document said it was (two files, both this backend's own
+codegen) and the guard catches both, while the MODULE DYLIB residual this
+document leaves open is unmoved. The two figures that had to be corrected
+elsewhere in the tree when this was re-measured are in the Status at the head.
+
 **The answer to the question this document spent three revisions asking is
 "close" — the corpus is ALREADY INSIDE the hole, by 1.3x — and the two deepest
 images are the two this backend's own codegen lives in**, which is the file this
@@ -139,10 +199,11 @@ is 6, so the risk is concentrated in exactly two files and is not a general
 property of the corpus; the depth is also an upper bound twice over (`iter`'s
 edges are a superset of the calls the emitter makes, and `call_graph_depth`
 bounds the longest simple path by the condensation), so the real figure is at
-most 76 and at least 60 — either way the same order as the budget.
+most 89 and at least 60 — either way the same order as the budget, and the
+re-measurement at the head of this document is what moved the upper end.
 
 **The x86-64 figure is why the rule had to be widened rather than the budget
-raised.** 76 frames is 0.2x x86-64's budget and 1.3x arm64's, so a budget change
+raised.** 89 frames is 0.2x x86-64's budget and 1.5x arm64's, so a budget change
 would fix one machine by making the other's guard fire earlier for no reason.
 
 ## The rule that landed
@@ -248,7 +309,7 @@ The cheaper third option this document used to offer — "on a cycle, or reachab
 from one" — is **dominated** by what landed and is not worth taking: a DAG with
 no cycle in it has no member reachable from one, so it would guard nothing that
 the cycle rule did not already guard, and the measured offender
-(`formal/arm64_codegen.py`, 76 frames) is a DAG.
+(`formal/arm64_codegen.py`, 89 frames) is a DAG.
 
 ## Reproducing
 

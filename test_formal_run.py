@@ -7368,9 +7368,11 @@ BOTH_ARCH_CASES = [
     # Unbounded depth needs a cycle, so a chain like this walked straight past
     # the floor — and the corpus is already inside it, which is what
     # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
-    # measuring: `tools/formal_call_depth_census.py` puts the deepest single
-    # image in this repository at 76 frames against the 60 an arm64 budget
-    # affords (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`).
+    # measuring: `python3 tools/formal_call_depth_census.py` puts the deepest
+    # single image in this repository at 89 frames against the 60 an arm64
+    # budget affords (`formal/arm64_codegen.py`, and 78 for
+    # `x86_64_codegen.py`) — 76 and 69 until 2026-10-05, which is what a
+    # figure of the tree rather than of the rule looks like after a week.
     #
     # 600 rather than 61 because x86-64's frame is 16 KiB to arm64's 128 KiB, so
     # its budget affords 480 frames and a 61-deep chain is correctly INSIDE it.
@@ -7386,8 +7388,12 @@ BOTH_ARCH_CASES = [
     # `if n > 1000000: return n` in every body is what makes this a case about
     # the SECOND rule rather than the first: a body with no conditional branch
     # is not guarded off the cycle, and 600 of those is the measured residual
-    # `stack_floor_guarded_names`'s docstring states (12 frames over the whole
-    # corpus, a median of 3).
+    # `stack_floor_guarded_names`'s docstring states — **7 frames** over the
+    # whole corpus, a median of 3, re-measured 2026-10-05. It said 12 here
+    # until then, in this comment and 14,000 lines below it, and the census's
+    # own docstring and the guard's docstring and the bug doc all said 7: a
+    # figure copied between files is a figure that stops agreeing with the
+    # instrument it cites.
     #
     # Measured before the widening, on both architectures: exit 139 (SIGSEGV,
     # no output, no status). After: `STACK_TRAP_STATUS`, exit 2.
@@ -21822,9 +21828,9 @@ _STACK_FLOOR_PROBES = [
     # The cycle rule alone left a DAG of distinct functions free to walk past
     # the floor, and the measured cost of that is in
     # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
-    # single image in this corpus is 76 frames against the 60 an arm64 budget
-    # affords. So a body that already contains a conditional branch is guarded
-    # whether or not anything calls back into it.
+    # single image in this corpus is 89 frames against the 60 an arm64 budget
+    # affords (76 until 2026-10-05). So a body that already contains a
+    # conditional branch is guarded whether or not anything calls back into it.
     ("a_branching_body_is_guarded_off_the_cycle",
      "def leaf(n):\n    return n * 2\n"
      "def mid(n):\n"
@@ -21997,10 +22003,14 @@ def check_stack_floor_decision(verbose=False):
 # not about the parse: a module the corpus already holds would make a test that
 # goes red the moment an unrelated function is added, which is a test of the
 # corpus rather than of the rule. The corpus figure is
-# `tools/formal_call_depth_census.py`'s (deepest image 76 frames against the 60
-# an arm64 budget affords; deepest branch-free chain 12), and it is a
+# `python3 tools/formal_call_depth_census.py`'s (deepest image 89 frames against
+# the 60 an arm64 budget affords; deepest branch-free chain 7), and it is a
 # MEASUREMENT rather than an assertion — pinning it here would pin today's
-# corpus.
+# corpus. It is written down because the rule's own argument is that the corpus
+# is already inside the hole, and a reader who wants to know by how much needs
+# the number; it was 76 and 12 until 2026-10-05, when the census was re-run for
+# `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` and both halves
+# of it had moved.
 _STACK_FLOOR_DEPTH_PROBES = [
     # A straight chain of n: the answer is n, and the point of the row is that
     # 76 of them is a real number the cycle rule cannot see.

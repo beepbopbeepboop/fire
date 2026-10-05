@@ -37220,8 +37220,13 @@ def body_has_conditional_branch(fn) -> bool:
         one's — the same rule `ValueKinds._scan` follows for the same reason.
 
     Under-counting is the safe direction and is where the residual lives:
-    `tools/formal_call_depth_census.py`'s `no-brch` column is what this
-    predicate's complement leaves unguarded, measured over the corpus.
+    `tools/formal_call_depth_census.py`'s `unguard` column is what this
+    predicate's complement leaves unguarded, measured over the corpus. (It was
+    written `no-brch`, which is a name the census does not print — the column is
+    `unguard`, and it is the DEPTH of the deepest chain through unguarded
+    bodies rather than a per-image flag. Fixed 2026-10-05, with the residual
+    re-measured the same day: **7 frames**, unchanged, which is what
+    `stack_floor_guarded_names`'s own paragraph above states.)
     """
     body = getattr(fn, "body", None)
     if body is None:
@@ -37297,10 +37302,19 @@ def stack_floor_guarded_names(functions, structs: dict = None,
         constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
         the cycle rule left a DAG of DISTINCT functions free to walk straight
         past it. Measured over this repository and the stdlib with
-        `tools/formal_call_depth_census.py`: the deepest single image is **76
-        frames** (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`),
-        which is 1.3x what the arm64 budget affords. So this is not a stated
-        limit with no work behind it; it is one the corpus is already inside.
+        `python3 tools/formal_call_depth_census.py` (12 s, no build): the
+        deepest single image is **89 frames** (`formal/arm64_codegen.py`, and
+        **78** for `x86_64_codegen.py`), which is 1.5x what the arm64 budget
+        affords. So this is not a stated limit with no work behind it; it is
+        one the corpus is already inside.
+
+        **Those figures were 76 and 69 (1.3x) until 2026-10-05, and the number
+        is a MEASUREMENT of the tree rather than a property of the rule** — the
+        repository has grown from 413 to 474 images since, and the two deepest
+        are still the two this backend's own codegen lives in. It is written
+        here with the command that produces it for that reason: a figure quoted
+        without one cannot be re-measured by the next reader, and a stale one is
+        indistinguishable from a true one until something goes wrong.
 
     **And the second rule costs nothing the first one was careful not to.** The
     per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
