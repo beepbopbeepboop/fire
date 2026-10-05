@@ -663,6 +663,37 @@ CENSUS_QUOTES = (
     ('bugs/FORMAL_known_limits.md',
      r'it is the only thing between the (\d+) and working code',
      ('word',)),
+    # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
+    # gap that produced `bugs/FORMAL_phase2_export_ceiling_is_four_behind.md`**,
+    # and the reason it went unnoticed is worth recording: §6's phase-2 table
+    # IS checked, by `test_formal_runtime_link.py` — but that job is in the
+    # `proofs` bucket only, so the gate never ran it, and §2.2's copy of the same
+    # census was in no table at all. Ten entry points landed, `fire_runtime.h`
+    # grew 565 → 580, and every published figure stayed where it was.
+    #
+    # §6's phase-2 `exported`/`reachable` rows are deliberately NOT here: they
+    # are `runtime_abi() ∩ (the dylib's own export table)`, which needs a built
+    # library, and `live_census()` reads headers only. `test_formal_runtime_link.py`
+    # is the check for those two, and the `word` row is in both.
+    ('FORMAL.md',
+     r'\| entry points across \*\*11\*\* headers \| \*\*(\d+)\*\* \|',
+     ('total',)),
+    ('FORMAL.md',
+     r'\| `fire_runtime\.h` (\d+), `fire_sqlite3\.h`',
+     ('fire_runtime_h',)),
+    ('FORMAL.md',
+     r'\| \*\*word in, word out\*\* \| \*\*(\d+)\*\* \|',
+     ('word',)),
+    ('FORMAL.md',
+     r'\| not word-shaped \| \*\*(\d+)\*\* \|',
+     ('box',)),
+    ('FORMAL.md',
+     r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
+     ('word', 'total')),
+    ('formal/build.py',
+     r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
+     r'word-shaped,',
+     ('total', 'word')),
     ('build_stdlib_dylib.py',
      r"of `fire_runtime\.h`'s (\d+)\n\s*entry points",
      ('fire_runtime_h',)),

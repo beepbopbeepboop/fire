@@ -446,6 +446,10 @@ def test_link_line_is_the_dylibs_exports():
         check(published is not None,
               'FORMAL.md §6 phase 2 still publishes the callable-surface figure')
         if published:
+            check(len(word) == published['word'],
+                  f"{arch}: {len(word)} word-shaped entry points in "
+                  f"`runtime_abi()`, FORMAL.md §6 phase 2 publishes "
+                  f"{published['word']}")
             check(len(linked) == published['exported'],
                   f"{arch}: {len(linked)} word-shaped entry points exported, "
                   f"FORMAL.md §6 phase 2 publishes {published['exported']}")
@@ -457,20 +461,33 @@ def test_link_line_is_the_dylibs_exports():
 def _published_phase2_surface():
     """FORMAL.md §6 phase 2's three-row table, read out of the document.
 
-    `(exported, reachable)` as published, or `None` when the rows are gone — and
-    gone is a FAILURE at the call site, not a skip: the rows are the phase's exit
-    criterion, and a document that quietly dropped them has stopped reporting
-    whether the phase is done.
+    `(word, exported, reachable)` as published, or `None` when the rows are
+    gone — and gone is a FAILURE at the call site, not a skip: the rows are the
+    phase's exit criterion, and a document that quietly dropped them has stopped
+    reporting whether the phase is done.
+
+    **The first row is read too, and reading it is the point.** Only rows 2 and
+    3 were checked, which is how row 1 went stale for TEN entry points while the
+    job that measures it was never run — the drift this document was filed for
+    saw FOUR of them, and six more landed afterwards. Row 1 is
+    `runtime_abi()`'s own word count, which needs no dylib and no `nm`, so it is
+    the one row a cheap caller can verify — and a row nothing checks is a row
+    that rots silently while the two that are checked stay honest.
+    `FORMAL.md`'s §2.2 table quotes the same census and is checked by
+    `test_runtime_header_scan.py`, whose `--fix` rewrites it.
     """
     import re
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'FORMAL.md')
     text = open(path, encoding='utf-8').read()
+    word = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+                     text)
     exp = re.search(r'…of which the runtime dylib actually \*\*exports\*\*\s*\|\s*'
                     r'(\d+)', text)
     reach = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
-    if not (exp and reach):
+    if not (word and exp and reach):
         return None
-    return {'exported': int(exp.group(1)), 'reachable': int(reach.group(1))}
+    return {'word': int(word.group(1)), 'exported': int(exp.group(1)),
+            'reachable': int(reach.group(1))}
 
 
 def test_manifest_round_trips():
