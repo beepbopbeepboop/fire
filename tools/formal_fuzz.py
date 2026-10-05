@@ -3973,12 +3973,20 @@ class Gen:
 
     def comp_walk_stmt(self, indent, cond=False, as_dict=False):
         """`[<target> for <target> in <blob>]` and the walk of its result."""
-        # A STRING-keyed dict is NOT a source here. Its comprehension target has
-        # no KIND on this path, so `len(k)` inside the result's walk is refused
-        # on both backends with a sentence false about the source — the filed
-        # gap `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int`
-        # — and a family that is a third refusals measures the refusal. It is a
-        # kind rule to add, not a family to write around.
+        # A STRING-keyed dict was NOT a source here while its comprehension target had
+        # no KIND on this path: `len(k)` inside the result's walk was refused on
+        # both backends with a sentence false about the source — the gap filed as
+        # `FORMAL_a_comprehension_target_over_a_string_keyed_dict_is_an_int` — and
+        # a family that is a third refusals measures the refusal. It was a kind
+        # rule to add, not a family to write around, and the kind rule LANDED in
+        # `e685f464`: `ValueKinds.kind_of`'s `F.Comprehension` arm now reads its
+        # element through the comprehension's own scope stack instead of
+        # `_kind_of_simple`, so `self.dicts`' `kind == "str"` rows are answerable
+        # and a string-keyed family belongs here. **It is NOT written** — a family
+        # added without a sweep over it is an unmeasured claim, and the sweep is
+        # a heavy run a light worker cannot afford — so the next step is to add
+        # it and run the mix, not to leave this comment reading as though the
+        # kind were still missing.
         pool = [(src, "int") for src, kind, _k in self.dicts if kind == "int"]
         pool += [(src, "int") for src, _n in self.lists]
         pool += [(src, "int") for src, _n in self.tuples]
