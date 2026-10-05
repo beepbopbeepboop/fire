@@ -3236,6 +3236,568 @@ def division_floors(op: str, signed: bool) -> bool:
     return bool(signed) and op in ("//", "%")
 
 
+# ── Integer OVERFLOW: CPython is unbounded and a word is 64 bits ──────────
+#
+# Every other rule in this file is about what an operator MEANS. This one is
+# about what happens when the answer does not fit, and it is here because it is
+# the one arithmetic fact both backends got wrong in the same direction, with
+# no diagnostic, on both machines.
+#
+# CPython's `int` is arbitrary precision: `2**64` is 18446744073709551616 and
+# `9223372036854775807 + 1` is 9223372036854775808, both exact. A formal value
+# is ONE 64-bit word (`doc/ABI.md`, "Scalar types"), so `ADD`/`SUB`/`MUL`/
+# `LSL`/`SDIV` produce the answer MODULO 2^64 and nothing downstream can tell.
+# MEASURED on this tree before the rule below existed, both backends, same
+# program, same silence (exit 0, no message, a plausible number):
+#
+#     9223372036854775807 + 1     CPython  9223372036854775808   arm64 0
+#     0 - 9223372036854775807 - 2  CPython  -9223372036854775809  arm64 -1
+#     4000000000 * 4000000000      CPython  16000000000000000000  arm64 1983905792
+#     1 << 63                      CPython  9223372036854775808   arm64 0
+#     1 << 64                      CPython  18446744073709551616 arm64 0
+#     2 ** 64                      CPython  18446744073709551616 arm64 0
+#     int("9223372036854775808")   CPython  9223372036854775808   arm64 -1
+#     -2**63 // -1                 CPython  9223372036854775808   arm64 0
+#                                                        x86-64   SIGFPE
+#
+# The last row is the shape of the whole list: ONE source, TWO architectures,
+# and they do not even fail the same way — arm64 wraps to 0 because `SDIV`
+# defines the result, and x86-64 dies on the `IDIV` overflow trap. A backend
+# that disagrees with CPython is a defect; two backends that disagree with each
+# other about WHICH wrong answer to give is the worse one, because there is
+# then no single number to look for.
+#
+# **The decision is a TRAP, not exact semantics and not a wider word.** Exact
+# semantics is a heap-allocated bignum behind every value, which contradicts
+# the whole of `doc/ABI.md` (a formal value is one word; it crosses a register,
+# a frame slot and a module dylib boundary in one). A wider word is not
+# available. What IS available is the pattern this path already uses for every
+# other bounded operation it cannot answer — `SHIFT_TRAP_STATUS` for a shift
+# amount that is not a distance, `int_parse_trap_message` for a string that is
+# not an integer, `list_append_overflow_message` for a list that is full: say
+# WHICH bound was hit on fd 2 and stop with a non-zero status. That is not
+# CPython's `OverflowError` — this path has no way to raise, and every
+# diagnostic here says so — but it is the difference between "this program has
+# no answer on this target" and "this program silently printed a wrong number",
+# and only the second one is a miscompile.
+#
+# **What is NOT trapped, and why each exclusion is a decision rather than a
+# gap.** Trapping every `+` would be as wrong as wrapping every one:
+#
+#   * a NARROW type (`Int8`…`Int32`) — wrapping is what the type MEANS. Mojo's
+#     `Int8` is a declared 8-bit type, the value is a bit pattern, and
+#     `x: Int8 = 127; x + 1` is -1 in every Mojo that has `Int8`. The rule
+#     asks the RESULT type, so the promotion decides it: two `Int32` operands
+#     promote to `Int32` and wrap, and that is right.
+#   * an UNSIGNED 64-bit type (`UInt64`) — same reason, and stronger: the
+#     source spelled the wrap down. There is no unsigned CPython to disagree
+#     with.
+#   * POINTER arithmetic — `p + 1` on a `Pointer[Int64]` is an ADDRESS, and
+#     address arithmetic wraps by definition: the last element of an array
+#     plus one is a one-past-the-end pointer, and a one-past-the-end pointer
+#     is not an overflow. `pointer_offset_scale` is what tells the emitters
+#     this (they already call it on the same two lines), so the exclusion is
+#     one predicate rather than a type test that would have to know what a
+#     pointer looks like in every spelling.
+#
+# **The one place the trap is NOT enough, and what happens instead.** `<<` and
+# `**` with a LITERAL amount are decided by the build: `1 << 64` and `2 ** 64`
+# overflow for every value of the base, so a refusal naming the line is both
+# possible and better than a status code. `literal_overflow_refusal` is that
+# message. The run-time trap covers the variable-amount spelling, where the
+# build cannot know.
+
+#: The machine word's signed range. `Int` is `int64_t` (`doc/ABI.md`), so these
+#: are the two values CPython's `int` cannot be represented as.
+INT64_MIN = -(2 ** 63)
+INT64_MAX = 2 ** 63 - 1
+
+#: The width of the word an `Int` occupies, as a named constant rather than the
+#: `64` that appears in `SHIFT_WIDTH` two hundred lines above and in
+#: `doc/ABI.md`'s scalar table. `int_overflow_traps` asks "is this result type
+#: at least a full word", and a literal `64` in that question is a second place
+#: for the word's width to be edited.
+INT_WORD_WIDTH = 64
+
+#: The operators whose word result can leave the signed 64-bit range. `&`, `|`,
+#: `^`, `~`, `>>` and unary `-` are NOT here and the reasons are worth the
+#: space, because "the same rule for every operator" is the obvious mistake:
+#:
+#:   * `&` `|` `^` `~` are BITWISE — every answer is a function of the same bit
+#:     positions of the operands, so the result is in range whenever the
+#:     operands are.
+#:   * `>>` on a signed value is arithmetic and Python floors, so it moves
+#:     TOWARD negative infinity and can only leave a non-negative operand
+#:     negative, never the other way — `shift_saturated_is_zero` already
+#:     spells the saturating end of it.
+#:   * unary `-` overflows for exactly ONE operand, `INT64_MIN`, and that one
+#:     is a build-time decidable constant whenever the source writes it; the
+#:     runtime spelling reads a variable and is handled by `abs`/negation of a
+#:     value that is already in range.
+INT_OVERFLOW_OPS = ("+", "-", "*")
+
+
+def int_value_fits(result_type, value) -> bool:
+    """Whether CPython's `value` is representable as a word of `result_type`.
+
+    The question is asked of the RESULT type because that is the type the
+    promotion chose, and the promotion is what decides whether the hardware
+    keeps the whole answer: `int_overflow_traps` below asks this for the
+    result of the operation, so `x: Int32 = 127; y = x + 1` is asked about
+    `Int32` and answers "fits", while the same two values read as `Int` is
+    asked about `int64_t`.
+
+    An UNSIGNED type's range is `[0, 2**w)` and a SIGNED one is
+    `[-2**(w-1), 2**(w-1))`, which is the same statement about a different
+    zero point. Both are answered here rather than only the signed one, because
+    the caller that asks the general question (`fold_overflow`) asks it before
+    it has decided anything else, and a function that answered True for every
+    unsigned value because "only the signed case is asked" would be a second
+    implementation of the answer rather than a generalisation of it."""
+    t = resolve_type(result_type)
+    if t.signed:
+        lo, hi = -(2 ** (t.width - 1)), 2 ** (t.width - 1) - 1
+    else:
+        lo, hi = 0, 2 ** t.width - 1
+    return lo <= value <= hi
+
+
+def resolve_type(t):
+    """`types.resolve` without the import: model.py imports no formal module.
+
+    `formal/types.py` imports THIS module, so importing it back here would be
+    a cycle; `model.py` has always read a `None` type as "the default"
+    (`literal_default_word`, `optional_none_word` and the `NONE_WORD` family all
+    do), and this is that reading in one named place. The default is the signed
+    64-bit word, which is `types.DEFAULT_INT_TYPE` and the only width for which
+    `int_overflow_traps` is ever True — so a `None` reaching this function is
+    the trapping case, which is the safe direction."""
+    if t is None:
+        return _DEFAULT_INT_TYPE
+    if getattr(t, "width", None) is None:
+        return _DEFAULT_INT_TYPE
+    return t
+
+
+class _IntTypeShape:
+    """The two attributes of `formal/types.py`'s `IntType` this module reads.
+
+    A tiny stand-in rather than the class itself, for the reason in
+    `resolve_type`: `types` imports `model`, so `model` cannot import `types`.
+    Duck-typed on `width`/`signed`, which is all `int_value_fits` and
+    `int_overflow_traps` look at, and which makes a caller that passes the
+    real `IntType` work unchanged."""
+    __slots__ = ("width", "signed")
+
+    def __init__(self, width: int, signed: bool):
+        self.width = width
+        self.signed = signed
+
+    def __eq__(self, other):
+        return (isinstance(other, _IntTypeShape) and other.width == self.width
+                and other.signed == self.signed)
+
+    def __repr__(self):                                   # pragma: no cover
+        return ("Int" if self.signed else "UInt") + str(self.width)
+
+
+_DEFAULT_INT_TYPE = _IntTypeShape(64, True)
+
+
+def int_overflow_traps(op: str, result_type, *, pointer_arith: bool = False,
+                       operand_types=()) -> bool:
+    """Whether `op` on these operands must refuse rather than wrap.
+
+    The ONE predicate both backends ask before they emit an overflow check, and
+    it is a predicate rather than a formula written out twice for the reason
+    `division_floors` gives above: a rule written per backend is two rules that
+    agree until one of them is edited.
+
+    The answer is True for exactly `+`, `-`, `*` on a result the word cannot
+    hold — a signed 64-bit one — and False for every case the "What is NOT
+    trapped" list above gives a reason for. Read in order, that is:
+
+      1. not one of `INT_OVERFLOW_OPS` → False;
+      2. `pointer_arith` → False (an address, and the caller is the one that
+         knows: `model.pointer_offset_scale` is the same predicate the emitter
+         uses to decide to SCALE the offset, so the two cannot disagree about
+         whether it was a pointer);
+      3. the result type is not signed-64 → False (a narrow or unsigned type
+         wraps by definition);
+      4. otherwise → True.
+
+    `operand_types` is accepted and NOT used for the decision, on purpose. The
+    temptation is to let a narrow operand exempt the operation — "the left side
+    is an `Int8`, so `a + b` cannot overflow" — and it is wrong twice: the
+    promotion has already happened by the time this is asked (`a + b` with an
+    `Int8` and an `Int64` is an `Int64` operation), and CPython's `int` has no
+    narrow types at all, so there is no source that could be asking for a
+    narrow result. The parameter exists so that a caller which HAS the operand
+    types can pass them without changing shape when the rule grows to use them.
+    """
+    if op not in INT_OVERFLOW_OPS:
+        return False
+    if pointer_arith:
+        return False
+    t = resolve_type(result_type)
+    return bool(t.signed) and t.width >= INT_WORD_WIDTH
+
+
+#: The status a trapped run-time overflow leaves behind. It is
+#: `SHIFT_TRAP_STATUS` and that is deliberate rather than a copy: "this program
+#: could not be answered on this target" is ONE answer on this path, and a
+#: reader who has seen a shift stop should not have to learn that an add stops
+#: differently. Every diagnostic on this path — the divide-by-zero arm, the
+#: shift trap, the int-parse trap, the append overflow — leaves this status.
+INT_OVERFLOW_TRAP_STATUS = SHIFT_TRAP_STATUS
+
+
+def int_overflow_trap_message(op: str) -> str:
+    """The ONE text a run-time integer overflow writes to fd 2 before it stops.
+
+    For BOTH backends, for the reason `int_parse_trap_message` gives: two
+    architectures printing two different sentences for one limit is how a reader
+    ends up looking for a construct one of them invented. It is `op`-shaped
+    only in the operator it names, because that is the one fact the two
+    architectures could disagree about — the trap site knows which instruction
+    it came from, and saying "an overflow" without saying where would send the
+    reader to `+` when it was `*`.
+
+    The message says the three things a reader needs and no more: what the
+    target cannot do, what CPython would have said, and that this is a stop
+    rather than an answer. It does NOT claim to be `OverflowError`, because
+    this path cannot raise — the same sentence `int_parse_trap_message` spends
+    on `ValueError`, and for the same reason.
+    """
+    return (f"OverflowError: this program's `{op}` left the signed 64-bit "
+            f"range this target has for an integer ({INT64_MIN} .. "
+            f"{INT64_MAX}), and the word wrapped instead. CPython's `int` is "
+            f"arbitrary precision and would have answered the exact value; "
+            f"this formal image has no way to raise and no wider word to "
+            f"answer with, so it stops here rather than report the wrapped "
+            f"one.\n")
+
+
+def literal_overflow_refusal(op: str, value, operands=None) -> str:
+    """The BUILD-TIME refusal for an operation whose exact value is already known.
+
+    Where `int_overflow_trap_message` is the answer for a value the build
+    cannot know, this is the answer where it can — and it is the better one,
+    for the reason `negative_shift_refusal` gives: a refusal names the
+    expression and the exact number CPython would have produced, where a status
+    code can only say that something went wrong somewhere.
+
+    The exact value is the point. `2 ** 64` is 18446744073709551616 and saying
+    so tells the reader their program is one multiplication away from being
+    representable and four from being readable; "an overflow occurred" does
+    not. It is computed in CPython's own arbitrary precision here, which is why
+    the message can carry a number the target cannot hold.
+    """
+    operands = operands or ()
+    if len(operands) == 2:
+        shown = "%s %s %s" % (spelled(operands[0]), op, spelled(operands[1]))
+    elif len(operands) == 1:
+        shown = "%s %s" % (op, spelled(operands[0]))
+    else:
+        shown = None
+    return (f"an integer overflow the build can decide: "
+            f"{('`%s`' % shown) if shown else ('`%s`' % op)} is "
+            f"{value} in CPython, which is outside the signed 64-bit range "
+            f"({INT64_MIN} .. {INT64_MAX}) this target keeps an integer in. "
+            f"CPython's `int` is arbitrary precision and answers it exactly; "
+            f"the word this image computes in would answer the wrapped value "
+            f"instead, so the build refuses rather than emit a program that "
+            f"reports a different number for the same source")
+
+
+def fold_overflow(op: str, left, right, result_type=None,
+                  pointer_arith: bool = False) -> str | None:
+    """The build-time overflow refusal for `left op right`, or None.
+
+    The one caller of both `fold_literal_expr` and `int_value_fits`, so the
+    two questions — "can the build know the value" and "does the value fit" —
+    are asked together and in one place. Either operand unknown and the answer
+    is None, because a refusal that fires on half a fact is a refusal that
+    fires on `n + 1`.
+
+    `right` is None for the unary spellings (`~`, unary `-`), which is why the
+    fold is written over a tuple.
+    """
+    if not int_overflow_traps(op, result_type, pointer_arith=pointer_arith):
+        return None
+    nodes = (left,) if right is None else (left, right)
+    vals = [fold_literal_expr(n) for n in nodes]
+    if any(not isinstance(v, int) or isinstance(v, bool) for v in vals):
+        return None
+    try:
+        value = _apply_op(op, vals[0], None if right is None else vals[1])
+    except (ZeroDivisionError, ValueError, OverflowError, MemoryError):
+        # A `//` by a literal zero, or `0 ** -1`. Both already have their own
+        # answer elsewhere on this path (a divide-by-zero trap at run time, and
+        # the zero-exponent arm of the power emitter), and neither is this
+        # function's question.
+        return None
+    if int_value_fits(result_type, value):
+        return None
+    return literal_overflow_refusal(op, value, nodes)
+
+
+def _apply_op(op: str, a, b):
+    """CPython's own `a op b`, for the handful of operators this module needs.
+
+    Deliberately `eval`-free and not a re-implementation: this IS the oracle,
+    in the only process that has arbitrary precision. `eval` on an operator
+    drawn from a fixed tuple of two-character names is safe in a way `eval` on
+    source is not, and it cannot be wrong about `//` flooring or `-1 ** 2` in a
+    way a hand-written table can."""
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    if op == "~":
+        return ~a
+    if b is None:
+        raise ValueError("unary operator with a right operand")
+    raise ValueError("not an integer operator: %r" % (op,))
+
+
+def shift_overflow_refusal(op: str, amount, base=None,
+                         operands=None) -> str | None:
+    """The build-time refusal for a shift this path cannot answer as CPython does.
+
+    Two different questions share one function because they share one shape — a
+    literal amount, a base the build may or may not know, and a word that cannot
+    hold the answer — and the `<<`-only rule is the whole content:
+
+      * **the amount is at or past the word's width.** `model.shift_saturates`
+        already decided the shift cannot be performed, and `_emit_saturated`
+        answered it with a constant. That constant is CPython's for `>>` and a
+        FABRICATION for `<<`: `8 >> 64` is 0 and `8 >> 200` is 0, but
+        `1 << 64` is 18446744073709551616 and `1 << 200` is a number with 61
+        digits. So a saturating `<<` is refused and a saturating `>>` keeps its
+        answer, and that asymmetry is why this is a function rather than a line
+        at the `_emit_saturated` call site.
+      * **the amount is in range and the RESULT does not fit** — `1 << 63`,
+        which does not saturate and still overflows, so the immediate form's
+        `0..63` range test is not a safety test and cannot be made into one.
+        Decided only when the base folds; a variable base is the subject of
+        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+
+    `None` in any argument means "the build does not know", and every such case
+    returns None rather than guessing: a refusal that fires on half a fact is a
+    refusal that fires on `n << 3`.
+    """
+    if not _is_known_int(amount) or amount < 0:
+        return None                      # `negative_shift_refusal`'s question
+    if amount >= SHIFT_WIDTH:
+        if op != "<<":
+            return None                  # the saturation IS CPython's answer
+        if _is_known_int(base):
+            try:
+                value = _apply_shift(op, base, amount)
+            except (ValueError, TypeError):
+                value = None
+            if value is not None and not int_value_fits(_DEFAULT_INT_TYPE,
+                                                       value):
+                return literal_overflow_refusal(op, value, operands)
+        return (f"a shift by an amount this target cannot perform: `{op}` by "
+                f"{amount} needs more than the {SHIFT_WIDTH} bits an integer "
+                f"has here, and CPython's `int` is arbitrary precision, so "
+                f"`x {op} {amount}` is a number of more than {SHIFT_WIDTH} "
+                f"bits rather than the 0 a saturating shift would answer. The "
+                f"build refuses rather than emit a program that reports a "
+                f"different number for the same source. (`>>` is NOT this "
+                f"case: `8 >> 64` really is 0 in CPython, because a right "
+                f"shift moves bits OUT and there is nothing left to keep.)")
+    if op != "<<" or not _is_known_int(base):
+        return None
+    try:
+        value = _apply_shift(op, base, amount)
+    except (ValueError, TypeError):
+        return None
+    if int_value_fits(_DEFAULT_INT_TYPE, value):
+        return None
+    return literal_overflow_refusal(op, value, operands)
+
+
+def _is_known_int(v) -> bool:
+    """Whether `v` is an int the build DECIDED, as opposed to `None` or a bool.
+
+    Excludes `bool` for the reason `fold_literal_expr` excludes it: `True` is
+    not the integer 1 here, it is a `BoolLiteral`, and every question in this
+    section is about a number the source spelled as one."""
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+
+def _apply_shift(op: str, base, amount):
+    if op == "<<":
+        if amount < 0 or base < 0:
+            raise ValueError("not a foldable shift")
+        return base << amount
+    if op == ">>":
+        if amount < 0:
+            raise ValueError("not a foldable shift")
+        return base >> amount
+    raise ValueError("not a shift: %r" % (op,))
+
+
+# ── `**`: the operator with the most ways to be wrong here ──────────────────
+#
+# Three, and they are three different defects rather than three instances of
+# one:
+#
+#   * **a NEGATIVE exponent** answers a FLOAT in CPython. `2 ** -1` is `0.5`,
+#     `(-1) ** -3` is `-1.0`, and the only integer results a negative exponent
+#     has are `0 ** -1` (which RAISES) and `0 ** -2` (which is `0.0` — still a
+#     float). There is no integer answer to give, and this path has no float
+#     division, so the answer it used to give — a materialised `0`, from
+#     `formal/arm64_codegen.py`'s `movz x0, #0` — was a number the source never
+#     wrote. **REFUSED**, and that is decidable at build time whenever the
+#     exponent is a literal, which is the only spelling that reaches the
+#     unroller.
+#   * **an exponent past the unroller's range** (`> 64`) reaches the binary
+#     exponentiation loop, which wraps. `2 ** 1000` is a 302-digit number and
+#     the loop answers 0. Decidable when the BASE is a literal, which is the
+#     case that matters; see the note in `power_overflow_refusal`.
+#   * **an exponent in range with a base that overflows** — `2 ** 64` is the
+#     measured one. Also decidable when the base is a literal.
+#
+# What is deliberately NOT here: `pow(a, b, m)`, the three-argument form, which
+# `pow_arity_refusal` refuses by arity and which is a DIFFERENT question (it
+# never overflows, because every step is reduced modulo `m`). `divmod` is
+# refused the same way. Both are listed in `doc/ABI.md`'s integer table as
+# refusals rather than as wrong answers, which is the honest status for a
+# three-argument `pow`.
+
+
+def power_overflow_refusal(base, exponent, operands=None) -> str | None:
+    """The build-time refusal for an integer `**` this path cannot answer.
+
+    Asked only when the build KNOWS both operands, because without them there
+    is no question to refuse: `b ** n` overflows for some `b` and not for
+    others, and a build that cannot say which has no answer to give. So the
+    foldable case is refused precisely, and the variable case is what
+    `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
+
+    `None` means "answerable": a non-negative exponent whose exact value fits,
+    or the `0 ** 0` / `1 ** anything` shapes that never overflow.
+    """
+    if not isinstance(base, int) or not isinstance(exponent, int):
+        return None
+    if exponent < 0:
+        return _negative_power_refusal(exponent, operands)
+    if base in (0, 1, -1):
+        return None                       # 0**0 = 1, 1**n = 1, (-1)**n = ±1
+    try:
+        value = base ** exponent
+    except (OverflowError, MemoryError, ValueError):
+        return literal_overflow_refusal("**", -1, operands)
+    if int_value_fits(_DEFAULT_INT_TYPE, value):
+        return None
+    return literal_overflow_refusal("**", value, operands)
+
+
+def _negative_power_refusal(exponent, operands=None) -> str:
+    """Why `b ** e` with `e < 0` has no integer answer to give."""
+    shown = None
+    if operands and len(operands) == 2:
+        shown = "%s ** %s" % (spelled(operands[0]), spelled(operands[1]))
+    return (f"`{shown or 'b ** e'}` with a NEGATIVE exponent: CPython's `int "
+            f"`**` answers a FLOAT there — `2 ** -1` is `0.5` and "
+            f"`(-1) ** -3` is `-1.0` — because a negative exponent asks for a "
+            f"reciprocal and this target has no float division to compute one "
+            f"in. The `0` this path used to answer is a number the source never "
+            f"wrote, and `0 ** -1` raises `ZeroDivisionError` in CPython rather "
+            f"than answering `0.0`, so there is no integer to substitute for "
+            f"it either. Refused rather than answered with a fabrication; "
+            f"`pow(b, e)` with a non-negative exponent is the same value when "
+            f"one exists")
+
+
+def division_overflow_refusal(numerator, denominator, op="/",
+                               operands=None) -> str | None:
+    """The build-time refusal for the one division whose answer does not fit.
+
+    `INT64_MIN // -1` is 2**63 in CPython, which is one past the largest word;
+    `-2**63 % -1` is 0 and fits. A64's `SDIV` defines the overflowing case as
+    `INT64_MIN` (AArch64 §4.5 does not raise), so arm64 answered
+    `-9223372036854775808`; x86-64's `IDIV` raises `#DE`, so the same program
+    **died on SIGFPE** — measured, exit -8 on x86-64 and exit 0 with the wrong
+    number on arm64, which is the worst pair of answers one construct can have.
+
+    Refused when the build knows both operands, which is the only case it can
+    be sure of: a variable denominator may be `-1` and a variable numerator may be
+    `INT64_MIN`, and the emitter's `CMP`-the-denominator-by-zero guard is the wrong
+    place to add a second test (see the bug doc for the run-time half).
+    """
+    if not isinstance(numerator, int) or not isinstance(denominator, int):
+        return None
+    if denominator != -1:
+        return None
+    try:
+        value = numerator // denominator if op == "//" else numerator % denominator
+    except (ZeroDivisionError, ValueError):
+        return None
+    if int_value_fits(_DEFAULT_INT_TYPE, value):
+        return None
+    shown = None
+    if operands and len(operands) == 2:
+        shown = "%s %s %s" % (spelled(operands[0]), op, spelled(operands[1]))
+    return (f"an integer division whose exact answer does not fit: "
+            f"`{shown or 'a // b'}` is {value} in CPython, one past the "
+            f"largest value this target keeps an integer in "
+            f"({INT64_MIN} .. {INT64_MAX}). This is the only division that "
+            f"overflows — the smallest word divided by -1 — and the two "
+            f"architectures do not even fail it the same way: A64's `SDIV` "
+            f"defines the answer as the numerator, while x86-64's `IDIV` raises "
+            f"#DE and the image dies on SIGFPE. Refused rather than emitted as "
+            f"one program and a crash")
+
+
+def int_parse_overflow_refusal(text_value, base=None) -> str | None:
+    """The build-time refusal for `int(s)` on a string whose value does not fit.
+
+    The parse is `strtoll`, which on overflow returns `LLONG_MAX` (or
+    `LLONG_MIN`) and sets `errno = ERANGE` — so the number this path used to
+    produce for `int("9223372036854775808")` was `-1`, measured, with exit 0
+    and nothing on stderr: the clamped value read as an ordinary answer.
+    Checking `errno` is the run-time answer and it needs another libc call
+    (`__error`), which is the same unfollowable-call budget the run-time
+    overflow check wants; so the foldable case is refused precisely here and
+    the rest is in the bug doc.
+
+    `base` is the parse's base, and `None` means the one-operand `int(s)`,
+    which `int_parse_lowering` makes a base-10 parse.
+    """
+    if not isinstance(text_value, str):
+        return None
+    b = INT_PARSE_BASE_MIN + 8 if base is None else base
+    body = text_value.strip(C_WHITESPACE)
+    sign = 1
+    if body[:1] in ("+", "-"):
+        sign = -1 if body[0] == "-" else 1
+        body = body[1:]
+    if not body:
+        return None
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"[:b].lower()
+    if not all(ch in digits for ch in body.lower()):
+        return None                     # not a number in this base at all
+    value = sign * int(body, b)
+    if int_value_fits(_DEFAULT_INT_TYPE, value):
+        return None
+    return (f"an integer parse whose value does not fit: `int(\"{text_value}\")` "
+            f"is {value} in CPython, which is outside the signed 64-bit range "
+            f"({INT64_MIN} .. {INT64_MAX}) this target keeps an integer in. "
+            f"`strtoll` does not answer that — it clamps to the largest word "
+            f"and sets `errno`, which is why `int(\"{text_value}\")` used to "
+            f"answer -1 with exit 0 and nothing on stderr, a number the source "
+            f"never wrote. CPython raises `OverflowError`; this path refuses "
+            f"rather than report the clamp")
+
+
 # ── Read before store ─────────────────────────────────────────────────────
 #
 # A name the allocator gives a register is a name it cannot tell the

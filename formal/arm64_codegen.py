@@ -46,6 +46,15 @@ from mojo.middle.boundnames import (
 _SCRATCH = M.ARM64_CONTAINER_BUDGET
 _SCRATCH_CHUNK = 4080
 
+#: Darwin's `SYS_write`, the number `_emit_overflow_diagnostic` puts in x16.
+#: It is a named constant rather than a literal at the one site that uses it
+#: because the sibling `SYS_exit` at `_emit_exit` writes the same register with
+#: `1` written out, and two spellings of "which syscall is this" in one file is
+#: how the wrong one gets used.  From `sys/syscall.h`; the number is the same on
+#: arm64 and x86-64 Darwin, which is why the same text works on both backends.
+DARWIN_SYS_WRITE = 4
+DARWIN_SYS_EXIT = 1
+
 
 # ── IEEE-754 binary64 ─────────────────────────────────────────────────────
 #
@@ -6434,28 +6443,40 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_overflow_diagnostic(self, text: str) -> None:
         """`write(2, text, len)` — say WHICH bound was hit before stopping.
 
-        The shared half of every bounded-container stop on this path, and the
-        reason it goes through `write(2)` rather than the raw syscall the exit
-        beside it uses: the exit sequence above is the Darwin one this backend
-        already emits everywhere, but `write`'s syscall number is not what makes
-        this a good message — the fact that the same C library call works on
-        both platforms is, and `write` is the one call whose interface this
-        value model can satisfy with nothing but an interned label and an
-        immediate.
+        The shared half of every bounded stop on this path, and it is a RAW
+        SYSCALL rather than a call into the C library's `write`, which is the
+        one thing about it that is a decision rather than an accident:
 
-        SP is 16-byte aligned here (the append's own `stp` pushed a multiple of
-        16), which is what AAPCS and the C library both assume at a call, so no
-        extra adjustment is needed and the pushed base/value stay readable.
-        X0-X2 are free: the values the append needed are already in X4 (base)
-        and the out-of-range path discards them.
+        a `BL` here is an *unfollowable call* as far as
+        `arm64_proof_gen.py::_unfollowable_calls` is concerned, and that
+        function's own docstring states the limit it imposes: a proved function
+        may contain **at most one** of them, because the universal theorem's
+        halt address is a single address. A trap block that reached libc twice
+        — once for `write`, once for the `fflush` inside `_emit_exit` — would
+        spend the whole budget on a path that is not the program's answer, so
+        any proved program that also called `printf` would stop being provable.
+        Measured: with a libc `write`, `def main(n): return n + 1` refused with
+        "universal theorem: 2 calls this walk cannot follow (…), and ONE halt
+        address cannot discharge them".
+
+        Darwin's `write` is `x16 = 4` (SYS_write) with `x0`/`x1`/`x2` the fd,
+        the buffer and the length — the same register the C library call would
+        have taken, because `_emit_exit` above already sets `x16` for
+        `SYS_exit` and so fixes the convention. Zero calls, no PLT, and the
+        message cannot be reordered by a buffer.
+
+        Two registers the message needs and three the syscall takes, so the
+        buffer goes in through `adrp`/`add` on x1 and the two immediates follow;
+        nothing is live across this (every caller is on a path that stops), and
+        SP needs no adjustment because there is no call any more — which also
+        removes the alignment note this method used to carry.
         """
         label = self._intern_string(text)
-        _emit_sub_imm(self.asm, 31, 31, 16)
-        self.asm.emit_adrp_add(1, label)
-        self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
-        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
-        self._emit_extern_call("write", 3)
-        _emit_add_imm(self.asm, 31, 31, 16)
+        self.asm.emit_adrp_add(1, label)                   # X1 = text
+        self.asm.emit(encode_movz_xd_imm(0, 2))            # X0 = fd = stderr
+        self.asm.emit(encode_movz_xd_imm(2, len(text)))    # X2 = length
+        self.asm.emit(encode_movz_xd_imm(16, DARWIN_SYS_WRITE))
+        self.asm.emit(encode_svc(0x80))
 
     def _conversion_operand_is_text(self, operand) -> object:
         """True / False / None: does this conversion's operand hold text.
@@ -6506,7 +6527,23 @@ ctor_field_value=self._ctor_field_value_for(name),
         anything else), which is why it is a `movz` immediate and not a
         register: a base read at run time would need a slot of its own to
         survive the call, and it is a different question from a stated one.
+
+        `model.int_parse_overflow_refusal` is asked before anything is emitted,
+        and it is the THIRD thing this parse gets wrong that `strtoll` cannot
+        report: a string whose value does not fit comes back CLAMPED to
+        `LLONG_MAX` with `errno = ERANGE`, and the endptr is at the end of the
+        string, so both of the checks below pass and the clamped word is the
+        answer. Measured: `int("9223372036854775808")` printed `-1`, exit 0,
+        nothing on stderr. Detecting it at run time means reading `errno`,
+        which is another C library call (`__error`) and therefore another
+        unfollowable call in a block the proof framework has to cross — so the
+        foldable case is refused here, precisely, and the rest is
+        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
+        reason = M.int_parse_overflow_refusal(
+            M.fold_literal_expr(text_expr), base)
+        if reason:
+            raise CodegenError(reason)
         self._while_counter += 1
         trap = f"{self.func_name}_ip{self._while_counter}_trap"
         end = f"{self.func_name}_ip{self._while_counter}_end"
@@ -7014,10 +7051,23 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_movz_xd_imm(2, scale))
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
+            result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+            # The build-time half of `model.int_overflow_traps`: a `+`, `-` or
+            # `*` whose operands the build can FOLD is decided here, and a
+            # refusal carrying the exact CPython value is a better answer than
+            # a wrapped number or a status code. The run-time half — the same
+            # predicate over a value the build cannot know — is emitted by
+            # `_emit_int_alu_checked`, which is wired up but not yet reachable;
+            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
+            # says why and what it needs.
+            if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
+                reason = M.fold_overflow(op, e.left, e.right, result_t,
+                                         pointer_arith=bool(scale))
+                if reason:
+                    raise CodegenError(reason)
             self.asm.emit(alu[op](0, 0, 1))
             if op in ("+", "-", "*"):
-                self._emit_trunc(common_type(self._ttype(e.left),
-                                             self._ttype(e.right)))
+                self._emit_trunc(result_t)
             return
 
         if op in ("in", "not in"):
@@ -7030,6 +7080,122 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         raise CodegenError(
             f"unsupported binary operator {op!r} on the formal arm64 path")
+
+    # ── integer overflow: the check, and the trap it branches to ──────────
+    #
+    # `model.int_overflow_traps` is the decision and everything below is its
+    # instruction selection, for the reason `division_floors` gives: the test
+    # IS the rule, and a rule written out in two backends is two rules that
+    # agree only until one of them is edited. The x86-64 emitter is
+    # `_emit_two_sided` plus its own `_emit_int_alu_checked`, and it asks the
+    # same predicate about the same promotion.
+    #
+    # The measured defect this replaces is in `model.py`'s integer-overflow
+    # section: `9223372036854775807 + 1` answered 0, `4000000000 * 4000000000`
+    # answered 1983905792 and `0 - 9223372036854775807 - 2` answered -1, with
+    # exit 0 and nothing on stderr, on BOTH architectures.
+
+    def _emit_int_alu_checked(self, op: str) -> None:
+        """`a OP b` for `+`/`-`/`*` with X0 = a and X1 = b, trapping on overflow.
+
+        Three shapes, because the architecture gives three ways to ask and they
+        are not the same cost:
+
+        | op | sequence | why it is the right test |
+        |---|---|---|
+        | `+` | `ADDS X0, X0, X1` ; `B.vs` | A64 sets V on a signed overflow, and `ADDS` is the add that sets it |
+        | `-` | `SUBS X0, X0, X1` ; `B.vs` | the same V, from the subtract |
+        | `*` | `SMULH X2, X0, X1` ; `MUL X0, X0, X1` ; `EOR X2, X2, X0` ; `LSR X2, X2, #63` ; `CBNZ X2` | the product FITS iff the high half IS the sign extension of the low half, and no flag-setting multiply exists |
+
+        The multiply is the one that is not a single instruction, and the
+        reason is worth stating because "use the CPU's overflow flag" is the
+        obvious move and does not exist here: `MUL` writes no flag at all, and
+        `SMULH` is the only instruction on this target that computes the high
+        half. So the check is the two halves, and `SMULH` runs BEFORE `MUL`
+        because it reads the operands while `MUL` overwrites X0 with the low
+        half.
+
+        **`high == low` is NOT the test, and it is the mistake worth writing
+        down**: for `6 * 7` the high half is 0 and the low half is 42, so the
+        halves are unequal and `high == low` traps on the most ordinary
+        multiplication there is (measured: `a = 6 * 7` exited 1 with the
+        overflow message). The test is `high == sext(low)`, and that identity
+        is exactly "`bit 63` of `high XOR low` is set" — the two agree iff they
+        agree in sign, because `sext(low)` carries `low`'s sign and
+        `low`'s magnitude.
+
+        So the tail is an `EOR` and a read of bit 63, and the read is a
+        `LSR #63` + `CBNZ` rather than a `TBNZ #63` because
+        `encode_tbnz_xn_bit` refuses a bit above 31 — its own assertion says
+        so and names this alternative. Four extra instructions on a multiply is
+        the honest cost of an architecture with no overflow flag on `MUL`; the
+        alternative is a wrong number.
+
+        `X2` is the scratch: at this point in `_emit_binop` the only live values
+        are the two operands (the stack was already popped), and X2 is not one
+        of them.
+        """
+        if op == "+":
+            self.asm.emit(encode_adds_xd_xn_xm(0, 0, 1))
+            self._emit_int_overflow_trap(op, "vs")
+            return
+        if op == "-":
+            self.asm.emit(encode_subs_xd_xn_xm(0, 0, 1))
+            self._emit_int_overflow_trap(op, "vs")
+            return
+        if op == "*":
+            self.asm.emit(encode_smulh_xd_xn_xm(2, 0, 1))
+            self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
+            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 0))
+            self.asm.emit(encode_lsr_xd_xn_imm(2, 2, 63))
+            self._emit_int_overflow_trap(op, None, reg=2)
+            return
+        raise CodegenError(
+            f"internal: no checked arm64 sequence for {op!r}")
+
+    def _emit_int_overflow_trap(self, op: str, cond: str, reg=None) -> str:
+        """The branch into an inline overflow trap, and the trap itself.
+
+        Two entry shapes, because the architecture has two ways to say "this
+        computation did not fit" and they are not the same instruction:
+
+          * `cond` — a `B.cond` over the FLAGS. `+` and `-` set V through
+            `ADDS`/`SUBS` and there is nothing else to ask.
+          * `reg` — a `CBNZ` over a REGISTER. The multiply has no flags to read
+            (`MUL` writes none and `SMULH` writes none), so its test is a
+            value: the bit-63 test, already shifted down to bit 0.
+
+        The shared half — the `B` over the block, the `write(2)`, the flush and
+        the `SYS_exit` — is here and is one method rather than one per
+        operator, because `model.int_overflow_trap_message` is one sentence per
+        operator and the scaffolding is none of them. Two copies of the
+        scaffolding is how the shift trap and the int-parse trap came to differ
+        in whether they flushed.
+
+        Nothing here preserves a register: the block ends in an exit, so the
+        value the operation was computing is not live on the far side, and the
+        `B` over the block is unconditional because the branch into it has
+        already been spent.
+
+        Returns the label control falls through to, which is where the caller
+        continues.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_ovf{tid}_t"
+        ok = f"{fn}_ovf{tid}_k"
+        if reg is None:
+            self.asm.emit(encode_b_cond(cond, 0))
+        else:
+            self.asm.emit(encode_cbnz_xn(0, reg))
+        self.asm.emit_label_rel(trap, here_offset=-4)
+        self._emit_b_to(ok)
+        self.asm.label(trap)
+        self._emit_overflow_diagnostic(M.int_overflow_trap_message(op))
+        self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+        self.asm.label(ok)
+        return ok
 
     def _emit_strcmp_flags(self, l, r) -> bool:
         """`l == r` on two STRINGS as `strcmp(l, r) == 0`. True if it emitted.
@@ -9720,6 +9886,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         result_t = common_type(self._ttype(e.left), self._ttype(e.right))
         signed = cmp_signed(result_t)
         if op in ("/", "//", "%"):
+            # `INT64_MIN // -1` is the one division whose answer does not fit,
+            # and the two architectures do not even fail it the same way — see
+            # `model.division_overflow_refusal`, which is the shared decision
+            # and the shared message. Asked before anything is emitted because
+            # it is decidable here: both operands fold.
+            reason = M.division_overflow_refusal(
+                M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+                op if op != "/" else "//", [e.left, e.right])
+            if reason:
+                raise CodegenError(reason)
             self._if_counter += 1
             cid = self._if_counter
             fn = self.func_name
@@ -9763,6 +9939,27 @@ ctor_field_value=self._ctor_field_value_for(name),
             return
 
         if op in ("<<", ">>"):
+            # `model.shift_overflow_refusal` is asked FIRST, before either the
+            # immediate form's range test or the saturation arm, because it is
+            # the one question about a shift whose answer is a NUMBER the source
+            # wrote and this target cannot hold:
+            #
+            #   * `1 << 64` is 18446744073709551616 in CPython and the
+            #     saturating arm below answered 0. `8 >> 64` IS 0 in CPython,
+            #     so the refusal is `<<`-only — see `shift_saturated_is_zero`,
+            #     whose `>>` row is right and whose `<<` row was a fabrication.
+            #   * `1 << 63` does not saturate and still overflows, so the
+            #     immediate form's `0..63` range test is not a safety test and
+            #     cannot be one.
+            #
+            # Both are decidable when the AMOUNT is a literal and the BASE is
+            # not, and precisely decidable when both are; the variable-base case
+            # is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            reason = M.shift_overflow_refusal(
+                op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
+                [e.left, e.right])
+            if reason:
+                raise CodegenError(reason)
             # The signedness that picks ASRV over LSRV is the LEFT operand's
             # own, not the promotion's. `result_t` above is still the answer to
             # "what width is the result", which is a different question and
@@ -9832,6 +10029,26 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         if op == "**":
             exp = e.right
+            # `model.power_overflow_refusal` is asked FIRST and it is the whole
+            # of the three defects this operator had, in one place:
+            #
+            #   * `2 ** 64` is 18446744073709551616 and the unroller below
+            #     answered 0 (measured, exit 0);
+            #   * `2 ** -1` is 0.5 in CPython — a FLOAT — and the `neg` arm at
+            #     the bottom of this method answered a materialised 0, which is
+            #     a number the source never wrote;
+            #   * `2 ** 1000` reaches the binary-exponentiation loop, which
+            #     wraps.
+            #
+            # All three are decidable here whenever both operands fold, which
+            # is the case the corpus and a reader hit first. The variable-base
+            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+            # untrapped.md`.
+            reason = M.power_overflow_refusal(
+                M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
+                [e.left, exp])
+            if reason:
+                raise CodegenError(reason)
             lit = self._static_int(exp)
             if lit is not None and 0 <= lit <= 64:
                 n = lit

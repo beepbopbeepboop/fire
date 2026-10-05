@@ -2763,6 +2763,23 @@ _STEP_CONDS = [
     # getting that wrong would mean a branch to the wrong address, silently.
     (0xff000000, 0x36000000),
     (0xff000000, 0x37000000),
+    # 54 ADDS/CMN and 55 SMULH, the integer-overflow check's two instructions
+    # (`formal/model.py::int_overflow_traps`). APPENDED for the reason 51 gives:
+    # every index above is hard-coded in `_step_rhs` and in the block scanner, so
+    # a new instruction goes at the end and the indices do not move. What DOES
+    # move is `lib/ProofLib.lean`'s `work_step_*` family — no: it does not,
+    # because each of those lemmas rewrites the `arm64_step` chain from the top
+    # and its own `if_pos` fires before reaching these two arms, so appending
+    # here invalidates none of them. Only the two NEW lemmas (`work_step_adds`,
+    # `work_step_smulh`) need an `if_neg` for all 54 arms above, which is what
+    # their generated proofs carry.
+    #
+    # 0xab000000 covers `ADDS Xd, Xn, Xm` AND `CMN Xn, Xm` (`Rd = 31`), which is
+    # the same word and one `arm64_step` arm, because `arm64_set_reg 31 s v = s`.
+    # 0x9b407c00 is `SMULH`; it is `MUL`'s class with bit 22 set, so the mask is
+    # `MUL`'s `0xffe07c00` and the two cannot be confused.
+    (0xffe00000, 0xab000000),
+    (0xffe07c00, 0x9b407c00),
     # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
     # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
     # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
@@ -3083,6 +3100,13 @@ def _step_rhs(w: int, idx: int):
         sh = 63 - imms
         return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< "
                 f"UInt64.ofNat {sh}))")
+    if idx == 54:  # ADDS / CMN (Rd = 31 is CMN): add AND set the flags
+        rn_sp = f"(arm64_reg_or_sp {rn} s)" if rn == 31 else f"(arm64_reg {rn} s)"
+        return (f"some {{ (arm64_set_reg {rd} s ({rn_sp} + arm64_reg {rm} s)) "
+                f"with nzcv := arm64_adds_flags {rn_sp} (arm64_reg {rm} s) "
+                f"({rn_sp} + arm64_reg {rm} s) }}")
+    if idx == 55:  # SMULH: the signed HIGH half, and no flag
+        return f"some (arm64_set_reg {rd} s (smulhi64 (arm64_reg {rn} s) (arm64_reg {rm} s)))"
     return None
 
 
@@ -3287,6 +3311,11 @@ _WORK_STEP = [
     (33, "work_step_orn", [(0xffe0fc00, 0xaa200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
     (35, "work_step_svc", [(0xffe0001f, 0xd4000001)]),
+    # The integer-overflow check's two instructions (`formal/model.py`'s
+    # `int_overflow_traps`). Both lemmas negate all 54 arms above them, which is
+    # what appending to the chain costs the LAST arm and nothing else.
+    (54, "work_step_adds", [(0xffe00000, 0xab000000)]),
+    (55, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
