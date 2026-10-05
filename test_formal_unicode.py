@@ -1392,8 +1392,9 @@ def model_checks():
     #
     # A formal value is one 64-bit word and libc's `%d` reads a C `int` out of
     # it, so `printf("%d", 2**62)` printed `0` where CPython prints
-    # 4611686018427387904 (`bugs/FORMAL_printf_d_renders_32_bits.md`, measured
-    # on both architectures). The fix widens the CONVERSION, so these rows are
+    # 4611686018427387904 (measured on both architectures; the fix is
+    # `model.printf_widened_format`, landed 2026-10-05). It widens the
+    # CONVERSION, so these rows are
     # about the text and `test_formal_int_semantics.py`'s are about the answer;
     # between them they are what stops a rewrite from being "widen everything
     # that looks like a number".

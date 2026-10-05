@@ -96,10 +96,19 @@ silent number and never a fabricated one:
 | `(x).bit_length()` | **refused** | no libc binding for it on this link line |
 
 **Reading an integer out is not in this table because it is a separate
-question, and it has its own defect**: `printf("%d", x)` renders **32 bits**
-(libc's `%d` reads a C `int`), so `printf("%d", 2**62)` prints `0` while
-`printf("%lld", x)` and `print(x)` are right. Use `print` or `%lld` for a
-`Int`. Measured on both backends; `bugs/FORMAL_printf_d_renders_32_bits.md`.
+question, and `printf` gets it right by construction now.** An `Int` is a
+64-bit word, and libc's `%d`/`%u`/`%o`/`%x`/`%X` read a C `int` out of one, so
+before 2026-10-05 `printf("%d", 2**62)` printed `0`. Every such conversion that
+carries **no** length modifier is now given an `ll` before the format is
+interned (`formal/model.py::printf_widened_format`, run by
+`formal/build.py::_widen_printf_integer_conversions`), so `%d` renders the whole word
+and agrees with `print`. `%ld`/`%lld`/`%zu` were already 64-bit under LP64 and
+are untouched; `%c` is untouched because it converts to `unsigned char`.
+Measured on both backends over `2**62`, `INT64_MAX`, `INT64_MIN`, `2**32`,
+`5e9`, `2**40`, `INT32_MAX`, `INT32_MIN` and `-1`, with CPython's
+`format(v, spec)` as the oracle — `test_formal_int_semantics.py`'s
+`FORMAT_ROWS`. **A `printf` format held in a NAME is not rewritten**, because a
+non-literal cannot be scanned.
 
 **The one row that is a wrong number rather than a refusal.** Every row above
 is exact or refused **when the build can fold the operands**. A variable

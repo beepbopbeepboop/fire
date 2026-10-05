@@ -3435,9 +3435,9 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 def _widen_printf_integer_conversions(functions: list) -> int:
     """Give every 32-bit INTEGER conversion of a printf format an `ll`.
 
-    **The fix for `bugs/FORMAL_printf_d_renders_32_bits.md`, and it is HERE,
-    in the one pipeline both front ends go through, for the reason the
-    neighbouring passes give.** A `%d` on this path reads a C `int` out of a
+    **The rewrite that made `printf("%d", 2**62)` print the number the source
+    wrote, and it is HERE, in the one pipeline both front ends go through, for
+    the reason the neighbouring passes give.** A `%d` on this path reads a C `int` out of a
     64-bit word, so `printf("%d", 2**62)` printed `0` where CPython prints
     `4611686018427387904` — measured on BOTH architectures, exit 0, wrong
     number, and invisible to every differential test that compares exit status
@@ -17171,7 +17171,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # measurement, the three rejected alternatives (a refusal, a per-emitter
     # substitution, an emitter-side rewrite) and the one shape it cannot reach
     # (a format held in a NAME) are in `_widen_printf_integer_conversions`'s
-    # docstring and in `bugs/FORMAL_printf_d_renders_32_bits.md`.
+    # docstring and on `model.printf_widened_format`.
     _widen_printf_integer_conversions(functions)
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),

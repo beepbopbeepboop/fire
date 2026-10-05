@@ -9171,8 +9171,9 @@ def _printf_length_modifier(spec: str) -> str:
 def printf_widened_format(fmt_text) -> str | None:
     """`fmt_text` with every 32-bit INTEGER conversion given an `ll`, or None.
 
-    **The fix for `bugs/FORMAL_printf_d_renders_32_bits.md`, and it is a
-    REWRITE rather than a refusal because the answer is not in doubt.** A
+    **The rewrite that made `printf("%d", 2**62)` print the number the source
+    wrote, and it is a REWRITE rather than a refusal because the answer is not
+    in doubt.** A
     formal value is one 64-bit word (`doc/ABI.md`, "Scalar types"), the emitter
     passes the whole word, and libc's `%d` reads a C `int` out of it — so the
     conversion renders the low 32 bits and the program prints a number the

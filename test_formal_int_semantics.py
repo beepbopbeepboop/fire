@@ -35,9 +35,9 @@ computation cannot pass for a refusal:
 formatting.** libc's `%d` reads a C `int`, so before
 `model.printf_widened_format` landed `printf("%d", 2**62)` printed `0` on both
 backends where CPython prints `4611686018427387904`
-(`bugs/FORMAL_printf_d_renders_32_bits.md`, deleted with its fix). Reading an
-arithmetic answer through `%d` would have measured that defect instead of the
-arithmetic, which is why every arithmetic row here is a `print`.
+(`model.printf_widened_format`, landed 2026-10-05). Reading an arithmetic answer
+through `%d` would have measured that defect instead of the arithmetic, which is
+why every arithmetic row here is a `print`.
 
 **The `print` spelling.** `print(x)` on this path builds its own format
 (`_print_call` chooses `%s` or `%lld` from the operand's kind), so it is the
@@ -323,9 +323,9 @@ STILL_UNTRAPPED_DOC = (
 # was wrong: a formal value is one 64-bit word and libc's `%d` reads a C `int`
 # out of it, so `printf("%d", 2**62)` printed `0` on BOTH backends where CPython
 # prints `4611686018427387904`
-# (`bugs/FORMAL_printf_d_renders_32_bits.md`, deleted with its fix;
-# `model.printf_widened_format` is the rewrite and
-# `formal/build.py::_widen_printf_integer_conversions` is where it runs).
+# (`model.printf_widened_format` is the rewrite and
+# `formal/build.py::_widen_printf_integer_conversions` is where it runs; both
+# landed 2026-10-05 and the doc that recorded the defect went with them).
 #
 # **Each program prints every value TWICE — once through the conversion under
 # test and once through `print` — and the row's expectation is CPython's answer
