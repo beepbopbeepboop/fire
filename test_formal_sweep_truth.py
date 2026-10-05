@@ -492,17 +492,26 @@ class TestCensusReport(unittest.TestCase):
 # Same shape, three more rows: `resource` (2 files, both of which spell
 # `resource.getrusage(resource.RUSAGE_CHILDREN)` inside the STRING of a child
 # program they write out, never in code), `sysconfig` (`fire.py`, which the work
-# map already recorded as "imports it and never uses it"), and `traceback`
-# (1 file).
+# map already recorded as "imports it and never uses it"), and — until
+# 2026-10-05 — `traceback` (1 file). `traceback` LEFT this list the way
+# `shutil` and `tempfile` left theirs: by being WRITTEN.
+# `formal/hostmods/traceback.mojo` answers CPython's own text for the one state
+# this target can be in — no exception in flight — and it BUILDS on both
+# architectures (`test_formal_hostmods_census.py`: 72/72 rows). So importing it
+# is no longer an unresolved host import, its row is no longer stopped at one,
+# and this section — whose subject is a row that is ENTIRELY dead imports — is
+# not about it. That is the event `test_the_premise_each_row_is_unbuildable`
+# was written to be told about, and it is why the list is three and the prose
+# above it still says four: the history is part of what a reader needs.
 #
-# What the four have in common is that the row is ENTIRELY dead imports, which
+# What the three have in common is that the row is ENTIRELY dead imports, which
 # is what makes them this test's subject rather than a list: a dead import in a
 # file whose row has real users costs nothing (`signal` has five, so
 # `test_memslot.py`'s dead one is invisible and is left alone), while a row that
 # is nothing but dead imports is a row of work that is not work.
 
-# The four, and the census of what is left, printed rather than asserted.
-_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig", "traceback")
+# The three, and the census of what is left, printed rather than asserted.
+_DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # Modules with no readable names that STILL have users, so their rows are real:
 # `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
 # `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
@@ -560,14 +569,17 @@ def _imports_of(path):
 
 class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
     def test_the_premise_each_row_is_unbuildable(self):
-        """Each of the four names has no Mojo source and no front-end transform.
+        """Each name in `_DEAD_ROW_MODULES` has no source and no transform.
 
         The property below says "this repository does not import a module it
         cannot build without reading it", and that is only worth anything if the
         modules really are unbuildable. So the premise is asked of the build's
-        own wording rather than trusted, and it is asked for all four at once
-        because a name that gains a `formal/hostmods/` model stops being this
-        test's subject — which is a reason to be told, not a reason to be quiet.
+        own wording rather than trusted, and it is asked for every name in the
+        list at once because a name that gains a `formal/hostmods/` model stops
+        being this test's subject — which is a reason to be told, not a reason
+        to be quiet.  `traceback` was told about that way on 2026-10-05 and left
+        the list; see `_DEAD_ROW_MODULES`'s own comment for why, and for the
+        build measurement behind it.
         """
         import formal.imports as I
         for name in _DEAD_ROW_MODULES:
@@ -589,7 +601,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
                               f"about does not exist")
 
     def test_no_file_imports_one_of_them_and_reads_nothing(self):
-        """No `.py` of this repository imports one of the four and reads nothing.
+        """No `.py` of this repository imports one of them and reads nothing.
 
         The reader is `tools/formal_sweep_causes.py::_host_mentions_module`, the
         same one the ranking's `uses` fallback asks, so the test and the report
@@ -616,8 +628,8 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
     def test_the_other_rows_still_have_users(self):
         """The rows NOT in this section still have files that read the module.
 
-        A check over the four names above cannot see a fifth, and the way it
-        gets extended by accident is by widening the list. So the three rows
+        A check over the `_DEAD_ROW_MODULES` names cannot see a fifth, and the
+        way it gets extended by accident is by widening the list. So the rows
         that share their shape and are NOT dead imports are asserted to have
         users — which is the statement that keeps them out.
         """
@@ -634,7 +646,7 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
                 self.assertTrue(
                     users.get(name),
                     f"no file of this repository reads `{name}`, so its row is "
-                    f"dead imports like the four above and belongs in "
+                    f"dead imports like the ones above and belongs in "
                     f"_DEAD_ROW_MODULES rather than in this list")
 
 
@@ -1998,13 +2010,20 @@ class TestOleanCurrency(unittest.TestCase):
     Every case here is pure file-content arithmetic, so none of it runs Lean.
     """
 
-    # The real graph's SHAPE, which is the part that matters: one root that
-    # imports nothing from the set (`ProofLib`), a middle module, and two
-    # leaves that reach it by different routes. Two modules importing `X86` is
-    # the case the defect was measured on — three modules rebuilt from one
-    # edit — and one importing only the root is what says the fix does not
-    # over-invalidate.
+    # The real graph's SHAPE, which is the part that matters: TWO roots that
+    # import nothing from the set (`IEEE754` and `ProofLib` — `IEEE754` was
+    # added to the library and `LIBRARY_MODULES` with it, and it imports
+    # nothing at all, which is what `formal/lean.py`'s own comment says), a
+    # middle module, and two leaves that reach a root by different routes. Two
+    # modules importing `X86` is the case the defect was measured on — three
+    # modules rebuilt from one edit — and one importing only the root is what
+    # says the fix does not over-invalidate. `IEEE754` was MISSING here while
+    # `LIBRARY_MODULES` named it, which is the whole of the failure
+    # `test_the_fixtures_are_the_real_graph` was written to catch: a fixture
+    # missing a module exercises nothing about it, and the digest's walk is
+    # scoped to `LIBRARY_MODULES` so a name outside that tuple is invisible.
     SOURCES = {
+        "IEEE754": "",
         "ProofLib": "import Lean\n",
         "X86": "import ProofLib\n",
         "work": "import ProofLib\nimport X86\n",
