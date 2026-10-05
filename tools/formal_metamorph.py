@@ -1800,6 +1800,22 @@ TRANSFORMS = collections.OrderedDict([
 
 TRANSFORM_NAMES = tuple(TRANSFORMS)
 
+
+def wanted_transforms(args):
+    """The transforms this run asks for, validated ONCE and up front.
+
+    Validating inside `check_pair` raised `SystemExit` on a WORKER THREAD, where
+    it does not stop the run and prints nothing useful — the pool swallowed it
+    and the sweep reported a clean tally over no programs.
+    """
+    names = [t.strip() for t in (args.transforms.split(",") if args.transforms
+                                 else TRANSFORM_NAMES) if t.strip()]
+    bad = [n for n in names if n not in TRANSFORMS]
+    if bad:
+        raise SystemExit(f"ERROR: unknown transform(s) {', '.join(bad)}; the "
+                         f"table is {', '.join(TRANSFORM_NAMES)}")
+    return names
+
 #: What each transformation is FOR, for `--list-transforms` and for the ledger.
 #: A transform whose purpose nobody can state is a transform whose results
 #: nobody can read.
@@ -2083,11 +2099,6 @@ def check_pair(label, text, index, args, tmpdir):
         rec["detail"] = perr or "CPython produced no answer"
         return rec
     want = (ref[0], ref[1])
-    names = [t for t in (args.transforms.split(",") if args.transforms
-                         else TRANSFORM_NAMES) if t]
-    for bad in [n for n in names if n not in TRANSFORMS]:
-        raise SystemExit(f"ERROR: unknown transform {bad!r}; the table is "
-                         f"{', '.join(TRANSFORM_NAMES)}")
     base = {b: F.run_on(b, text, tmpdir, f"m{index}p") for b in args.backends}
     # The ORIGINAL's own disagreement with CPython, once per program rather than
     # once per transform: every twin inherits its parent's answer, so counting it
@@ -2100,7 +2111,7 @@ def check_pair(label, text, index, args, tmpdir):
         if ans is not None and (ans[0] != want[0] or ans[1] != want[1]):
             rec["diverge"].append("DIVERGENCE-"
                                   + ("X86" if b == "x86_64" else "ARM"))
-    for tname in names:
+    for tname in wanted_transforms(args):
         entry = _one_transform(rec, label, text, index, tname, want, args,
                                tmpdir, base)
         rec["transforms"][tname] = entry
@@ -2273,6 +2284,7 @@ def main():
               "(export PATH=/opt/homebrew/bin:$PATH first)", file=sys.stderr)
         return 2
     os.makedirs(args.work, exist_ok=True)
+    wanted_transforms(args)          # refuse a misspelt name before any build
 
     pairs, undrivable = program_texts(args)
     started = time.time()

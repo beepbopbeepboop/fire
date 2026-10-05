@@ -51,6 +51,11 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 import formal_fuzz as F  # noqa: E402
 import formal_metamorph as M  # noqa: E402
 
+# `exec_budget`'s shared per-child budgets rather than a literal: the
+# `--list-transforms` probe below runs a python process, and a reader has no way
+# to tell a deliberate 120 s from a stale one.
+from exec_budget import RUN_TIMEOUT_S  # noqa: E402
+
 EXAMPLES = os.path.join(HERE, "formal", "examples")
 
 
@@ -565,7 +570,7 @@ class TheDriver(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(HERE, "tools", "formal_metamorph.py"),
              "--list-transforms"],
-            capture_output=True, text=True, timeout=120, cwd=HERE)
+            capture_output=True, text=True, timeout=RUN_TIMEOUT_S, cwd=HERE)
         self.assertEqual(proc.returncode, 0, proc.stderr[-300:])
         for name in M.TRANSFORM_NAMES:
             self.assertIn(name, proc.stdout)
