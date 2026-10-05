@@ -1637,6 +1637,156 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
               f"module: {text[-300:]}")
 
 
+def test_a_name_with_nothing_to_implement_gets_its_own_tier(tmpdir, _shared):
+    """The FOURTH answer, and the two corrections that earned it.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
+    named the gap exactly: its "neither tier, deliberately" group — "a name
+    whose only spelling is a documentation or test artefact (`this`,
+    `antigravity`, `turtledemo`, `idlelib`), or a Windows-only / POSIX-only
+    module that is not this host's (`msvcrt`, `winreg`, `nt*`, `posix`,
+    `genericpath`, `nturl2path`)" — "want[s] a third answer or an explicit
+    exclusion list, which is a decision about the table rather than a
+    classification — and it should be recorded as one, not left to look like an
+    oversight."
+
+    **It is the FOURTH and not the third**, because `HOST_ADMITTED` took that
+    slot, and `host_module_tier` now answers four values plus `''`.
+
+    **The premise each name rests on is CPython's own `find_spec`, not a
+    remembered list**, which is what splits the doc's single group into three
+    with different answers:
+
+      * `this`, `antigravity`, `turtledemo` — a spec EXISTS and what is behind
+        it is not code. `this` is the Zen of Python as a module-level string,
+        `antigravity` opens a browser, `turtledemo` is a directory of example
+        scripts. Nothing to implement and nothing missing, so neither
+        `unreachable` ("needs an object this target lacks") nor `modelled`
+        ("nothing is missing and the work is undone") is true of them, and
+        `HOST_NOT_A_MODULE` says the one thing that is.
+      * `msvcrt`, `winreg`, `winsound`, `nt` — **no spec AT ALL** on the
+        interpreter that runs this tree. CPython cannot find them here either,
+        so the object is missing from the target and `unreachable` is the
+        table's own rule applied, not a new category.
+      * `ntpath`, `nturl2path`, `genericpath`, `posix` — a spec EXISTS here,
+        because they are frozen or arithmetic-over-strings modules CPython
+        ships everywhere and only ever *uses* on Windows. **These are the
+        CORRECTION**: the doc listed them with `msvcrt` as "not this host's",
+        and for `posix` that is false outright — this is a POSIX target, and
+        `formal/hostmods/os/_syscalls.mojo` already makes every libSystem call
+        `posix` would need. So they are `modelled`.
+
+    And `idlelib` is in NEITHER new tier and that is also a correction: the doc
+    lists it twice, once as a documentation artefact and once under
+    `unreachable`. The second is right — IDLE is an interactive editor, so it
+    needs a terminal — and `HOST_UNREACHABLE`'s existing "A terminal" heading is
+    that fact, so it is left in the queue rather than given the wrong tier.
+
+    **The Wording half is the point of the tier.** A member of
+    `HOST_NOT_A_MODULE` is in the union, so the arm that says "a host module …
+    which has no Mojo source" would fire — true, and it tells the reader to go
+    and implement a module that has no API. So the new arm is tested FIRST.
+    """
+    import sys as _sys
+    import formal.imports as I
+
+    not_a_module = {
+        "this": "the Zen of Python, one module-level string",
+        "antigravity": "importing it opens a browser window",
+        "turtledemo": "a directory of turtle-graphics demonstration scripts",
+    }
+    # Measured, not remembered: CPython itself cannot find these here, so the
+    # object is missing from the target and the EXISTING `unreachable` row is
+    # the rule applied rather than a fourth category invented for them.
+    foreign = ("msvcrt", "winreg", "winsound", "nt")
+    # …and the four the doc grouped with them, which a spec here contradicts.
+    pure = {
+        "posix": "the POSIX low-level module, and THIS is a POSIX target",
+        "genericpath": "the platform-independent base `os.path` builds on",
+        "ntpath": "the Windows path parser, which is string manipulation",
+        "nturl2path": "`url2pathname`/`pathname2url`, string in, string out",
+    }
+    check(not I._host_tier_conflicts(),
+          "a name in two tiers is a partition bug: %s"
+          % I._host_tier_conflicts())
+    check(not (I.HOST_NOT_A_MODULE
+               & (I.HOST_UNREACHABLE | I.HOST_MODELLED | I.HOST_ADMITTED)),
+          "HOST_NOT_A_MODULE asserts the LEAST of the four tiers, so a name in "
+          "two of them is a claim that contradicts itself")
+
+    for name, why in sorted(not_a_module.items()):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module")
+        got = I.host_module_tier(name)
+        check(got == "not-a-module",
+              f"host_module_tier({name!r}) is {got!r}, not 'not-a-module' — "
+              f"{why}. In either other tier it would assert something false "
+              f"about the module")
+    for name, why in sorted(pure.items()):
+        got = I.host_module_tier(name)
+        check(got == "modelled",
+              f"host_module_tier({name!r}) is {got!r}, not 'modelled' — "
+              f"{why}, so nothing is missing from the target and only the "
+              f"module is unwritten. Calling it unreachable would be a "
+              f"permanent-fact claim about the target and it is not one")
+    for name in foreign:
+        got = I.host_module_tier(name)
+        check(got == "unreachable",
+              f"host_module_tier({name!r}) is {got!r}, not 'unreachable' — it "
+              f"needs an object this target does not have")
+    check(not I.host_module_tier("idlelib"),
+          "idlelib is in no tier: it is a TERMINAL (an interactive editor), so "
+          "`unreachable` is right and giving it 'not-a-module' would claim "
+          "there is nothing to implement when there is a whole editor")
+
+    # …and the SPEC measurement itself, so the three groups cannot drift apart
+    # from the interpreter the next time one of them is questioned.
+    import importlib.util
+    for name in sorted(not_a_module):
+        spec = importlib.util.find_spec(name)
+        check(spec is not None and spec.origin,
+              f"precondition: CPython finds source for {name!r} here, which is "
+              f"what makes it 'nothing to implement' rather than 'not this "
+              f"host's' — measured {spec!r}")
+    for name in foreign:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            spec = None
+        check(spec is None,
+              f"precondition: CPython cannot find {name!r} on this host at "
+              f"all, which is the measurement the `unreachable` placement rests "
+              f"on — measured {spec!r}")
+
+    # The WORDING, which is the load-bearing half: a name in this tier must not
+    # be sent to implement a module that has no API.
+    for name in sorted(not_a_module):
+        one = os.path.join(tmpdir, "notamodule", name)
+        os.makedirs(one, exist_ok=True)
+        prog = os.path.join(one, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(f"import {name}\ndef main():\n  return 1\n")
+        fresh_cas()
+        result = run_fire(["build", "--formal", "--no-prove", "-o",
+                           os.path.join(one, "prog.aout"), prog], cwd=one)
+        check(result.returncode != 0,
+              f"import {name} built. A module with a Mojo source would "
+              f"resolve, which is a different (and better) finding")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("no content to compile" in text,
+              f"import {name} does not say there is nothing to implement, so "
+              f"the reader is sent to write a module with no API: "
+              f"{text[-300:]}")
+        check("host module" not in text,
+              f"import {name} is refused as a host module awaiting a Mojo "
+              f"source, which is the sentence the new tier exists to replace: "
+              f"{text[-300:]}")
+        check("not a stdlib or sibling module" not in text,
+              f"import {name} is still refused as a name that does not exist, "
+              f"which is false of a CPython standard-library module: "
+              f"{text[-300:]}")
+
+
 def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     """The refusal's second half: what to write here instead, where the reader is.
 
@@ -3885,6 +4035,8 @@ TESTS = [
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
     ("no standard-library module is left in neither tier",
      test_no_standard_library_module_is_left_in_neither_tier),
+    ("a name with nothing to implement gets its own tier",
+     test_a_name_with_nothing_to_implement_gets_its_own_tier),
     ("a host-module refusal says what this target offers instead",
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
