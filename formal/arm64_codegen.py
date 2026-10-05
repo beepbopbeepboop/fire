@@ -10010,6 +10010,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(M.negative_shift_refusal(op, known))
             lit = self._static_int(imm_r)
             if lit is not None and M.shift_saturates(lit):
+                # The OPERAND goes through the normal path first. It used not
+                # to, and `_emit_saturated` sign-extended whatever X0 held —
+                # which inside a `print(...)` is the address of the format
+                # string, so `print(a >> 64)` with `a = 0 - 8` answered 0
+                # where CPython answers -1, while x86-64 (which has always
+                # emitted the operand here) answered -1. See
+                # `_emit_saturated`'s contract.
+                self._emit_expr(e.left)
                 self._emit_saturated(op, signed)
                 self._emit_trunc(result_t)
                 return
@@ -10843,16 +10851,34 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         The decision is `model.shift_saturated_is_zero` and this is only its
         instruction selection, so that a second backend cannot answer the
-        same question differently. Two cases, and the second is the one a
-        `return 0` saturation gets wrong: `ASR X0, X0, #63` is exactly "the
+        same question differently. Two cases, and the second is the one
+        a `return 0` saturation gets wrong: `ASR X0, X0, #63` is exactly "the
         sign-extended word", which is 0 for a non-negative operand and -1 for
         a negative one — which is what Python's arithmetic `>>` gives at any
-        amount at or past 64. `X0` holds the value being shifted on entry, so
-        the sign is read from it rather than recomputed."""
+        amount at or past 64.
+
+        **X0 MUST ALREADY HOLD THE VALUE BEING SHIFTED, and that is the
+        caller's half of the contract rather than an assumption this can
+        make.**  It read "the value being shifted is already in X0", which is
+        true only when the shift IS the whole expression statement — and a
+        saturating shift in any other position found whatever the enclosing
+        expression had left there.  Measured, on `print(a >> 64)` with
+        `a = 0 - 8`: the `print` emitter had already materialised its interned
+        format string into X0, so the `ASR` sign-extended the ADDRESS of that
+        string and `a >> 64` answered **0** where CPython answers -1 — while
+        x86-64, whose `_emit_saturated` is the same sequence, answered -1 for
+        the same source.  One source, two architectures, one right and one
+        wrong, from a register nobody re-read.
+
+        So both callers evaluate the operand first (`_emit_shift`'s literal
+        arm, which did not, and `_emit_shift_reg`, which already had it in X0
+        from the shift sequence itself), and the image is then the same shape
+        whichever of the two reached it."""
         if M.shift_saturated_is_zero(op, signed):
             self.asm.emit(encode_movz_xd_imm(0, 0))
         else:
             self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
+
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.

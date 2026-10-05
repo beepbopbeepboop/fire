@@ -54,6 +54,63 @@ the obvious C scalars:
 | `Float16/32/64` | `__fp16` / `float` / `double` |
 | `None` | `void` (return) |
 
+### Integer semantics: what a `Int` is allowed to do
+
+**CPython's `int` is arbitrary precision and a value here is one 64-bit
+word.** That is the whole reason this subsection exists: `ADD`, `SUB`, `MUL`,
+`LSL`, `SDIV` and `strtoll` all answer their result **modulo 2^64**, and
+nothing downstream can tell a wrapped answer from a computed one. The decision
+per operation is below; the shared predicates are `formal/model.py`'s
+`int_overflow_traps` (which of them must refuse) and the `*_overflow_refusal`
+family (the build-time messages), and both backends ask those rather than
+writing the rule out, so they cannot word one operation differently.
+
+**A refusal is a build failure carrying CPython's exact value**, never a
+silent number and never a fabricated one:
+
+| operation | answer on this target | why |
+|---|---|---|
+| `a + b`, `a - b`, `a * b` | the exact value, or a **refusal** when it does not fit | `int_overflow_traps` |
+| the same on `Int8`…`Int32` | **wraps** | a narrow type is a declared bit width; `x: Int8 = 127; x + 1` is `-128` in every Mojo that has `Int8` |
+| the same on `UInt64` | **wraps** | the source spelled the wrap down, and CPython has no unsigned to disagree with |
+| the same on a `Pointer[T]` | **wraps** | `p + 1` is an ADDRESS, and a one-past-the-end pointer is not an overflow |
+| `a // b`, `a % b` | exact, **flooring** (`-7 // 2` is `-4`, `-7 % 3` is `2`) | `model.division_floors` |
+| `a // -1` at `INT64_MIN` | **refused** — the answer is 2^63 | the only division that overflows; A64's `SDIV` answers the dividend and x86-64's `IDIV` raises `#DE` and the image dies on SIGFPE, so one source had one wrong number and one signal |
+| `a / b` | **truncates** toward zero (`-7 / 2` is `-3`) | there is no float on this path; `FORMAL.md` §6 Phase 7 |
+| `a ** b`, `b ≥ 0` | the exact value, or a **refusal** when it does not fit | `power_overflow_refusal` |
+| `a ** b`, `b < 0` | **refused** | CPython answers a **float** (`2 ** -1` is `0.5`) and this target has no float division; the `0` this used to materialise is a number the source never wrote |
+| `pow(a, b, m)` | **refused** by arity | a different question — every step reduces modulo `m`, so it cannot overflow |
+| `divmod(a, b)` | **refused** | — |
+| `x << n`, `n < 64` | the exact value, or a **refusal** when the RESULT does not fit (`1 << 63` is 2^63) | `shift_overflow_refusal`; the immediate form's `0..63` range test is not a safety test |
+| `x << n`, `n ≥ 64` | **refused** | CPython's `int` is unbounded, so `1 << 64` is 18446744073709551616. The hardware masks the amount, and the "saturate to 0" rule that answered it was CPython's for `>>` and a fabrication here |
+| `x >> n`, `n ≥ 64` | **0** for a non-negative `x`, **-1** for a negative one | Python's `>>` floors and keeps replicating the sign, so saturation IS the answer here; the two cases are why the shift refusal is `<<`-only |
+| `a << n`, `a >> n` with `n < 0` | **refused** | CPython raises `ValueError: negative shift count` |
+| `a & b`, `a \| b`, `a ^ b`, `~a` | exact | bitwise: the result is in range whenever the operands are, so there is nothing to refuse |
+| unary `-a` | exact; `INT64_MIN` is representable | `-(2^63)` is the one value that is its own negation as a word |
+| `abs(a)` | **refused** by name | the C library's is `int abs(int)` — 32 bits — and answering it would truncate a word |
+| `int(s)`, `int(s, base)` | the exact value, or a **refusal** when it does not fit | `strtoll` CLAMPS to `LLONG_MAX` and sets `errno`; the clamp used to be the answer (`int("9223372036854775808")` printed `-1`) |
+| `int(s, base)` with base `0` | **refused** by name | CPython's auto-detection and `strtoll`'s are three different rules |
+| `int(x)` on a double | truncation toward zero (`int(2.9)` is `2`) | a conversion, not a parse |
+| comparisons | exact, **signed** for an unannotated `int` | `types.DEFAULT_INT_TYPE` is signed, so `-3 < 2` is true |
+| `range(a, b, c)`, `len`, `len(x) + k` | exact | a length and a count are words; `len(range(0, 10, 3))` is `4` |
+| `(x).bit_length()` | **refused** | no libc binding for it on this link line |
+
+**Reading an integer out is not in this table because it is a separate
+question, and it has its own defect**: `printf("%d", x)` renders **32 bits**
+(libc's `%d` reads a C `int`), so `printf("%d", 2**62)` prints `0` while
+`printf("%lld", x)` and `print(x)` are right. Use `print` or `%lld` for a
+`Int`. Measured on both backends; `bugs/FORMAL_printf_d_renders_32_bits.md`.
+
+**The one row that is a wrong number rather than a refusal.** Every row above
+is exact or refused **when the build can fold the operands**. A variable
+operand cannot be folded, and the run-time check for it is not landed: `a = n
++ n` with `n = 2^62` answers 0 today. `bugs/FORMAL_integer_overflow_at_run_
+time_is_still_untrapped.md` has the measurements, the emitters and instruction
+sequences that are written and working, and the one proof-framework obstacle
+in front of turning them on;
+`test_formal_int_semantics.py`'s `VARIABLE_ROWS` section pins today's answer
+so the gap is a row rather than an absence.
+
 ## Pointers
 
 | Mojo | C ABI |
