@@ -3416,10 +3416,39 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             own_names = set(MM.template_names(module_source_text(source_path)))
             own_demap = {(t, a): m for t, m, a, _p in extra_sources
                          if t in own_names}
+            # …and the OTHER half of the same rewrite: the templates this module
+            # IMPORTS and APPLIES. `libb` writing `Pair[Int]()` beside `liba`'s
+            # `struct Pair[T]` is the shape, and it was refused by name with a
+            # sentence about an importer that is not there — "this call is one
+            # that asked for none — it names no type argument …" — while the
+            # demand set computed a few lines above (`below`) is exactly that
+            # demand, and `liba`'s library is already on this one's link line
+            # carrying `liba_Pair_1_T_3_Int_get_first`.
+            #
+            # So the two halves of one feature, from one reader: the DEMAP is the
+            # rewrite, and the DECLARATIONS are the layout the rewritten call
+            # constructs with and the method names its lifted calls bind. The
+            # bodies are NOT taken, because an imported template's body is
+            # compiled into the library that DECLARES it — taking it here would
+            # publish the methods under this module's prefix and give one image
+            # two definitions of one struct.
+            #
+            # A separate `parse_module` rather than the `stmts` above, for the
+            # reason `_rewritten_own_statements` gives: this list is memoised on
+            # `(path, content digest)` and handed to every reader in the
+            # process, so a rewrite left in it is visible to the next build of
+            # the same module. `module_source_text` is the source and
+            # `imported_template_instantiations` parses it; the cost is one
+            # parse of a file this build was going to parse anyway.
+            borrowed_demap, borrowed = imported_template_instantiations(
+                source_path, module_statements(source_path),
+                project_root=project_root or source_path)
             result = compile_formal_dylib(
                 [source_path] + [p for _t, _m, _a, p in extra_sources],
                 output=out, prove=False, check=False,
-                statements=_rewritten_own_statements(source_path, own_demap),
+                statements=_rewritten_own_statements(
+                    source_path, {**borrowed_demap, **own_demap}),
+                borrowed_structs=list(borrowed.values()),
                 module_prefixes=dict(
                     {source_path: prefix}, **extra_prefixes),
                 link_dylibs=dep_dylibs, arch=arch,
@@ -3557,9 +3586,65 @@ def imported_instantiations(source_path: str, stmts: list,
     same precedence `_imported_structs` applies to the declarations themselves.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
+    demap, out = imported_template_instantiations(
+        source_path, stmts, project_root=project_root or source_path,
+        linked_paths=linked_paths)
+    out.update(_own_instantiations(module_source_text(source_path), source_path,
+                                   demap, project_root or source_path, stmts))
+    if demap:
+        MM.rewrite_instantiation_calls(stmts, demap)
+    return out
+
+
+def imported_template_instantiations(source_path: str, stmts: list,
+                                     project_root: str = None,
+                                     linked_paths=()) -> tuple:
+    """`(demap, {mangled name: StructDef})` for the generic templates THIS file
+    APPLIES out of a module it reaches — the imported half of
+    `imported_instantiations`, and its OWN half is `_own_instantiations`.
+
+    **Both halves come out of ONE `made`, and that is the property this
+    function exists to keep.** The declaration an importer needs and the mangled
+    name its call site has to be rewritten to are the same fact read twice, and
+    computing them separately is what makes it possible for a call to name a
+    struct no declaration was collected for. So the demap is returned ALONGSIDE
+    the declarations rather than being recomputed by the caller, and the two
+    consumers — `imported_instantiations` on the executable path and
+    `build_module_dylib` on the library path — cannot build different tables
+    out of one `made`.
+
+    **Why the library path needs it, which is the reason it is not private.**
+    `build_module_dylib` compiles a module's OWN source, so a module that
+    applies ANOTHER module's template (`libb` writing `Pair[Int]()` beside
+    `liba`'s `struct Pair[T]`) has a call site whose brackets name nothing this
+    image compiles. The demand is computed and the dependency publishes the
+    body — `liba`'s library carries `liba_Pair_1_T_3_Int_get_first` — so half
+    the mechanism already runs and the build is refused at the call for a
+    sentence about an importer that is not there:
+
+        make_pair: `Pair` is called, and it is imported from `liba`, so the call
+        has to bind a symbol `liba` exports. That module does not export it …
+        … so this call is one that asked for none — it names no type argument,
+        or names one that is a value rather than a type, or spells the template
+        as `module.Pair`.
+
+    Every clause of that last sentence is false about this call: it names the
+    type argument `Int`, `build_module_dylib` computed exactly this demand set
+    before it reached the refusal, and the module is already on `libb`'s link
+    line. What the path lacked is the rewrite and the declaration, and they are
+    exactly what this returns.
+
+    **The bodies are NOT here, and must not be.** An imported template's body is
+    compiled into the library that DECLARES it; appending it here as well would
+    publish the struct's methods under the importing module's prefix and give
+    one image two definitions of one struct. The declaration alone is what the
+    importer needs — the layout to construct with, and the method names to lift a
+    call to, each of which the dependency's own library provides.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
     consumer = module_source_text(source_path)
     if not consumer:
-        return {}
+        return {}, {}
     paths = []
     for mod in imported_modules(stmts):
         dep = resolve_module_path(mod, relative_to=source_path,
@@ -3585,11 +3670,7 @@ def imported_instantiations(source_path: str, stmts: list,
                                              project_root or source_path):
                     _attach_declared_census(st, gen_path)
                     out.setdefault(st.name, st)
-    out.update(_own_instantiations(consumer, source_path, demap,
-                                   project_root or source_path, stmts))
-    if demap:
-        MM.rewrite_instantiation_calls(stmts, demap)
-    return out
+    return demap, out
 
 
 def _own_instantiations(consumer_src: str, source_path: str, demap: dict,

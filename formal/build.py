@@ -18506,7 +18506,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                          check: bool = True, module_prefixes: dict = None,
                          link_dylibs: list = None, arch: str = "arm64",
                          fmt: str = "macho", reexports: dict = None,
-                         statements: dict = None) -> dict:
+                         statements: dict = None,
+                         borrowed_structs: list = None) -> dict:
     """Compile `source_paths` into one dylib for `arch`.
 
     `arch`/`fmt` select the CODEGEN and the container, exactly as
@@ -18538,6 +18539,25 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     `formal/imports.py::build_module_dylib` is that caller; the executable path's
     equivalent is `compile_formal`'s own `stmts` parameter, and this is the same
     seam. A path absent from the map is parsed here, exactly as before.
+
+    `borrowed_structs` are declarations of ANOTHER module's generic templates
+    that this library's rewritten call sites now name — the `Pair_1_T_3_Int` of
+    a `Pair[Int]()` written in a module that IMPORTS `Pair` rather than declaring
+    it — and they are handed to every source's `_prepare_functions` beside the
+    library's own other-source declarations, which is the same seam for the same
+    reason: the frame-holder analysis and the method dispatch table are
+    properties of the IMAGE, and a call site that constructs a struct needs its
+    layout whatever file wrote it.
+
+    **The bodies are not here and the bodies must not be.** An imported
+    template's body is compiled into the library that DECLARES it, and that
+    library is already on this one's link line with the methods published under
+    its own prefix. Carrying the body here would give one image two definitions
+    of one struct and publish the second under the wrong module's qualifier. So
+    these are DECLARATIONS, they reach `_method_exports` through nobody — the
+    per-file attribution filter below drops any struct no source of this library
+    declares, and a borrowed one is declared by none of them — and what this
+    library emits is a call the dependency's own export table answers.
     """
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
@@ -18726,6 +18746,21 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 if isinstance(st, F.StructDef) and st.name not in library_declared:
                     library_declared[st.name] = source_path
                     library_extra.append(st)
+    # …and the declarations this library BORROWS: another module's template
+    # instantiations its own rewritten call sites now name. Deliberately NOT in
+    # `library_declared`, which is a map from struct name to the FILE THAT
+    # DECLARES IT and is what the per-file attribution filter below reads — a
+    # borrowed struct is declared by no source of this library, so recording one
+    # would attribute it to whichever file happened to be asked first and publish
+    # its methods under that module's prefix. `library_extra` is the other half
+    # of the same pair (declarations the analysis must see), so it is the list
+    # this belongs in, and `library_structs` below is left alone for the same
+    # reason: the emitter does not compile these bodies, and the codegen reaches
+    # the layout through `_prepare_functions`' own `extra_structs`.
+    for st in (borrowed_structs or ()):
+        if st.name not in library_declared and not any(
+                s.name == st.name for s in library_extra):
+            library_extra.append(st)
     library_structs: list = []
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \

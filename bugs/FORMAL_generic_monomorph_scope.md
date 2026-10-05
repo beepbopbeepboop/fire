@@ -10,8 +10,11 @@ fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall
 which was a third bug underneath it and is named there. What is left is §1a
 itself (a name resolution, and an ABI decision), §2 (a dotted application), §3
 (comptime-valued parameters), §4 (a type declared in the consumer), §8 (trait
-bounds), and the cross-module-library half filed as
-`bugs/FORMAL_a_library_calling_another_modules_template_instantiation.md`.
+bounds). The cross-module-library half — a LIBRARY that applies ANOTHER
+module's template — is FIXED (`build_module_dylib` now hands the imported
+templates' demap and declarations to `compile_formal_dylib`, beside §9a's own
+half; `test_formal_monomorph.py`'s "a library that applies another module's
+template instantiation").
 
 The mechanism itself is `formal/monomorph.py` and its two call sites in
 `formal/imports.py` (`instantiation_demands`, `imported_instantiations`); the
@@ -438,12 +441,18 @@ same two sentences. `test_formal_run.py` is 997/997.
 
 **What is still open on the LIBRARY side, and it is a different piece of work:**
 a library that applies ANOTHER module's template (`libb` calling `liba`'s
-`Pair[Int]`) is still refused, and the refusal's last sentence — "so this call
-is one that asked for none" — is FALSE about it: the demand is computed, the
+`Pair[Int]`) WAS refused, and the refusal's last sentence — "so this call is one
+that asked for none" — was FALSE about it: the demand is computed, the
 dependency publishes the instantiation, and only the call-site rewrite and the
-declaration are missing. Measured, both architectures, with the reason and the
-exact next step:
-`bugs/FORMAL_a_library_calling_another_modules_template_instantiation.md`.
+declaration were missing. **Both are now done** — the imported half of
+`imported_instantiations` returns its demap ALONGSIDE its declarations
+(`imported_template_instantiations`, one `made`, two readers) and
+`build_module_dylib` hands both to `compile_formal_dylib(statements=…,
+borrowed_structs=…)` — and the case is
+`test_formal_monomorph.py`'s "a library that applies another module's template
+instantiation": three files, two instantiations, both architectures, and the
+manifest assertion that `libb` publishes `libb_make_int`/`libb_make_bool` and
+NOT `Pair_1_T_3_Int`'s methods, which is the half a right answer cannot see.
 
 **The original text, which is what the fix had to satisfy:** a module that
 applies its own template **and is built as a dylib** is refused, with the same

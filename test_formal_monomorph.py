@@ -437,6 +437,137 @@ def test_a_module_that_applies_its_own_template_publishes_it(tmpdir):
           f"is the `declares only the template(s)` refusal's other half")
 
 
+def test_a_library_that_applies_another_modules_template_instantiation(tmpdir):
+    """§9a's CROSS-MODULE half: `libb` writes `Pair[Int]()` beside `liba`'s
+    `struct Pair[T]`, and `libb` is a LIBRARY.
+
+    The case above and this one are different features and the difference is
+    which module DECLARES the template. §9a seeds a library's own demand set
+    from the templates it declares; this one's demand comes from the module's own
+    IMPORT, and `instantiation_demands` is asked with `own_templates` for the
+    own set, so nothing on the path saw it:
+
+        build: main.mojo imports 'libb', which cannot be built either: libb.mojo:
+        make_pair: `Pair` is called, and it is imported from `liba`, so the call
+        has to bind a symbol `liba` exports. That module does not export it …
+        A generic template's instantiations ARE compiled into that module's
+        library when an importer asks for them, so this call is one that asked
+        for none — it names no type argument, or names one that is a value
+        rather than a type, or spells the template as `module.Pair`.
+
+    Every clause of that last sentence is false about this call, and both halves
+    of the mechanism had already run when the refusal was printed: `below` (the
+    demand set, computed from `libb`'s own source) is `{liba: {Pair: [(Int,)]}}`
+    and `liba`'s library already publishes `liba_Pair_1_T_3_Int_get_first`. What
+    the library path lacked is the two halves the executable path has — the CALL
+    SITE rewrite and the DECLARATION — and they are what this case exercises.
+
+    **The bodies are still not taken, and the manifest assertion is what says
+    so.** A library that compiled the imported instantiation's body would publish
+    its methods under its OWN prefix and give one image two definitions of one
+    struct; so `libb`'s export table must carry `libb_make_int`/`libb_make_bool`
+    and nothing else, and the instantiation's methods must be `liba`'s. That is
+    checked from the manifests rather than argued, because it is the half of the
+    change that a program printing the right number cannot see.
+
+    Two instantiations in one library, for the reason every other case in this
+    file says: `Pair[Int]` and `Pair[Bool]` collapsing onto one symbol is the
+    failure this must not have, and here it would collapse by a different route
+    — the two call sites are in the same function.
+    """
+    liba = ("struct Pair[T]:\n"
+            "    var first: T\n"
+            "    var second: T\n"
+            "\n"
+            "    def get_first(self) -> T:\n"
+            "        return self.first\n"
+            "\n"
+            "    def total(self) -> T:\n"
+            "        return self.first + self.second\n")
+    libb = ("from liba import Pair\n"
+            "\n"
+            "def make_int() -> Int:\n"
+            "    var a = Pair[Int]()\n"
+            "    a.first = 7\n"
+            "    a.second = 5\n"
+            "    return a.total()\n"
+            "\n"
+            "def make_bool() -> Int:\n"
+            "    var b = Pair[Bool]()\n"
+            "    b.first = True\n"
+            "    b.second = False\n"
+            "    return b.get_first()\n")
+    prog = ("from libb import make_int, make_bool\n"
+            "\n"
+            "def main():\n"
+            "    print(make_int())\n"
+            "    print(make_bool())\n")
+    cpython = ("class Pair:\n"
+               "    def __init__(self):\n"
+               "        self.first = 0\n"
+               "        self.second = 0\n"
+               "\n"
+               "    def get_first(self):\n"
+               "        return self.first\n"
+               "\n"
+               "    def total(self):\n"
+               "        return self.first + self.second\n"
+               "\n"
+               "def make_int():\n"
+               "    a = Pair()\n"
+               "    a.first = 7\n"
+               "    a.second = 5\n"
+               "    return a.total()\n"
+               "\n"
+               "def make_bool():\n"
+               "    b = Pair()\n"
+               "    b.first = True\n"
+               "    b.second = False\n"
+               "    # A formal Bool is ONE WORD and prints as 1, where Python's "
+               "is its\n"
+               "    # own object — the same spelling the cases above make and "
+               "for the\n"
+               "    # same reason.\n"
+               "    return int(b.get_first())\n"
+               "\n"
+               "def main():\n"
+               "    print(make_int())\n"
+               "    print(make_bool())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_crosslib", libb, prog, cpython,
+                            extra={"liba.mojo": liba}, libname="libb.mojo")
+        check(got == "12\n1\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
+        # libb's export table, and liba's: the instantiation's METHODS are liba's
+        # and nothing else is, which is the property a right answer cannot see.
+        # Under the architecture's own CAS subdirectory, so an x86-64 run cannot
+        # read an arm64 run's tables — `fresh_cas` empties the whole root, but the
+        # arm64 half is rebuilt by the loop's first iteration.
+        mine, theirs = set(), set()
+        for _base, _dirs, files in os.walk(FI.cas_imports(arch)):
+            for name in files:
+                if not name.endswith(".manifest.json"):
+                    continue
+                with open(os.path.join(_base, name)) as f:
+                    table = {e["symbol"] for e in json.load(f)["exports"]}
+                if name.startswith("libb."):
+                    mine |= table
+                elif name.startswith("liba."):
+                    theirs |= table
+        check(mine == {"libb_make_int", "libb_make_bool"},
+              f"[{arch}] libb's export table is {sorted(mine)} — an imported "
+              f"instantiation's methods published here would give one image two "
+              f"definitions of one struct")
+        check({"liba_Pair_1_T_3_Int_total",
+               "liba_Pair_1_T_4_Bool_get_first"} <= theirs,
+              f"[{arch}] liba publishes neither instantiation's method "
+              f"({sorted(theirs)}) — the bodies are compiled into the module "
+              f"that DECLARES the template, which is what makes libb's call a "
+              f"boundary call at all")
+
+
 def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
         tmpdir):
     """`from pkg import Pair` must instantiate in `pairlib`, not in `pkg`.
@@ -1928,6 +2059,8 @@ TESTS = [
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
+    ("a library that applies another module's template instantiation",
+     test_a_library_that_applies_another_modules_template_instantiation),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
