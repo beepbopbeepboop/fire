@@ -38055,6 +38055,56 @@ def _fill_gaps(name: str, shape, positional: list, slots: list) -> tuple:
     return slots, None
 
 
+def try_handler_refusal(fn_name: str, stmt, handlers: list) -> str:
+    """The diagnostic for a `try` that HAS handlers.
+
+    A `try` with no handlers is a cleanup scope and is lowered: `finally` runs
+    on the fall-through, on a return and on a raise, which is what
+    `_emit_try`'s pending-finally stack is for. An `except` arm is the other
+    thing entirely and there is no answer for it here, because **this image has
+    no unwinder**: `raise` lowers to an exit (`arm64_codegen.py::_emit_stmt`'s
+    `RaiseStmt` arm and `x86_64_codegen.py`'s twin both evaluate the exception
+    expression for its side effects and then leave the process), so there is no
+    edge from a raise site to a handler and no way for a handler to be reached.
+
+    Measured, both architectures, and the point is that the program BUILDS:
+    `class MyErr(ValueError)` + `raise MyErr("m")` inside a `try:`/`except:` was
+    assembled, ran, and exited 1 having printed nothing where CPython prints
+    `caught` and exits 0. `otool -tvV` shows why: the `except` arm's code is not
+    emitted at all, the call to the raising function is followed by the code
+    AFTER the `try` as if the call had returned normally, and the raise itself
+    is `mov w0, #1 ; svc #0x80`. The same is true of a base this image
+    DECLARES (`class MyBase` / `class MyErr(MyBase)`), which is why the reason
+    below names the runtime and not the base: it is the handler that cannot
+    run, not a class that cannot be built. The construction half is fine — that
+    class builds and runs — so a refusal naming bases would be refusing the
+    wrong half.
+
+    The project's own rule for this is stated in `formal/hostmods/os` and
+    `formal/hostmods/time`: *a failure is a status, not an exception*, and this
+    is where that rule is enforced rather than merely written down. Zero of the
+    664 stdlib files contain a `try` at all, so nothing that builds today stops
+    building."""
+    first = handlers[0]
+    exc = first.exc_type if first is not None else None
+    caught = "a bare `except:`" if not isinstance(exc, str) or not exc \
+        else f"`except {exc}`"
+    n = len(handlers)
+    arms = "arm" if n == 1 else "arms"
+    return (f"{fn_name}: the `try` on line {getattr(stmt, 'line', 0) or 0} "
+            f"has {n} except {arms} ({caught}), and this image has no "
+            f"unwinder: a `raise` here is an EXIT — the exception expression is "
+            f"evaluated for its side effects and the process then leaves with "
+            f"status 1 — so no handler can be reached and the code after the "
+            f"`try` would run as if the body had returned normally. Measured on "
+            f"both architectures: such a program builds, prints nothing and "
+            f"exits 1 where CPython enters the handler. Refused rather than "
+            f"emitted, because a program that runs and is not the program "
+            f"written is the outcome this path treats as its worst. Report a "
+            f"failure as a status: return a value, raise nothing, and let the "
+            f"caller decide. `finally` needs no runtime and is still lowered.")
+
+
 def variadic_read_refusal(fn_name: str, name: str, is_kwarg: bool,
                           call_note: str) -> str:
     """The diagnostic for a body that READS its variadic parameter.

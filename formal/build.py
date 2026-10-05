@@ -13882,6 +13882,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
+        _refuse_try_handlers(fn)
         _refuse_returned_container_blobs(fn, returns_container)
         unstored.append(_unstored_read(fn, placed, frame_slots))
     # Raised LAST, and that ordering is the design rather than an accident of
@@ -14134,6 +14135,35 @@ def _refuse_returned_container_blobs(fn, returns_container) -> None:
     """
     for line, what in M.container_escape_sites(fn, returns_container):
         raise CodegenError(M.returned_container_refusal(fn, line, what))
+
+
+def _refuse_try_handlers(fn) -> None:
+    """Refuse a `try` that carries an `except` arm.
+
+    **No unwinder, so no handler is reachable — and the program that says so is
+    still built.** That is the defect this closes: `raise` lowers to an exit on
+    both backends (`arm64_codegen.py::_emit_stmt`'s `RaiseStmt` arm, and
+    x86-64's twin), `_emit_try` skips the handlers because there is no edge to
+    route, and the code AFTER the `try` is emitted as if the body had returned
+    normally. So `try: boom() except: pass` where `boom()` raises exits 1 having
+    printed nothing, and CPython enters the handler — measured on both
+    architectures, for a base this image cannot see AND for one it declares,
+    which is why the reason names the runtime rather than the base.
+
+    **Only a `try` WITH handlers is refused, and the distinction is the point.**
+    `try: … finally: …` is a cleanup scope, not an exception scope: `finally`
+    needs no runtime, and `formal/arm64_codegen.py::_emit_try` lowers it on all
+    three exits (fall-through, return, raise). Refusing every `try` would refuse
+    the half that works, so the check reads `stmt.handlers` and nothing else.
+
+    Asked per function beside `_refuse_variadic_reads`, and it walks
+    `iter_nodes` rather than the statement spine, so a `try` nested in an `if`, a
+    loop or a `with` is found — which is where a real one lives, since a `try`
+    at the top of a body is not what anyone writes."""
+    for node in M.iter_nodes(fn.body):
+        if isinstance(node, F.TryStmt) and node.handlers:
+            raise CodegenError(M.try_handler_refusal(fn.name, node,
+                                                     node.handlers))
 
 
 def _refuse_variadic_reads(functions: list, fn, shape) -> None:

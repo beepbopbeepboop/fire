@@ -4054,6 +4054,15 @@ class Parser:
         return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
+        # The `try` keyword's own line, recorded because `TryStmt` is the one
+        # statement here whose position nothing downstream could recover: every
+        # other node in a body is reached through a statement whose position a
+        # diagnostic can name, and a `try` is the statement a refusal about
+        # EXCEPTION SCOPES has to name (`formal/build.py::_refuse_try_handlers`,
+        # whose message is useless with line 0). Additive — the field already
+        # existed with this default, so nothing that reads it changes except
+        # from "always 0" to the truth.
+        line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
         body = self._parse_block()
         handlers = []
@@ -4131,7 +4140,8 @@ class Parser:
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
         return TryStmt(body=body, handlers=handlers,
-                       else_body=else_body, finally_body=finally_body)
+                       else_body=else_body, finally_body=finally_body,
+                       line=line)
 
     def _parse_with(self):
         self._expect("KW", "with")
