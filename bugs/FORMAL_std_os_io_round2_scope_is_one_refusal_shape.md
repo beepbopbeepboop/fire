@@ -197,12 +197,19 @@ walk whose key is wrong, and it is wrong because of a defect in the resolver the
 walk and the build share — which is also why §2's table, read off the sweep log
 rather than off this walk, is the one to use.
 
-**Link 2 has NO bug doc and no claim: `std/sys/arg.mojo` is outside every package
-here, and the refusal — `Span[StaticString, ImmStaticOrigin] is a compile-time
-explicit-parameter list on a generic, not a subscript` — is the shape
-`bugs/FORMAL_generic_monomorph_scope.md` §"what is not covered" already holds. It
-is filed nowhere of its own, and 4 files of this scope sit behind it, so it is
-worth a doc rather than a mention. **The stop is the tool's documented limit** —
+**Link 2 HAS a doc and no claim, and it is not monomorphisation**
+(`work/formal25-5`): `std/sys/arg.mojo` is outside every package here, and the
+refusal — `Span[StaticString, ImmStaticOrigin] is a compile-time
+explicit-parameter list on a generic, not a subscript` — is filed in
+`bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`, which
+measures the chain it is actually behind. The short version: the second bracket
+argument is a `comptime` ALIAS whose initializer is an MLIR attribute template
+(`std/origin/__init__.mojo:123`), and that module does not build, so there is no
+word to bind for it. A near-identical program with a comptime argument that
+*folds* builds, which is what rules out the easy reading. 4 files of this scope
+sit behind it, so it was worth a doc rather than a mention — and the doc it
+needed to be is not the one `FORMAL_generic_monomorph_scope.md` §"what is not
+covered" was going to become. **The stop is the tool's documented limit** —
 neutering a module removes the names its users call — and it is now detected and
 reported as such rather than as 43 files refusing a construct (§4).
 
