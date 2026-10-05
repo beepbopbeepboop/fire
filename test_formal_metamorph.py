@@ -377,6 +377,42 @@ class ScopeResolution(unittest.TestCase):
         # without the declaration, which is a NameError in the twin.
         self.assertNotIn("G", an.locals_of(fn))
 
+    def test_a_global_declared_name_is_still_a_module_binding(self):
+        """The other half of the same rule, and it is the half that broke.
+
+        `_bind_body` refuses to descend into a nested `def`, but it spelled the
+        refusal so that the refusal did not apply to the `def` STATEMENT — so
+        `global G6` inside `def bump7` was read as a declaration of the MODULE,
+        and `G6` was then dropped from the module's bindings.  That set is what
+        `reorder`'s `_reachable_by_a_call` consults, so `G6 = 9` and
+        `print(bump9(5))` were exchanged and the printed value moved from 14 to
+        25.  Found by the CPython oracle over 5910 pairs
+        (`stress-mm:18`, `globals`).
+        """
+        an = self._an("G = 5\n"
+                      "def bump(n):\n"
+                      "    global G\n"
+                      "    G = G + n\n"
+                      "    return G\n")
+        self.assertIn("G", an.module_bindings,
+                      "a name a function declares `global` is bound in the "
+                      "MODULE, whatever the declaration is written inside")
+
+    def test_a_nested_functions_locals_are_not_module_bindings(self):
+        """The other direction of the same fix, and it is an over-approximation.
+
+        `module_bindings` is "what a call made from anywhere can reach".  A
+        module-level `def`'s locals are not that: reaching them needs a closure,
+        and `_captured_names` is the predicate for that.  Reading them in here
+        made `reorder` refuse swaps it need not refuse, which costs pairs and
+        hides the rule that is actually protecting anything.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    s1 = 0\n"
+                      "    print(s1)\n"
+                      "    return 0\n")
+        self.assertNotIn("s1", an.module_bindings)
+
     def test_a_shadowing_parameter_is_its_own_binding(self):
         an = self._an("def f(x):\n"
                       "    x = x + 1\n"
@@ -443,6 +479,174 @@ class ScopeResolution(unittest.TestCase):
         # `a` is not an int, so `swap_add` and the int half of `extract` are
         # unreachable on every program in `formal/examples`.
         self.assertEqual(an.int_only, {"n", "a", "b"})
+
+    # -- the integer classification, one rule per row ------------------------
+    #
+    # Each rule below exists because a MEASUREMENT said the predicate was
+    # declining programs it could classify: 133 of 440 generated programs admitted
+    # a `swap_add`, and the reasons, in order, were a `for`/comprehension target,
+    # a parameter with an integer default, a call used as an argument, and a
+    # self-referential store.  Each is a decidable question with a decidable
+    # answer, so the cost of getting it wrong is bounded by the CPython oracle —
+    # and the row that would catch getting it wrong is the one asserting it does
+    # NOT fire.
+
+    def test_a_defaulted_parameter_is_classified_from_its_default(self):
+        """`argshape` spells every helper `def af8(q9, q10=30)`.
+
+        The rule used to EXCLUDE a function with any default, which was answering
+        a question about binding ("may this call omit the argument?") with a
+        statement about type.  With `q10` excluded on that technicality, `af8`'s
+        own `return (q9 + q10 + 11) & 0xFFFF` was unclassifiable, so nothing that
+        CALLS `af8` was either.
+        """
+        an = self._an("def af(q9, q10=30):\n"
+                      "    return (q9 + q10 + 11) & 0xFFFF\n"
+                      "def main() -> Int32:\n"
+                      "    print(af(1))\n"
+                      "    print(af(1, 2))\n"
+                      "    return 0\n")
+        self.assertEqual(an.int_only, {"q9", "q10"})
+
+    def test_a_defaulted_parameter_with_a_container_default_is_not_an_int(self):
+        """And the granularity is per FUNCTION, not per parameter.
+
+        `af(1)` leaves `q10` bound to `[1]`, so `q10` is not an int at every
+        binding — and `q9` goes with it, because the rule is a conjunction over
+        the parameters rather than a per-parameter answer.  Coarser than it could
+        be, and sound in the direction that matters: a parameter classified on
+        one call site and forgotten on another is exactly the mistake the
+        conjunction exists to prevent.
+        """
+        an = self._an("def af(q9, q10=[1]):\n"
+                      "    return q9 + 1\n"
+                      "def main() -> Int32:\n"
+                      "    print(af(1))\n"
+                      "    return 0\n")
+        self.assertNotIn("q10", an.int_only)
+        self.assertNotIn("q9", an.int_only)
+
+    def test_a_function_that_returns_only_ints_is_an_int_expression(self):
+        """`w3 = g10 + 1` is the corpus's own idiom, and it is why this row exists.
+
+        A CALL used to be unconditionally False for `_int_expr`, so `g10(...)`
+        was unclassifiable, so the parameter receiving it was unclassifiable, so
+        every `+` downstream of a helper call was out of reach for `swap_add`.
+        """
+        an = self._an("def g10(p):\n"
+                      "    return p + 1\n"
+                      "def use(n):\n"
+                      "    w = g10(n) + 1\n"
+                      "    return w + n\n"
+                      "def main() -> Int32:\n"
+                      "    print(use(3))\n"
+                      "    return 0\n")
+        self.assertIn("w", an.int_only)
+        self.assertIn("g10", an._int_returns)
+
+    def test_a_function_that_can_return_none_is_not_an_int_expression(self):
+        """The three ways, because they are three different mistakes.
+
+        `maybe` falls off the end (so its result is `None`), `cond` returns the
+        string on one branch, and `gen` is a generator — `gen()` is a generator
+        whatever its `return` says.
+        """
+        an = self._an("def maybe(p):\n"
+                      "    if p > 0:\n"
+                      "        return p\n"
+                      "def cond(p):\n"
+                      "    if p > 0:\n"
+                      "        return p\n"
+                      "    return 'x'\n"
+                      "def gen(p):\n"
+                      "    yield p\n"
+                      "def main() -> Int32:\n"
+                      "    print(maybe(1) + cond(1) + len(list(gen(1))))\n"
+                      "    return 0\n")
+        self.assertEqual(an._int_returns, {"main"})
+
+    def test_a_nested_functions_return_is_not_the_outer_functions(self):
+        """`ast.walk` descends into everything, and it descends silently.
+
+        `def outer(): def inner(): return "x"` read as a function returning a
+        string, which is the OPPOSITE of the answer, and it would have been
+        certified by the very rule meant to widen the classification.
+        """
+        an = self._an("def outer(p):\n"
+                      "    def inner():\n"
+                      "        return 'x'\n"
+                      "    return inner()\n"
+                      "def main() -> Int32:\n"
+                      "    print(1)\n"
+                      "    return 0\n")
+        self.assertNotIn("outer", an._int_returns)
+
+    def test_a_loop_target_of_an_int_sequence_is_an_int(self):
+        """`for tk7 in T6` where `T6` is `(28, 23)`, which is the `containers`
+        mix's whole shape — and `containers` had NO `swap_add` at all before."""
+        an = self._an("def main() -> Int32:\n"
+                      "    T6 = (0, 0)\n"
+                      "    w8 = 0\n"
+                      "    T6 = (28, 23)\n"
+                      "    for tk7 in T6:\n"
+                      "        w8 = (w8 + tk7) & 0xFFFF\n"
+                      "    print(w8)\n"
+                      "    return 0\n")
+        self.assertIn("tk7", an.int_only)
+        self.assertIn("T6", an._int_sequences)
+        self.assertIn("w8", an.int_only)
+
+    def test_a_loop_target_of_a_string_sequence_is_not_an_int(self):
+        an = self._an("def main() -> Int32:\n"
+                      "    t = 'ab'\n"
+                      "    for ch in t:\n"
+                      "        print(ch)\n"
+                      "    return 0\n")
+        self.assertNotIn("ch", an.int_only)
+        self.assertNotIn("t", an._int_sequences)
+
+    def test_a_self_referential_store_is_int_when_something_anchors_it(self):
+        """`s2 = (s2 + 1)` beside `s2 = 0`, which is the `core` mix's arithmetic.
+
+        The fixpoint is a LEAST one, so a name whose store mentions the name can
+        never enter it — and `s2 = (s2 + 1)` never becomes an int however obvious
+        the arithmetic is.  One store int-shaped without assuming anything is the
+        anchor that lets the self-referential ones be read in the assumption.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    s2 = 0\n"
+                      "    s2 = (s2 + 1)\n"
+                      "    print(s2)\n"
+                      "    return 0\n")
+        self.assertIn("s2", an.int_only)
+
+    def test_a_cycle_that_anchors_nothing_is_not_an_int(self):
+        """The row that keeps the anchor rule from becoming a licence.
+
+        `x = y; y = x` is int-shaped for both names under the assumption and
+        neither of them is an int, because nothing in the program ever
+        established that either was — a greatest fixpoint over the names would
+        certify the whole cycle from nothing.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    x = 0\n"
+                      "    y = 0\n"
+                      "    x = y\n"
+                      "    y = x\n"
+                      "    print(x + y)\n"
+                      "    return 0\n")
+        # `x` and `y` each store 0, so they ARE ints here.  The row that matters
+        # is the one with no anchor at all:
+        an = self._an("def main() -> Int32:\n"
+                      "    x = 0\n"
+                      "    y = 0\n"
+                      "    del x\n"
+                      "    x = y\n"
+                      "    y = x\n"
+                      "    print(1)\n"
+                      "    return 0\n")
+        self.assertNotIn("x", an.int_only)
+        self.assertNotIn("y", an.int_only)
 
     def test_a_parameter_of_an_uncalled_function_is_not_classified(self):
         an = self._an("def f(n):\n"

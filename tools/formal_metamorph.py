@@ -414,13 +414,37 @@ class _ScopeBuilder(ast.NodeVisitor):
         the nested function's own locals.  Visiting is a second pass, because
         the visitor is what creates the nested scopes and the two orders fight
         if they are interleaved.
+
+        The refusal has to be spelled for the STATEMENT as well as for what is
+        inside it, and it was not.  `_walk_skipping_scopes` skips a nested scope
+        only when it is not the node it was handed, so a `def` that IS a
+        statement of this body — every top-level `def` of a module, every method
+        of a class — was walked straight through.  Two consequences, both
+        measured on `stress-mm:18` of the `globals` mix, and they pull in
+        OPPOSITE directions:
+
+          * the MODULE scope collected `main`'s locals, so `module_bindings` was
+            an over-approximation of what a call can reach.  Harmless, and it is
+            why the error was invisible for as long as it was;
+          * `global G6` INSIDE `def bump7` was read as a declaration of the
+            module, so `G6` was dropped from the module's bindings — an
+            UNDER-approximation of the same set, and the one that broke
+            `reorder`.  `_reachable_by_a_call` is what stops `G6 = 9` being
+            exchanged with `print(bump9(5))`, and `G6` was not in the set that
+            predicate consults, so the swap happened and the printed value moved
+            (14 → 25).  Found by the CPython oracle over 5910 pairs, reported as
+            `transform-invalid`, which is the gate earning its place.
         """
         declared = set()
         for stmt in body:
+            if isinstance(stmt, _NESTED_SCOPES):
+                continue      # the statement IS a nested scope: not this one's
             for n in _walk_skipping_scopes(stmt):
                 if isinstance(n, (ast.Global, ast.Nonlocal)):
                     declared |= set(n.names)
         for stmt in body:
+            if isinstance(stmt, _NESTED_SCOPES):
+                continue
             for n in _walk_skipping_scopes(stmt):
                 if isinstance(n, ast.Name) and isinstance(n.ctx,
                                                          (ast.Store, ast.Del)):
@@ -534,6 +558,62 @@ def _is_int_literal(node):
     return False
 
 
+def _plain_names(target):
+    """`[target]` when it is one plain `Name`, else `[]`.
+
+    A tuple target's elements are one value each and a `Starred` one may be a
+    whole sequence, so neither is decided by the same question as a single name —
+    and `if _plain_names(target)` reads as "the target is decidable", which is the
+    only thing a caller asks of it.
+    """
+    return [target] if isinstance(target, ast.Name) else []
+
+
+def _own_returns(fn):
+    """The `return` statements of `fn` ITSELF, not of a function defined inside it.
+
+    A nested `def`'s `return` belongs to that function, and counting it would let
+    `def outer(): def inner(): return "x"` be read as returning a string — which
+    is the opposite of the answer, and the kind of mistake a `ast.walk` makes
+    silently because it descends into everything.
+    """
+    out, stack = [], list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Return):
+            out.append(node)
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.Lambda, ast.ClassDef)):
+                stack.append(child)
+    return out
+
+
+def _always_returns(stmts):
+    """Whether control cannot reach the end of `stmts` without a `return`.
+
+    The direction is the one that keeps the classification SOUND: only shapes
+    whose every path ends in `return` or `raise` count, so a loop with no `else`
+    (its body may run zero times), a `try` (a handler may swallow the return), a
+    bare `if` with no `else` and an empty body are all False.  A function that
+    CAN fall off its end returns `None`, and `None` is not an integer, so a
+    caller would be classifying a call that has no integer answer.
+
+    It is a syntactic over-approximation, not a proof: `while True: return 1` has
+    no path off the end and this says False.  That direction is deliberate — the
+    cost is a `swap_add` that declines, and the alternative is an operand
+    classification that is wrong in a way the oracle cannot see.
+    """
+    if not stmts:
+        return False
+    stmt = stmts[-1]
+    if isinstance(stmt, (ast.Return, ast.Raise)):
+        return True
+    if isinstance(stmt, ast.If) and stmt.orelse:
+        return _always_returns(stmt.body) and _always_returns(stmt.orelse)
+    return False
+
+
 class Analysis:
     """Everything the transformations need to know about one program.
 
@@ -558,6 +638,18 @@ class Analysis:
         self.all_names = _all_names(module)
         self.module_bindings = set(self.scopes[id(module)].bindings)
         self._int_params: set = set()
+        self._int_returns: set = set()
+        self._int_sequences: set = set()
+        #: `{name: the module-level FunctionDef}` for a name that is never
+        #: rebound, so a call to it is decidable rather than a guess.  Built once
+        #: here because both `_int_returns_names` and `_int_expr` need it, and
+        #: "the defs of this module" is a fact about the tree rather than about
+        #: the fixpoint.
+        self.module_defs = {}
+        for node in module.body:
+            if isinstance(node, ast.FunctionDef) \
+                    and self.store_counts.get(node.name, 0) == 0:
+                self.module_defs[node.name] = node
         self.int_only = self._int_only()
 
     # -- lookups -----------------------------------------------------------
@@ -637,52 +729,181 @@ class Analysis:
         prove, so the answer is a superset of the store-only one and every name
         in it is still provably int-valued.
 
-        The rounds alternate between the two questions — "which parameters get
-        only integer arguments" and "which names are integer-valued" — because
-        each can feed the other: `def f(n): return n + 1` called as `f(k)` where
-        `k = 3` needs `k` known before `n` is, and `def g(k): return f(k) + 1`
-        needs `n` known before the second `k` is.  Four rounds is enough because
-        the corpus's call depth is far below that, and the loop stops as soon as
-        a round adds nothing.
+        The rounds alternate between the three questions — "which parameters get
+        only integer arguments", "which names are integer-valued" and "which
+        functions return only integers" — because each can feed the others:
+        `def f(n): return n + 1` called as `f(k)` where `k = 3` needs `k` known
+        before `n` is, `def g(k): return f(k) + 1` needs `n` known before the
+        second `k` is, and the corpus's own idiom `w3 = g10 + 1` needs `g10`'s
+        RESULT known before the parameter `p12` that receives it is.  Five rounds
+        is enough because the corpus's call depth is far below that, and the loop
+        stops as soon as a round adds nothing.
+
+        So it is a least fixpoint in the names and an ANCHORED assumption within
+        one name — the anchor rule is the two lines in `_int_grow`, and it is
+        what stops `x = y; y = x` from certifying itself.
+
+        The loop breaks on the round that changed NOTHING, which means the three
+        published sets are one round behind whatever the final `known` would
+        support.  That is not a detail: `def g10(p): return p + 1` beside
+        `def use(n): w = g10(n) + 1` converges with `p` known only on round 2,
+        so `g10` joins `_int_returns` on round 3 and `w` only becomes an int on
+        round 4 — one round after the break the first version took.  Hence the
+        recomputation after the loop, which is the difference between `w3 = g10 +
+        1` being classified and the whole `calls` idiom staying out of reach.
         """
         known: set = set()
-        for _round in range(5):
+        for _round in range(8):
+            self._int_returns = self._int_returns_names(known)
+            self._int_sequences = self._int_sequence_names(stores, known)
             params = self._param_int_names(stores, known)
-            if params == self._int_params and known:
+            grown = self._int_grow(stores, params)
+            if grown == known and params == self._int_params:
                 break
-            self._int_params = params
-            grown = set(params)
-            changed = True
-            rounds = 0
-            while changed and rounds <= len(stores) + 2:
-                changed = False
-                rounds += 1
-                for name in sorted(stores):
-                    if name in grown:
-                        continue
-                    if all(self._store_is_int(n, grown) for n in stores[name]):
-                        grown.add(name)
-                        changed = True
-            if grown == known:
-                break
-            known = grown
-        return known
+            known, self._int_params = grown, params
+        self._int_returns = self._int_returns_names(known)
+        self._int_sequences = self._int_sequence_names(stores, known)
+        self._int_params = self._param_int_names(stores, known)
+        return self._int_grow(stores, self._int_params)
+
+    def _int_grow(self, stores, params):
+        """`params`, plus every name all of whose stores are int expressions."""
+        grown, rounds = set(params), 0
+        changed = True
+        while changed and rounds <= len(stores) + 2:
+            changed = False
+            rounds += 1
+            for name in sorted(stores):
+                if name in grown:
+                    continue
+                nodes = stores[name]
+                # ANCHOR, then ASSUME.  A store whose only support is the
+                # name's own previous value cannot start a proof — `x = y;
+                # y = x` is int-shaped for both under the assumption and
+                # neither of them is an int, because nothing in the program
+                # ever established that either was.  So a name must have at
+                # least one store that is an int expression WITHOUT assuming
+                # anything, and only then may the self-referential stores be
+                # read in the assumption.  Measured on `core`, where `s2 =
+                # (s2 + 1)` beside `s2 = 0` and `s2 = (s1 + s3)` was the
+                # single largest reason `swap_add` declined the mix: 4 of 20
+                # programs, and every `s`-named operand in them.
+                if not any(self._store_is_int(n, grown) for n in nodes):
+                    continue
+                if all(self._store_is_int(n, grown | {name}) for n in nodes):
+                    grown.add(name)
+                    changed = True
+        return grown
+
+    def _int_returns_names(self, known):
+        """`{name: calling it yields an integer}` for the module's own functions.
+
+        THE MISSING EDGE, and it was the reason `swap_add` answered for a third of
+        the generated corpus.  Measured on 440 programs, 307 of the operand names
+        `swap_add` declined were PARAMETERS — and the largest single reason a
+        parameter was not provably int was a call site of the corpus's own idiom
+        `w3 = g10 + 1`: `g10(...)` is a CALL, `_int_expr` said False for calls,
+        and the parameter `p12` receiving it therefore had no known value either.
+        Nothing about `+` was wrong; the analysis simply had no edge for "a
+        function that returns only integers returns an integer".
+
+        Five conditions, each a way the answer could NOT be an int:
+
+          * every `return` of the function ITSELF is an int expression.  A
+            `return` with no value is `None`, and `_int_expr(None)` is False —
+            which is the `count`-shaped `if/else` body getting it right for free.
+            Returns of a NESTED function belong to that function, so the walk does
+            not descend into one (`_own_returns`);
+          * control cannot reach the end of the body (`_always_returns`), because
+            falling off the end returns `None`;
+          * it is not a generator.  `f()` on a generator is a generator whatever
+            its `return` says, and the `yield` is somewhere in the body;
+          * it is not `async` — `f()` is a coroutine, not its awaited result;
+          * the name is never REBOUND (`module_defs`) and the call resolves to the
+            MODULE scope, so `f()` means this definition rather than a local `f`
+            or a later assignment.
+
+        A recursive function satisfies all five or none, and none is the answer
+        until its base case is provable — which is the fixpoint doing its job
+        rather than a rule written for the corpus.
+        """
+        out: set = set()
+        for name, fn in self.module_defs.items():
+            if isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            rets = _own_returns(fn)
+            if not rets or not _always_returns(fn.body):
+                continue
+            if any(isinstance(n, (ast.Yield, ast.YieldFrom))
+                   for n in ast.walk(fn)):
+                continue
+            if all(self._int_expr(r.value, known) for r in rets):
+                out.add(name)
+        return out
+
+    def _int_sequence_names(self, stores, known):
+        """`{name: the name holds a list or tuple of nothing but integers}`.
+
+        For `_int_iterable`, and it is the other half of the loop-target rule:
+        `for tk7 in T6` where `T6` is `(28, 23)` binds an int, and without this
+        `T6` is a name holding a tuple, which `_int_expr` declines because a tuple
+        is not an integer.
+
+        EVERY store decides, exactly as for a scalar: a name assigned a tuple of
+        ints and then a string is not a sequence of ints, and one assigned an
+        empty list and then a list of ints is (the empty list contributes no
+        element to contradict it).  A `DictComp`, `ListComp` or `SetComp` is not a
+        literal and is declined — the comprehension's own target is exactly the
+        name whose stores would have to be reasoned about, and `_int_expr` has no
+        rule for a comprehension's result type.
+        """
+        out: set = set()
+        for name, nodes in stores.items():
+            if all(self._store_is_int_seq(n, known) for n in nodes):
+                out.add(name)
+        return out
+
+    def _store_is_int_seq(self, node, known):
+        """Whether the store at `node` gives the name an int-only sequence."""
+        parent = self.parent_of(node)
+        if not isinstance(parent, ast.Assign):
+            return False
+        value = parent.value
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            return False
+        return all(self._int_expr(e, known) for e in value.elts)
 
     def _param_int_names(self, stores, known):
-        """Parameters whose every call site passes an integer argument.
+        """Parameters whose value is provably an integer at every call site.
 
-        Decidable, and the reason is that the corpus calls its helpers with
-        literals: `f13(0, (1 if 1 else 7), f13(-24, 25, 15))` says `p14` is an
-        int at every call, so `p14` is an int inside `f13`.  The exclusions are
-        the ones that make it an argument rather than a guess:
+        Two rules, and the second is the one the corpus needs:
+
+          * a parameter BOUND at a call site is an int when the argument there is
+            an int expression.  Decidable, and the reason is that the corpus calls
+            its helpers with literals: `f13(0, (1 if 1 else 7), f13(-24, 25, 15))`
+            says `p14` is an int at every call, so `p14` is an int inside `f13`;
+          * a parameter the call site MAY OMIT is an int when its DEFAULT is an
+            integer literal.  This used to be an EXCLUSION — the whole function
+            was skipped if it had any default — which was answering a question
+            about binding ("may this call leave the parameter unbound?") with a
+            rule about type.  `def af8(q9, q10=30)` reaches `return (q9 + q10 +
+            11) & 0xFFFF`, and with `q10` excluded on a binding technicality the
+            whole function is unclassifiable, so nothing that CALLS it is either:
+            measured on the `argshape` mix, where `af8`/`af11`/`af16` are every
+            helper the generator emits and every one of them has a default.
+
+        The exclusions are the ones that make this an argument rather than a
+        guess:
 
           * `main`, whose call is emitted by the build's startup stub and is not
             in the text at all;
           * a function used as a VALUE (passed, bound, used as an attribute or a
             keyword name), because then some call is not in the text;
-          * a function with a DEFAULT parameter, which a call may omit;
           * a call with `*args`/`**kwargs`, whose arity is not knowable;
-          * a call with the wrong arity for the signature.
+          * a call with the wrong arity for the signature, or a keyword naming a
+            parameter that does not exist;
+          * an omitted parameter with no default, which CPython answers with a
+            `TypeError` — a program that raises is not an int-valued one.
         """
         out: set = set()
         for fn in self.functions:
@@ -691,9 +912,8 @@ class Analysis:
             args = fn.args
             if args.vararg or args.kwarg or args.kwonlyargs:
                 continue
-            if any(d is not None for d in args.defaults):
-                continue
             params = [a.arg for a in _params(fn)]
+            defaults = _defaults_by_name(fn)
             sites = [n for n in ast.walk(self.module)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                      and n.func.id == fn.name]
@@ -708,19 +928,26 @@ class Analysis:
                     ok = False
                     break
                 bound = dict(zip(params, call.args))
+                twice = False
                 for kw in call.keywords:
-                    if kw.arg in bound:
-                        ok = False            # given twice
+                    if kw.arg in bound or kw.arg not in params:
+                        ok = False            # given twice, or not a parameter
+                        twice = True
                         break
                     bound[kw.arg] = kw.value
+                if twice:
+                    break
+                for p in params:
+                    if p in bound:
+                        if not self._int_expr(bound[p], known):
+                            ok = False
+                            break
+                    elif _is_int_literal(defaults.get(p)):
+                        continue              # omitted: the default supplies it
+                    else:
+                        ok = False
+                        break
                 if not ok:
-                    break
-                if set(bound) != set(params):
-                    ok = False
-                    break
-                if not all(self._int_expr(v, known)
-                           for v in bound.values()):
-                    ok = False
                     break
             if ok:
                 out |= set(params)
@@ -736,16 +963,58 @@ class Analysis:
         if isinstance(parent, ast.AugAssign):
             return (isinstance(parent.op, _INT_OPS)
                     and self._int_expr(parent.value, known))
+        if isinstance(parent, (ast.For, ast.AsyncFor)):
+            return self._iter_binds_int(parent.target, parent.iter, known)
+        if isinstance(parent, ast.comprehension):
+            return self._iter_binds_int(parent.target, parent.iter, known)
+        return False
+
+    def _iter_binds_int(self, target, it, known):
+        """Whether iterating `it` binds `target` to integers.
+
+        The loop target is a STORE like any other, and it is the one the corpus
+        writes most: measured over 440 generated programs, "the operand is bound
+        by a `for`" and "by a comprehension" were the two largest single reasons
+        `Analysis.int_only` could not classify a name, and both are decidable —
+        `for tk7 in T6` binds an int when `T6` holds nothing but ints.
+
+        The iterated expression has to be an INT SEQUENCE, which is its own
+        question and not `int_only`: a name qualifies when every one of its stores
+        is a list or tuple literal whose elements are all int expressions
+        (`_int_sequences`), or when it is a `range(...)` whose arguments are all
+        int expressions.  A string iterates to one-character strings and a dict
+        to its keys, and neither is a name this may call an int.
+        """
+        if not _plain_names(target):
+            return False        # a tuple target's elements are not one int each
+        return self._int_iterable(it, known)
+
+    def _int_iterable(self, node, known):
+        """Whether `node` is a sequence whose every element is an integer."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "range" and not node.keywords:
+            return all(self._int_expr(a, known) for a in node.args)
+        if isinstance(node, ast.Name):
+            return node.id in self._int_sequences
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return all(self._int_expr(e, known) for e in node.elts)
         return False
 
     def _int_expr(self, node, known):
         """Whether `node` provably evaluates to an integer.
 
         Deliberately conservative about every shape whose result type depends on
-        something this cannot see: a call, a subscript, an attribute read and
-        every container literal are False, because the corpus's `containers` and
+        something this cannot see: a subscript, an attribute read and every
+        container literal are False, because the corpus's `containers` and
         `strmeth` mixes bind names to those and a subscript of a list of words
         is an int here and a list of bytes is not.
+
+        The one shape that LOOKED like that and is not is a call to a
+        module-level function that returns only integers — `_int_returns_names`
+        says which, with its five conditions.  A CALL used to be unconditionally
+        False, and the measurement above is what that cost: a third of the
+        generated corpus, because the corpus's idiom passes a call's result
+        straight into another function's parameter.
         """
         if node is None:
             return False
@@ -753,6 +1022,8 @@ class Analysis:
             return True
         if isinstance(node, ast.Name):
             return node.id in known
+        if isinstance(node, ast.Call):
+            return self._call_is_int(node)
         if isinstance(node, ast.BinOp):
             return (isinstance(node.op, _INT_OPS)
                     and self._int_expr(node.left, known)
@@ -773,6 +1044,25 @@ class Analysis:
             return (self._int_expr(node.body, known)
                     and self._int_expr(node.orelse, known))
         return False
+
+    def _call_is_int(self, node):
+        """Whether `node` calls a function this analysis proved returns an int.
+
+        Three conditions beyond the callee's own, and each is a name the call
+        might mean something else by: the callee is a plain `Name` (an
+        `Attribute` or a subscript could be a method or an element), the name is
+        one `_int_returns` proved, and the call's own scope resolves the name to
+        the MODULE — so a local `f` inside the calling function, or a nested
+        `def f`, sends the call somewhere else and the answer does not apply.
+        """
+        callee = node.func
+        if not isinstance(callee, ast.Name):
+            return False
+        if callee.id not in self._int_returns:
+            return False
+        if callee.id not in self.module_defs:
+            return False
+        return self.builder.bind_of(callee) is self.builder.module_scope
 
     # -- stores ------------------------------------------------------------
     def stores_of(self, name):
@@ -928,6 +1218,27 @@ def _params(fn):
     return (list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)
             + ([a.vararg] if a.vararg else [])
             + ([a.kwarg] if a.kwarg else []))
+
+
+def _defaults_by_name(fn):
+    """`{parameter: its default expression}`, aligned the way CPython aligns it.
+
+    `ast` puts `defaults` in a list bound to the LAST `len(defaults)` of the
+    positional parameters, so the mapping has to be walked backwards off that
+    alignment — a `zip` from the front maps `def f(a=1, b)`'s `1` onto `a`, which
+    is a signature CPython will not even compile.  Keyword-only defaults are read
+    off `kw_defaults`, which IS per parameter and so needs no alignment.
+    """
+    a = fn.args
+    pos = list(a.posonlyargs) + list(a.args)
+    out = {}
+    for arg, default in zip(reversed(pos), reversed(a.defaults)):
+        if default is not None:
+            out[arg.arg] = default
+    for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+        if default is not None:
+            out[arg.arg] = default
+    return out
 
 
 # -- 1. rename ---------------------------------------------------------------
