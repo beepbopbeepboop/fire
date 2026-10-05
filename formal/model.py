@@ -17148,13 +17148,19 @@ NOT_LOWERED_BUILTINS = {
              "than one word (`FORMAL_the_value_model_is_one_word`)",
     "enumerate": "a generator of pairs; both halves are out of reach "
                  "(`FORMAL_listdir_no_run_time_sequence`)",
-    "float": "a double, and every value on this path is one 64-bit INTEGER "
-             "word",
+"float": "a double, and every value on this path is one 64-bit INTEGER "
+           "word",
+    "filter": "a call THROUGH A VALUE per element, and a value is one 64-bit "
+              "word with no code address in it — the same wall as `sorted`'s "
+              "comparison call, and the same one `map` is against",
     "hex": "a base-16 rendering, the same shape as `bin`",
     "list": "a counted blob this path CAN lay out (`BLOB_TYPE_CTORS`) but "
             "cannot COPY from another blob at run time — a copy is the tagged-"
             "value work `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_"
             "time.md` is about",
+    "map": "a call THROUGH A VALUE per element, and calling through a value "
+           "is not a thing this path can express — `sorted` needs a "
+           "comparison call per element for the same reason",
     "max": "a compare and a select; both emitters already have the select "
            "(`MLIR_SELECT_OP`'s `TernaryExpr` is one `CSEL`)",
     "min": "a compare and a select, the same shape as `max`",
@@ -17217,6 +17223,37 @@ NOT_LOWERED_BUILTINS = {
 FOREIGN_ABI_BUILTINS = frozenset({"abs", "pow", "round"})
 
 
+# The one name `NOT_LOWERED_BUILTINS` lists that the emitters DO lower when it is
+# CALLED, so `not_lowered_builtin_refusal` must not ask about it.
+#
+# **`float(x)` is an integer-to-double CONVERSION and both emitters build it**,
+# measured on this tree at HEAD in all three argument positions —
+# `printf("%.17g\n", float(9007199254740995))`, `printf("%s\n", float(7))`, and
+# a `float(7)` bound to a `var` first — and `test_formal_run.py`'s three float
+# rows depend on it, answering `9007199254740996` where the source says
+# `9007199254740995` and CPython says the same. So a pre-pass that refused the
+# name would take three passing rows red, which is the whole cost of a
+# name-based check that has not asked whether the name is lowered.
+#
+# The table row is not wrong, and this is why both can be true: `float` is in
+# `NOT_LOWERED_BUILTINS` because a `Double` is not a VALUE on this path — every
+# value is one 64-bit integer word — and the row is about the value model. The
+# call shape is a separate fact, and it is answered, so the name belongs in
+# neither this pre-pass nor `FOREIGN_ABI_BUILTINS` (which is for names whose
+# call shape is refused with a better message, not for names whose call shape
+# works).
+#
+# `abs`, `pow` and `round` are excluded by `FOREIGN_ABI_BUILTINS` instead, for
+# the same reason and with a different message: those ARE refused at the
+# emitter, by `builtin_binding_refusal`, and its sentence names the C function
+# whose namesake would be bound — which says more than this table's one-liner.
+# Between them these two exclusions and this table account for every name in
+# `NOT_LOWERED_BUILTINS`, so the set of names this pre-pass may refuse is stated
+# here rather than left as "the ones nobody has tried yet": the other twenty
+# were each probed at HEAD and every one refuses.
+LOWERED_CALL_SHAPED_BUILTINS = frozenset({"float"})
+
+
 def builtin_binding_refusal(name: str):
     """Why a bare-name call to `name` must not bind to a C symbol, or None.
 
@@ -17257,6 +17294,82 @@ def builtin_binding_refusal(name: str):
         f"is the same advice is that the outcome is the same class of thing: "
         f"an answer about a program this path did not compile."
     )
+
+
+def not_lowered_builtin_refusal(functions, module_names=()) -> str | None:
+    """Why a call to a builtin in `NOT_LOWERED_BUILTINS` is not in the image.
+
+    **Asked BEFORE any emitter**, and that is the whole of what this adds.
+    `NOT_LOWERED_BUILTINS` already carried the reason for every one of these
+    names and nothing in the build read it: the emitters treated `sorted`,
+    `map`, `filter` and `sum` as ordinary extern calls, emitted `BL sorted`, and
+    the LINK AUDIT refused four stages later from a message about SYMBOLS whose
+    advice ("bind the name from a library that provides it") is about the link
+    line rather than about the fact that no library on any line provides a
+    Python builtin's semantics. Everything downstream of emission has already run
+    by then — the whole closure allocated, every other function emitted — and a
+    pre-pass refusal is free.
+
+    The sentence quotes the table's own reason VERBATIM, because the table is
+    what says what lowering each name would take and a second wording would be a
+    second answer. `tools/formal_proof_breadth.py::builtin_refusal_detail` builds
+    a ledger row from the same strings in the same `` `name`: reason `` shape,
+    and `_refusal_class`'s `UNLOWERED_CALLEE_MARKS` includes this refusal's
+    marker — so a census row and this message agree about which builtin stopped a
+    proof. Those are three readers of one table, and the marker below is a
+    contract with all of them rather than prose that happens to read well.
+
+    **A name this unit compiles, binds or imports is not the builtin**, and each
+    of those is asked by its own reader: a module-level `def sorted` is in
+    `functions`, a parameter or local is `callee_is_a_bound_value` (the
+    allocator's own walk, so it cannot disagree with what a register was cut
+    for), and a module-level binding of any kind — an import, a constant, a
+    class-level name — is `module_names`. Refusing a program that defines its
+    own `sum` would be the false refusal this table's own header says a missing
+    name must not be, and the emitter already asks exactly the first two
+    questions before it takes the extern path.
+
+    **`FOREIGN_ABI_BUILTINS` is excluded on purpose**, because those three are
+    already refused at the emitter by `builtin_binding_refusal` with a strictly
+    better sentence — the one naming the C function whose namesake would be
+    bound — and this pass is asked before any emitter.
+    """
+    compiled = {f.name for f in (functions or [])}
+    at_module = set(module_names or ())
+    for fn in functions or []:
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr):
+                continue
+            name = node.func.name
+            if name not in NOT_LOWERED_BUILTINS or name in compiled \
+                    or name in at_module or callee_is_a_bound_value(fn, name):
+                continue
+            if name in LOWERED_CALL_SHAPED_BUILTINS:
+                continue
+            if name in FOREIGN_ABI_BUILTINS:
+                # `abs`, `pow` and `round` are in the table AND refused at the
+                # emitter by `builtin_binding_refusal`, whose sentence is
+                # strictly better: it names the C function whose namesake is
+                # bound (`double pow(double, double)`) and the measured wrong
+                # answer, which is what a reader has to act on and is more than
+                # "a loop" is. This pre-pass is asked BEFORE any emitter, so
+                # without the exclusion it would pre-empt that message with a
+                # weaker one — the same mistake as a broad taxonomy marker
+                # placed above a narrow one, and the reason the exclusion is
+                # here rather than folded into the loop above.
+                continue
+            return (
+                f"`{name}(...)` is not lowered on this path, and the reason "
+                f"is a property of the NAME rather than of the link line: "
+                f"`{name}`: {NOT_LOWERED_BUILTINS[name]}. Write the operation "
+                f"out in the source — the emitter treated it as an ordinary "
+                f"call to a C symbol and the link audit then refused the "
+                f"image for binding a symbol nothing provides, which is true "
+                f"and says nothing about what you wrote. Nothing on any link "
+                f"line provides this function's semantics, so binding the name "
+                f"is not a way to get it.")
+    return None
 
 
 # ── `debug_assert` ──────────────────────────────────────────────────────────
@@ -42334,6 +42447,138 @@ def unresolved_name_refusal(name: str, fn_name: str, why: str) -> str:
             f"out of whatever register the allocator left behind, which is "
             f"how one program returned 10 on arm64 and 0 on x86-64 where the "
             f"source says 5")
+
+
+def publish_pre_lift_defs(table: dict) -> None:
+    """Install `{pre-lift name: LiftedDef}` for the closure lift just performed.
+
+    Published for the same reason and with the same REPLACE-never-merge shape as
+    `publish_module_symbols`: the consumer is a per-function walk inside
+    `check_module_symbols` with no closure table in hand, and two units compiled
+    in one process must not accumulate each other's lifts."""
+    global _PRE_LIFT_DEFS
+    _PRE_LIFT_DEFS = dict(table or {})
+
+
+def pre_lift_defs() -> dict:
+    """The published `{pre-lift name: LiftedDef}` table. Empty before a publish."""
+    return _PRE_LIFT_DEFS
+
+
+def pre_lift_def(name: str):
+    """The `LiftedDef` a lift RENAMED to something else, or None.
+
+    None is the answer for every ordinary name, which is the point: this table
+    holds exactly the names the lift took away, so a read this returns None for
+    is a read the lift did not touch and `check_module_symbols` asks its other
+    tables as it did before."""
+    return _PRE_LIFT_DEFS.get(name)
+
+
+class LiftedDef:
+    """One nested `def`, in its PRE-LIFT spelling and its post-lift facts.
+
+    Four attributes because four questions are asked about the same rename, and
+    one attribute per question is why none of them has to be recomputed from the
+    AST after `_flatten_closures` has stripped the `def` that carried them:
+    `name` is the spelling SOURCE still uses, `lifted_name` is the symbol the
+    build emitted, `outer_name` is the function the `def` was nested in, and
+    `captures` is what makes the value of a lifted closure different from the
+    value of a plain function.
+
+    `__slots__` for the reason every table on this path uses it: a module body
+    with a thousand nested `def`s builds a thousand of these, and the
+    compiled path stores an element of a tuple-typed list, so an instance with a
+    `__dict__` is both more memory and a shape the self-hosted backend cannot
+    lower."""
+
+    __slots__ = ("name", "lifted_name", "outer_name", "captures")
+
+    def __init__(self, name, lifted_name, outer_name, captures=()):
+        self.name = name
+        self.lifted_name = lifted_name
+        self.outer_name = outer_name
+        self.captures = tuple(captures or ())
+
+    def __repr__(self):
+        return (f"LiftedDef({self.name!r} -> {self.lifted_name!r}, "
+                f"in {self.outer_name!r}, captures={list(self.captures)!r})")
+
+
+# The pre-lift spellings the closure lift took away, installed by
+# `publish_pre_lift_defs`. Published rather than threaded for the same reason
+# `_MODULE_SYMBOLS` is, and DELETED-from-nothing: a name is in it only if the
+# lift renamed it, so a name in here is a name the build emitted under a
+# different spelling — which no other table here can recognise, because by this
+# point `_callee_defs(functions)` holds `make_add` and the source says `add`.
+_PRE_LIFT_DEFS: dict = {}
+
+
+def lifted_closure_value_refusal(name: str, fn_name: str, lifted_name: str,
+                                 outer_name: str, captures) -> str:
+    """Why a nested `def` cannot be handed BACK to its caller, in its own words.
+
+    ``def make(n): def add(x): return x + n; return add`` — the sentence this
+    replaces is `unresolved_name_refusal`'s, which says the name has no home and
+    then lists where a name could live: a register, a spill slot, a receiver
+    field's frame, a folded module constant. **Every item of that list is
+    irrelevant to this program**, and the first two are the ones that send the
+    reader to look for a register-allocation bug in a file whose problem is a
+    construct: `add` never wanted a register, and the allocator never refused it
+    one.
+
+    The reason it reached that sentence at all is an ORDER, and it is worth
+    naming because it is the whole defect. `_flatten_closures` renames the
+    nested `def` to `make_add` and strips it from the enclosing body before
+    anything asks whether the name is a function. So the read of `add` is
+    answered by no table in the build: it is not a parameter, not a local, not a
+    struct, not a folded module constant, and — the actual gap — not a function
+    either, because the function is now called something else. What the read IS
+    is a function, and the two facts a reader needs are which symbol the build
+    emitted and what makes its value different from a plain function's.
+
+    That last part is why the refusal is not "a function is not a value" — a
+    plain function's value IS a code address here, materialized by each
+    backend's `_load_var` and branched through by its `_emit_call`, so that
+    sentence is false about the general case and `function_value_refusal` is
+    dead code kept only for the wording. A lifted closure is the one function
+    whose value is NOT its address: the lift prepends its captures as
+    parameters, so the word would have to carry an environment as well as a
+    code address, and the capture ABI this path implements is a CALL-SITE rewrite
+    in the scope that DEFINES the closure — `add(n, x)`, not a value passed
+    around. There is no call site at `return add`, so materializing the address
+    would print a number nobody wrote and, called back through, drop the capture.
+
+    So the message names the rename, the symbol, the captures, and the repair
+    (return the RESULT, or keep the call in the scope that defines the `def`),
+    which is what a reader has to act on."""
+    who = f"{fn_name}: " if fn_name else ""
+    caps = ", ".join(repr(c) for c in (captures or ()))
+    if caps:
+        why_caps = (f"a lifted function's value is not its address: the lift "
+                    f"prepends its captures ({caps}) as parameters, so a word "
+                    f"holding {lifted_name!r} would have to carry an "
+                    f"environment as well as a code address — and the capture "
+                    f"ABI this path implements is a CALL-SITE rewrite in the "
+                    f"scope that defines the closure, so there is nothing to "
+                    f"pass the captures at here")
+        repair = ("Return the results the `def` produces, or keep the call in "
+                  "the function that defines it")
+    else:
+        why_caps = (f"even with nothing captured, a word holding "
+                    f"{lifted_name!r} is a bare address that the return "
+                    f"path cannot vouch for: {outer_name or 'the enclosing ' + repr(outer_name)}"
+                    f" hands a caller a word whose calling convention is the "
+                    f"lift's, and the caller's declaration cannot say so")
+        repair = ("Return the results the `def` produces, or keep the call in "
+                  "the function that defines it")
+    return (f"{who}{name!r} is a nested `def`, and the build emitted it as "
+            f"{lifted_name!r}: the lift renames a nested function to a "
+            f"module-level symbol and strips it from this body, so the read "
+            f"below is in its PRE-LIFT spelling and no table in the build "
+            f"holds that spelling — this is a rename the reader has not been "
+            f"told about, not a name the allocator lost. Handing it back is "
+            f"refused for a second reason: {why_caps}. {repair}")
 
 
 def function_value_refusal(name: str, fn_name: str) -> str:

@@ -283,6 +283,52 @@ def _try_around_raise_message():
 _TRY_AROUND_RAISE_REFUSAL = _try_around_raise_message()
 
 
+#: The program the sample below is built from, and the one construct the
+#: higher-order-builtin refusal exists for: `sorted` over a literal, which the
+#: emitter used to treat as an ordinary call to a C symbol and the link audit
+#: used to refuse four stages later from a message about SYMBOLS.
+_NOT_LOWERED_BUILTIN_SOURCE = """\
+def main(n):
+    return sorted([3, 1, 2])
+"""
+
+#: The family and the cause are spelled INDEPENDENTLY of the two tables for the
+#: reason `OWN_METHOD_CAUSE` is: the planner's tables are keyed on different
+#: things, and the pair of samples is what proves the two spellings still agree.
+NOT_LOWERED_BUILTIN_FAMILY = "a builtin this path does not lower"
+NOT_LOWERED_BUILTIN_CAUSE = "a builtin this path does not lower"
+
+
+def _not_lowered_builtin_message():
+    """The higher-order-builtin refusal, BUILT: parsed, walked, refused.
+
+    Built rather than copied for the reason the three above are, and for one
+    more that matters here specifically: the message QUOTES
+    `formal/model.py::NOT_LOWERED_BUILTINS`'s own sentence for the name, so a
+    hand-copy would be a sentence that stops matching the moment that table is
+    reworded — and a dead marker here empties a CAUSE row, which reads as a
+    cause that blocks nothing.
+    """
+    import formal.build as FB
+    stmts = FB.parse_module(_NOT_LOWERED_BUILTIN_SOURCE, filename="<taxonomy>")
+    fns = [n for n in FM.iter_nodes(stmts)
+           if type(n).__name__ == "FunctionDef"]
+    msg = FM.not_lowered_builtin_refusal(
+        fns, FM.collect_module_symbols(stmts))
+    if msg is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses a call to a builtin it does not "
+            "lower: `not_lowered_builtin_refusal` answered None for a program "
+            "whose only statement is `sorted([3, 1, 2])`. Either the check was "
+            "removed — in which case `sorted` is an unbound C symbol again and "
+            "the link audit is the only thing saying so, four stages after the "
+            "whole closure was emitted — or it stopped seeing the call.")
+    return msg
+
+
+_NOT_LOWERED_BUILTIN_REFUSAL = _not_lowered_builtin_message()
+
+
 # The planner's spelling of the SAME cause as `OWN_METHOD_FAMILY` above, and it
 # is spelled here independently of `tools/formal_sweep_causes.py::CAUSES` for
 # the reason `STRING_COMPOSITION_CAUSE` is: the two tables are keyed on
@@ -1115,6 +1161,17 @@ CAUSE_SAMPLES = [
     # each other — and the built sample is what proves that, rather than a
     # reading of the two markers.
     (TRY_AROUND_RAISE_CAUSE, _TRY_AROUND_RAISE_REFUSAL),
+
+    # The higher-order builtin, in BOTH tables and from ONE built message: the
+    # family row asks which SHAPE the refusal is and the cause row what a fix
+    # would have to CHANGE, and this message is the same sentence for both, so
+    # one sample exercises two markers that are the same clause. That is the
+    # only pair of samples here that share a sample, and it is worth saying why
+    # it is safe: the two labels are spelled independently above, so a label
+    # that drifted in either table fails one of them rather than silently
+    # emptying the other's row.
+    (NOT_LOWERED_BUILTIN_FAMILY, _NOT_LOWERED_BUILTIN_REFUSAL),
+    (NOT_LOWERED_BUILTIN_CAUSE, _NOT_LOWERED_BUILTIN_REFUSAL),
 
     # The SAME construct as the family row above, and a second table because the
     # two are keyed on different things — the family on the shape of the

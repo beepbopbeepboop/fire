@@ -183,17 +183,30 @@ SKIP_DIRS = {".git", ".tmp", "__pycache__", "cas", "output", "lib", "build",
 # fails a test instead of quietly becoming a frontier nobody reported.
 BUILTIN_NAMES = {
     "True", "False", "None", "abs", "all", "any", "bin", "bool", "chr",
-    "divmod", "enumerate", "float", "hex", "int", "len", "list", "max",
-    "min", "oct", "ord", "pow", "print", "property", "range", "repr",
-    "reversed", "round", "sorted", "staticmethod", "classmethod", "str",
-    "sum", "tuple",
+    "divmod", "enumerate", "filter", "float", "hex", "int", "len", "list",
+    "map", "max", "min", "oct", "ord", "pow", "print", "property", "range",
+    "repr", "reversed", "round", "sorted", "staticmethod", "classmethod",
+    "str", "sum", "tuple",
 }
 
 # The names the census lets through that the formal path does NOT lower, with
 # what lowering each one would take.  NOT a copy of anything: the model's own
 # table, read through the module rather than re-spelled, so this census and the
 # two backends cannot disagree about which builtins exist.
-NOT_LOWERED_BUILTINS = _model.NOT_LOWERED_BUILTINS
+#
+# **`float` is filtered out, and the filter is the measurement.** This census
+# partitions the allow-list by CALL — "does `name(...)` lower" — and both
+# emitters DO lower `float(x)`, as an integer-to-double conversion, in every
+# argument position (`test_formal_run.py`'s three float rows depend on it and
+# answer what CPython answers). The model's row is in `NOT_LOWERED_BUILTINS` for
+# a different question: a `Double` is not a VALUE on this path, every value is
+# one 64-bit integer word. Both facts are true and only one of them belongs in
+# this partition, so the census reads the model's own exclusion set
+# (`LOWERED_CALL_SHAPED_BUILTINS`) rather than re-deciding which row is which —
+# the same reason the table is read through the module rather than re-spelled.
+NOT_LOWERED_BUILTINS = {
+    name: why for name, why in _model.NOT_LOWERED_BUILTINS.items()
+    if name not in _model.LOWERED_CALL_SHAPED_BUILTINS}
 
 # The builtins this census lets through that the path DOES lower, and why — the
 # other half of the partition, and the half that has to be WRITTEN rather than
@@ -227,6 +240,15 @@ LOWERED_BUILTINS = {
     "print": "the emitter builds its own format from the operand's kind",
     "range": "materialized as a list blob",
     "str": "the identity on an operand that is text; refused otherwise",
+    # Measured on this tree, all three argument positions, both of which are
+    # what `test_formal_run.py`'s three float rows do: `printf("%.17g\n",
+    # float(9007199254740995))` answers `9007199254740996`, as CPython does, and
+    # so does a `float(7)` bound to a `var` first. It is on THIS side of the
+    # partition for the same reason `str` is — a call that is answered for some
+    # operands and refused for others is a measurement, not a gap.
+    "float": "an integer-to-double conversion; the value is still a word and a "
+             "Double is not a value on this path, which is why the model's own "
+             "table keeps a row for it",
 }
 
 # The two markers that say "this refusal is about a CALL the build emitted and

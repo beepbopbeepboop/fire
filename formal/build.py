@@ -14913,8 +14913,30 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))
-            raise CodegenError(M.unresolved_name_refusal(
-                name, fn.name, _why_unplaced(node, fn, frame_slots)))
+            # A name the closure lift RENAMED, asked immediately before the
+            # generic arm and for the same ordering reason as every other
+            # construct-naming refusal in this function: `unresolved_name_refusal`
+            # enumerates where a NAME lives — a register, a spill slot, a
+            # receiver field's frame, a folded module constant — and this name
+            # is in none of them, because it never wanted one. It is a function
+            # under a spelling the build no longer emits, so the register
+            # allocator did not lose it and there is nothing there to find.
+            #
+            # Asked at the LAST possible moment on purpose. Every table above
+            # declines this name for a reason that is TRUE and NOT THE REASON:
+            # it is not a parameter, not a local, not a struct, not a folded
+            # constant, and not a module symbol. The generic sentence is right
+            # about each of those and still misleads, because the reader's
+            # question is "what should I write instead", and the answer is a
+            # different program, not a different register.
+            _prelift = M.pre_lift_def(name)
+            raise CodegenError(
+                M.lifted_closure_value_refusal(
+                    name, fn.name, _prelift.lifted_name,
+                    _prelift.outer_name, _prelift.captures)
+                if _prelift is not None
+                else M.unresolved_name_refusal(
+                    name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
         _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container,
@@ -16471,6 +16493,29 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     why_deco = M.unapplied_decorator_refusal(functions)
     if why_deco is not None:
         raise CodegenError(why_deco)
+    # A call to a CPython BUILTIN this path does not lower, asked HERE and for
+    # the same reason as the three above: one pipeline both front ends go
+    # through, so the executable and dylib paths cannot answer differently, and
+    # BEFORE any emitter — the whole closure is allocated and every other
+    # function emitted by the time the link audit notices.
+    #
+    # `NOT_LOWERED_BUILTINS` carries the reason for each of these names and
+    # nothing read it: `sorted([3, 1, 2])`, `map(dbl, [1, 2, 3])`,
+    # `filter(lambda v: v > 1, …)` and `sum([1, 2, 3])` each emitted a `BL` to a
+    # name nothing provides and were refused from a message about SYMBOLS,
+    # whose advice ("bind the name from a library that provides it") is about
+    # the link line rather than about the fact that no library on any line
+    # provides a Python builtin's semantics. Measured on both architectures,
+    # identical for all four. The sentence and the table are
+    # `model.not_lowered_builtin_refusal`'s.
+    #
+    # `symbols` is passed because a name this module BINDS is not the builtin:
+    # a module-level `def`, an import, a constant — a program that defines its
+    # own `sum` must still build, and a refusal that cannot tell those apart is
+    # the false refusal this check exists beside.
+    why_builtin = M.not_lowered_builtin_refusal(functions, symbols)
+    if why_builtin is not None:
+        raise CodegenError(why_builtin)
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`FORMAL_frame_receivers_is_handed_the_method_name_table`):
@@ -16949,6 +16994,47 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
+    # The PRE-LIFT spellings, published HERE because it is the only point where
+    # both halves are in hand: `ctx._all_closures` is the lift's own table and
+    # is the only place in the build that still knows a nested `def` was called
+    # `add` before `_flatten_closures` renamed it to `make_add` and stripped it
+    # from the body.
+    #
+    # Published immediately after the flatten and not read by it, which is the
+    # asymmetry that makes this necessary: `_flatten_closures` rewrites a CALL to
+    # a closure name (`_rewrite_closures_in_expr`) and deliberately leaves
+    # `make`'s own `return add` alone, because that read needs a VALUE and a
+    # value is not a call site. So the rename is silent at exactly the one place
+    # it is not local, and `check_module_symbols` — which runs last, on the
+    # FINAL function list — is the first reader that could notice.
+    #
+    # A bare nested `def` with no `ClosureInfo` is lifted keeping its name (see
+    # `_flatten_closures`'s own note), so it is already in `_callee_defs` and
+    # needs no row here: what lands in this table is exactly the set of names
+    # the build emitted under a DIFFERENT spelling, which is the only set
+    # `unresolved_name_refusal` could not have answered on its own.
+    #
+    # The pre-lift spelling is the `_all_closures` KEY and NOT
+    # `ci.inner_def.name`, which is the fact that makes this table necessary
+    # rather than convenient: `ClosureInfo` holds the very FunctionDef node
+    # `_flatten_closures` renames, IN PLACE, so by the time anyone downstream
+    # looks at `ci.inner_def.name` it already reads `make_add` — the spelling
+    # the SOURCE used is destroyed by the lift, and the dict key is the only
+    # copy of it left anywhere in the compiler. (That is also the mechanical
+    # form of what the bug doc says: the read is of a lifted function under
+    # its pre-lift name, and "no table in the build holds that spelling" is
+    # literally true rather than approximately.)
+    #
+    # `ci.captures` is a list of `(name, ctype)` PAIRS, so the name is element
+    # zero — read as the whole pair the refusal would print `('n', 'int64_t')`,
+    # which reads as a tuple the program never wrote.
+    M.publish_pre_lift_defs({
+        pre_lift: M.LiftedDef(
+            pre_lift, ci.lifted_name, outer_name,
+            [c[0] if isinstance(c, (tuple, list)) else c
+             for c in (getattr(ci, "captures", None) or ())])
+        for outer_name, inner_map in (ctx._all_closures or {}).items()
+        for pre_lift, ci in (inner_map or {}).items()})
     functions = _lift_lambdas(functions)
     # AFTER `_lift_lambdas`, because it is what records the symbol on the node:
     # this pass turns the lifted lambda into a read of that symbol, which is the
