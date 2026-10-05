@@ -80,12 +80,15 @@ constructor' shape, which is common in real code") is now true for the
 STRUCT-POINTER axis and false for the CONTAINER axis, which is a different
 defect with a different mechanism and has its own doc:
 
-* `bugs/CODEGEN_param_receiving_a_call_result_has_no_element_type.md` — a
-  parameter handed a function's RETURN VALUE gets no element type at all
-  (`total(build(10))` prints an address where CPython prints `21`), because
-  `_static_arg_elems` has arms for a caller-scanned local and for a container
-  literal and none for a `CallExpr`. Its "container-direction twin" sentence
-  above is about this, and the twin did not exist then and does not now.
+* The CONTAINER axis of the same question, a different defect with a
+  different mechanism: a parameter handed a function's RETURN VALUE got no
+  element type at all, because `_static_arg_elems` had arms for a
+  caller-scanned local and for a container literal and none for a
+  `CallExpr` — `total(build(10))` printed an address where CPython prints
+  `21`. FIXED 2026-10-04: `_static_arg_elems`' third arm reads
+  `_return_elem_types`, pinned by `gimple_param_elem_from_a_call_result` in
+  `test_gimple_runner.py`. This doc's "container-direction twin" sentence
+  above is about it, and the twin did not exist when this was written.
 * `bugs/CODEGEN_polymorphic_struct_param_degrades_to_a_pointer.md` — a
   parameter called with two DIFFERENT structs has no representation, and the
   correct unanimity refusal leaves it at `int64_t`, so both calls print a
