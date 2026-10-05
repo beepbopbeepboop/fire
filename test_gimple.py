@@ -14,6 +14,29 @@ import fire_compiler
 import mojo.middle.infra_infer
 import platform
 from build_config import find_gcc
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+
+# This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
+# the call site, and every one of them is now a named constant — a quarter of the
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# the doc names first. The classification is five shapes, and it was read off the
+# argv at each site rather than off the number:
+#
+#   | was | count | argv | constant |
+#   |---|---|---|---|
+#   | 300 | 17 | `[GCC, '-fgimple', …]` — a compile of the generated C plus `fire_runtime.c` | `COMPILE_TIMEOUT_S` |
+#   | 60 | 16 | `[sys.executable, entry]` — the CPython ORACLE, i.e. a reference run of the case's own source | `RUN_TIMEOUT_S` |
+#   | 30 | 17 | `[exe]` — the executable those two produced | `RUN_TIMEOUT_S` |
+#   | 120 | 1 | `[sys.executable, fire.py, 'run', entry]` — this project's own interpreter | `RUN_TIMEOUT_S` |
+#
+# Every substitution is a WIDENING (30/60/120 -> 120 and 300 -> 600), which is
+# the direction `exec_budget`'s docstring asks for: the old numbers were sized
+# for "much more than a tiny program needs" and were therefore firing on a loaded
+# machine, where a timeout inside a test file is reported as an ordinary FAIL —
+# that is, as a compiler bug. Nothing here needs an EXCEEDING pair (the outer and
+# inner budgets `test_gimple_runner.py`'s RSS probe has, where the outer wraps
+# CPython around a compiled child): the gcc and the `[exe]` run are sequential
+# siblings, and the `[sys.executable, …]` children are whole and alone.
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
@@ -7616,7 +7639,7 @@ main()
                 fh.write(preamble)
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
         if py.returncode != 0:
             return None
         return py.stdout
@@ -7641,11 +7664,11 @@ main()
             cc = subprocess.run(
                 [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                  os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=300)
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if cc.returncode != 0:
                 return ('BUILD-FAILED', cc.stderr)
             run = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=30)
+                                 timeout=RUN_TIMEOUT_S)
         return run.stdout
 
     def test_callable_return_type_survives_its_carrier():
@@ -8186,7 +8209,7 @@ print("%r" % p)
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -8208,14 +8231,14 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                           f"{cc.stderr[:800]}")
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -8330,7 +8353,7 @@ print("%r" % p)
             # would report "the test program itself is wrong" for a
             # harness mistake.
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
@@ -8352,14 +8375,14 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                           f"{cc.stderr[:1200]}")
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 if run.stdout != want:
                     print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
                           f"CPython printed {want!r}")
@@ -8525,7 +8548,7 @@ print("%r" % p)
                     fh.write(body)
             entry = os.path.join(td, 'q', 'main.py')
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 return (f"{label}: CPython on the same program exited "
@@ -8545,12 +8568,12 @@ print("%r" % p)
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     return (f"{label} [{mode}]: gcc -fgimple failed:\n"
                             f"{cc.stderr[:1200]}")
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 if run.stdout != want:
                     return (f"{label} [{mode}]: printed {run.stdout!r}, "
                             f"CPython printed {want!r}")
@@ -9258,7 +9281,7 @@ outer([10, 20, 30])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9286,7 +9309,7 @@ outer([10, 20, 30])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9295,7 +9318,7 @@ outer([10, 20, 30])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9372,7 +9395,7 @@ print([y for y in [(1,), (2,)]])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9386,7 +9409,7 @@ print([y for y in [(1,), (2,)]])
             # comparison could not have caught the bug.
             it = subprocess.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'),
                                  'run', entry], capture_output=True, text=True,
-                                cwd=td, timeout=120)
+                                cwd=td, timeout=RUN_TIMEOUT_S)
             if it.returncode != 0 or it.stdout != want:
                 print(f"FAIL  {name} [interp]: exit {it.returncode}, printed "
                       f"{it.stdout!r}, CPython printed {want!r} "
@@ -9412,7 +9435,7 @@ print([y for y in [(1,), (2,)]])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9421,7 +9444,7 @@ print([y for y in [(1,), (2,)]])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9504,7 +9527,7 @@ print(resumes_after_next([7, 8, 9]))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9532,7 +9555,7 @@ print(resumes_after_next([7, 8, 9]))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9541,7 +9564,7 @@ print(resumes_after_next([7, 8, 9]))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9602,7 +9625,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9630,7 +9653,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9639,7 +9662,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9713,7 +9736,7 @@ relay('hi')
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9741,7 +9764,7 @@ relay('hi')
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9750,7 +9773,7 @@ relay('hi')
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -9803,7 +9826,7 @@ C().sort()
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -9831,7 +9854,7 @@ C().sort()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -9840,7 +9863,7 @@ C().sort()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10090,7 +10113,7 @@ inside()
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10118,7 +10141,7 @@ inside()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10127,7 +10150,7 @@ inside()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10214,7 +10237,7 @@ print({'p': 1} | {'q': 2})
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10242,7 +10265,7 @@ print({'p': 1} | {'q': 2})
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10251,7 +10274,7 @@ print({'p': 1} | {'q': 2})
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10331,7 +10354,7 @@ print(sorted(e({'k': 1}).items()))
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10359,7 +10382,7 @@ print(sorted(e({'k': 1}).items()))
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10368,7 +10391,7 @@ print(sorted(e({'k': 1}).items()))
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout, run.stderr))
             bad = [m for m, out, _e in results if out != want]
             if bad:
@@ -10481,7 +10504,7 @@ strings(['a', 'b'])
             with open(entry, 'w') as fh:
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10509,7 +10532,7 @@ strings(['a', 'b'])
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10518,7 +10541,7 @@ strings(['a', 'b'])
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10618,7 +10641,7 @@ report()
             with open(entry, 'w') as fh:
                 fh.write(cpython_src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -10649,7 +10672,7 @@ report()
                         [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe,
                          c_file,
                          os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                        capture_output=True, text=True, timeout=300)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                     if cc.returncode != 0:
                         errs = [ln for ln in cc.stderr.splitlines()
                                 if ' error:' in ln]
@@ -10658,7 +10681,7 @@ report()
                         _FAIL += 1
                         return
                     run = subprocess.run([exe], capture_output=True,
-                                         text=True, timeout=30)
+                                         text=True, timeout=RUN_TIMEOUT_S)
                     results.append((f'{tag}/{mode}', run.stdout, want))
             bad = [t for t, out, want in results if out != want]
             if bad:
@@ -10739,7 +10762,7 @@ walk_span()
                 cc = subprocess.run(
                     [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=300)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
                 if cc.returncode != 0:
                     errs = [ln for ln in cc.stderr.splitlines()
                             if ' error:' in ln]
@@ -10748,7 +10771,7 @@ walk_span()
                     _FAIL += 1
                     return
                 run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=30)
+                                     timeout=RUN_TIMEOUT_S)
                 results.append((mode, run.stdout))
             bad = [m for m, out in results if out != want]
             if bad:
@@ -10870,7 +10893,7 @@ walk_span()
             # sibling of it — see the same note in
             # `aliased_and_reexported_imports_resolve_to_the_defining_module`.
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
@@ -10888,14 +10911,14 @@ walk_span()
             cc = subprocess.run(
                 [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
                  os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=300)
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if cc.returncode != 0:
                 print(f"FAIL  {name}: gcc -fgimple failed:\n"
                       f"{cc.stderr[:1200]}")
                 _FAIL += 1
                 return
             run = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=30)
+                                 timeout=RUN_TIMEOUT_S)
             if run.stdout != py.stdout:
                 print(f"FAIL  {name}: printed {run.stdout!r}, CPython "
                       f"printed {py.stdout!r}")

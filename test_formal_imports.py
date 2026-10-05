@@ -59,6 +59,19 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from exec_budget import RUN_TIMEOUT_S   # noqa: E402
+
+#: How long this process waits for a `Popen` it has just `terminate()`d to be
+#: reaped. NOT a per-child budget, and named here so the widened estate check
+#: sees a name rather than a bare number and does not have to be told this is
+#: deliberate: `exec_budget`'s constants size a COMPILE, a LINK and a RUN of
+#: compiled code, and this bounds the wait AFTER a signal — the writer process
+#: republishing a library in place, stopped in the `finally` below, whose corpse
+#: has to be collected before the case can judge what the 400 runs printed. It
+#: is `test_formal_sweep.py`'s `SIGTERM_REAP_S` under the same name, because it
+#: is the same wait.
+SIGTERM_REAP_S = 60
+
 # The independent Mach-O reader and the CLI driver live in the dylib suite;
 # imported rather than copied so a fix to the reader cannot leave a second,
 # quietly different one behind.
@@ -225,7 +238,7 @@ def build(root, name, expect_ok=True, arch=None):
 
 
 def run(out):
-    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return r.returncode, (r.stderr or r.stdout)
 
 
@@ -2236,7 +2249,7 @@ def test_one_word_struct_field_is_the_value(tmpdir, _shared):
     out = os.path.join(tmpdir, "field.aout")
     rc = run_fire(["build", "--formal", "--no-prove", "-o", out, src]).returncode
     check(rc == 0, f"build failed: {rc}")
-    r = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check(r.returncode == 42,
           f"returned {r.returncode}, expected 42 — if this is 1, the field "
           f"and the receiver are different storage and the accessor is "
@@ -2292,7 +2305,7 @@ def test_wide_struct_runs_by_reference(tmpdir, _shared):
     check(result.returncode == 0,
           f"a two-field struct should build by reference: "
           f"{(result.stderr or result.stdout).strip()[-300:]}")
-    run = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check(run.returncode == 6,
           f"exit status {run.returncode}, expected 6 (the value the method "
           f"wrote through the receiver)")
@@ -3075,7 +3088,7 @@ def test_the_library_is_published_atomically(tmpdir, _shared):
                     break
     finally:
         writer.terminate()
-        writer.wait(timeout=60)
+        writer.wait(timeout=SIGTERM_REAP_S)
     if not bad:
         return
     raise TestFailure(

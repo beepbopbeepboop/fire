@@ -56,6 +56,15 @@ import subprocess
 import sys
 import tempfile
 
+# One COMPILE budget and five RUN budgets, by argv: the `fire.py build --formal`
+# that produces each case's image, and then the image itself or the CPython
+# oracle beside it. The compile was 900 s and is `COMPILE_TIMEOUT_S`'s 600 —
+# a narrowing, and the only one in this batch, so it is stated here rather than
+# left to be discovered: the seven builds this file makes per case are one
+# `formal/build.py` over a source with no import closure, and `exec_budget`'s
+# 600 is ~50x the observed worst `gcc -fgimple` it was derived from.
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
 HOSTMODS = os.path.join(HERE, "formal", "hostmods")
@@ -729,12 +738,12 @@ def run_mojo(root, parser, case_index, worker=0):
     built = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "-n", str(case_index), "-o", out, src],
-        cwd=root, capture_output=True, text=True, timeout=900, env=env)
+        cwd=root, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, env=env)
     check(built.returncode == 0,
           f"{parser['name']} case {case_index}: build failed: "
           f"{(built.stderr or built.stdout).strip()[-600:]}")
     check(os.path.isfile(out), f"{parser['name']}: no executable at {out}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return ran
 
 
@@ -744,7 +753,7 @@ def run_cpython(root, parser, case_index):
     with open(src, "w") as f:
         f.write(py_source(parser))
     return subprocess.run([sys.executable, src, str(case_index)],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
 
 
 def compare(case_label, want, got):
@@ -992,7 +1001,7 @@ def test_a_refused_spec_is_refused_with_a_reason(tmp, _shared):
         check(built.returncode == 0,
               f"{label}: the program did not build: "
               f"{(built.stderr or built.stdout).strip()[-400:]}")
-        ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+        ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         check("rc=3" in ran.stdout,
               f"{label}: parse returned {ran.stdout.splitlines()[:1]}, "
               f"expected the refusal status 3. stdout: {ran.stdout!r}")
@@ -1037,7 +1046,7 @@ def test_an_underscore_in_an_int_is_refused(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check("rc=2" in ran.stdout,
           f"`--n 1_0` returned {ran.stdout.splitlines()[:1]}, expected the "
           f"error status 2: {ran.stdout!r}")
@@ -1080,7 +1089,7 @@ def test_prog_is_the_basename_of_argv0(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check(ran.stderr.startswith("usage: tool [-h] [-v]"),
           f"the usage line is {ran.stderr.splitlines()[:1]}, which does not "
           "name the program `tool`")

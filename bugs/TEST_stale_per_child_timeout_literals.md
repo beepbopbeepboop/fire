@@ -24,23 +24,63 @@ that makes the rest mechanical.
   `test_suite.py`), each with its reason, and a row asserts the exemption list
   and the walk still agree — so an exemption cannot outlive the need.
 
-  Measured with this tree's predicate (a `timeout=` KEYWORD off the AST, over
-  both file spellings, derived trees skipped): **207 sites over 57 files**,
-  after the 8 above, and after `test_formal_proof_breadth.py` grew two more
-  sites of its existing `timeout=60` shape (`work/formal25-6`) and its census row
-  moved 3 -> 5 with them. The file count did not move: a file that gains a
-  literal is a file already in the table. That is smaller than the 217/63 below for two measurable
-  reasons: a grep counts `timeout=NN` occurrences that are not call keywords,
-  and it walks `build/` and the other derived trees.
+* **Six more files landed 2026-10-05 (`work/bugs7-4`), 76 sites, and the census
+  now reads 129 over 50 files.** Each classification is the ARGV at the call
+  rather than the number, and each file's table is at its import so the reason
+  is in the file:
+
+  | file | sites | shapes, and what each became |
+  |---|---|---|
+  | `test_gimple.py` | 51 | 17 `gcc -fgimple` -> `COMPILE_TIMEOUT_S`; 17 `[exe]` -> `RUN_TIMEOUT_S`; 16 `[sys.executable, entry]` (the CPython oracle) -> `RUN_TIMEOUT_S`; 1 `fire.py run` -> `RUN_TIMEOUT_S`. A quarter of the whole residue, and the file this doc names first. |
+  | `test_gimple_async_runner.py` | 11 | 4 `gcc`/`gxx -c` -> `COMPILE_TIMEOUT_S`; 7 `Popen`ed `[exe]` -> `RUN_TIMEOUT_S`. |
+  | `test_formal_argparse.py` | 6 | 1 `fire.py build --formal` -> `COMPILE_TIMEOUT_S`; 5 the image or its CPython oracle -> `RUN_TIMEOUT_S`. |
+  | `test_comptime_parity.py` | 4 | 1 `fire.py build` -> `COMPILE_TIMEOUT_S`; 1 the executable it produced -> `RUN_TIMEOUT_S`; 2 `fire.py run` -> `RUN_TIMEOUT_S`, that one being an INTERPRETER run rather than a build. |
+  | `test_formal_imports.py` | 4 | 3 compiled images -> `RUN_TIMEOUT_S`; 1 `writer.wait(timeout=60)` after a `terminate()` is NOT a child budget and is named `SIGTERM_REAP_S`, the same name and the same wait `test_formal_sweep.py` already records. |
+  | `test_struct_formal.py`, `test_re_formal.py` | 2 | Adopted `exec_budget` for `child_exit_reason`, which put them in the widened walk and named their one remaining literal each. |
+
+  Two things that batch turned up and that are worth more than the substitutions:
+
+  * **`test_gimple_async_runner.py`'s three `communicate(timeout=10)` rows were a
+    real flake source, not a budget.** They are the rows that assert an ELAPSED
+    window (`max_seconds = max(1.0, delay * 5)`), so on a loaded machine the 10 s
+    ceiling fired `TimeoutExpired` and took the row down with a traceback
+    instead of reporting the timing it exists to measure. `RUN_TIMEOUT_S` is the
+    right shape for it — "the child must finish" — and the row's own assertion
+    bounds the timing, so nothing is lost and a slow machine stops being a crash.
+  * **`test_re_formal.py`'s `timeout=900` was 1.5x `COMPILE_TIMEOUT_S`,** and its
+    eight children are eight `fire.py build`s of this repository's OWN source
+    (`fire_compiler.py`, `reflect.py`, the `spec_gen.py` / `exprtypes.py` pair).
+    Measured on this tree: 0.2, 6.5, 10.7, 10.5, 5.9, 5.5, 2.0, 1.1 s — so 600 is
+    ~56x the worst of them and still 6x inside `DEFAULT_JOB_TIMEOUT_S`.
+
+  **Two files left, and named so the next pass does not re-derive them:**
+
+  * **`test_formal_admitted.py` (7 sites).** Three are a compiled image and one
+    is a `python3 -c` child, but THREE are not child budgets at all: two
+    `pool.submit(…).result(timeout=60)` — a thread/process pool's own window for
+    the callable to report where it ran — and one `lock.acquire(timeout=0)`,
+    which is `threading.validate_timeout(0)`'s own SUBJECT, the value under test.
+    Converting it needs three named constants rather than a substitution, and
+    the file also wants `lib/ProofLib.olean`, which a light worker may not build.
+  * **`test_metal_codegen.py` (9 sites).** Five are `fire.py --jit`, which is a
+    compile AND an execution of a Metal kernel, so `COMPILE_TIMEOUT_S` would
+    NARROW 900 to 600 — and the measurement that would justify or refuse that
+    needs a machine with a Metal device (`metalgpu` measured 107 s and 0.37 GB
+    with one). Take it where such a machine is and decide there; nothing on a
+    host without a GPU can.
 
 **Still to do, and it is per-file reading in the owning area's lane:** the
-remaining 54 rows, cheapest first, `test_gimple.py` (51) first — it alone is a
-quarter of the residue. Each row is the same four steps: read each `timeout=`,
-decide which of `COMPILE_TIMEOUT_S` / `LINK_TIMEOUT_S` / `RUN_TIMEOUT_S` /
-`SWEEP_TIMEOUT_S` the child is, name the site where the answer is "none of
-these", add the import, delete the literals, and delete the file's row here in
-the same commit. The census is the checklist and the check now enforces that it
-and the tree agree.
+remaining 50 rows, and the two files that need a judgement rather than a
+substitution are named above (`test_formal_admitted.py`, `test_metal_codegen.py`).
+Cheapest first after those, `test_async_void_return.py`,
+`test_async_with_lock_guard.py`, `test_coro_nested_async_capture.py`,
+`test_mutable_async_capture.py`, `test_nested_async_generic.py`,
+`test_transitive_closure_capture.py` (5 each). Each row is the same four steps:
+read each `timeout=`, decide which of `COMPILE_TIMEOUT_S` / `LINK_TIMEOUT_S` /
+`RUN_TIMEOUT_S` / `SWEEP_TIMEOUT_S` the child is, name the site where the answer
+is "none of these", add the import, delete the literals, and delete the file's
+row here in the same commit. The census is the checklist and the check now
+enforces that it and the tree agree.
 
 ## Original status
 

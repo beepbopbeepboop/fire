@@ -2459,14 +2459,23 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # named `*rest` — which is a write through an UNINITIALISED pointer,
         # i.e. a wild store that happens to be mapped.
         #
-        # A refusal and not a lowering, because the two engines disagree on
-        # this shape already and only one of them can be moved here: the
-        # interpreter binds the WHOLE key (`for k, *vs in d` prints
-        # `abc []` where CPython prints `a ['b', 'c']` — see
-        # bugs/RUNTIME_starred_for_target_over_a_dict_key_is_not_unpacked.md),
-        # so implementing CPython's reading here would make the compiled path
-        # disagree with the interpreter it falls back to, which is the one
-        # comparison this project can actually check.
+        # A refusal and not a lowering, and THE REASON IS NOW HISTORICAL: it
+        # was written when the two engines disagreed on this shape, because the
+        # interpreter bound the WHOLE key (`for k, *vs in d` printed `abc []`
+        # where CPython prints `a ['b', 'c']`), so implementing CPython's
+        # reading here would have made the compiled path disagree with the
+        # interpreter it falls back to. The interpreter now agrees with CPython
+        # — `myinterpreter.py`'s `_unpack_source` splits a `str` item, and
+        # `test_interp_oracle.py::a_sequence_target_unpacks_a_string_item` pins
+        # it against CPython — so that objection is answered and only the
+        # lowering is left.
+        #
+        # It stays a refusal because the lowering is a codegen change whose only
+        # proof is `make bootstrap`, which the branch that answered the
+        # interpreter half could not run. The next step, when it is taken, is
+        # this arm: a counted loop of `mojo_cstr_slice(key, i, i + 1)` appends
+        # with the slots after the star counted from the END of the key, and the
+        # refusal above deleted with it.
         if starred_slot_index(var_names) >= 0:
             _emit_unsupported_iter(gen, 'dict')
             return
