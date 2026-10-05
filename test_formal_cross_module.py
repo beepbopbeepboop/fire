@@ -1479,7 +1479,11 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
                       "    var b = Bag4()\n"
                       "    return b.get()\n"})
     result, _out = build(root, "prog.aout", expect_ok=False)
-    refuses(result, "none of them takes that count")
+    # The NAMED parameters, not "none of them takes that count": a keyword
+    # construction now selects an overload by name as well as by position, so
+    # this call is short of `n` and `m` by name and a reader told only a count
+    # has to work out which arguments to pass.
+    refuses(result, "missing 2 required positional arguments: 'n', 'm'")
 
 
 # ── (6) a frame address handed across the boundary ──────────────────────────

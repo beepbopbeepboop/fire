@@ -2063,9 +2063,21 @@ CASES = [
     # x86-64 says what its own ABI says the ninth one is. Same verdict, and the
     # shared-text rule cannot apply because the two limits are genuinely
     # different facts about two ABIs.
+    #
+    # **The operands are doubles now, and that is what this row is FOR.**  They
+    # were `4607182418800017409` — integers — so every `%f` read an integer as a
+    # double, which is a fact about the SOURCE, and
+    # `model.printf_kind_conversion_refusal` refuses it first with a message
+    # about the class. That is the more useful refusal (it is fixable in the
+    # source, and the placement limit is still there afterwards), but it means
+    # the row stopped testing what it was written to test: a big integer made
+    # the printed value distinctive, and it made it a different program. The
+    # limit under test is about PLACEMENT, so the operands have to agree with
+    # the conversions, and the needles below are then reached on both backends
+    # as they were before.
     ("limit_a_ninth_floating_printf_operand",
      "def main(n: Int) -> Int:\n"
-     "    var a = 4607182418800017409\n"
+     "    var a = 2.5\n"
      "    printf(\"%f %f %f %f %f %f %f %f %f\",\n"
      "           a, a, a, a, a, a, a, a, a)\n"
      "    return 0\n",
@@ -6085,6 +6097,55 @@ BOTH_ARCH_CASES = [
      "    printf(\"eq=%d %d\", 1 if mk(1) == mk(2) else 0,\n"
      "           1 if q == mk(2) else 0)\n"
      "    return 0\n", 0, "eq=1 1"),
+    # The same construct with a call in the chain's MIDDLE, and this row is here
+    # for the three facts the fix introduces that a single-statement row cannot
+    # reach, each of which is a way the hoist could be wrong on ONE architecture:
+    #
+    #   * `hits=3` — the temporary is bound INSIDE the loop body, so it
+    #     re-evaluates per iteration the way the expression it replaced did.  A
+    #     hoist to the top of the function would answer 1 here (evaluated once),
+    #     and a hoist outside the loop would be a different program.
+    #   * `coll=7` — a source local spelled `_eq_operand1`, the name the hoist
+    #     would otherwise hand itself.  A temporary that shadowed a local would
+    #     print the frame address (or crash) instead, and it would print it only
+    #     where the ordering of the name search put the temporary first.
+    #   * `ret=1` — the chain in a `return` STATEMENT rather than in a call's
+    #     argument list, which is the case where the enclosing statement has to
+    #     be SPLIT rather than filled in.
+    #
+    # `hits=3 ret=1` is CPython's answer for this text (a `class` twin with
+    # `__eq__` defined), so the constants are the oracle's and not this
+    # backend's.
+    ("both_arch_eq_chain_with_a_middle_call_in_a_loop_and_a_return",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    var u = mk(1)\n"
+     "    var _eq_operand1 = 7\n"
+     "    var i = 0\n"
+     "    var hits = 0\n"
+     "    while i < 3:\n"
+     "        if t == mk(1) == u:\n"
+     "            hits = hits + 1\n"
+     "        i = i + 1\n"
+     "    printf(\"hits=%d coll=%d ret=%d\", hits, _eq_operand1,\n"
+     "           1 if t == mk(1) == mk(1) else 0)\n"
+     "    return 1 if t == mk(1) == u else 0\n", 1,
+     "hits=3 coll=7 ret=1"),
     # …and the case that used to REFUSE a function read as a value, in the
     # group whose docstring says a construct the two backends once disagreed
     # about belongs here.  A function value is its entry ADDRESS
@@ -10958,16 +11019,22 @@ CONSTRUCTION_REFUSALS = [
     # and that is a shape this path already emits — so the argument count now
     # selects the overload and the selected body becomes the stores
     # (`CASES`, "a DECLARED `__init__`").  What the inline cannot supply is an
-    # overload the count does not pick out of one, and a body that is not only
-    # those stores.  Each of the five cases below is one of those, and each
-    # names its own cause.
+    # overload the CALL does not pick out of one, and a body that is not only
+    # those stores.  Each of the cases below is one of those, and each names its
+    # own cause.
     #
-    # (1) No declared arity admits the count.  `Slice` admits 2, 3 and 4
-    # positionals, and `A(1)` is not one of them — an error the language reports
-    # at the call, and the fix is on the caller's side, so the message spells
-    # the declared shapes.  The needle is the SHAPES, because a count alone
-    # leaves the reader to work out which arity was wrong.
-    ("constr_refuse_an_init_count_no_overload_takes",
+    # (1) Too FEW positionals for a constructor that REQUIRES more.  `Slice`
+    # admits 2, 3 and 4 positionals, and `A(1)` is not one of them — an error the
+    # language reports at the call, and the fix is on the caller's side, so the
+    # message spells the declared shapes AND names the parameter left unfilled.
+    # **The name in the needle is the point, and the reason moved.**  This used
+    # to be refused as `no_overload` — "none of them takes that count" — because
+    # the selection was by COUNT, so a short count had no parameter to name.  A
+    # keyword is a reordering of an argument list the path already has, so the
+    # selection is now over the whole call and a short call HAS a name, which is
+    # CPython's `missing 1 required positional argument: 'b'`.  Both spellings
+    # were true; only one of them tells the reader what to add.
+    ("constr_refuse_too_few_positionals_for_a_declared_init",
      "struct A1:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -10979,15 +11046,18 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var x = A1(1)\n"
      "    return x.a\n",
-     "refuse:and none of them takes that count: A1 declares 1 `__init__` overload (2 required (a, b))",
-     None),
-    # (2) TWO overloads admit the count.  This path resolves nothing by type —
-    # a call site carries the argument count and the arguments, never their
+     "refuse:missing 1 required positional argument: 'b'", None),
+    # (2) TWO overloads admit the call.  This path resolves nothing by type —
+    # a call site carries the arguments and their parameter names, never their
     # types — so it cannot say which constructor the source named, and picking
     # either would be running a constructor the program did not choose.  The
     # needle is the AMBIGUITY, because "it is refused" and "it is refused
     # because two would have done" have different fixes and a reader who is sent
-    # to the class body can only find that out by reading both.
+    # to the class body can only find that out by reading both.  **"that CALL",
+    # not "that count"**: since the selection reads the keywords too, the
+    # constructor is named by the whole call, and the way out is to pass the
+    # arguments only one of them takes — which for this pair means a keyword
+    # `b=…`, since one shape declares `b` and the other does not.
     ("constr_refuse_two_inits_admitting_the_same_count",
      "struct A2:\n"
      "    var a: Int\n"
@@ -11001,7 +11071,7 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var x = A2(1)\n"
      "    return x.a\n",
-     "refuse:and TWO of them admit that count", None),
+     "refuse:and TWO of them admit that call", None),
     # (3) A BRANCH in the body.  The body is not a sequence of stores, and a
     # branch means the value in a field depends on a condition this path would
     # have to reproduce at the construction site rather than copy.  The needle
@@ -11326,9 +11396,11 @@ CONSTRUCTION_REFUSALS = [
     # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
     # `m` — and it used to build, run and return 7 by bringing both fields up
     # at zero.  A silently wrong value is the outcome this backend treats as
-    # worst available, and the count is not ambiguous here: `init_overload_
-    # for_arity` says no declared overload takes 0 and the message spells the
-    # overloads it does declare, so the fix is on the caller's side.
+    # worst available, and the call is not ambiguous here: there is ONE declared
+    # overload, it REQUIRES `n` and `m`, and the call supplied none of them, so
+    # the two parameters are named rather than a count — the same spelling
+    # `init_overload_for_arity` gave it by way of "none of them takes that
+    # count", which said nothing about what to pass.
     ("constr_refuse_a_zero_arg_construction_when_init_requires_parameters",
      "struct Bag4:\n"
      "    var n: Int\n"
@@ -11344,7 +11416,59 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var b = Bag4()\n"
      "    return b.get()\n",
-     "refuse:none of them takes that count", None),
+     "refuse:missing 2 required positional arguments: 'n', 'm'", None),
+    # ── the POSITIONAL boundary of a declared `__init__`, which is a third
+    # answer the count questions used to share ──
+    # A keyword-only parameter has no positional slot, so a surplus positional
+    # is not a binding — and with the keyword binding in place this is a shape
+    # a program can WRITE and be right about: `Rng(seed=7)` is the corpus's own
+    # spelling (`std/testing/prop/random.mojo`), and `Rng(7)` for the same
+    # struct is the mistake a reader makes by not knowing it.  CPython's
+    # `TypeError` for it is `takes 1 positional argument but 2 were given`, and
+    # the needle is the BOUNDARY rather than that sentence, because the boundary
+    # is the fact about the DECLARATION the reader has to look at.
+    ("constr_refuse_a_positional_for_a_keyword_only_parameter",
+     "struct Rng5:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(out self, *, seed: Int):\n"
+     "        self.n = seed\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng5(7)\n"
+     "    return r.n\n",
+     "refuse:crosses a keyword-only boundary: Rng5 declares 1 `__init__` "
+     "overload (1 required (seed), seed keyword-only)", None),
+    # The same code on a constructor with NO keyword-only parameter, where the
+    # fact is a different one and the message says that instead: there is no
+    # boundary to cross, there is a widest arity and the call is past it.  Two
+    # rows because one message covering both would have to claim "crosses a
+    # keyword-only boundary" about a struct that declares none.
+    ("constr_refuse_one_positional_too_many_for_a_declared_init",
+     "struct One5:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int):\n"
+     "        self.a = a\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var o = One5(1, 2)\n"
+     "    return o.a\n",
+     "refuse:the widest one declared takes 1 by position: One5 declares 1 "
+     "`__init__` overload (1 required (a))", None),
+    # And a keyword-only parameter the call does not supply is `missing`, in
+    # CPython's own spelling — "required KEYWORD-ONLY argument", not "required
+    # positional".  The word is the point: `Two5(1)` is right about `a` and
+    # wrong about `b`, and a reader told to add a positional would add it in the
+    # wrong place.
+    ("constr_refuse_a_keyword_only_parameter_left_unfilled",
+     "struct Two5:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, *, b: Int):\n"
+     "        self.a = a\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var t = Two5(1)\n"
+     "    return t.a\n",
+     "refuse:missing 1 required keyword-only argument: 'b'", None),
     # ── ARITY: too few, too many, and a zero-field struct ──
     # Too FEW. `S(1)` on a two-field `S` is not a one-field construction, it is
     # a two-field construction missing an argument, and the message has to say
@@ -11479,12 +11603,19 @@ CONSTRUCTION_REFUSALS = [
      "    var p = P3(1, x=2)\n"
      "    return 0\n",
      "refuse:gives field 'x' more than one value", None),
-    # A keyword against a struct that DECLARES an `__init__`, and this is the
-    # one the resolution cannot fix rather than a rule it is leaving out:
-    # `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT, so a keyword
-    # call has nothing to select on.  Picking the widest, or the first, would
-    # be running a constructor the program did not choose.
-    ("constr_refuse_keyword_against_a_declared_init",
+    # A keyword against a struct that DECLARES an `__init__`.  **This case used
+    # to be a blanket refusal of the SHAPE**, with the reason "nothing here
+    # resolves by type or by parameter name, so a keyword call cannot say which
+    # overload it means" — and the second clause was false, which is why it is
+    # gone: a keyword DOES name a parameter, and `model.init_overload_for_call`
+    # selects on the parameter names plus the positional order.
+    #
+    # `S3(end=7)` is still a refusal, and it is the one CPython raises:
+    # `TypeError: __init__() missing 1 required positional argument: 'start'`.
+    # The needle is the missing parameter's NAME, not the old text about
+    # overload selection, because the name is what the caller has to fix and the
+    # selection story is a fact about this path rather than about the program.
+    ("constr_refuse_keyword_against_a_declared_init_leaves_a_parameter_unfilled",
      "struct S3:\n"
      "    var start: Int\n"
      "    var end: Int\n"
@@ -11494,8 +11625,99 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var s = S3(end=7)\n"
      "    return 0\n",
-     "refuse:is a call to a user-defined `__init__` (S3 declares 1 of them)",
-     None),
+     "refuse:missing 1 required positional argument: 'start'", None),
+    # ── a keyword against a DECLARED `__init__`, which is now a PROGRAM ──
+    # The filing's reproducer, and the construct `std/testing/prop/random.mojo`
+    # is written with: a KEYWORD-ONLY parameter, so there is no positional
+    # arity at all for the count-only rule to select on, and the keyword is the
+    # ONLY thing that names the overload.  Measured before the fix, both
+    # architectures: "constructing Rng with 'seed' — 'seed' is not a field of
+    # Rng (n) …", every clause of which is wrong — `seed` IS a parameter of the
+    # declared `__init__` and `Rng` HAS one.
+    #
+    # The `printf` is the oracle: `seed=7` is the only way 7 can be in `r.n`,
+    # so a binding that answered the default, the first parameter or the field
+    # list could not produce this pair.
+    ("constr_keyword_names_a_keyword_only_init_parameter",
+     "struct Rng:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(out self, *, seed: Int):\n"
+     "        self.n = seed\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng(seed=7)\n"
+     "    printf(\"n=%d\", r.n)\n"
+     "    return r.n\n", 7, "n=7"),
+    # The same selection with a keyword in the SECOND position, which is the
+    # case an implementation that binds keywords by APPENDING them to the
+    # positionals gets wrong: `pair(10, y=20)` must leave `x` at 10, and
+    # `pair(y=20, x=10)` must give the same object.  Two rows rather than one
+    # because "the keywords are read in the order they are written" is the
+    # reading the old refusal's reason (`"the program's meaning would depend on
+    # the order the keywords appear in"`) warned about, and it is false for a
+    # binding that matches by NAME.
+    ("constr_keyword_binds_by_name_not_by_position",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, y=20)\n"
+     "    var b = Pair2(y=20, x=10)\n"
+     "    printf(\"a=%d,%d b=%d,%d\", a.x, a.y, b.x, b.y)\n"
+     "    return a.x + a.y + b.x + b.y\n", 60, "a=10,20 b=10,20"),
+    # A parameter given twice — `Pair2(10, x=20)` is CPython's `got multiple
+    # values for argument 'x'`, and it is a refusal rather than a pick, because
+    # either store is a program the source did not write.
+    ("constr_refuse_a_parameter_given_twice",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, x=20)\n"
+     "    return a.x\n",
+     "refuse:got multiple values for argument 'x'", None),
+    # A keyword naming no PARAMETER of the declared constructor — the case the
+    # old blanket refusal could not tell from the one above, because both were
+    # "a keyword against a declared `__init__`".  CPython's `unexpected keyword
+    # argument`, and the needle is the NAME rather than a count.
+    ("constr_refuse_keyword_naming_no_init_parameter",
+     "struct Pair2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a = Pair2(10, z=20)\n"
+     "    return a.x\n",
+     "refuse:is not a parameter of any of them", None),
+    # ── a no-field struct WITH a constructor: the message that denied it ──
+    # `construction_arity_refusal` used to answer this one with "with no
+    # user-defined constructor … and Rng declares no `__init__` for it to call
+    # instead", which is false twice over: `Rng` declares one, and the arity
+    # check was reached before the constructor branch.  It is still a refusal —
+    # the body makes a CALL, which is not a `self.<field> = …` store — and the
+    # needle is the offending STATEMENT, which is the fact the reader can act
+    # on.
+    ("constr_refuse_a_no_field_struct_with_an_init_whose_body_is_not_stores",
+     "def sink(v: Int) -> Int:\n"
+     "    return v\n\n"
+     "struct Rng4:\n"
+     "    def __init__(out self, seed: Int):\n"
+     "        sink(seed)\n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = Rng4(7)\n"
+     "    return 0\n",
+     "refuse:whose body this path does not inline: `sink(...)`", None),
     # ── a COPY of the wrong thing ──
     # A copy of a DIFFERENT struct. A copy here is a slot-for-slot copy, so it
     # is only defined between two objects of the SAME layout, and `B` is a
@@ -15848,6 +16070,86 @@ FLOAT_CASES = [
 ]
 
 
+# The float family REFUSALS, kept beside `FLOAT_CASES` because they are the
+# other half of the same value model: `FLOAT_CASES` is every program this path
+# gets RIGHT about binary64 and these are the two shapes it used to get wrong
+# the same way, in opposite directions.
+#
+# **A `printf` conversion states what the C library will do with the word it is
+# handed, and the word's kind states what it is.** Both backends place a vararg
+# from the FORMAT rather than from the operand's kind (AAPCS has one register
+# file, and SysV's classifier reads the conversions), so a disagreement is not
+# an ABI problem — it is a wrong NUMBER, printed, from a green build, exit 0.
+# Measured on both architectures before `model.printf_kind_conversion_refusal`:
+FLOAT_REFUSALS = [
+    # A `Float64` at an INTEGER conversion. `x = 3.9` is
+    # 0x400FF33333333333, so the low 32 bits are 0x33333333 = 858993459 and
+    # that is what `%d` printed. `printf("[%d]", x)` answered `[858993459]`
+    # where CPython's `Int(x)` answers 3.
+    ("float_refuse_an_integer_conversion_of_a_double",
+     "def show(x: Float64) -> Int:\n"
+     "    printf(\"[%d]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(3.9)\n",
+     "refuse:the `%d` conversion in printf's format string reads `x` as an "
+     "integer, and `x` is a double", None),
+    # …and at a `%c`, which is the same two bytes read as a character: 0x33 is
+    # `'3'`, so `printf("[%c]", x)` printed `[3]`. A separate row because a
+    # `%c` reader is a different code path from a `%d` reader in any libc, and
+    # one row per mechanism is how a fix that repairs only one of them fails.
+    ("float_refuse_a_character_conversion_of_a_double",
+     "def show(x: Float64) -> Int:\n"
+     "    printf(\"[%c]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(3.9)\n",
+     "refuse:the `%c` conversion in printf's format string reads `x` as an "
+     "integer, and `x` is a double", None),
+    # The other direction, and the one that reads WORSE: the integer 7 as a
+    # double is `3.4584595208887258e-323`, so `printf("%.17g", 7)` printed a
+    # denormal. CPython's `"%.17g" % 7` is `7`, so this is a program a reader
+    # would write believing the two spellings agree — which is why the needle
+    # is the CONVERSION and not the operand: the fix is `float(7)` or `%d`.
+    # The evidence this row needs is a NAME, because a literal is refused by
+    # `printf_arg_float_evidence`'s third rule (an expression that cannot be
+    # seeded by a default); `var a = 7` is the shape that proves the name rule.
+    ("float_refuse_a_floating_conversion_of_an_integer",
+     "def main() -> Int:\n"
+     "    var a = 7\n"
+     "    printf(\"[%.17g]\", a)\n"
+     "    return 0\n",
+     "refuse:the `%g` conversion in printf's format string reads `a` as a "
+     "double, and `a` is a value this function bound to an integer", None),
+    # The CONTROL, and the reason the rule is not "refuse unless the operand is
+    # known to be a double": an UNANNOTATED parameter is the permissive
+    # direction. `def show(x): printf("%f", x)` called `show(2.5)` prints 2.5
+    # today and must keep doing so — both backends place the word from the
+    # FORMAT, so a caller that passed a double needs no annotation here. A rule
+    # that read "the source does not say" as "not a float" would refuse a
+    # program that is right, which is the failure mode every evidence rule in
+    # this file is written against.
+    ("float_an_unannotated_parameter_at_a_floating_conversion_still_prints",
+     "def show(x):\n"
+     "    printf(\"[%.17g]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(2.5)\n", 0, "[2.5]"),
+    # The other control: `%d` of an INTEGER and `Int(x)` of a double are the
+    # two directions the rule must NOT refuse, and `Int(x)` is the conversion
+    # the refusal message names — so a rule that broke the conversion while
+    # refusing the mismatch would still pass the three rows above.
+    ("float_an_integer_conversion_of_an_integer_still_prints",
+     "def main() -> Int:\n"
+     "    var a = 7\n"
+     "    printf(\"[%d %d]\", a, Int(2.5))\n"
+     "    return 0\n", 0, "[7 2]"),
+]
+
+
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
 
@@ -17671,15 +17973,20 @@ EQ_DISPATCH_CASES = [
      "    var t = mk(1)\n"
      "    printf(\"chain=%d\", 1 if mk(1) == t == mk(1) else 0)\n"
      "    return 0\n", 0, "chain=1"),
-    # …and the call in a chain's MIDDLE, which stays an address compare, and is
-    # pinned as the ONE remaining shape rather than left to be discovered: the
-    # lowering reads each operand twice, so `t == mk(1) == u` would call `mk`
-    # three times where the source calls it twice. The remedy is a
-    # STATEMENT-level rewrite — bind the operand to a temporary in the enclosing
-    # statement, which needs its own round in the holder fixpoint — and it is
-    # written down in `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` rather
-    # than done here.
-    ("eq_chain_with_a_call_in_the_middle_stays_an_address_compare",
+    # …and the call in a chain's MIDDLE, which now reaches the method, evaluates
+    # the call ONCE, and is pinned here rather than left to be discovered.  The
+    # lowering turns a chain into the `and` of its links, and a middle operand
+    # appears in TWO of them, so `t == mk(1) == u` would call `mk` twice where
+    # `F.CompareChain` says each operand is evaluated exactly once — and it used
+    # to: the rewrite declined the shape and the operator stayed an ADDRESS
+    # COMPARE, printing 0 where CPython prints 1, silently, on both machines.
+    # `formal/build.py`'s `_hoist_eq_chain_middle_calls` binds the operand to a
+    # local in the enclosing STATEMENT first (an expression has nowhere to put
+    # one), after which the chain is three names and the dispatch is the
+    # ordinary one.  The needle pair is why this row can tell a fixed hoist from
+    # a broken one: `mid` is True only if the method ran, and `diff` is False
+    # only if it ran on the VALUES.
+    ("eq_chain_with_a_call_in_the_middle_reaches_a_declared_eq",
      "struct A:\n"
      "    var x: Int\n"
      "    var y: Int\n"
@@ -17697,8 +18004,10 @@ EQ_DISPATCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var t = mk(1)\n"
-     "    printf(\"chain=%d\", 1 if t == mk(1) == mk(1) else 0)\n"
-     "    return 0\n", 0, "chain=0"),
+     "    var u = mk(2)\n"
+     "    printf(\"mid=%d diff=%d\", 1 if t == mk(1) == mk(1) else 0,\n"
+     "           1 if t == mk(1) == u else 0)\n"
+     "    return 0\n", 0, "mid=1 diff=0"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this
@@ -21564,6 +21873,7 @@ def main():
                   + TYPE_VALUE_NUMBER_CASES \
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
+                  + FLOAT_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS

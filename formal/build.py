@@ -1882,7 +1882,36 @@ def compile_formal(source_path: str, output: str = None,
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
                                    source_path, result["admitted"]))
-        proof = generate_proof(prog, code, info)
+        try:
+            proof = generate_proof(prog, code, info)
+        except NotImplementedError as e:
+            # `NotImplementedError` is how BOTH generators REFUSE — it is their
+            # uniform "I will not write a model I do not have" signal, which is
+            # why `formal/x86_64_proof_gen.py` catches it internally and falls
+            # back to a disclaimed placeholder model. Nothing converted it into
+            # a build error, so a refusal escaped `fire.py build --formal` as a
+            # Python TRACEBACK: exit 1 with forty frames of generator internals
+            # and the actual sentence — "a FloatLiteral has no value in the
+            # semantic model; refusing rather than modelling it as 0, which
+            # would be a false statement about the source" — at the bottom of
+            # it. That is the wrong diagnostic for a construct the refusal
+            # NAMES, and `fire.py`'s own `except FormalBuildError` arm already
+            # exists to print `build: <message>` for it.
+            #
+            # The IMAGE is not what refused, and the message says so: the
+            # machine model above already describes this program, and
+            # `--no-prove` builds and runs the same bytes. What is missing is
+            # the translation of the SOURCE into the semantic model, so the
+            # fix is a domain in that model and not a change to the emitter.
+            raise FormalBuildError(
+                f"no proof was generated: the semantic model has no value for "
+                f"something in this program, and refusing is what it does "
+                f"rather than state something false about the source. The "
+                f"IMAGE is not what refused — `--no-prove` builds and runs the "
+                f"same bytes — and what is missing is a domain in "
+                f"`formal/arm64_proof_gen.py`'s model of the source, which is "
+                f"a function of the entry argument alone. The generator's own "
+                f"word for it: {e}") from e
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
             os.chmod(proof_path, 0o644)  # u+w so overwrite works
@@ -3922,9 +3951,17 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             _pass_state = _holder_state(holders, hstruct, returns_frame)
         moved = (_rewrite_len_on_frame_receivers(functions, holders,
                                           hstruct)
+                 + _hoist_eq_chain_middle_calls(functions, structs_by_name)
                  + _rewrite_eq_on_frame_receivers(functions, holders,
                                                  hstruct, one_word,
                                                  structs_by_name))
+        # A pass that hoisted a temporary has introduced a LOCAL into a body the
+        # holder analysis has not read yet, so "no round moved anything" is not
+        # the same condition as before the hoist existed and the loop has to run
+        # once more to let `tmp = mk(1)` become a holder.  That is the whole
+        # reason the hoist is in here and not in the per-function pass ahead of
+        # `_frame_receivers`: a pass that decides a dispatch must not introduce
+        # a store, and this one introduces no dispatch.
         if not (grew or moved):
             break
     else:
@@ -6293,15 +6330,14 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
     as the `and` of its pairwise comparisons, which is what the language says a
     chain is.  A call may stand at either END of the chain — `mk(1) == b` and
     `b == mk(1)` are one link each, so the call is evaluated exactly where the
-    source put it — and NOT in the middle: `a == mk(1) == b` lowers to
-    `and(A___eq__(a, mk(1)), A___eq__(mk(1), b))`, which calls `mk` twice where
-    the language calls it once.  That middle case is the one shape left alone,
-    and the remedy for it is a STATEMENT-level rewrite — bind the operand to a
-    temporary in the enclosing statement first, which is what
-    `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` asks for and what this
-    deliberately does not do, because it needs its own round in the fixpoint
-    below and this change's argument is that a dispatch decision must not
-    introduce a store.
+    source put it — and a call in the MIDDLE is reached too, because
+    `_hoist_eq_chain_middle_calls` binds it to a temporary in the enclosing
+    statement FIRST and this pass then sees only names.  `a == mk(1) == b`
+    lowers to `and(A___eq__(a, tmp), A___eq__(tmp, b))` over one evaluation of
+    `mk`, which is the chain's own rule (`F.CompareChain`: each operand is
+    evaluated exactly once).  The `lowered = False` guards below are what a
+    chain that survives the hoist still has to refuse: a middle operand that is
+    a call to a callee whose return type this image does not state.
 
     Returns how many operators it rewrote, which is what lets the caller run
     this and the holder fixpoint as ONE fixpoint: a round that neither grew a
@@ -6434,6 +6470,117 @@ def _call_frame_structs(node, functions_by_name: dict, structs_by_name: dict):
         if st is not None:
             out[id(operand)] = st
     return out
+
+
+def _hoist_eq_chain_middle_calls(functions, structs_by_name: dict) -> int:
+    """`a == mk(1) == b` → `<tmp> = mk(1)` then `a == <tmp> == b`. Count.
+
+    **The root fix for a chained comparison whose MIDDLE operand is a call**,
+    and it is a statement-level rewrite because that is the only place a
+    temporary can be introduced: the chain is an EXPRESSION, so the name has to
+    be bound in the statement that contains it.
+
+    The defect it removes, precisely.  A chain is one `F.CompareChain`, and its
+    docstring is the language's own rule: *each of `operands` is evaluated
+    exactly once, left-to-right*.  The `==`/`!=` dispatch lowering turns it into
+    the `and` of its pairwise comparisons, and the middle operand appears in TWO
+    of them:
+
+        a == mk(1) == b   →   A___eq__(a, mk(1)) and A___eq__(mk(1), b)
+
+    so the callee runs twice where the language runs it once.  The pass declined
+    that shape rather than emit it (`_rewrite_eq_on_frame_receivers`: `lowered =
+    False` for a call at index `i > 0`), and the operator then stayed an ADDRESS
+    COMPARE — a silent wrong answer rather than a refusal: measured on both
+    architectures, `t == mk(1) == mk(1)` answered `chain=0` where CPython
+    answers 1, because `mk(1)` builds a second object and an address compare
+    asks whether it is the first.
+
+    Binding the operand once, in the enclosing statement, is what the language
+    says and is what makes the lowering's two reads the same read.  One
+    `F.CompareChain` node holds ONE node per operand, so replacing
+    `operands[i]` reaches both links — this is not a copy of the call and not a
+    second evaluation.
+
+    **A call is the only operand that needs this.**  A middle operand that is a
+    field read, a subscript or an arithmetic expression is pure here, so reading
+    it twice computes the same word twice and nothing observable differs.
+
+    ## What it deliberately does NOT do
+
+    * **Only a call that DISPATCHES.**  `model.call_result_frame_struct` has to
+      name the struct, from the callee's own declared return type; an
+      unannotated callee answers None and there is no `__eq__` to reach, so
+      nothing is hoisted and the chain keeps today's answer.  Hoisting it anyway
+      would introduce a store for no rewrite to enable.
+    * **It does not decide the dispatch.**  The links are still decided by
+      `_rewrite_eq_on_frame_receivers`, one round later, from the holder tables —
+      which is why this pass is inside `_frame_receivers`' fixpoint and not in
+      the per-function pass ahead of it: the temporary is a holder only once the
+      holder analysis has seen the binding, and that analysis is what the next
+      round re-runs.
+
+    ## The evaluation ORDER it changes, stated because it is a real difference
+
+    `a == f() == b` evaluates `a`, then `f()`, then `a == b(ound)`.  Hoisting
+    evaluates `f()` before `a`'s first comparison.  That is observable only if
+    `f()` mutates something the first link's `__eq__` reads — and it is the
+    price of a temporary, not a choice: with no name to hold the value there are
+    two options, call it twice (what the language does not say) or leave the
+    comparison an address compare (what this did, and it is a wrong answer).  A
+    hoisted temporary re-evaluates per iteration, because the binding goes where
+    the expression was: inside the loop body it was in.
+
+    Returns how many bindings it introduced, which is what the fixpoint counts as
+    progress — the round after this one has to re-derive the holder tables over
+    a body that now has a local in it.
+    """
+    functions_by_name = {fn.name: fn for fn in functions
+                         if getattr(fn, "name", None)}
+    count = [0]
+    for fn in functions:
+        used = _fn_spelled_names(fn)
+        counter = [0]
+
+        def fresh_name():
+            while True:
+                counter[0] += 1
+                name = f"_eq_operand{counter[0]}"
+                if name not in used:
+                    used.add(name)
+                    return name
+
+        def visit(stmt):
+            bindings, edits = [], []
+            for node in M.iter_nodes(stmt):
+                if not isinstance(node, F.CompareChain) or len(node.ops) < 2:
+                    continue
+                if any(op not in ("==", "!=") for op in node.ops):
+                    continue
+                for i in range(1, len(node.operands) - 1):
+                    operand = node.operands[i]
+                    if not isinstance(operand, F.CallExpr):
+                        continue
+                    if M.call_result_frame_struct(operand, functions_by_name,
+                                                  structs_by_name) is None:
+                        continue
+                    tmp = fresh_name()
+                    bindings.append(F.VarDecl(tmp, None, operand))
+                    edits.append((node, i, tmp))
+            if not bindings:
+                return stmt
+            # AFTER the walk, not during it: `M.iter_nodes` recurses into what
+            # it just yielded, so replacing `operands[i]` inline would decide
+            # which children the walk still has to visit.
+            for chain, i, tmp in edits:
+                chain.operands[i] = F.IdentExpr(tmp)
+            count[0] += len(bindings)
+            return bindings + [stmt]
+
+        body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
+        if body is not None:
+            fn.body = body
+    return count[0]
 
 
 def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
@@ -16362,15 +16509,19 @@ def _rewrite_stmt_lists(stmts: list, visit) -> list:
     return out
 
 
-def _with_temp_names(fn) -> set:
+def _fn_spelled_names(fn) -> set:
     """Every name the function's own body mentions, for a collision-free temp.
 
-    A `with` that evaluates its context expression once needs a name to hold it,
-    and the name has to be one the source cannot also mean: a `__with_ctx` that
-    shadowed a local would silently change what that local holds for the rest of
-    the function, which is a wrong answer rather than a refusal.  Every name in
-    the tree is collected — parameters, locals, fields spelled through a
-    receiver — because a name this function never assigns can still be READ.
+    A rewrite that evaluates an expression ONCE needs a name to hold it, and the
+    name has to be one the source cannot also mean: a `__with_ctx` or an
+    `_eq_operand1` that shadowed a local would silently change what that local
+    holds for the rest of the function, which is a wrong answer rather than a
+    refusal.  Every name in the tree is collected — parameters, locals, fields
+    spelled through a receiver — because a name this function never assigns can
+    still be READ.
+
+    The set is what `fresh_name` in each caller checks against and then ADDS to,
+    so two temporaries in one function cannot collide either.
     """
     names = set()
     for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -16423,7 +16574,7 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
     has no other meaning here, and the emitters already said so where they used
     to drop the exit call.
     """
-    used = _with_temp_names(fn)
+    used = _fn_spelled_names(fn)
     counter = [0]
 
     def fresh_name():

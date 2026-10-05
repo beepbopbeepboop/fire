@@ -2018,6 +2018,115 @@ def test_a_conditional_expression_derives_a_spec(tmpdir, shared):
               f"against anything except the machine")
 
 
+def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
+    """`cset` selects a VALUE; `b.cond` selects a PC. The contract layer has to
+    tell them apart, and it was reading a substring.
+
+    `_dylib_contract_proof` declined a block whose any step's model effect
+    contained the text `if `. That is not the property `Refine.Block.step` needs
+    — one function of one state — and the two spellings it conflated are both
+    real: `CSET`'s effect is `arm64_set_reg rd s (if
+    arm64_matches_condition c s.nzcv then 1 else 0)`, a conditional VALUE, and
+    `B.cond`'s is the model answering `if c then some A else some B`, a
+    conditional PC. So every export whose code contained a `cset` got no
+    contract at all. Measured before the fix on the program below: 23
+    instructions, one of them a `cset`, `_dylib_contract_proof` returned the
+    empty string, and the image computes `n * 3` in both architectures.
+
+    The fix asks the MODEL's shape instead of the text: `arm64_step` returns
+    `some <state>` for a step that is one function of one state and two `some`s
+    for a conditional branch, so `_step_rhs`'s own `some` prefix is the
+    discriminator, and it is the same prefix `_body_of` already reads.
+
+    Three claims, all of them real builds:
+
+      * the control — the program computes `n * 3`, run through the image, so a
+        spec supplied by hand below is a claim about what the machine does and
+        `bv_decide` is checking it rather than believing it;
+      * a `cset`-bearing block now gets a PROVED contract (`Block` + `BlockCert`
+        + `agrees_of_body`), and the emitted file checks clean with 0 holes;
+      * a body with a real BRANCH still gets none, and still gets the named
+        `_spec` obligation rather than silence — a block layer that started
+        accepting `b.cond` would be a theorem about a machine this path does not
+        step, which is the shape
+        `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+        is about.
+    """
+    import re as _re
+    from formal.lean import find_lean
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import _step_branch_index, generate_dylib_proof
+    src = os.path.join(tmpdir, "csetval.mojo")
+    with open(src, "w") as f:
+        f.write("def csetval(n):\n  var b = not n\n  var m = n * 3\n"
+                "  return m\n\n\n"
+                "def branched(n):\n  var m = n * 3\n"
+                "  if n > 3:\n    return m\n  return 0\n")
+    out = os.path.join(tmpdir, "csetval.dylib")
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "csetval", 14) == 42
+          and call_exported_by_name(out, "csetval", 0) == 0
+          and call_exported_by_name(out, "csetval", 100) == 300,
+          "the image does not compute n * 3, so the spec below would be a "
+          "guess and the obligations would be false")
+    check(call_exported_by_name(out, "branched", 7) == 21
+          and call_exported_by_name(out, "branched", 2) == 0,
+          "the branching export's answers are not the ones its spec below "
+          "claims, so the obligation would be stated over a falsehood")
+    # The `cset` is really there, read off the IMAGE's own words through the
+    # step table rather than taken from the source: the claim is about the code
+    # the contract emitter is handed.
+    code, exports, info = built["code"], built["exports"], built["info"]
+    entry = [e for e in exports if e["name"] == "csetval"][0]["entry"]
+    base = info["base_addr"]
+    k0 = (entry - base) // 4
+    words = [int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)]
+    end = min([e["entry"] for e in exports if e["entry"] > entry]
+              or [base + len(code)])
+    own = words[k0:(end - base) // 4]
+    check(any(_step_branch_index(w) == 30 for w in own),
+          f"no CSET in the export's own {len(own)} instructions, so this test "
+          f"is measuring something other than what it claims")
+    # The spec is supplied BY HAND because `_dylib_spec_lean` cannot render
+    # `not` — which is the filing's own method, and the reason it is safe: the
+    # emitted proof checks the spec against the machine with `bv_decide`, so a
+    # spec that did not describe this code would be a build failure.  The
+    # branching export's spec is handed over for the same reason and is the
+    # CONTROL: it is the one spec in this file whose contract must NOT be
+    # emitted, so "a spec exists" and "a contract was proved" are two facts
+    # rather than one.
+    specs = {"csetval": "(fun n => (n * (3 : UInt64)))",
+             "branched": "(fun n => (if ((n) ^^^ 0x8000000000000000) > "
+                         "((3 : UInt64) ^^^ 0x8000000000000000) then "
+                         "(n * (3 : UInt64)) else (0 : UInt64)))"}
+    path = os.path.join(tmpdir, "csetval_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(code, info, exports, specs))
+    text = open(path).read()
+    check(_re.search(r"Contracts\.agrees_of_body dylib_image "
+                     r"dylib_export_\d+_csetval bodyI", text),
+          "the cset-bearing export got no proved contract, so a step that "
+          "chooses a VALUE is still being read as a step that chooses a pc")
+    check(not _re.search(r"agrees_of_body dylib_image "
+                         r"dylib_export_\d+_branched", text)
+          and _re.search(r"theorem dylib_export_\w+_branched_spec\b", text),
+          "the branching export must keep its NAMED obligation and get no "
+          "contract: a block layer that accepted a real branch would be a "
+          "theorem about a machine this path does not step")
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof_cached
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, "lean rejected a contract for a block whose steps choose values: "
+              f"{detail[-400:]}")
+    check(n == 1, f"the proof admits {n} hole(s); the cset-bearing contract "
+                  f"should be proved, so the only hole left is the branching "
+                  f"export's named `_spec`")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("the manifest offers nothing the image does not define",
@@ -2037,6 +2146,8 @@ TESTS = [
      test_an_export_that_binds_a_local_still_gets_a_proved_contract),
     ("a conditional expression derives a spec",
      test_a_conditional_expression_derives_a_spec),
+    ("a conditional value is not a branch",
+     test_a_conditional_value_is_not_a_branch),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),

@@ -11056,19 +11056,38 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # `pc_writes[i]`: does step `i`'s model effect move the pc? `_step_rhs`
     # writes the `pc` field exactly for the instructions that do. So every step
     # but the last must be straight-line, and the last may additionally be the
-    # return that ends the body. A CONDITIONAL branch comes back from `_step_rhs`
-    # as an `if` (there is no `some <state>` to strip), and a `Refine.Block` is
-    # one function of one state, so there is nothing to emit for it at any
-    # position -- hence the separate check.
+    # return that ends the body.
     def _body_of(i):
         rhs = rhss[i]
         return rhs[len("some "):] if rhs.startswith("some ") else rhs
-    if any("if " in _body_of(i) for i in range(m)):
+    # A step the model returns as ONE `some <state>` is one function of one
+    # state, which is all `Refine.Block.step` asks for -- and the `some` is how
+    # `arm64_step` says so, so the check reads the model's own shape rather than
+    # a property of the instruction.  A CONDITIONAL BRANCH is the other shape:
+    # `arm64_step` answers `if c then some A else some B`, so there is no single
+    # `some` to strip and `_step_rhs` hands back the two arms, and that is not
+    # one function of one state at any position.
+    #
+    # **This used to be `any("if " in _body_of(i))`, and it refused the wrong
+    # thing.**  A ternary is not a branch, and neither is any other step whose
+    # effect CHOOSES A VALUE: `CSET` (`arm64_set_reg rd s (if
+    # arm64_matches_condition c s.nzcv then 1 else 0)`) and `ADRP` (a sign-
+    # extended `pc`-relative immediate) both come back wrapped in their `some`
+    # with an `if` inside, and both are exactly what a `Block` is for.  The
+    # substring could not tell them from `B.cond`, so every export whose code
+    # contained a `cset` got NO contract at all -- measured on
+    # `var b = not n; var m = n * 3; return m`, whose eighth instruction is a
+    # `cset` and which computes `n * 3` in both architectures.  `bugs/FORMAL_
+    # dylib_block_layer_is_not_the_ceiling.md` recorded the same confusion from
+    # the other side ("its own check is textual ... and a CSEL's effect contains
+    # an `if` while writing no `pc`, which is the whole distinction the block
+    # layer cares about") and scoped the work around it rather than in it.
+    if any(not rhss[i].startswith("some ") for i in range(m)):
         return ""
     pc_writes = ["pc :=" in _body_of(i) for i in range(m)]
     if any(pc_writes[:m - 1]):
         return ""
-    # at most one `if` may survive in the composed effect, at the last step
+    # at most one step may move the pc, and it must be the last
     assert sum(pc_writes) <= 1
 
     out = [f"namespace {ident}_contract\n",

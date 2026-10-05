@@ -8339,6 +8339,131 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
     return None
 
 
+def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
+    """`"float"` / `"int"` / None — which side of a FLOATING conversion this is.
+
+    THE evidence for `printf_kind_conversion_refusal`, and it is a second
+    function rather than an extension of `printf_arg_text_evidence` because the
+    two axes have different evidence available: a `%s` handed an integer is
+    caught by "this function bound the name to an integer", which is evidence a
+    NAME can carry, while the floating axis needs `FLOAT_KIND`, and `FLOAT_KIND`
+    is never a default — it comes from an annotation, a literal, a declared
+    return type or a float initializer. So `"float"` needs no such hunt and
+    `"int"` does, and folding them into one three-way would have had to pick
+    which axis's discipline governs the other.
+
+    **No conversion is unwrapped, and that is the difference from
+    `printf_arg_text_evidence`'s step 1.** There, `String(x)`/`int(x)` move the
+    word and change nothing, so the question about the call is the question
+    about its operand. Here `float(7)` is a DOUBLE and `Int(2.5)` is an
+    integer, so the conversion is exactly where the answer changes: unwrapping
+    would answer `printf("%d", Int(2.5))` about `2.5` and refuse a program that
+    prints 2.
+
+    The two sources of `"int"`, and both are POSITIVE:
+
+      * a NAME this function bound to an integer on that statement's own shape
+        (`ValueKinds.own_shape_kind`), which is the evidence `%s` uses and the
+        reason an unannotated parameter is not enough — `INT_KIND` is this
+        model's DEFAULT for a word, so reading it as a claim refuses correct
+        programs;
+      * an EXPRESSION that cannot be seeded by a default at all: a literal, an
+        arithmetic result, a subscript. `printf("%.17g", 7)` is the reproducer
+        and it is the same defect as `%d` of a double in the other direction —
+        measured on BOTH architectures it printed
+        `3.4584595208887258e-323`, which is the integer 7 read as the bit
+        pattern of a double.
+
+    A CALL is never evidence, for the reason `_own_shape_of` gives: `kind_of`
+    answers `INT_KIND` for a callee it cannot see, and `printf("%.17g",
+    get())` may well be handed a double by a caller this build knows nothing
+    about.
+    """
+    if is_float is not None and is_float(expr):
+        return "float"
+    if isinstance(expr, F.IdentExpr):
+        if vk is not None and vk.own_shape_kind(expr.name) == INT_KIND:
+            return "int"
+        return None
+    if isinstance(expr, F.CallExpr) or vk is None:
+        return None
+    return "int" if vk.kind_of(expr) == INT_KIND else None
+
+
+def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
+                                   class_of=None) -> str | None:
+    """Why a conversion whose CLASS disagrees with its operand's kind is refused.
+
+    The mirror of `printf_text_conversion_refusal`, and the same rule read from
+    the other side: a `printf` conversion states what the C library will do
+    with the word it is handed, and both halves have to agree. `%d`/`%c`/`%u`/
+    `%x` read the vararg as an integer and `%f`/`%g`/`%e` read it as a double,
+    so a double at `%d` is the bit pattern rendered as a decimal and an integer
+    at `%f` is the same word read as an exponent. Neither is a rounding; both
+    are a wrong number that prints, which is why this is a refusal and not a
+    conversion. **Converting is the language's job and it is already there**:
+    `Int(x)` is `FCVTZS` (`float_conversion_lowering`'s `FLOAT_TO_INT` arm) and
+    `float(x)` is `SCVTF`, so the message names both rather than offering a
+    guess.
+
+    Measured, both architectures, before this existed:
+
+        def f(x: Float64): printf("[%d]", x)      # x = 3.9
+        def main(): f(3.9)
+
+    printed `[858993459]`, which is `0x33333333` — the low 32 bits of 3.9's bit
+    pattern — and `printf("[%c]", x)` printed `[3]`, which is `0x33`, the same
+    two bytes as a character. The other direction printed
+    `[3.4584595208887258e-323]` for `printf("%.17g", 7)`. Green builds, exit 0,
+    wrong numbers on the screen.
+
+    `class_of` is `printf_arg_float_evidence`'s three-way answer and the
+    permissive direction is load-bearing: **None never refuses.** An
+    unannotated parameter holding a double (`def show(x): printf("%f", x)`
+    called `show(2.5)`) is a program this path prints correctly today, because
+    both backends place a vararg from the FORMAT rather than from the operand's
+    kind, so a word in the right register is enough. Reading "the source does
+    not say" as "not a float" would refuse it.
+
+    `None` for a format this does not parse, the same permissive direction
+    `printf_conversion_specifiers` takes: a call whose conversions cannot be
+    enumerated keeps whatever behaviour it had.
+    """
+    if class_of is None:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if j >= len(args):
+            continue
+        got = class_of(args[j])
+        if got is None:
+            continue
+        wants_float = conv in PRINTF_FLOAT_CONVERSIONS
+        if (got == "float") == wants_float:
+            continue
+        what = ("a double" if got == "float"
+                else "a value this function bound to an integer")
+        return (
+            f"the `%{conv}` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as "
+            f"{'a double' if wants_float else 'an integer'}, and "
+            f"`{spelled(args[j])}` is {what}. The two do not have to be "
+            f"guessed at: `%{conv}` tells the C library how to interpret the "
+            f"word it is handed, and the word's own kind says what it is, so a "
+            f"disagreement is a rendering of the wrong value rather than a "
+            f"rounding of the right one — measured on BOTH architectures, "
+            f"`printf(\"[%d]\", x)` for a `Float64` `x` printed 3.9's bit "
+            f"pattern as a decimal and `printf(\"[%.17g]\", 7)` printed the "
+            f"integer as a denormal. Refused rather than converted, because "
+            f"the conversion is the source's decision and this path already "
+            f"has both of them: `Int(x)` truncates toward zero and `float(x)` "
+            f"rounds to the nearest double"
+        )
+    return None
+
+
 def one_word_value_text_evidence(candidates, int_names=(), string_names=(),
                                  decls=None):
     """`True` / `None` / an evidence string: is a ONE-FIELD struct's value text?
@@ -8515,34 +8640,43 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
 
 
 def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
-                         text_of_arg=None):
+                         text_of_arg=None, class_of=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now three ways a format string fails here — a `%s`
+    than two: there are now four ways a format string fails here — a `%s`
     handed something that is not text (`printf_text_conversion_refusal`), a
     conversion with no argument behind it
-    (`printf_missing_operand_refusal`), and a WIDTH on a `%s` whose argument is
-    text that is not ASCII (`printf_text_width_refusal`) — and two emitters that
-    each had to remember them is exactly how arm64 and x86-64 come to disagree
-    about what a `printf` means. One function, one order, one message table.
+    (`printf_missing_operand_refusal`), a WIDTH on a `%s` whose argument is
+    text that is not ASCII (`printf_text_width_refusal`), and a conversion whose
+    CLASS disagrees with the kind of the argument behind it
+    (`printf_kind_conversion_refusal`) — and two emitters that each had to
+    remember them is exactly how arm64 and x86-64 come to disagree about what a
+    `printf` means. One function, one order, one message table.
 
     The order is the one that matters if two could fire: a missing operand and
     a `%s` of a non-text argument are both more basic facts about the CALL than
     the width is, and naming them first is the more useful refusal, since the
-    fix is in the format rather than in the argument's text.
+    fix is in the format rather than in the argument's text. The class check
+    comes last because it is the only one that needs the argument's VALUE rather
+    than its text, and a format already known to be unusable is not worth a
+    second, deeper question about the same call.
 
-    `text_of_arg` is the fourth hook and it is the only one that is optional:
-    it answers "what TEXT does this argument carry" (None for anything whose
-    text this build cannot see) where `text_of` answers "is this argument text
-    at all". The width question needs the first and the conversion question
-    needs the second, and a caller that has no way to answer the first passes
-    None — which is the permissive direction, exactly as `text_of`'s own None
-    row is.
+    `text_of_arg` is the fourth hook and it is the only one of the first two
+    that is optional: it answers "what TEXT does this argument carry" (None for
+    anything whose text this build cannot see) where `text_of` answers "is this
+    argument text at all". The width question needs the first and the conversion
+    question needs the second, and a caller that has no way to answer the first
+    passes None — which is the permissive direction, exactly as `text_of`'s own
+    None row is. **`class_of` is optional for the same reason**: it is
+    `printf_arg_float_evidence`'s three-way answer, and a caller that has no
+    `ValueKinds` to hand passes None, which never refuses.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
-                                             text_of_arg))
+                                             text_of_arg)
+            or printf_kind_conversion_refusal(callee, fmt_text, args,
+                                              class_of))
 
 
 
@@ -27966,13 +28100,22 @@ def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
 
 
 InitShape = collections.namedtuple("InitShape",
-                                   "method params positional required optional")
+                                   "method params positional required optional "
+                                   "required_names")
 InitShape.__doc__ = (
     "One `__init__` this struct declares.  A named tuple and not a bare one "
     "because the arity window below is arithmetic over four of the five "
     "fields, and `s.required + s.optional` is legible where `s[3] + s[4]` is "
-    "a puzzle.  Unpacks as a 5-tuple, so the diagnostics that only need the "
-    "shapes are unaffected.")
+    "a puzzle.  Unpacks as a 6-tuple, so the diagnostics that only need the "
+    "shapes are unaffected.\n\n"
+    "`required_names` is WHICH parameters have no default, which is not the "
+    "first `required` entries of `params`: `def __init__(out self, a: Int = 3, "
+    "*, b: Int)` has one required parameter and it is `b`.  It is carried "
+    "rather than re-derived because the binder "
+    "(`init_call_bindings`) needs it and a second walk of `param_has_default` "
+    "would be a second answer to \"which parameters must this call supply\", "
+    "and a disagreement between the two is a construction that binds a "
+    "defaulted parameter and demands a missing one.")
 
 
 def struct_init_shapes(struct_def) -> list:
@@ -28042,6 +28185,7 @@ def struct_init_shapes(struct_def) -> list:
         recv = (method_receiver_name(m)
                 if method_declares_receiver(m) else None)
         names, params, required, optional = [], [], 0, 0
+        required_names = []
         for p in (getattr(m, "params", None) or []):
             pname = p[0] if isinstance(p, (tuple, list)) else p
             if recv is not None and pname == recv:
@@ -28052,27 +28196,157 @@ def struct_init_shapes(struct_def) -> list:
                 optional += 1
             else:
                 required += 1
+                required_names.append(pname)
         positional = len(params)
         for i, pname in enumerate(names):
             if pname in kwonly:
                 positional = i
                 break
-        out.append(InitShape(m, params, positional, required, optional))
+        out.append(InitShape(m, params, positional, required, optional,
+                             tuple(required_names)))
     return out
 
 
-def struct_init_overloads(struct_def) -> list:
-    """`[(required, optional, names)]` per `__init__` this struct declares.
+def init_call_bindings(shape, args, kwargs):
+    """`({parameter name: argument}, why, names)` — how ONE `__init__` binds a
+    call.
 
-    `struct_init_shapes` without the methods and the positional bound, for the
-    diagnostics that only need to SPELL the overloads.  One derivation rather
-    than two: a second walk over the same declarations would eventually
-    disagree with the first about what an arity is, and the disagreement would
-    be a struct that one function can call and the other cannot.
+    The binding the language defines, and the whole of what turns
+    `Rng(seed=7)` from a refusal into a program: a positional argument takes
+    parameter `i` in DECLARATION ORDER (up to the keyword-only boundary), a
+    keyword takes the parameter it NAMES, and a parameter the call leaves out
+    keeps the default its signature gave it.
+
+    `bindings` is None when `why` is not None, and `names` is what the
+    refusal has to spell: the keyword that names no parameter, or the
+    parameters the call left unfilled.  Each `why` is a different fact about
+    the program with a different repair, which is why `init_overload_for_call`
+    reports them separately rather than collapsing them into "no match":
+
+      * `"unknown_parameter"` — a keyword names no parameter of THIS
+        constructor.  CPython's `got an unexpected keyword argument`.
+      * `"too_many_positionals"` — more positionals than `positional`, so one
+        of them would bind a keyword-only parameter by position.
+      * `"missing"` — a parameter with no default that the call did not supply.
+        CPython's `missing 1 required positional argument`.
+      * `"twice"` — one parameter given twice, by a positional and a keyword or
+        by two keywords.  CPython's `got multiple values for argument`.
+
+    **`init_body_stores` substitutes through this map and not through an index
+    arithmetic of its own.**  It used to ask "is parameter `i` below the
+    positional count, and if so what is argument `i`", which is the same
+    question for a call with no keywords and cannot answer it for a call with
+    any: a keyword names its parameter out of order, so the parameter that
+    bound is not the parameter at the argument's own index.
     """
-    return [(required, optional, [p for p, _d in params])
-            for _m, params, _pos, required, optional
-            in struct_init_shapes(struct_def)]
+    _method, params, positional, _required, _optional, required_names = shape
+    names = [p for p, _d in params]
+    if len(args) > positional:
+        return (None, "too_many_positionals", ())
+    bound = {names[i]: value for i, value in enumerate(args)}
+    for key, value in kwargs:
+        if key not in names:
+            return (None, "unknown_parameter", (key,))
+        if key in bound:
+            return (None, "twice", (key,))
+        bound[key] = value
+    unfilled = tuple(n for n in required_names if n not in bound)
+    if unfilled:
+        return (None, "missing", unfilled)
+    return (bound, None, ())
+
+
+def init_overload_for_call(shapes, args, kwargs):
+    """`(shape, bindings, why, names)` — the `__init__` this call NAMES.
+
+    The keyword-aware sibling of `init_overload_for_arity`, and the reason a
+    keyword construction against a declared constructor is a program rather
+    than a refusal.  That refusal (`construction_keyword_refusal`'s old `"init"`
+    arm) said `CONSTRUCTION_INIT` "selects the overload by ARGUMENT COUNT —
+    nothing here resolves by type or by parameter name, so a keyword call
+    cannot say which one it means".  **The first clause was true and the second
+    was not, and the second is what the refusal rested on:** a keyword DOES name
+    a parameter, and one constructor declaring that parameter is selected by
+    that alone.  So the selection is over the whole call now — positionals in
+    order plus the parameter names the keywords give — and the count-only rule
+    survives as `init_overload_for_arity` for a call that has no keywords.
+
+    Why it is still a refusal rather than "pick the widest": this path resolves
+    nothing by TYPE, so two constructors that both admit the call's parameter
+    names are indistinguishable here, and a construction chosen by guess is a
+    program the source did not write.  That is `ambiguous`, unchanged.
+
+    The failure codes are reported in the order a reader can act on them,
+    because they are not the same severity and not the same repair:
+
+      1. `unknown_parameter` — a keyword names no parameter of ANY declared
+         constructor.  First because it is a typo-shaped fact about the call
+         and nothing about the positionals can improve on it.  The names are
+         read off the CALL against the union of the overloads' parameter names,
+         not off one overload's answer: a name one overload declares was
+         understood, and reporting it would send the reader after a parameter
+         the call did get right.
+      2. `twice` — one parameter given two values, by a positional and a keyword
+         or by two keywords.  CPython's `got multiple values for argument`.
+         Second for the same reason as the first: it is a fact about the
+         SPELLING, and it is the only one of the four whose own repair (drop one
+         of the two) leaves the rest of the call unchanged.
+      3. `too_many_positionals` — more positionals than the constructor's
+         positional boundary, so one of them would bind a keyword-only parameter
+         by position.  It carries no names of its own — which parameter the
+         surplus argument would have hit is not a fact about the call — so it is
+         reported on its presence rather than on the intersection rule the other
+         three use.
+      4. `missing` — every keyword is spelled right and something the
+         constructor REQUIRES was left out.  Last because it is the fallback
+         shape of "you did not supply enough", and it is the only one of the four
+         whose names come from the constructor rather than from the call.
+
+    For the two codes the overloads answer with names, the names are the
+    INTERSECTION over the overloads that produced that code, and that is a
+    deliberate choice rather than a convenience: when two constructors disagree
+    about what the call leaves out, neither set is what the call left out, so the
+    honest message is the count-based one below ("none of them takes that
+    count"), which is a statement about every declared overload at once.  A union
+    would name `b` and `c` for `S()` against `(a, b)` and `(a, c)` as though
+    supplying both would do.
+    """
+    bound = []
+    whys = {}
+    for shape in shapes:
+        bindings, code, names = init_call_bindings(shape, args, kwargs)
+        if code is None:
+            bound.append((shape, bindings))
+        else:
+            whys.setdefault(code, []).append(names)
+    if len(bound) == 1:
+        return (bound[0][0], bound[0][1], None, ())
+    if len(bound) > 1:
+        return (None, None, "ambiguous", ())
+    declared = {p for shape in shapes for p, _d in shape.params}
+    unknown = tuple(k for k, _v in kwargs if k not in declared)
+    if unknown:
+        return (None, None, "unknown_parameter", unknown)
+    for code in ("twice", "missing"):
+        if code not in whys:
+            continue
+        # The intersection is a set and a set has no order; the names are taken
+        # back in the FIRST overload's declaration order, which is the order
+        # CPython reports them in (`missing 2 required positional arguments: 'n'
+        # and 'm'`, not the alphabetical one).
+        common = set.intersection(*[set(group) for group in whys[code]])
+        names = tuple(dict.fromkeys(
+            n for n in whys[code][0] if n in common))
+        if names:
+            return (None, None, code, names)
+    if "too_many_positionals" in whys:
+        return (None, None, "too_many_positionals", ())
+    # The positionals are what failed, and this is the pre-existing question
+    # with its own two reasons and its own message.
+    hit = [s for s in shapes
+           if s.required <= len(args) <= s.required + s.optional
+           and len(args) <= s.positional]
+    return (None, None, "ambiguous" if hit else "no_overload", ())
 
 
 def init_overload_for_arity(shapes, got: int):
@@ -28098,7 +28372,7 @@ def init_overload_for_arity(shapes, got: int):
     return (None, "ambiguous" if hits else "no_overload")
 
 
-def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
+def init_body_stores(struct_def, call, shape, bindings, decls: dict, rets=None):
     """`([(field, slot, value)], refusal)` — an `__init__` body as STORES.
 
     The lowering of a user-defined constructor, and the whole of what premise
@@ -28155,9 +28429,14 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     that is a CALL to a function returning a container is a blob in the CALLEE's
     reclaimed scratch, and an inlined constructor body runs at a construction
     site in the CALLING function, so nothing about the lifetime differs.
+
+    `bindings` is `init_call_bindings`' answer for THIS shape — `{parameter
+    name: the caller's expression}` — and it is passed in rather than re-derived
+    from `call.args` because the selection (`init_overload_for_call`) has
+    already asked, and a body that substituted through a count of its own would
+    be answering the keyword case by a rule that does not have one.
     """
-    method, params, _positional, _required, _optional = shape
-    got = len(list(getattr(call, "args", None) or []))
+    method, params, _positional, _required, _optional, _req = shape
     args = list(getattr(call, "args", None) or [])
     receivers = struct_receivers(struct_def)
     framed_names = {name for name, s in (decls or {}).items()
@@ -28245,8 +28524,8 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
                     f"`{spelled(target)}`, which assigns a field "
                     f"({struct_field_summary(struct_def)}) this struct does "
                     f"not have"))
-            value, refusal = _init_store_value(struct_def, raw, params, got,
-                                              args, rets, framed_names, call,
+            value, refusal = _init_store_value(struct_def, raw, params,
+                                              bindings, rets, framed_names, call,
                                               decls)
             if refusal is not None:
                 return (None, refusal)
@@ -28285,13 +28564,24 @@ def struct_ctor_field_value(struct_def, call, field, decls: dict = None):
     pairs this with `struct_field_written_outside_init`, which is the check
     that keeps it a claim about the object's field rather than about its
     first instruction."""
-    if not struct_init_shapes(struct_def):
+    shapes = struct_init_shapes(struct_def)
+    if not shapes:
         return None
-    shape, why = init_overload_for_arity(struct_init_shapes(struct_def),
-                                         len(getattr(call, "args", None) or []))
+    # `init_overload_for_call` and not `init_overload_for_arity`, because this
+    # question is "which expression does THIS call put in this field" and a
+    # keyword construction's answer is not derivable from a positional count: a
+    # struct whose only constructor takes `(out self, *, seed: Int)` has no
+    # positional arity at all, and asking for one answered "no overload" for a
+    # call that binds perfectly well. `None` below then means "this
+    # construction says nothing about that field", which is the answer its
+    # caller already handles.
+    shape, bindings, why, _names = init_overload_for_call(
+        shapes, list(getattr(call, "args", None) or []),
+        list(getattr(call, "kwargs", None) or []))
     if shape is None or why is not None:
         return None
-    stores, refusal = init_body_stores(struct_def, call, shape, decls or {})
+    stores, refusal = init_body_stores(struct_def, call, shape, bindings,
+                                       decls or {})
     if refusal is not None:
         return None
     for name, _slot, value in stores or ():
@@ -28897,7 +29187,7 @@ def init_receiver_rewrite(struct_def, value, call, decls):
             f"what is left is a shape with no address to compute from"))
 
 
-def _init_store_value(struct_def, value, params, got: int, args, rets,
+def _init_store_value(struct_def, value, params, bindings, rets,
                       framed_names, call=None, decls=None):
     """`(value_node, refusal)` — what one `self.<f> = …` stores.
 
@@ -28909,11 +29199,11 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
     if isinstance(value, F.IdentExpr) and value.name in _INIT_SINGLETON_NAMES:
         return (value, None)
     if isinstance(value, F.IdentExpr):
-        for i, (pname, default) in enumerate(params):
+        for pname, default in params:
             if pname != value.name:
                 continue
-            if i < got:
-                return (args[i], None)
+            if pname in bindings:
+                return (bindings[pname], None)
             if default is None:
                 return (None, construction_init_body_refusal(
                     struct_def.name,
@@ -29090,21 +29380,33 @@ def _init_type_position_names(value) -> set:
     return out
 
 
-def _init_overload_spelling(overloads) -> str:
+def _init_overload_spelling(shapes) -> str:
     """The declared shapes as one clause, for a message about selecting one.
 
     "it has a constructor" is not actionable, and `Slice`'s two shapes are
     small enough to print, so the arities and the parameter names both appear.
+    The KEYWORD-ONLY boundary is printed where there is one because it is the
+    boundary `too_many_positionals` refuses against: a reader who passed two
+    positionals to `(a, *, b)` cannot tell from `2 required (a, b)` which of
+    the two parameters was meant to take the second one.
     """
-    return "; ".join(
-        f"{req} required" + (f" and {opt} defaulted" if opt else "")
-        + (f" ({', '.join(names)})" if names else "")
-        for req, opt, names in overloads)
+    out = []
+    for shape in shapes:
+        names = [p for p, _d in shape.params]
+        text = (f"{shape.required} required"
+                + (f" and {shape.optional} defaulted" if shape.optional else "")
+                + (f" ({', '.join(names)})" if names else ""))
+        only = names[shape.positional:]
+        if only:
+            text += f", {', '.join(only)} keyword-only"
+        out.append(text)
+    return "; ".join(out)
 
 
-def construction_init_arity_refusal(name: str, overloads, got: int,
-                                    why: str) -> str:
-    """`S(...)` at a count no declared `__init__` admits, or two of them admit.
+def construction_init_arity_refusal(name: str, shapes, got: int,
+                                    why: str, missing=()) -> str:
+    """`S(...)` at a count no declared `__init__` admits, two of them admit, one
+    crosses a keyword-only boundary, or one is left short of what it REQUIRES.
 
     Still a refusal that has to come BEFORE the plain arity one, because that
     message's claim — "a struct's fields are filled in DECLARATION ORDER and
@@ -29112,16 +29414,29 @@ def construction_init_arity_refusal(name: str, overloads, got: int,
     constructor, and a message that is false about the program in front of the
     reader is worse than no message.
 
-    The two reasons are different problems and are stated differently, because
+    The reasons are different problems and are stated differently, because
     they have different fixes:
 
       * `no_overload` — the count is outside every declared arity.  This is an
         error the language would report at the call, and the fix is on the
         caller's side: `Slice` admits 2, 3 and 4 positionals and nothing else.
-      * `ambiguous` — two declared constructors admit the count, and this path
+      * `ambiguous` — two declared constructors admit the call, and this path
         resolves nothing by type, so it cannot say which one the source named.
         The fix is NOT "pick the first": a construction chosen by guess is a
         program the source did not write.
+      * `missing` — the keywords were all understood and the constructor still
+        wants something the call did not give it.  This is the reason the
+        keyword construction used to be refused with a message about overload
+        SELECTION instead, and it is the honest one: `S3(end=7)` against
+        `def __init__(out self, start: Int, end: Int)` names a real parameter
+        and leaves `start` unfilled, and CPython says
+        `TypeError: __init__() missing 1 required positional argument:
+        'start'`.  `missing` is the names to say so with.
+      * `too_many_positionals` — the call passed more positionals than the
+        constructor will take by position, so one of them would have to bind a
+        keyword-only parameter by position, which is not a binding.  CPython
+        reports the boundary (`takes 1 positional argument but 2 were given`),
+        and this does too, naming which parameters have no positional slot.
 
     `std/builtin/builtin_slice.mojo`'s `Slice` is why this family exists at all:
     it declares a two-parameter constructor and a four-parameter one with a
@@ -29131,26 +29446,77 @@ def construction_init_arity_refusal(name: str, overloads, got: int,
     `Slice` genuinely does not have, and the counts two of its overloads would
     both claim.
     """
-    shapes = _init_overload_spelling(overloads)
+    spelling = _init_overload_spelling(shapes)
     if why == "ambiguous":
         return (f"constructing {name} with {got} argument(s) is a call to a "
-                f"user-defined `__init__` and TWO of them admit that count: "
-                f"{name} declares {len(overloads)} `__init__` overload"
-                f"{'' if len(overloads) == 1 else 's'} ({shapes}). This path "
-                f"resolves nothing by type — a call site carries the argument "
-                f"count and the arguments, never their types — so it cannot say "
-                f"which of them the source named, and picking either would be "
-                f"running a constructor the program did not choose. Pass the "
-                f"count only one of them takes, or give the two different "
-                f"arities")
-    return (f"constructing {name} with {got} argument(s) is a call to a "
-            f"user-defined `__init__` and none of them takes that count: "
-            f"{name} declares {len(overloads)} `__init__` overload"
-            f"{'' if len(overloads) == 1 else 's'} ({shapes}). In Mojo a "
+                f"user-defined `__init__` and TWO of them admit that call: "
+                f"{name} declares {len(shapes)} `__init__` overload"
+                f"{'' if len(shapes) == 1 else 's'} ({spelling}). This path "
+                f"resolves nothing by type — a call site carries the arguments "
+                f"and their parameter names, never their types — so it cannot "
+                f"say which of them the source named, and picking either would "
+                f"be running a constructor the program did not choose. Pass the "
+                f"arguments only one of them takes, or give the two different "
+                f"parameter lists")
+    if why == "too_many_positionals":
+        wide = max(s.positional for s in shapes)
+        if any(len(s.params) > s.positional for s in shapes):
+            return (f"constructing {name} with {got} positional argument(s) "
+                    f"crosses a keyword-only boundary: {name} declares "
+                    f"{len(shapes)} `__init__` overload"
+                    f"{'' if len(shapes) == 1 else 's'} ({spelling}) — the "
+                    f"parameters after that boundary have no positional slot, "
+                    f"so they have to be named, as `{name}(name=value)`, and a "
+                    f"surplus positional argument is not a binding. This is "
+                    f"CPython's `TypeError`: __init__() takes fewer positional "
+                    f"arguments than were given")
+        return (f"constructing {name} with {got} positional argument(s) is a "
+                f"call to a user-defined `__init__` and the widest one declared "
+                f"takes {wide} by position: {name} declares {len(shapes)} "
+                f"`__init__` overload{'' if len(shapes) == 1 else 's'} "
+                f"({spelling}). In Mojo a declared `__init__` is what "
+                f"`{name}(...)` calls, and this path lowers that call by "
+                f"inlining the constructor body at the construction site, where "
+                f"there is no `*args` to put the surplus argument in. This is "
+                f"CPython's `TypeError`: __init__() takes {wide + 1} "
+                f"positional argument{'' if wide == 0 else 's'} but "
+                f"{got + 1} were given")
+    if why == "missing":
+        # CPython words the two kinds of required parameter differently, and
+        # saying "positional" about a keyword-only one is false: `T(1)` against
+        # `def __init__(out self, a: Int, *, b: Int)` raises `missing 1
+        # required keyword-only argument: 'b'`, not the positional spelling.
+        # The split is per NAME and reads every overload, because `missing` is
+        # only reported when they agree on the names.
+        kwonly = {n for n in missing if all(
+            n in [p for p, _d in s.params][s.positional:] for s in shapes)}
+        clauses = ", ".join(
+            f"missing {len(group)} required {kind} argument"
+            f"{'' if len(group) == 1 else 's'}: "
+            f"{', '.join(repr(n) for n in group)}"
+            for kind, group in (("positional",
+                                 tuple(n for n in missing if n not in kwonly)),
+                                ("keyword-only",
+                                 tuple(n for n in missing if n in kwonly)))
+            if group)
+        names = ", ".join(repr(m) for m in missing)
+        return (f"constructing {name} with {got} positional argument(s) leaves "
+                f"{names} unfilled, and {name} declares "
+                f"{len(shapes)} `__init__` overload"
+                f"{'' if len(shapes) == 1 else 's'} ({spelling}) — a "
+                f"declared `__init__` is what `{name}(...)` calls, and its own "
+                f"parameters that have no default are arguments the call has "
+                f"to supply by position or by name. This is CPython's "
+                f"`TypeError`: __init__() {clauses}")
+    return (f"constructing {name} with {got} positional argument(s) is a call "
+            f"to a user-defined `__init__` and none of them takes that call: "
+            f"{name} declares {len(shapes)} `__init__` overload"
+            f"{'' if len(shapes) == 1 else 's'} ({spelling}). In Mojo a "
             f"declared `__init__` is what `{name}(...)` calls, and this path "
             f"lowers that call by inlining the constructor body at the "
-            f"construction site — so the argument count selects the overload "
-            f"and nothing else does. Pass a count one of them takes")
+            f"construction site — so the call has to name exactly one of them, "
+            f"by its positional count together with the parameter names its "
+            f"keywords spell. Pass arguments one of them takes")
 
 
 def construction_init_body_refusal(name: str, why: str) -> str:
@@ -29257,14 +29623,15 @@ def construction_arity_refusal(name: str, got: int, summary: str,
 
 def construction_keyword_refusal(name: str, keys, why: str,
                                  fields=(), field: str = None,
-                                 overloads: int = 0) -> str:
-    """`S(a=1)` — a keyword construction the field binding could not resolve.
+                                 shapes=()) -> str:
+    """`S(a=1)` — a keyword construction the field or parameter binding could not
+    resolve.
 
-    One message per `why`, because the three failures are three different facts
-    about the program, and it is the ONE function for all three because the
+    One message per `why`, because the failures are different facts
+    about the program, and it is the ONE function for all of them because the
     three spellings the keyword form is refused in (a name that is not a field,
-    a field reached twice, a declared `__init__`) are three arms of the same
-    rule rather than three rules.
+    a field given twice, a name that is not a declared `__init__` parameter)
+    are three arms of the same rule rather than three rules.
 
     `why` is one of:
 
@@ -29276,12 +29643,27 @@ def construction_keyword_refusal(name: str, keys, why: str,
       covered by a positional (`S(1, a=2)` for fields `a, b`), or named by two
       keywords if the parser ever lets that through. CPython calls this
       `got multiple values for argument`; `field` names it.
-    * `"init"` — `name` declares a user-defined `__init__`, and
-      `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT alone, so a
-      keyword call cannot say which overload it means. This is the one case the
-      resolution itself cannot fix, and it stays a refusal rather than becoming
-      "pick the overload with the most parameters", which would be running a
-      constructor the program did not choose.
+    * `"twice_parameter"` — the same shape against a declared `__init__`, where
+      the word is PARAMETER and not field. It is a separate arm rather than a
+      flag on `"twice"` because the sentence has to name the thing the reader
+      wrote: "`x` is not a field of P3 (x, y)" is a diagnostic about a struct
+      with no constructor, and repeating it for a constructor's own parameter
+      would be the same false-vocabulary defect in a new place.
+    * `"unknown_parameter"` — `name` declares a user-defined `__init__` and a
+      keyword names no parameter of ANY of them, which is CPython's
+      `got an unexpected keyword argument`. `shapes` is the declared
+      constructors' `InitShape` list and the parameter NAMES are printed,
+      because the reader's next move is to compare one name against one list.
+
+    It used to have a fourth, `"init"`, which refused **every** keyword
+    against a declared `__init__` on the grounds that "nothing here resolves by
+    type or by parameter name, so a keyword call cannot say which one it
+    means".  That is deleted rather than narrowed, and the deletion is the fix:
+    a keyword DOES name a parameter, so `init_overload_for_call` selects on the
+    parameter names the keywords give plus the positional order, and
+    `Rng(seed=7)` against `def __init__(out self, *, seed: Int)` is now a
+    program.  What is left here is the two facts that binding cannot decide —
+    a name nothing declares, and a parameter given twice.
 
     It used to be ONE blanket refusal for every keyword construction, and the
     reason it gave — "reading a keyword as positional would make the program's
@@ -29305,14 +29687,30 @@ def construction_keyword_refusal(name: str, keys, why: str,
                 f"take the remaining fields in DECLARATION ORDER, and the two "
                 f"together must cover each field exactly once. This is the same "
                 f"`TypeError` CPython raises — got multiple values for argument "
-                f"{field}")
-    return (f"constructing {name} with {keys} is a call to a user-defined "
-            f"`__init__` ({name} declares {overloads} of them), and this path "
-            f"selects the overload by ARGUMENT COUNT — nothing here resolves "
-            f"by type or by parameter name, so a keyword call cannot say which "
-            f"one it means. Passing the values positionally selects the "
-            f"overload the same way every other call on this path does, or use "
-            f"`{name}()` and assign the fields")
+                f"{field!r}")
+    if why == "twice_parameter":
+        return (f"constructing {name} with {keys} gives parameter {field!r} "
+                f"more than one value: a keyword names its parameter and the "
+                f"positionals take the rest in DECLARATION ORDER, so the two "
+                f"together must cover each parameter exactly once and neither "
+                f"store is a program the source wrote. This is the same "
+                f"`TypeError` CPython raises — got multiple values for argument "
+                f"{field!r}")
+    if why == "unknown_parameter":
+        declared = "; ".join(
+            ", ".join(p for p, _d in shape.params) for shape in shapes
+            if shape.params) or "none"
+        return (f"constructing {name} with {keys} is a call to a user-defined "
+                f"`__init__`, and {keys.split(',')[0]} is not a parameter of "
+                f"any of them ({declared}). A keyword is bound to the parameter "
+                f"it NAMES, which is how this call selects the overload — the "
+                f"positional arguments take the rest in DECLARATION ORDER — so "
+                f"a keyword that names no parameter has nowhere to put its "
+                f"value. This is CPython's `TypeError`: __init__() got an "
+                f"unexpected keyword argument")
+    return (f"constructing {name} with {keys} is a keyword construction this "
+            f"path does not lower, and the reason is not the keyword itself — "
+            f"see `construction_keyword_refusal`'s caller")
 
 
 def keyword_spread_refusal(subject: str, operand: str) -> str:
@@ -29606,49 +30004,30 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # REQUIRES a parameter is the other half and is now what the language
     # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
     # and it is refused as one, naming the declared overloads.
-    unmatched = [k for k, _v in kwargs if k not in slots]
-    if unmatched:
-        # A keyword that names no field is a `TypeError` in every language this
-        # path stands in for, and it is asked BEFORE the shape refusals below
-        # because it is the more specific fact about the call: a reader who
-        # wrote `Config(widht=7)` needs to be told the name is wrong, not that
-        # the argument count does not match.
-        return (None, construction_keyword_refusal(
-            name, unmatched, "unknown", slots))
-    if not struct_is_framed(struct_def) and len(slots) != 1 and (args or kwargs):
-        # Zero or two-plus fields with no block to fill: a formal value is one
-        # 64-bit word and a multi-field struct has no value form, so there is
-        # nowhere to put an argument at all.  Asked BEFORE the field binding so
-        # the message is about the shape rather than about a keyword that could
-        # not have been matched to a field list this struct does not have.
-        return (None, construction_arity_refusal(
-            name, len(args), summary,
-            bases=struct_unresolved_bases(struct_def)))
-    if not args and not kwargs and not shapes:
-        # The existing shape, for a struct that declares no constructor at all:
-        # every field at its own default, and every placed nested frame brought
-        # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
-        # non-literal default belongs to `struct_frame_representable` /
-        # `struct_default_word` and has its own message, and a second copy of
-        # the decision is a second thing to keep in step with the first.
-        return ((CONSTRUCTION_DEFAULT,), None)
     if shapes:
-        if kwargs:
-            # A keyword against a DECLARED constructor is a different construct
-            # from the keyword form the field-filling path now lowers, and it
-            # is refused here rather than left to reach `init_body_stores`,
-            # which binds the constructor's parameters POSITIONALLY and would
-            # therefore drop the keyword and build the call the source did not
-            # write. `construction_keyword_refusal`'s `"init"` arm says which
-            # shape is missing and names the way out.
+        # **READ THIS BRANCH BEFORE THE TWO BELOW, and that ordering is what
+        # this comment used to only claim.** `unmatched` matched every keyword
+        # against the FIELD LIST and `construction_arity_refusal` said "with no
+        # user-defined constructor … and Rng declares no `__init__` for it to
+        # call instead" — both of them answers about a struct that HAS a
+        # constructor, so both were false about `struct Rng: def __init__(out
+        # self, seed: Int): …` constructed as `Rng(7)`, and `Rng(seed=7)` was
+        # refused as a keyword naming "no field". The claim at the top of this
+        # function ("a DECLARED `__init__` outranks everything below, and it has
+        # to") was right and was not true of the code.
+        shape, bindings, why, why_names = init_overload_for_call(
+            shapes, args, kwargs)
+        if why == "unknown_parameter":
             return (None, construction_keyword_refusal(
-                name, [k for k, _v in kwargs], "init",
-                overloads=len(struct_init_overloads(struct_def))))
-        shape, why = init_overload_for_arity(shapes, len(args))
+                name, why_names, "unknown_parameter", shapes=shapes))
+        if why == "twice":
+            return (None, construction_keyword_refusal(
+                name, why_names, "twice_parameter", field=why_names[0]))
         if why is not None:
             return (None, construction_init_arity_refusal(
-                name, struct_init_overloads(struct_def), len(args), why))
-        stores, refusal = init_body_stores(struct_def, call, shape, decls, rets)
+                name, shapes, len(args), why, missing=list(why_names)))
+        stores, refusal = init_body_stores(struct_def, call, shape, bindings,
+                                           decls, rets)
         if refusal is not None:
             return (None, refusal)
         # A ONE-FIELD struct whose constructor stores into its only field: the
@@ -29686,6 +30065,36 @@ def struct_construction_plan(struct_def, call, decls: dict,
         # that cannot be materialized is refused by them, by field, as it is
         # for `S()`.
         return ((CONSTRUCTION_INIT, stores), None)
+    # Everything below is a struct that declares NO constructor, which is what
+    # makes these three the right questions here: `S(...)` fills the FIELD LIST
+    # in declaration order, and the two refusals above are about a field list
+    # this struct actually has.
+    unmatched = [k for k, _v in kwargs if k not in slots]
+    if unmatched:
+        # A keyword that names no field is a `TypeError` in every language this
+        # path stands in for, and it is asked BEFORE the shape refusals below
+        # because it is the more specific fact about the call: a reader who
+        # wrote `Config(widht=7)` needs to be told the name is wrong, not that
+        # the argument count does not match.
+        return (None, construction_keyword_refusal(
+            name, unmatched, "unknown", slots))
+    if not struct_is_framed(struct_def) and len(slots) != 1 and (args or kwargs):
+        # Zero or two-plus fields with no block to fill: a formal value is one
+        # 64-bit word and a multi-field struct has no value form, so there is
+        # nowhere to put an argument at all.  Asked BEFORE the field binding so
+        # the message is about the shape rather than about a keyword that could
+        # not have been matched to a field list this struct does not have.
+        return (None, construction_arity_refusal(
+            name, len(args), summary,
+            bases=struct_unresolved_bases(struct_def)))
+    if not args and not kwargs:
+        # The existing shape, for a struct that declares no constructor at all:
+        # every field at its own default, and every placed nested frame brought
+        # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
+        # non-literal default belongs to `struct_frame_representable` /
+        # `struct_default_word` and has its own message, and a second copy of
+        # the decision is a second thing to keep in step with the first.
+        return ((CONSTRUCTION_DEFAULT,), None)
     framed = struct_is_framed(struct_def)
     # A FRAMED struct.  One argument that is a recognised frame of THIS struct
     # is a copy, and it is checked before the arity rule because arity is what

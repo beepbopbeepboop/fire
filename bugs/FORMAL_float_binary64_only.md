@@ -1,10 +1,11 @@
 # binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice
 
 **Area:** FORMAL (the float value model). Claim `project26:float`, found
-2026-10-04 on `work/formal26-float`. **NOT FIXED, deliberately** — this is the
-SCOPE of the support rather than a defect in it, and the doc exists so that
-"binary64 only" is a decision somebody can read rather than an absence somebody
-has to infer.
+2026-10-04 on `work/formal26-float`. **Status: the SCOPE is unchanged and it is
+not sound** — binary64 is still all that is supported, and one place inside it
+was a silent wrong answer rather than a refusal until 2026-10-05
+(`formal29-2-r2`); §"What was measured" below records that, and it is a different
+kind of finding from the narrow formats this document is about.
 
 ## What is supported, and where
 
@@ -79,3 +80,60 @@ so `//`, `%`, `**` and the bitwise operators on two doubles are REFUSED by name 
 other is not (neither FP unit has an instruction, and CPython's `7.0 // 2` is
 `3.0`, not a truncated `3`). That refusal is a slice boundary of this one and not
 a gap in it.
+## Status, 2026-10-05 (`formal29-2-r2`): the scope had one silent wrong answer
+## inside it, and it is closed
+
+"Binary64 only" was a scope nobody had checked against the other half of the
+question, which is what a **double is read AS**. Every consumer of a float on
+this path asked for a KIND — `float_binary_refusal`, `float_conversion_lowering`,
+`float_comparison`, `truthy_lowering` — and every producer agreed, because the
+producers are literals, annotations and initialisers. A `printf` conversion is
+none of those: it is a *format string*, and both backends place a vararg from
+the FORMAT rather than from the operand's kind (AAPCS has one register file, and
+SysV's classifier reads the conversions), so nothing ever compared the two.
+
+Measured, both architectures, before the fix:
+
+| source | printed | what it is |
+|---|---|---|
+| `def show(x: Float64): printf("[%d]", x)` with `x = 3.9` | `[858993459]` | `0x33333333`, the low 32 bits of 3.9 |
+| the same with `%c` | `[3]` | `0x33`, the same two bytes as a character |
+| `var a = 7; printf("[%.17g]", a)` | `[3.4584595208887258e-323]` | the integer 7 read as the bit pattern of a double |
+
+Green builds, exit 0, wrong numbers on the screen. Not a rounding anywhere: a
+`%d` reads the vararg as an integer and a `%g` reads it as a double, so a
+disagreement is a rendering of the wrong VALUE rather than of the right one.
+
+**What landed.** `model.printf_kind_conversion_refusal`, asked from
+`printf_format_refusal` — the one entry point both backends already ask, next to
+`printf_text_conversion_refusal`, which is the same rule on the `%s` axis. The
+evidence is `model.printf_arg_float_evidence`, which is a three-way answer
+(`"float"` / `"int"` / `None`) because the two directions have different evidence
+available: `FLOAT_KIND` is never a default, so a double is positive evidence
+from `_expr_str_kind` alone, while "an integer" needs what
+`printf_text_conversion_refusal`'s own rows call positive evidence —
+`ValueKinds.own_shape_kind`, a statement of THIS function binding the name to a
+number on its own shape.
+
+**`None` never refuses, and that is load-bearing.** An unannotated parameter
+holding a double (`def show(x): printf("%f", x)` called `show(2.5)`) prints 2.5
+today and must keep doing so: both backends place the word from the format, so
+a caller that passed a double needs no annotation here. Reading "the source does
+not say" as "not a float" would refuse a program that is right, which is the
+failure mode every evidence rule in this area is written against — and the row
+`float_an_unannotated_parameter_at_a_floating_conversion_still_prints` pins it.
+
+Pinned by `test_formal_run.py`'s new `FLOAT_REFUSALS` group, five rows: the two
+refusals that are the defect, the third for the other direction, and two
+controls (`%d` of an integer, `Int(x)` of a double — the conversion the message
+names, so a rule that broke the conversion while refusing the mismatch would
+still pass the three refusals). `FLOAT_CASES` is 21/21 and the new group 5/5.
+
+**What this does NOT close.** It is a hole in the boundary of the scope, not a
+change to it: the scope is still binary64, `Float32` is still refused by name for
+the reason §"What is NOT" gives, and the SECOND slice is still a second kind. It
+also removes one hazard from
+`bugs/FORMAL_float_pointer_pointee.md`'s remaining work rather than doing any of
+it: letting a `Pointer[Float64]` load through without a kind would have made
+`printf("%d", p.value())` print a bit pattern, so the rule above is a
+PREREQUISITE for that change and not an alternative to it.

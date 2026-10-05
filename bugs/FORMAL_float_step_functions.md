@@ -128,3 +128,57 @@ three, and every reading in it is a function the two machines' compare
 instructions are asked to implement — but "the model's order is not yet proved to
 be an order" is a statement about the model's completeness and belongs in the file
 rather than in a reader's head.
+## Status, 2026-10-05 (`formal29-2-r2`): the refusal is a REFUSAL now, and the
+## traceback was the whole of what was wrong with it
+
+The section above reports the reproducer's ending as "it escapes as a traceback
+rather than a `CodegenError`". **That is fixed, and it was a defect in its own
+right rather than a cosmetic detail of an honest limit**: `NotImplementedError` is
+both generators' uniform "I will not write a model I do not have" signal —
+`formal/x86_64_proof_gen.py` catches it internally and falls back to a
+disclaimed placeholder model, which is what `TestAPlaceholderModelClaimsNothing`
+pins — and nothing turned it into a build error. So on the backend that REFUSES
+rather than stubbing, this program's refusal reached the reader as exit 1 and
+forty frames of generator internals, with the sentence that NAMES the construct
+at the bottom of it:
+
+```
+build: no proof was generated: the semantic model has no value for something in
+this program, and refusing is what it does rather than state something false
+about the source. The IMAGE is not what refused — `--no-prove` builds and runs
+the same bytes — and what is missing is a domain in
+`formal/arm64_proof_gen.py`'s model of the source, which is a function of the
+entry argument alone. The generator's own word for it: model: a FloatLiteral
+has no value in the semantic model (a `UInt64 → UInt64` function over the
+source's arithmetic); refusing rather than modelling it as 0, which would be a
+false statement about the source
+```
+
+`formal/build.py` now converts it at the one boundary where a proof is
+requested, so `fire.py`'s own `except FormalBuildError` arm prints it. Three
+things the message has to say and each is a row in
+`test_formal_call_proof_gen.py`'s `TestAModelRefusalIsABuildRefusalNotATraceback`:
+it is a `FormalBuildError` and not a bare exception (so no traceback), it
+carries the generator's OWN sentence (so the reader is sent to the float
+literal), and it says `--no-prove` builds the same bytes (so a reader can tell a
+model gap from a lowering one at a glance). The fourth row is the control the
+other three rest on: the program still BUILDS on both backends with
+`prove=False`.
+
+**Nothing about the model changed.** Items 1-6 of "Missing, in the order it has
+to be done" are exactly as they were, and this is not a step towards them: the
+model still has no float kind, `V0..V7`/`XMM0..XMM15` still do not exist, and
+`IEEE754`'s functions are still `rfl`-unreachable from any step arm. What
+changed is that a reader who runs into the limit is told what it is in one line
+instead of being handed a stack trace.
+
+**A measurement worth recording for whoever does item 2, because it decides
+where the first float proof can even be asked for.** x86-64 does NOT refuse this
+program: it takes its documented placeholder route and emits the identity model
+with a note, suppressing the AST bridge and the run tests — so on x86-64 a float
+program BUILDS and its proof TYPECHECKS with two admitted `sorry`s
+(`2 declaration(s) ADMITTED a sorry — the file typechecks, it is not a proof`).
+The divergence is the documented one (`wide_recv` is the other example of it)
+and it is the arm64 half that is stricter, but it means a measurement of "a
+float program cannot be proved" has to say which backend it ran on: x86-64's
+answer today is "it is admitted", and an admitted proof is not a proof.

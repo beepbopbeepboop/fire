@@ -174,3 +174,76 @@ really is not a branch (§1, re-confirmed by `csel x0, x0, x1, eq` being four
 instructions and no control flow), and the block layer really is not the ceiling
 — the ceiling for rows 3/4/5 is `_gen_run_cert`'s composed-state proof, and for
 row 6 it is still the per-block `pc` function above.
+
+## Status, 2026-10-04 (`formal29-2`): the block layer's OWN check is fixed, and it
+## was refusing a shape the layer already expresses
+
+The last bullet of the section above — *refusing a block that contains a
+conditional-value step is a special case chosen to dodge a cost this emitter
+cannot model* — is now **wrong, and the thing it describes was a defect in its
+own right rather than only a workaround.** `_dylib_contract_proof`'s gate was
+
+```python
+if any("if " in _body_of(i) for i in range(m)):
+    return ""
+```
+
+a substring test standing in for *one function of one state*, which is what
+`Refine.Block.step` actually asks for. The two are different, both spellings are
+real, and the substring cannot tell them apart:
+
+| a step that CHOOSES A VALUE | a step that CHOOSES A PC |
+|---|---|
+| `CSET`: `some (arm64_set_reg rd s (if arm64_matches_condition c s.nzcv then 1 else 0))` — one `some`, so `arm64_step` says it is one function of one state | `B.cond`/`CBZ`/`TBZ`: the model answers `if c then some A else some B`, so there is no single `some` to strip |
+
+So the check refused every export whose code contained a `cset`, which is a
+**live, already-reachable** loss and not a hypothetical one about CSEL:
+
+```
+$ cat .tmp/p/csetval.mojo
+def csetval(n):
+    var b = not n          # CMP + CSET — branchless, two instructions
+    var m = n * 3
+    return m
+```
+
+`arm64_codegen.py` emits `cmp` + `cset` for a `not` in VALUE position
+(`_emit_truthy_word`, then `encode_cmp_xn_imm` + `encode_cset_xd_cond`, ~line
+5182) and never branches. The image is 23 instructions, the eighth is
+`cset x0, eq`, and it computes `n * 3` — run through the dylib: 0/15/42/300 for
+`n = 0/5/14/100`, against the same values from the branchless twin with the
+`not` deleted. `_dylib_contract_proof` returned the **empty string** for it.
+
+**The fix asks the MODEL's shape instead of the text.** `arm64_step` returns
+`some <state>` exactly when the step is one function of one state, so `_step_rhs`'s
+own `some` prefix is the discriminator — and it is the same prefix `_body_of`
+already reads, so there is no new encoding to keep in step. The `pc_writes`
+discipline below it is unchanged, so a branch in any position but the last is
+still declined, and the last may still be the `ret`.
+
+Measured after: the same export gets a **PROVED** contract — `bodyCert`,
+`agrees_of_body`, `hreg` — and the emitted file checks clean with **0 holes** in
+**7.5 s / 1.6 GB** through `formal/lean.py`. `test_formal_dylib.py`'s
+`a conditional value is not a branch` pins all three claims: the image's answers,
+a PROVED `agrees_of_body` for the `cset` export, and — the control — a *named*
+`_spec` obligation and **no** contract for a body with a real `B.cond` in it,
+whose spec is handed over by hand so that "a spec exists" and "a contract was
+proved" are two facts in the same file. `test_formal_dylib.py` is 25/25.
+
+### What this does and does not unblock
+
+* **It does not make rows 3/4/5 build.** Those still need the `CSEL` row, and
+  that row is not this document's: it is deliberately ABSENT from `_STEP_CONDS`
+  with a long comment saying why (`check_step_conds` requires the table and
+  `arm64_step` to be the same set, so a row here with no model branch is a
+  generator describing a CSEL's effect while the function being proved takes no
+  step for that word), and the model branch is claimed by
+  `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+  (formal28-2), blocked on `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
+  (formal28-1). What landed here is that when that row does arrive, the block
+  layer will already accept it: a `CSEL` is `some (arm64_set_reg rd s (if … then
+  … else …))`, which is the `CSET` shape above, one `some` around a conditional
+  value and no `pc` write anywhere.
+* **Row 6, the loop, is untouched** and still needs the per-block `pc` function.
+* **The `_gen_run_cert` cost centre is untouched** and is not this document's
+  either — it is the three-branch certificate's, on formal28-1's claim.

@@ -375,8 +375,8 @@ SAMPLES = [
      "parse error: /x/std/algorithm/reduction.mojo:251:7: `comptime { … }` and "
      "`comptime <expr>` are not supported by this compiler"),
     ("construction with arguments needs __init__",
-     "constructing FuncAttribute with 2 argument(s) is a call to a "
-     "user-defined `__init__` and none of them takes that count"),
+     "constructing FuncAttribute with 2 positional argument(s) is a call to a "
+     "user-defined `__init__` and none of them takes that call"),
     ("receiver stored in a container",
      "a Optional receiver is stored in a container, which has no layout for a "
      "frame address on this path"),
