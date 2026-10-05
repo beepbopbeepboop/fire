@@ -8321,6 +8321,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # happened to be emitting when it was asked. The table is per function
         # and is fixed before `_scan_value_kinds` runs (see `_emit_function`).
         frame_candidates = dict(self._frame_candidates)
+        fdefs = dict(self._functions)
         structs = self._structs
 
         def kind_of_slot(expr):
@@ -8335,7 +8336,18 @@ ctor_field_value=self._ctor_field_value_for(name),
                     return M.one_word_receiver_kind(
                         cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs,
                         DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
-                return None
+                # LAST, and only for a PARAMETER of the function this table was
+                # built for: the receiver and the frame slot are decided by the
+                # BINDING above, and what is left is a name whose own signature
+                # may say what it holds.  `len(keys)` where `keys: List[T]` is
+                # refused without this while `keys[0]` in the same body lowers,
+                # and two readers of one word that consult different evidence is
+                # how a mismatch turns into a wrong answer rather than a
+                # refusal.  `model.declared_param_kind`'s docstring says why the
+                # scope is this narrow and why it is asked last.
+                return M.declared_param_kind(
+                    fdefs.get(fn_name), name, TYPE_NAMES, STRING_TYPE_NAMES,
+                    DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
             if isinstance(expr, F.MemberExpr):
                 # ONE level only.  `a.b.c` is a load of a load and the outer
                 # field's declared type is the type of the WORD, not of

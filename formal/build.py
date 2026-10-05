@@ -14582,6 +14582,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
+        _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container)
         unstored.append(_unstored_read(fn, placed, frame_slots))
     # Raised LAST, and that ordering is the design rather than an accident of
@@ -14834,6 +14835,80 @@ def _refuse_returned_container_blobs(fn, returns_container) -> None:
     """
     for line, what in M.container_escape_sites(fn, returns_container):
         raise CodegenError(M.returned_container_refusal(fn, line, what))
+
+
+def _raises_somewhere(body, raisers: set, nested_ok: bool = True) -> bool:
+    """Whether `body` can raise: a `raise`, or a call to a local raiser.
+
+    `nested_ok=False` stops at a nested `def`, because a function body's `raise`
+    is not reachable from the enclosing statement — the two run on different
+    frames — and a `try` around the CALL is what this has to notice.
+    """
+    for node in M.iter_nodes(body):
+        if not nested_ok and isinstance(node, F.FunctionDef):
+            continue
+        if isinstance(node, F.RaiseStmt):
+            return True
+        if isinstance(node, F.CallExpr):
+            name = getattr(node.func, "name", None)
+            if name is not None and name in raisers:
+                return True
+    return False
+
+
+def _refuse_try_handlers(functions, fn) -> None:
+    """Refuse a `try` whose handlers guard something that can actually RAISE.
+
+    **No unwinder, so no handler is reachable — and the program that says so is
+    still built.** That is the defect this closes: `raise` lowers to an exit on
+    both backends (`arm64_codegen.py::_emit_stmt`'s `RaiseStmt` arm, and
+    x86-64's twin), `_emit_try` skips the handlers because there is no edge to
+    route, and the code AFTER the `try` is emitted as if the body had returned
+    normally. So `try: boom() except: pass` where `boom()` raises exits 1 having
+    printed nothing, and CPython enters the handler — measured on both
+    architectures, for a base this image cannot see AND for one it declares,
+    which is why the reason names the runtime rather than the base.
+
+    **Three conditions, and the second and third are what keep this off the
+    programs that are already right.**  A `try` with NO handlers is a cleanup
+    scope rather than an exception scope — `finally` needs no runtime and
+    `_emit_try` lowers it on all three exits — and a `try` whose guarded region
+    CANNOT raise is a program that is already the program written: nothing can
+    throw, so the unreachable handler is unreachable in CPython too. Measured on
+    this tree's own corpus before the conditions were added, a first version of
+    this check that refused every `try` with a handler turned three rows of
+    `test_formal_run.py` red, and two of the three
+    (`try_body_store_is_dominating_after_the_statement`,
+    `try_else_clause_runs_only_when_the_body_completed`) were `try: p = 1` —
+    no raise, no call, exit 0 and the right number, which is CPython's answer
+    as well. Refusing those would have been refusing correct programs, so the
+    check asks the guarded region instead of the `try`.
+
+    **What "can raise" means here is decidable at build time for the two cases
+    that matter**: a `raise` statement in the guarded region, and a call to a
+    function of THIS MODULE whose own body raises (the raiser set is built once
+    per unit from the same `functions` list every other per-function pass gets).
+    A call into a host module that raises — `int("x")`, a failing `open` — is
+    NOT in the set, so such a `try` still builds with a dead handler; that is the
+    remaining limit and it is a limit of the evidence, stated here rather than
+    papered over with a refusal that would also take the correct programs.
+
+    Asked per function beside `_refuse_variadic_reads`, and it walks
+    `iter_nodes` rather than the statement spine, so a `try` nested in an `if`, a
+    loop or a `with` is found — which is where a real one lives, since a `try`
+    at the top of a body is not what anyone writes."""
+    raisers = set()
+    for f in functions or ():
+        name = getattr(f, "name", None)
+        if name and _raises_somewhere(getattr(f, "body", None), set()):
+            raisers.add(name)
+    for node in M.iter_nodes(fn.body):
+        if not isinstance(node, F.TryStmt) or not node.handlers:
+            continue
+        guarded = list(node.body or []) + list(node.else_body or [])
+        if any(_raises_somewhere(st, raisers, nested_ok=False) for st in guarded):
+            raise CodegenError(M.try_handler_refusal(fn.name, node,
+                                                     node.handlers))
 
 
 def _refuse_variadic_reads(functions: list, fn, shape) -> None:

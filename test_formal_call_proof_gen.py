@@ -66,6 +66,7 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -665,6 +666,16 @@ SP_IN_RN_FORMS = (
     ("mul x0, sp, x1", "= 0x9b007c00 then", "zr", "rejected"),
     ("neg x0, sp", "= 0xcb0003e0 then", "zr", "rejected"),
     ("add w0, sp, #16", "= 0x11000000 then", "zr", "rejected"),
+    # …and the two UNSIGNED-OFFSET memory forms, which read SP and which the
+    # emitter uses for stack traffic: `encode_ldr_xt_xn_imm(_, 31, off)` and
+    # `encode_str_xt_xn_imm(_, 31, off)` are emitted at ten sites apiece. Both
+    # used to read their base with `arm64_reg`, which is 0 at register 31, so
+    # every stack read was modelled from address `off` and every stack write
+    # landed at `off` — a wrong answer rather than a missing one, because the
+    # address it computed was an ordinary-looking address. `TestStoreWidth`
+    # below is the hardware half of the same fact.
+    ("ldr x0, [sp, #64]", "= 0xF9400000 then", "sp", "lands here"),
+    ("str x0, [sp, #16]", "= 0xF9000000 then", "sp", "lands here"),
 )
 
 # The three words the hardware is asked about directly, as
@@ -4322,6 +4333,135 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                          "bugs/FORMAL_a_division_by_a_symbolic_value_leaves_"
                          "the_zero_guard_open.md records, and its next step "
                          "and its Status both need re-reading")
+
+
+class TestUnsignedOffsetAccess(unittest.TestCase):
+    """`LDR Xt, [Xn, #imm]` / `STR Wt, [Xn, #imm]` / `STR Xt, [Xn, #imm]`, run.
+
+    `TestRegister31` above settles the QUESTION for these three forms — their
+    `Rn = 31` is SP, and the model now reads it that way — by asking the
+    assembler and reading `arm64_step`'s branch text. This class asks the thing
+    that settles it for real: it runs each instruction ON THE CPU, runs the same
+    bytes through `arm64_step`, and requires the two final states to be equal.
+
+    Two defects, both measured on this tree before the fix and both invisible to
+    the question above, which is why they are here rather than folded into it:
+
+      * the BASE. `arm64_reg 31 s = 0`, so `ldr x0, [sp, #32]` was modelled as a
+        load from address 32 and `str x0, [sp, #32]` as a write there. The model
+        answered 0 and the hardware answered the word — and because the modelled
+        address was an ordinary address rather than an absurd one, no value-level
+        test of a compiled program could see it.
+      * the WIDTH. `STR Wt` is four bytes and the model wrote eight, so the four
+        bytes ABOVE the stored word were clobbered in the model and left alone by
+        the hardware. A store whose value is right and whose neighbours are wrong
+        is the shape a byte-array or a struct-through-a-pointer test finds.
+
+    Both are one-instruction facts, so the whole class is four cases and about a
+    second: `tools/formal_model_fuzz.py`'s `sweep` on a hand-built state, which
+    is the same code path a 300-case run takes — one `clang` harness, one Lean
+    process with four `#eval`s. It is a test rather than a tool invocation
+    because a tool's exit status is only about the run it was asked for, and
+    these four instructions are the ones the emitter actually emits.
+
+    Skipped off arm64, because the only oracle for the hardware half is the
+    hardware. Lean is required too (`sweep` evaluates `arm64_step`), and the
+    library build it needs is the one every other proof-checking path needs.
+    """
+
+    #: `(text, encoder(*args))` — the SP-relative spellings the emitter emits at
+    #: `formal/arm64_codegen.py`'s ten `encode_ldr_xt_xn_imm(_, 31, …)` /
+    #: `encode_str_xt_xn_imm(_, 31, …)` sites, plus the 32-bit store of the
+    #: pointer value model.
+    CASES = (
+        ("ldr x7, [sp, #64]", lambda A: A.encode_ldr_xt_xn_imm(7, 31, 64)),
+        ("str x7, [sp, #32]", lambda A: A.encode_str_xt_xn_imm(7, 31, 32)),
+        ("str w7, [sp, #32]", lambda A: A.encode_str_wt_wn_imm(7, 31, 32)),
+        # The twelve narrower/unscaled forms and the two flag-setting compares,
+        # all of which `arm64_step` refused to step before this class existed's
+        # subject was fixed. The register-offset pair is the one that cannot be
+        # spelled `[sp, …]`, so it is the one case where the base register is a
+        # name rather than the stack pointer — and that is exactly why it is here:
+        # a pool that only drew SP-relative forms would never have noticed the
+        # register-offset mask being wrong.
+        ("ldrb w7, [sp, #8]", lambda A: A.encode_ldrb_wd_wn(7, 31, 8)),
+        ("strb w7, [sp, #8]", lambda A: A.encode_strb_wd_wn(7, 31, 8)),
+        ("ldrh w7, [sp, #8]", lambda A: A.encode_ldrh_wt_wn_imm(7, 31, 8)),
+        ("strh w7, [sp, #8]", lambda A: A.encode_strh_wt_wn_imm(7, 31, 8)),
+        ("ldrsb x7, [sp, #8]", lambda A: A.encode_ldrsb_xt_xn_imm(7, 31, 8)),
+        ("ldrsh x7, [sp, #8]", lambda A: A.encode_ldrsh_xt_xn_imm(7, 31, 8)),
+        ("ldrsw x7, [sp, #8]", lambda A: A.encode_ldrsw_xt_xn_imm(7, 31, 8)),
+        ("ldr w7, [sp, #8]", lambda A: A.encode_ldr_wt_wn_imm(7, 31, 8)),
+        ("ldur x7, [sp, #-8]", lambda A: A.encode_ldur_xt_xn_imm(7, 31, -8)),
+        ("stur x7, [sp, #-8]", lambda A: A.encode_stur_xt_xn_imm(7, 31, -8)),
+        ("ldr x7, [x9, x4]", lambda A: A.encode_ldr_xt_xn_xm(7, 9, 4)),
+        ("str x7, [x9, x4]", lambda A: A.encode_str_xt_xn_xm(7, 9, 4)),
+        # `CMN` and `TST`: the flags-only pair, and the only two cases here whose
+        # answer lives in PSTATE rather than in a register. They are the rows the
+        # fuzzer's `flags` and `select` mixes draw, and the comparison reads them
+        # back through four conditional branches, so an agreement here is an
+        # agreement about all four flag bits.
+        ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
+        ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        import platform
+        if platform.machine() not in ("arm64", "aarch64"):
+            raise unittest.SkipTest("the hardware half of this is arm64 code")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "formal_model_fuzz",
+            os.path.join(HERE, "tools", "formal_model_fuzz.py"))
+        fm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fm)
+        if not fm.L.find_lean():
+            raise unittest.SkipTest("no Lean on PATH, so arm64_step cannot be run")
+        cls.fm = fm
+
+    def _cases(self):
+        from formal import arm64 as A
+        fm = self.fm
+        out = []
+        for text, enc in self.CASES:
+            regs = [0x0102030405060708] * 31
+            # `x9` and `x4` point into the window and `x4` is a small offset, so
+            # the register-offset pair addresses inside it — the harness reads
+            # memory outside the window as a fault, which is a fact about the
+            # pool and not about the model.
+            regs[9] = fm.MODEL_SP
+            regs[4] = 8
+            # A distinctive byte above each access as well as at it, so a store
+            # that is too WIDE shows up as a difference rather than as a value
+            # that happens to match.
+            mem = bytearray(b"\x11" * (fm.MEM_HI - fm.MEM_LO))
+            for off in (8, 32, 64):
+                for k in range(8):
+                    mem[fm.MODEL_SP + off - fm.MEM_LO + k] = 0xA0 + k
+            words = [struct.unpack("<I", A.encode_cmp_xn_imm(0, 1))[0],
+                     struct.unpack("<I", enc(A))[0]]
+            # The `cmp` first is not decoration: the harness reads the final
+            # NZCV back through four conditional branches, so the flags have to
+            # be ESTABLISHED by an instruction both engines execute — which is
+            # what makes them equal by construction.
+            out.append(fm.Case(regs, 0, bytes(mem),
+                               ["cmp x0, #1", text], words))
+        return out
+
+    def test_the_model_agrees_with_the_cpu(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tally, findings = self.fm.sweep(self._cases(), td)
+        self.assertEqual(
+            [f for f in findings], [],
+            "arm64_step and the CPU disagree on the unsigned-offset memory "
+            "forms:\n" + "\n".join(
+                "%s\n%s" % (c.describe(), "\n".join(d[:6]))
+                for _i, c, d in findings))
+        self.assertEqual(tally.get("AGREE"), len(self.CASES),
+                         f"the sweep reported {dict(tally)}: a case that was "
+                         f"refused or never run is not an agreement")
 
 
 def _generate_dir(tmp, src_path, name, out):

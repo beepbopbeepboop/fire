@@ -307,7 +307,7 @@ def gen_alu(rng, free):
 def gen_moves(rng, free):
     """The move-immediate family, one encoder per width.
 
-    `formal/arm64.py` has TWO `movz` encoders and they are not
+    `formal/arm64.py` has TWO `movz` encoders, one per width, and they are not
     interchangeable: `encode_movz_xd_imm` is the 64-bit one (base `0xd2800000`)
     and `encode_movz_wd_imm` is the 32-bit one (base `0x52800000`), which is
     what every `arm64_codegen.py` call site emits. The pool pairs each encoder
@@ -317,11 +317,14 @@ def gen_moves(rng, free):
 
     **The two names used to be the other way round**, which is why the pairing
     is worth stating: the 32-bit encoder was called `encode_movz_xd_imm` and the
-    64-bit one `encode_movz_xn_imm`, so pairing by NAME gave the wrong width
-    for both and `ENC-MISMATCH 8 of 60` on the first sweep. Each is named after
-    the width it encodes now, and `test_arm64_encoders.py` checks both widths
-    of both names against `as -arch arm64` — so this pool's rule is now also
-    the encoder table's, rather than a convention this one file remembers.
+    64-bit one `encode_movz_xn_imm` — one named after a WIDTH and one after a
+    PARAMETER, both meaning the opposite of what they said — so pairing by
+    NAME gave the wrong width for both and `ENC-MISMATCH 8 of 60` on the first
+    sweep. Each is named for the width it encodes now, and
+    `test_arm64_encoders.py` checks both against the assembler on every
+    register and every immediate, so the names cannot drift back without that
+    suite going red — which is to say this pool's rule is now also the encoder
+    table's, rather than a convention this one file remembers.
     """
     d, n = _dst(rng, free), _r(rng, free)
     i = rng.randrange(0x10000)
@@ -507,20 +510,29 @@ def gen_memreg(rng, free):
 #:     every one of them the harness's fault and none of them a fact about
 #:     `arm64_step`. `arm64_step` has arms for both (0xa9800000, 0xa8c00000) and
 #:     they are untested here.
-#:   * `LDP Xd1, Xd2, [SP, #imm]` (signed offset, 0xa9400000), which the model
-#:     DOES step. No encoder in `formal/arm64.py` emits it and that is now a
-#:     decision with a reason rather than an accident: the encoder that claimed
-#:     it under that name encoded a single-register load off a REGISTER base
-#:     with its two arguments swapped and its offset in EIGHTIES, so a caller
-#:     that used it would have got a proof about one instruction (the model's
-#:     0xa9400000 arm) and an image containing another. It was deleted rather
-#:     than repaired, because nothing wants the instruction — frame traffic is
-#:     the writeback pairs above and a single SP-relative word is
-#:     `encode_ldr_xt_sp_imm` — and a correct encoder no lowering calls is a
-#:     table entry rather than an instruction any image can contain. So this
-#:     absence is permanent until a lowering wants the form, and the byte-exact
-#:     `ldp`/`stp` cases in `test_arm64_encoders.py` are what would catch it if
-#:     one landed wrong.
+#:   * `LDP Xd1, Xd2, [<Rn|SP>, #imm]` (signed offset, 0xa9400000), which the
+#:     model DOES step. No wired encoder emits it, and that is now a decision
+#:     with a reason rather than an accident. The encoder that claimed it under
+#:     the name `encode_ldp_xn_xt_sp` emitted something else: it never set the
+#:     base register, overwrote the base field with its first argument, packed
+#:     the displacement into `Rt2`'s field rather than `imm7`'s, and took its
+#:     arguments in the opposite order from the mnemonic — a single-register
+#:     load off a REGISTER base, so a caller that used it would have got a
+#:     proof about one instruction (the model's 0xa9400000 arm) and an image
+#:     containing another. It was DELETED, because nothing wants the
+#:     instruction — frame traffic is the writeback pairs above and a single
+#:     SP-relative word is `encode_ldr_xt_sp_imm` — and a correct encoder no
+#:     lowering calls is a table entry rather than an instruction any image can
+#:     contain. What replaced it is `encode_ldp_xt1_xt2_rn`, byte-checked against
+#:     `as` in `test_arm64_encoders.py` and STILL unwired, so this pool does not
+#:     draw it either. The model's own side had the same defect and is now
+#:     correct: its three field reads were all wrong (the base register read as
+#:     a destination, the first destination read as the second, and the
+#:     displacement read out of `imm7 | Rt2` as an unsigned 12-bit count of
+#:     eighties), and `lib/ProofLib.lean` now shares the pre-index STP arm's
+#:     `imm7`-at-21:15 reading. This absence is therefore permanent until a
+#:     lowering wants the form, and the byte-exact `ldp`/`stp` cases in
+#:     `test_arm64_encoders.py` are what would catch it if one landed wrong.
 MIXES = {
     "alu": (gen_alu, gen_moves),
     "flags": (gen_flags, gen_alu),

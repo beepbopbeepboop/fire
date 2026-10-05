@@ -2763,6 +2763,58 @@ _STEP_CONDS = [
     # getting that wrong would mean a branch to the wrong address, silently.
     (0xff000000, 0x36000000),
     (0xff000000, 0x37000000),
+    # 54-65: the narrower and unscaled access forms. APPENDED for the reason 51
+    # was — every index above is hard-coded in `_step_rhs` and in the block
+    # scanner, so a new instruction goes at the end and the indices do not move —
+    # and here the append is also what keeps `lib/ProofLib.lean`'s chain honest:
+    # `arm64_step` has these twelve arms at the END of its `if` chain for the
+    # same reason, so no existing `work_step_*` lemma's rewrite chain changes and
+    # each of the twelve new ones states the `¬` fact for every arm before it.
+    #
+    # The masks clear the 12-bit offset (`0xffd00000`), the 9-bit one with its `Rn`/`Rt`
+  # (`0xffe00c00`), or `Rm`/`option`/`S` for the register-offset pair (`0xffe0fc00`),
+    # because the 12-bit unsigned offset occupies bits 21:10 and the 9-bit
+    # unscaled one bits 20:12; a mask that kept bit 21 would claim words of the
+    # `LDR Xt, [Xn, #imm]` class above. A consequence stated rather than hidden:
+    # an offset with bit 11 set falls outside these masks and is therefore
+    # REFUSED by the generator rather than mis-read, which is the direction this
+    # path wants. Every one of the twelve encoders is WIRED — measured, each has
+    # a call site in `formal/arm64_codegen.py` and none appears in
+    # `tools/arm64_insn_audit.py::unwired_encoders`.
+    (0xffd00000, 0x39400000),  # 54 LDRB Wt, [Xn, #imm]
+    (0xffd00000, 0x39000000),  # 55 STRB Wt, [Xn, #imm]
+    (0xffd00000, 0x79400000),  # 56 LDRH Wt, [Xn, #imm]
+    (0xffd00000, 0x79000000),  # 57 STRH Wt, [Xn, #imm]
+    (0xffd00000, 0x39800000),  # 58 LDRSB Xt, [Xn, #imm]
+    (0xffd00000, 0x79800000),  # 59 LDRSH Xt, [Xn, #imm]
+    (0xffd00000, 0xb9800000),  # 60 LDRSW Xt, [Xn, #imm]
+    (0xffd00000, 0xb9400000),  # 61 LDR Wt, [Xn, #imm]
+    (0xffe0fc00, 0xf8606800),  # 62 LDR Xt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
+    (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
+    # 66 CMN, 67 TST. **Both encoders are UNWIRED on this tree** — measured:
+    # `grep -c encode_cmn_xn_xm formal/arm64_codegen.py` is 0, the same for
+    # `encode_tst_xn_xm`, and both are in
+    # `tools/arm64_insn_audit.py::unwired_encoders`. That CORRECTS this file's own
+    # §2 measurement, which listed them among "every encoder in the table above is
+    # wired" and called `encode_cmn_xn_xm` "emitted by `formal/arm64_codegen.py`";
+    # no lowering emits either, so an image cannot contain them and by the
+    # distinguishing test this table exists for, a model that cannot step them
+    # costs nothing.
+    #
+    # They are modelled anyway, and the reason is worth stating because it is not
+    # the doc's: the audit's test is about IMAGES, and the other consumer of
+    # `arm64_step` is `tools/formal_model_fuzz.py`, whose pool draws from the
+    # ENCODER TABLE rather than from the images. So an unwired encoder still shows
+    # up there as a `NOSTEP` — 38 of them on seed `sweepB` before these two arms,
+    # every one `CMN` or `TST` — and the number a reader of the fuzzer's own tally
+    # sees is a measurement of the MODEL, not of the emitter. Two arms and two
+    # `work_step_*` lemmas take it to zero, which is cheaper than the alternative
+    # (a pool that hides the gap) and leaves the model complete for every encoding
+    # `formal/arm64.py` can produce.
+    (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
+    (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
     # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
     # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
     # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
@@ -2831,12 +2883,12 @@ def _step_rhs(w: int, idx: int):
     # n` for every register form, `s.sp` for the immediate ones — and that
     # asymmetry is deliberate: the step-result lemma is closed by `exact`-ing the
     # library lemma INSTANTIATED AT THIS WORD, so the two right-hand sides only
-    # have to be defeq, and on a literal index they are.  Emitting
-    # `arm64_reg_or_sp` here instead would make that `exact` trivial but put
-    # `arm64_reg_or_sp n s` into every downstream value-flow goal, and those are
-    # simplified with `simp only [..., arm64_reg, arm64_set_reg]` lists that do
-    # not carry the helper — measured: 8 examples typecheck with the spelling
-    # below and the helper is not in those lists.
+    # have to be defeq, and on a literal index they are.
+    #
+    # The unsigned-offset `LDR`/`STR` rows below use `_base_of`, which is this
+    # same rule applied to a base register: `s.sp` at 31 and `arm64_reg n`
+    # otherwise, because their model's arms read through `arm64_reg_or_sp` and
+    # `exact` needs the two sides to be defeq.
     # `test_formal_call_proof_gen.py`'s `TestRegister31` pins both halves of that
     # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
     # table used to check the branch's source text, which the decoder cannot
@@ -2973,24 +3025,26 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # `arm64_reg 31 s`, not `s.sp`: the RHS has to be the SYNTACTIC mirror
-        # of `work_step_ldr_uoff`'s statement, because that is what `exact`
-        # unifies against, and a hand-simplified base is a different term even
-        # where it is equal.
-        #
-        # BUG, measured and not yet fixed: this form HAS an SP encoding, so
-        # `Rn = 31` is the stack pointer and both this row and
-        # `work_step_ldr_uoff` model `encode_ldr_xt_xn_imm(_, 31, off)` — ten
-        # sites in `formal/arm64_codegen.py` — as a load from address `off`.
-        # `bugs/FORMAL_arm64_ldr_str_unsigned_offset_reads_register_31_as_zero.md`.
+        # SP-aware through `_base_of`, which spells `s.sp` at `Rn = 31` — the
+        # form has an SP encoding, so `encode_ldr_xt_xn_imm(_, 31, off)` is what
+        # `formal/arm64_codegen.py` emits at ten sites for a stack read, and this
+        # row used to model every one of them as a read from address `off`
+        # (`arm64_reg 31 s` IS 0). Measured against the CPU by
+        # `tools/formal_model_fuzz.py`: `ldr x0, [sp, #32]` gave the model 0 and
+        # the hardware the word. The 32-bit store row below is the same fix.
         return (f"some (arm64_set_reg {rt} s (mem_read_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat))")
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] (unsigned-offset 32-bit STORE)
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 4}).toNat "
+        # FOUR bytes, because the instruction is four bytes wide: this row wrote
+        # eight and clobbered the four above the word the program stored, which
+        # the hardware leaves alone (measured: `tools/formal_model_fuzz.py`,
+        # seed `sweepC`, case 123). The base is SP-aware for the reason the LDR
+        # row's is — this class has an SP encoding for `Rn` too.
+        return (f"some {{ s with mem := mem_write_u32 s.mem "
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 4}).toNat "
                 f"(arm64_reg {rt} s) }}")
     if idx == 20:  # ADRP
         rd = w & 0x1f
@@ -3009,17 +3063,29 @@ def _step_rhs(w: int, idx: int):
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        # BUG, measured and not yet fixed: as for the LDR row above, `Rn = 31`
-        # is the stack pointer here too and this spells it as the zero register.
+        # SP-aware for the reason the LDR row above gives: this form has an SP
+        # encoding for `Rn`, so `encode_str_xt_xn_imm(_, 31, off)`'s ten call
+        # sites are stack writes and `arm64_reg 31 s` modelled every one of them
+        # as a write at `off`. `_base_of`'s docstring says why the answer is
+        # spelled rather than left to `arm64_reg_or_sp`.
         return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
+                f"({_base_of(rn)} + UInt64.ofNat {imm12 * 8}).toNat "
                 f"(arm64_reg {rt} s) }}")
-    if idx == 32:  # LDP [SP, #imm] (offset load pair)
-        d1 = (w >> 5) & 0x1f
-        d2 = w & 0x1f
-        imm12 = (w >> 10) & 0xfff
-        addr = f"(s.sp + UInt64.ofNat {imm12 * 8})"
-        return (f"some (arm64_set_reg {d2} (arm64_set_reg {d1} s "
+    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] (signed-offset pair load)
+        # `Rt1` is bits 4:0, `Rn` is 9:5 (the BASE, read SP-aware), `Rt2` is
+        # 14:10 and `imm7` is 21:15 SIGNED. This arm read `Rt1` from 9:5 — the
+        # base register — and `Rt2` from 4:0, so it loaded into the base and the
+        # first destination and left the second one alone, and it read the
+        # displacement out of `imm7 | Rt2` as an unsigned 12-bit count of
+        # eighties, which also made every negative displacement inexpressible.
+        rt1 = w & 0x1f
+        rn = (w >> 5) & 0x1f
+        rt2 = (w >> 10) & 0x1f
+        imm7 = (w >> 15) & 0x7f
+        off = (imm7 * 8) if imm7 < 64 else -((128 - imm7) * 8)
+        addr = f"(arm64_reg_or_sp {rn} s + UInt64.ofNat {off})" if off >= 0 else \
+               f"(arm64_reg_or_sp {rn} s - UInt64.ofNat {-off})"
+        return (f"some (arm64_set_reg {rt2} (arm64_set_reg {rt1} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) "
                 f"(mem_read_u64 s.mem ({addr} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
@@ -3038,6 +3104,53 @@ def _step_rhs(w: int, idx: int):
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
     if idx == 35:  # SVC (modelled no-op)
         return "some s"
+    # The twelve narrower/unscaled access forms, in `arm64_step`'s order. The
+    # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
+    # memory helper is the one at that width — the widths are the whole point of
+    # these arms: `LDRB` reads ONE byte where `LDR` reads eight.
+    if idx == 66:  # CMN Xn, Xm: the flags of Xn + Xm, which is not CMP's
+        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg "
+                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
+        return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
+                f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+        rn = (w >> 5) & 0x1f
+        base = _base_of(rn)
+        if idx in (62, 63):                      # register offset, LSL #0
+            addr = f"({base} + arm64_reg {(w >> 16) & 0x1f} s)"
+        elif idx in (64, 65):                    # unscaled, signed imm9
+            imm9 = (w >> 12) & 0x1ff
+            addr = (f"(if {imm9} ≥ 256 then {base} - UInt64.ofNat ({512 - imm9}) "
+                    f"else {base} + UInt64.ofNat {imm9})")
+        else:
+            scale = {54: 1, 55: 1, 56: 2, 57: 2, 58: 1, 59: 2,
+                     60: 4, 61: 4}[idx]
+            imm12 = (w >> 10) & 0xfff
+            addr = (f"({base} + UInt64.ofNat {imm12 * scale})"
+                    if scale == 1 else
+                    f"({base} + UInt64.ofNat ({imm12} * {scale}))")
+        if idx in (54, 56, 61):                 # zero-extending loads
+            width = {54: 8, 56: 16, 61: 32}[idx]
+            return (f"some (arm64_set_reg {rd} s "
+                    f"(mem_read_u{width} s.mem {addr}.toNat))")
+        if idx in (58, 59, 60):                 # sign-extending loads
+            width, helper = {58: (8, "t8s"), 59: (16, "t16s"),
+                             60: (32, "t32s")}[idx]
+            return (f"some (arm64_set_reg {rd} s ({helper} "
+                    f"(mem_read_u{width} s.mem {addr}.toNat)))")
+        if idx in (55, 57):                     # narrow stores
+            width = {55: 8, 57: 16}[idx]
+            return (f"some {{ s with mem := mem_write_u{width} s.mem "
+                    f"{addr}.toNat (arm64_reg {rd} s) }}")
+        if idx == 63:
+            return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
+                    f"(arm64_reg {rd} s) }}")
+        if idx == 65:
+            return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
+                    f"(arm64_reg {rd} s) }}")
+        return (f"some (arm64_set_reg {rd} s "
+                f"(mem_read_u64 s.mem {addr}.toNat))")
     if idx in (36, 37, 38):  # SXTB / SXTH / SXTW (sign-extend chains)
         # The arm64_step result is definitionally the t-w sign-extension helper
         # (same let/if body); emitting the helper keeps the value flow clean and
@@ -3084,6 +3197,28 @@ def _step_rhs(w: int, idx: int):
         return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< "
                 f"UInt64.ofNat {sh}))")
     return None
+
+
+def _base_of(rn: int) -> str:
+    """`Rn`'s value at this word, spelled CONCRETELY.
+
+    `s.sp` for 31 and `arm64_reg n` for every other register — the same choice
+    the add/subtract immediate rows above make, and for the same reason: the
+    step-result lemma is closed by `exact`-ing the library lemma instantiated at
+    this word, so the two right-hand sides only have to agree up to `defeq`, and
+    a concrete index makes that a computation rather than a search.
+
+    It is spelled concretely rather than as `arm64_reg_or_sp n` because the
+    helper would then survive into every downstream value-flow goal, and the
+    eighteen emitted `simp only` lists name `arm64_reg` and not the helper's two
+    lemmas — so `hx30_*` and the entry-state `FrameOk` conjuncts would arrive at
+    a goal with `arm64_reg_or_sp 17 s` still folded and fail to close. Measured
+    both ways on this tree: the helper spelling, with the two simp lemmas added
+    to every list, still left three programs of
+    `test_formal_call_proof_gen.py` red on an obligation that is otherwise
+    unchanged; spelling the answer, every list is untouched.
+    """
+    return "s.sp" if rn == 31 else f"arm64_reg {rn} s"
 
 
 _RD = "((w &&& 0x1f).toNat)"
@@ -3172,7 +3307,8 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (mem_read_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat))")
     if idx == 19:  # STR Wt, [Xn, #imm] -- unsigned-offset 32-bit STORE, base = Rn
-        return (f"some {{ s with mem := mem_write_u64 s.mem "
+        # `mem_write_u32`, for the four-byte reason the word-relative row gives.
+        return (f"some {{ s with mem := mem_write_u32 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 4)).toNat (arm64_reg {_RD} s) }}")
     if idx == 20:
         off = (f"(if {_IMM21} ≥ 2^20 then (UInt64.ofNat {_IMM21}) - (UInt64.ofNat (2^21)) "
@@ -3204,10 +3340,17 @@ def _step_rhs_generic(idx: int):
     if idx == 31:  # STR [Xn, #imm] -- unsigned-offset STORE, base = Rn
         return (f"some {{ s with mem := mem_write_u64 s.mem "
                 f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat (arm64_reg {_RD} s) }}")
-    if idx == 32:
-        addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
-        return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
-                f"(mem_read_u64 s.mem {addr}.toNat)) (mem_read_u64 s.mem ({addr} + 8).toNat))")
+    if idx == 32:  # LDP [<Rn|SP>, #imm7*8] — signed-offset pair load
+        # The same correction as the word-relative row above: `Rt1` is `_RD`,
+        # `Rt2` is `_RT2`, the base is SP-aware, and the displacement is the
+        # SIGNED `imm7` at 21:15 — which is `_ADDR7`, the same expression the
+        # pre-index STP row uses. That row had it right, which is the check
+        # that this one was wrong rather than differently-shaped: two arms of
+        # one pair-load family, one with a signed seven-bit displacement out of
+        # bits 21:15 and one reading twelve unsigned bits out of 10 and up.
+        return (f"some (arm64_set_reg {_RT2} (arm64_set_reg {_RD} s "
+                f"(mem_read_u64 s.mem {_ADDR7}.toNat)) "
+                f"(mem_read_u64 s.mem ({_ADDR7} + 8).toNat))")
     if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
         return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| "
                 f"((arm64_reg {_RM} s) ^^^ (0xffffffffffffffff : UInt64))))")
@@ -3215,6 +3358,43 @@ def _step_rhs_generic(idx: int):
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
         return "some s"
+    if idx == 66:
+        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
+                f"(arm64_reg {_RM} s) }}")
+    if idx == 67:
+        return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
+                f"&&& arm64_reg {_RM} s) }}")
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+        _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
+        _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
+        if idx in (62, 63):
+            _ADDR = f"({_BASE} + arm64_reg {_RM} s)"
+        elif idx in (64, 65):
+            _ADDR = (f"(if {_I9G} ≥ 256 then {_BASE} - UInt64.ofNat ((512 - {_I9G})) "
+                     f"else {_BASE} + UInt64.ofNat {_I9G})")
+        else:
+            _SCALE = {54: 1, 55: 1, 56: 2, 57: 2, 58: 1, 59: 2,
+                      60: 4, 61: 4}[idx]
+            _ADDR = (f"({_BASE} + UInt64.ofNat {_IDX})" if _SCALE == 1
+                     else f"({_BASE} + UInt64.ofNat ({_IDX} * {_SCALE}))")
+        if idx in (54, 56, 61):
+            _W = {54: 8, 56: 16, 61: 32}[idx]
+            return (f"some (arm64_set_reg {_RD} s "
+                    f"(mem_read_u{_W} s.mem {_ADDR}.toNat))")
+        if idx in (58, 59, 60):
+            _W, _H = {58: (8, "t8s"), 59: (16, "t16s"),
+                      60: (32, "t32s")}[idx]
+            return (f"some (arm64_set_reg {_RD} s ({_H} "
+                    f"(mem_read_u{_W} s.mem {_ADDR}.toNat)))")
+        if idx in (55, 57):
+            _W = {55: 8, 57: 16}[idx]
+            return (f"some {{ s with mem := mem_write_u{_W} s.mem {_ADDR}.toNat "
+                    f"(arm64_reg {_RD} s) }}")
+        return (f"some {{ s with mem := mem_write_u64 s.mem {_ADDR}.toNat "
+                f"(arm64_reg {_RD} s) }}"
+                if idx in (63, 65) else
+                f"some (arm64_set_reg {_RD} s "
+                f"(mem_read_u64 s.mem {_ADDR}.toNat))")
     if idx == 42:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s / arm64_reg {_RM} s))"
     if idx == 43:
@@ -3287,6 +3467,24 @@ _WORK_STEP = [
     (33, "work_step_orn", [(0xffe0fc00, 0xaa200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
     (35, "work_step_svc", [(0xffe0001f, 0xd4000001)]),
+    # The twelve narrower/unscaled access forms, APPENDED with their arms: the
+    # lemma name is what `exact`s the step RESULT, so a row here is what turns a
+    # model's branch into a fact a generated block can use. Each is one entry
+    # because each is one word test.
+    (54, "work_step_ldrb", [(0xffd00000, 0x39400000)]),
+    (55, "work_step_strb", [(0xffd00000, 0x39000000)]),
+    (56, "work_step_ldrh", [(0xffd00000, 0x79400000)]),
+    (57, "work_step_strh", [(0xffd00000, 0x79000000)]),
+    (58, "work_step_ldrsb", [(0xffd00000, 0x39800000)]),
+    (59, "work_step_ldrsh", [(0xffd00000, 0x79800000)]),
+    (60, "work_step_ldrsw", [(0xffd00000, 0xb9800000)]),
+    (61, "work_step_ldr_uoff32", [(0xffd00000, 0xb9400000)]),
+    (62, "work_step_ldr_regoff", [(0xffe0fc00, 0xf8606800)]),
+    (63, "work_step_str_regoff", [(0xffe0fc00, 0xf8206800)]),
+    (64, "work_step_ldur", [(0xffe00c00, 0xf8400000)]),
+    (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
+    (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
+    (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -4034,7 +4232,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51):
+    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 66, 67):
         return set()
     if idx == 15:
         return {30}
@@ -4053,7 +4251,19 @@ def _regs_written(w: int, idx: int):
     if idx == 31:
         return set()
     if idx == 32:
-        return {(w >> 5) & 0x1f, rd}
+        # LDP writes BOTH destinations: `Rt1` at bits 4:0 and `Rt2` at 14:10.
+        # This row said `{(w >> 5) & 0x1f, rd}` — the base register and `Rt1` —
+        # which is the same misreading the model's arm had, and it is the row
+        # that decides what a block's certificate is allowed to assert about
+        # the registers a step clobbered.
+        return {w & 0x1f, (w >> 10) & 0x1f}
+    if idx in (54, 56, 58, 59, 60, 61, 62, 64):
+        # The loads of the twelve appended arms: one destination, and no `sp` —
+        # none of these forms has a writeback, which is what distinguishes them
+        # from the pre/post-index pair arms above.
+        return {rd}
+    if idx in (55, 57, 63, 65):
+        return set()
     return None
 
 

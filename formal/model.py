@@ -18961,6 +18961,37 @@ class ValueKinds:
             # only evidence there is for it.
             if declared_type_is_dict(pann, self._dict_names_vocab):
                 self._dict_names[pname] = True
+        # …and the BRACKET parameters, which are parameters with a home and a
+        # declaration and are NOT in `params` -- `def f[T: AnyType, keys:
+        # List[T]](base: Int)` has `keys` in the bracket block alone.  The
+        # bracket block recorded the name and the default and used to throw the
+        # TYPE away, so nothing here had an annotation to read and a bare `keys`
+        # was an unclassified word: `len(keys)` was refused with "the source does
+        # not say what this operand holds" in a body where `keys[0]` in the same
+        # function lowered, because the subscript's base classifier reads the
+        # declaration and this did not.  Two readers of one word consulting
+        # different evidence is how a disagreement becomes a wrong answer rather
+        # than a refusal, so they are the same evidence now.
+        #
+        # EVERY bracket parameter is added to `_param_names`, TYPE parameters
+        # included, because the split is not the parser's to make and this loop
+        # does not need it: a bracket parameter's kind is whatever
+        # `declared_type_kind` maps its annotation to, and a TYPE parameter's
+        # annotation is a trait or a width (`AnyType`, `DType`, `SIMDSize`,
+        # `CompilationTarget`) — none of which names something this path has a
+        # representation for, so it maps to None and claims nothing.  The
+        # discrimination is therefore self-selecting: only an annotation that
+        # names a container or a string produces a kind, and those are exactly the
+        # ones `len()` and a subscript can act on.
+        for _pname, _pann in bracket_value_params(fn):
+            self._param_names.add(_pname)
+            _kind = declared_type_kind(
+                _pann, self._int_names, self._string_names,
+                None, float_names=self._float_names)
+            if _kind is not None:
+                self.locals[_pname] = _kind
+            if declared_type_is_dict(_pann, self._dict_names_vocab):
+                self._dict_names[_pname] = True
         # Two passes: a name whose value is another name bound later resolves
         # on the second. A third would not help — the chain that needs it is
         # one the first pass already walked.
@@ -20207,6 +20238,30 @@ def subscript_callee_name(call) -> str | None:
 
 def _param_list(fn):
     return list(getattr(fn, "params", None) or [])
+
+
+def bracket_value_params(fn):
+    """`(name, annotation)` for every BRACKET parameter that DECLARES a type.
+
+    A bracket parameter is a different list from `params`, and this is the one
+    reader of it: `def f[T: AnyType, keys: List[T]](base: Int)` has `keys` in
+    the bracket block alone, so `_param_list` cannot see it and used to make
+    every reader in this file treat a read of it as a read of an unknown name.
+
+    Every bracket parameter with an annotation is returned, TYPE parameters
+    included -- see the note at the call site. The pair is `(name, annotation)`
+    with the annotation's TEXT, which is what `declared_type_kind` reduces, and
+    an empty annotation yields no pair, so a bracket parameter written without
+    one is exactly as invisible here as it was before.
+    """
+    out = []
+    for name in (getattr(fn, "comptime_params", None) or []):
+        if not isinstance(name, str) or not name:
+            continue
+        ann = (getattr(fn, "comptime_param_annotations", None) or {}).get(name)
+        if isinstance(ann, str) and ann.strip():
+            out.append((name, ann))
+    return out
 
 
 # ── The kind of a PARAMETER, from the call sites rather than from an annotation
@@ -26343,7 +26398,17 @@ def param_annotation(fn, name: str) -> str | None:
         ann = p[1] if isinstance(p, (list, tuple)) and len(p) > 1 \
             else getattr(p, "annotation", None)
         return ann if isinstance(ann, str) and ann.strip() else None
-    return None
+    # A BRACKET parameter is a parameter too, and it is a different list: the
+    # runtime parameter list above is `params`, and `def f[T: AnyType, keys:
+    # List[T]](base: Int)` has `keys` in neither it nor anywhere else the old
+    # parse kept -- the bracket block recorded the NAME and the default and threw
+    # the TYPE away. Measured: `len(keys)` in such a body was refused with "the
+    # source does not say what this operand holds" while `keys[0]` in the same
+    # body lowered, so two readers of one word consulted different evidence.
+    # `fire_compiler.py`'s `comptime_param_annotations` is where the annotation
+    # is kept now; this is the one reader of it.
+    ann = (getattr(fn, "comptime_param_annotations", None) or {}).get(name)
+    return ann if isinstance(ann, str) and ann.strip() else None
 
 
 def _outer_annotation_base(ann) -> str | None:
@@ -26387,6 +26452,48 @@ def _outer_annotation_base(ann) -> str | None:
     if rest and not rest.startswith("["):
         return None
     return m.group(1).split(".")[0]
+
+
+def declared_param_kind(fn, name: str, int_names=(), string_names=(),
+                        dtype_names=(), float_names=()):
+    """The kind a PARAMETER's own declaration gives for `name`, or None.
+
+    **The one reader of "what does this name hold" that reads the DECLARATION**,
+    and it exists because two readers that could answer were consulting
+    different evidence and one of them had nothing at all:
+
+      * `keys[0]` where the parameter is `keys: List[T]` lowers, because the
+        subscript's base classifier reads the annotation;
+      * `len(keys)` over the SAME parameter was refused with "the source does
+        not say what this operand holds" — on a declaration that says it in the
+        parameter list. Measured, both architectures:
+        `def total[T: AnyType, keys: List[T]](base: Int) -> Int: return base +
+        len(keys)` was refused with that sentence while `keys[0]` in the same
+        body built and answered CPython.
+
+    Two answers to the same question about the same word is the defect this
+    repository has already paid for twice in this area, and the cost of a
+    mismatch is a WRONG answer rather than a refusal whenever the first reading
+    is the wrong one. So the reader is here, in the shared model, and both
+    backends' `kind_of_slot` hooks ask it rather than each deciding.
+
+    **`fn` is a FunctionDef and `name` must be one of ITS parameters.** That is
+    the whole scope, and it is narrower than "any name in the function" on
+    purpose: `param_annotation` returns None for a name the signature does not
+    bind, and a LOCAL's declaration is a different question with its own reader
+    (`optional_local_declared_annotation`, and the flow the emitter records). A
+    name that is a parameter of a DIFFERENT function must not borrow that
+    function's annotation.
+
+    `None` is the answer for everything this path has no representation for, so
+    an annotation naming a struct, a function type or an `Optional` leaves the
+    pre-existing unclassified refusal exactly as it was — this widens what can
+    be ANSWERED and never what is answered differently."""
+    ann = param_annotation(fn, name)
+    if not ann:
+        return None
+    return declared_type_kind(ann, int_names, string_names, None,
+                              dtype_names=dtype_names, float_names=float_names)
 
 
 def callee_value_refusal(name: str, fn, spelling: str = None,
@@ -39266,6 +39373,56 @@ def _fill_gaps(name: str, shape, positional: list, slots: list) -> tuple:
             return None, (f"call {name}(): missing required argument "
                           f"{pname!r}")
     return slots, None
+
+
+def try_handler_refusal(fn_name: str, stmt, handlers: list) -> str:
+    """The diagnostic for a `try` that HAS handlers.
+
+    A `try` with no handlers is a cleanup scope and is lowered: `finally` runs
+    on the fall-through, on a return and on a raise, which is what
+    `_emit_try`'s pending-finally stack is for. An `except` arm is the other
+    thing entirely and there is no answer for it here, because **this image has
+    no unwinder**: `raise` lowers to an exit (`arm64_codegen.py::_emit_stmt`'s
+    `RaiseStmt` arm and `x86_64_codegen.py`'s twin both evaluate the exception
+    expression for its side effects and then leave the process), so there is no
+    edge from a raise site to a handler and no way for a handler to be reached.
+
+    Measured, both architectures, and the point is that the program BUILDS:
+    `class MyErr(ValueError)` + `raise MyErr("m")` inside a `try:`/`except:` was
+    assembled, ran, and exited 1 having printed nothing where CPython prints
+    `caught` and exits 0. `otool -tvV` shows why: the `except` arm's code is not
+    emitted at all, the call to the raising function is followed by the code
+    AFTER the `try` as if the call had returned normally, and the raise itself
+    is `mov w0, #1 ; svc #0x80`. The same is true of a base this image
+    DECLARES (`class MyBase` / `class MyErr(MyBase)`), which is why the reason
+    below names the runtime and not the base: it is the handler that cannot
+    run, not a class that cannot be built. The construction half is fine — that
+    class builds and runs — so a refusal naming bases would be refusing the
+    wrong half.
+
+    The project's own rule for this is stated in `formal/hostmods/os` and
+    `formal/hostmods/time`: *a failure is a status, not an exception*, and this
+    is where that rule is enforced rather than merely written down. Zero of the
+    664 stdlib files contain a `try` at all, so nothing that builds today stops
+    building."""
+    first = handlers[0]
+    exc = first.exc_type if first is not None else None
+    caught = "a bare `except:`" if not isinstance(exc, str) or not exc \
+        else f"`except {exc}`"
+    n = len(handlers)
+    arms = "arm" if n == 1 else "arms"
+    return (f"{fn_name}: the `try` on line {getattr(stmt, 'line', 0) or 0} "
+            f"has {n} except {arms} ({caught}), and this image has no "
+            f"unwinder: a `raise` here is an EXIT — the exception expression is "
+            f"evaluated for its side effects and the process then leaves with "
+            f"status 1 — so no handler can be reached and the code after the "
+            f"`try` would run as if the body had returned normally. Measured on "
+            f"both architectures: such a program builds, prints nothing and "
+            f"exits 1 where CPython enters the handler. Refused rather than "
+            f"emitted, because a program that runs and is not the program "
+            f"written is the outcome this path treats as its worst. Report a "
+            f"failure as a status: return a value, raise nothing, and let the "
+            f"caller decide. `finally` needs no runtime and is still lowered.")
 
 
 def variadic_read_refusal(fn_name: str, name: str, is_kwarg: bool,

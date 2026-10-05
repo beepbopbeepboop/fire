@@ -695,6 +695,17 @@ class FunctionDef:
     # list's and its LENGTH is the trailing-default offset arithmetic's
     # input — see Parser._parse_generic_params_capture.
     comptime_param_defaults: dict = field(default_factory=dict)
+    # Declared ANNOTATIONS of those bracketed parameters (`def f[T: AnyType,
+    # keys: List[T]](...)`): `{name: annotation_text}` for the ones written
+    # `name: Type`.  Additive, and it exists because the bracket parse kept the
+    # names and the defaults and THREW THE TYPE AWAY, so no reader anywhere could
+    # ask what a bracket parameter holds -- and `len(keys)` over `keys: List[T]`
+    # was refused with "the source does not say what this operand holds" on a
+    # declaration that says it in the parameter list, while `keys[0]` in the same
+    # body lowered.  Kept out of `params` for the reason `comptime_param_defaults`
+    # is: that list is the RUNTIME parameter list and its length is the
+    # trailing-default offset arithmetic's input.
+    comptime_param_annotations: dict = field(default_factory=dict)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -3426,8 +3437,10 @@ class Parser:
         # bind `f[Int32]()`'s subscript to them by position.
         comptime_params = []
         comptime_param_defaults = {}
+        comptime_param_annotations = {}
         if self._peek().kind == "LBRACKET":
-            comptime_params, comptime_param_defaults = self._parse_generic_params_capture()
+            (comptime_params, comptime_param_defaults,
+             comptime_param_annotations) = self._parse_generic_params_capture()
         self._expect("LPAREN")
         params = []
         param_convs = {}
@@ -3656,6 +3669,7 @@ class Parser:
                            kwonly=kwonly,
                            comptime_params=comptime_params,
                            comptime_param_defaults=comptime_param_defaults,
+                           comptime_param_annotations=comptime_param_annotations,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
@@ -4104,6 +4118,15 @@ class Parser:
         return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
+        # The `try` keyword's own line, recorded because `TryStmt` is the one
+        # statement here whose position nothing downstream could recover: every
+        # other node in a body is reached through a statement whose position a
+        # diagnostic can name, and a `try` is the statement a refusal about
+        # EXCEPTION SCOPES has to name (`formal/build.py::_refuse_try_handlers`,
+        # whose message is useless with line 0). Additive — the field already
+        # existed with this default, so nothing that reads it changes except
+        # from "always 0" to the truth.
+        line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
         body = self._parse_block()
         handlers = []
@@ -4181,7 +4204,8 @@ class Parser:
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
         return TryStmt(body=body, handlers=handlers,
-                       else_body=else_body, finally_body=finally_body)
+                       else_body=else_body, finally_body=finally_body,
+                       line=line)
 
     def _parse_with(self):
         self._expect("KW", "with")
@@ -6044,8 +6068,14 @@ class Parser:
         plain value, and to answer `f[T=Int]()` for a parameter the bracket
         does not supply (`def f[T, y=0, *, linux=0]()`'s `y`).
 
-        Returns `(names, defaults)`: `defaults` is `{name: expr_node}` for
-        the parameters that declare one. It is kept apart from
+        Returns `(names, defaults, annotations)`: `defaults` is
+        `{name: expr_node}` for the parameters that declare one, and
+        `annotations` is `{name: annotation_text}` for the ones written
+        `name: Type`. The annotations were the missing third and they are what
+        `formal/model.py::param_annotation` asks about a bracket parameter -- the
+        bracket block used to keep the NAME and throw the TYPE away, so nothing in
+        the tree could say what `keys` held in `def f[T: AnyType, keys: List[T]]`.
+        The defaults are kept apart from
         `FunctionDef.param_defaults` because that table is the RUNTIME
         parameter list's, and its LENGTH is the trailing-default offset
         arithmetic's input (`_trailing_default_at`) — a comptime default in
@@ -6060,6 +6090,7 @@ class Parser:
         self._expect("LBRACKET")
         names = []
         defaults = {}
+        annotations = {}
         depth = 1
         expect_name = True
         while depth > 0:
@@ -6089,12 +6120,63 @@ class Parser:
                 names.append(_nm)
                 self._advance()
                 expect_name = False
+                if self._peek().kind == "COLON":
+                    self._advance()
+                    annotations[_nm] = self._capture_bracket_param_annotation()
+                    continue
                 if self._peek().kind == "ASSIGN":
                     self._advance()
                     defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
-        return names, defaults
+        return names, defaults, annotations
+
+    def _capture_bracket_param_annotation(self) -> str:
+        """The DECLARED TYPE of a bracketed parameter, as source text.
+
+        Consumes tokens until the next top-level COMMA or RBRACKET and returns
+        them joined with spaces -- the same span discipline as
+        `_parse_bracket_param_default`, and for the same reason: what FOLLOWS is
+        parameter-list punctuation (`//`, `,`, `]`), not part of the type. Text
+        and not a parsed expression because a type is not an expression here, and
+        the consumers (`model.param_annotation` -> `declared_type_kind`,
+        `model.optional_receiver_types`) reduce it from text.
+
+        The span is consumed whether or not anybody wants it, so the caller's
+        loop resumes at the separator either way; an EMPTY annotation (`f[T: ]`)
+        yields `""` and every reader treats that as absent, which is the same
+        answer the parameter had before this existed.
+        """
+        parts = []
+        depth = 1
+        while True:
+            t = self._peek()
+            if t.kind == "EOF":
+                break
+            if t.kind == "COMMA" and depth == 1:
+                break
+            if t.kind == "RBRACKET" and depth == 1:
+                break
+            if t.kind in ("LBRACKET", "LPAREN", "LBRACE"):
+                depth += 1
+            elif t.kind in ("RBRACKET", "RPAREN", "RBRACE"):
+                depth -= 1
+            parts.append(self._advance().value)
+        # Tokens are joined with a space (the `_capture_bracketed_text` rule: a
+        # token's `.value` is its exact source substring and joining without a
+        # separator would fuse `Self` and `.` into `Self.`), and then the space
+        # is taken back OFF the punctuation a type argument list is written with
+        # -- so `List [ T ]` is stored as `List[T]`, which is the spelling every
+        # reader of an annotation in this tree reduces (`model.
+        # annotation_base_name` strips the arguments and then requires an
+        # IDENTIFIER, and `List ` is not one). Only the brackets and the comma
+        # are tightened; spaces between words are left, because
+        # `borrowed List[T]` and a function type's `def(A, B) thin` both need
+        # them to stay words apart.
+        text = " ".join(parts).strip()
+        for ch in "[],":
+            text = text.replace(" " + ch, ch).replace(ch + " ", ch)
+        return text
 
     def _parse_bracket_param_default(self):
         """The declared default of a bracketed (`def f[T, y=0, ...]`)

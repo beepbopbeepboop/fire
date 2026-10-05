@@ -10737,21 +10737,40 @@ CONSTRUCTION_CASES = [
     # is the fix: a base from that table contributes `args`, base first, so the
     # message lands in the slot CPython puts it in.
     #
-    # The exit status is 1 and the output empty, and both are what this path
-    # documents for a `raise` (`formal`'s has no unwinder: a raise flushes the
-    # enclosing `finally` clauses and exits). What this row pins is that the
-    # BUILD accepts the construction at all — before the merge this was a
-    # refusal on both architectures, byte for byte.
-    #
-    # The `try`/`except` this used to carry is gone for the same measured
-    # reason as (3)'s: an arm that cannot be entered is now refused before
-    # anything is emitted, and this row's subject is where the MESSAGE goes
-    # (`Plain5(Exception)` inherits `args`, so `Plain5("m")` carries it) rather
-    # than what an unreachable arm does with it. `want_stdout=None` because a
-    # raise prints nothing here and CPython's traceback goes to stderr, which
-    # this suite does not compare: the claim is the exit status, which is 1 in
-    # both languages for an exception nothing catches.
-    ("constr_an_exception_carries_its_message",
+    # …and what happens to the `try` AROUND it, which is a REFUSAL and was not
+    # one until 2026-10-04. This row used to expect exit 1 and no output, which
+    # is what this path does with a `raise` that nothing catches — and it was
+    # pinning the WORST half of the story while looking like a passing program:
+    # CPython enters the handler and exits 0, and this image exits 1 having
+    # printed nothing, with no refusal anywhere. There is no unwinder on this
+    # path (`formal/arm64_codegen.py::_emit_try` says so), so a handler is
+    # unreachable, so a `try` whose guarded region can raise is a program that
+    # is not the program written and is refused rather than emitted. The row is
+    # now that refusal, on the same program: the construction is still accepted
+    # (`constr_an_exception_carries_its_message_without_a_try` is the row that
+    # pins THAT), and what is refused is the handler that could never run.
+    ("constr_a_try_whose_guard_can_raise_is_refused",
+     "struct Plain5(Exception):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom5():\n"
+     "    raise Plain5(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom5()\n"
+     "    except:\n"
+     "        pass\n"
+     "    return 0\n",
+     "refuse:this image has no unwinder", None),
+    # The construction half, which is what this group was about and which the
+    # refusal above would otherwise take with it: the same class, the same
+    # `raise`, and NO `try` — so nothing claims to catch it, the exit status is 1
+    # and CPython's is 1 as well (it also prints a traceback to stderr, which
+    # this path has no way to produce). That is the documented limit of a path
+    # with no unwinder rather than a wrong answer about a value, and it is why
+    # the refusal reads `handlers` and not `raise`.
+    ("constr_an_exception_carries_its_message_without_a_try",
      "struct Plain5(Exception):\n"
      "    \"\"\"no fields at all\"\"\"\n"
      "\n"
@@ -12247,70 +12266,34 @@ CONSTRUCTION_REFUSALS = [
      "    var e = MyErr(\"the message\")\n"
      "    print(\"built\")\n"
      "    return 0\n", 0, "built"),
-    # (3b) What a RAISED exception does at run time, which (3a) deliberately does
-    # not pin. The program is (3)'s, and it BUILT and then died: `exit=1`, no
-    # output, the arm never entered, against CPython's `caught` / 0. The arm is
-    # `except: pass`, so `refuse_dropped_handler_arm` does not fire on it (there
-    # is nothing in the arm to drop) and the `try` was emitted with its arms
-    # skipped — the two halves of that are each defensible alone and together
-    # they are a `try` that catches nothing and a program that stops where
-    # CPython does not.
+    # (3b) …and the negative half of the negative half: the `raise` half.
     #
-    # The subject is the MISSING EDGE and not the base: `raise` is
-    # `_emit_diverge` — flush the pending `finally` clauses, `exit(1)` — from
-    # whatever function holds it, so no frame anywhere can catch one, and the
-    # statements after the `try` are simply not in the image. The refusal is
-    # asked through the module's own call graph, because the `raise` is in
-    # `boom` and `try: boom()` contains no `raise` at all.
+    # Row (3a) above pins that the CONSTRUCTION of `class MyErr(ValueError)`
+    # works, and it says in its own comment that "what a raised exception does
+    # at run time" is a separate subject. This is that subject, and the answer
+    # is that the subject was never about the base at all.
     #
-    # (3c) is the half that says so: the same program with the base DECLARED
-    # here, which is the shape `MyErr(Widget)` above is refused for and which
-    # used to be the natural suspect. It answers identically, so the cause is
-    # not the base's visibility and no `struct_unresolved_bases` clause belongs
-    # in the message.
-    ("constr_refuse_a_raise_a_try_arm_cannot_catch",
-     "class MyErr(ValueError):\n"
-     "    \"\"\"no fields at all\"\"\"\n"
-     "\n"
-     "def boom():\n"
-     "    raise MyErr(\"the message\")\n"
-     "\n"
-     "def main(n):\n"
-     "    try:\n"
-     "        boom()\n"
-     "    except:\n"
-     "        pass\n"
-     "    print(\"caught\")\n"
-     "    return 0\n",
-     "refuse:cannot catch it, so the `try` is refused", None),
-    ("constr_refuse_a_raise_a_try_arm_cannot_catch_with_a_declared_base",
-     "class Base:\n"
-     "    var msg: String\n"
-     "\n"
-     "class MyErr(Base):\n"
-     "    var code: Int\n"
-     "\n"
-     "def boom():\n"
-     "    raise MyErr(\"the message\", 7)\n"
-     "\n"
-     "def main(n):\n"
-     "    try:\n"
-     "        boom()\n"
-     "    except:\n"
-     "        pass\n"
-     "    print(\"caught\")\n"
-     "    return 0\n",
-     "refuse:cannot catch it, so the `try` is refused", None),
-    # (3d) The NEGATIVE half of (3b), and the reason (3b) is a refusal about a
-    # CONTROL-FLOW EDGE rather than about exceptions: with no arm in the picture
-    # `exit(1)` IS what CPython does, and this program agrees with it exactly —
-    # no output, status 1, on both backends, against the same text run by
-    # CPython (which writes its traceback to stderr, which this suite does not
-    # compare; stdout and the status are the whole of the claim).
+    # Measured, both architectures, before this row existed: this program BUILT,
+    # and the binary exited 1 having printed nothing, where CPython prints
+    # `caught` and exits 0. `otool -tvV` on the built arm64 image shows the
+    # whole mechanism in nine instructions — the `except:` arm's code is not
+    # emitted at all, the call to `boom` is followed by the code AFTER the
+    # `try` as if the call had returned normally, and `raise` itself is
+    # `mov w0, #1 ; svc #0x80`. The reason is that this image has no
+    # unwinder: `formal/arm64_codegen.py::_emit_stmt`'s `RaiseStmt` arm and
+    # x86-64's twin both evaluate the exception expression and then leave, so
+    # there is no edge from a raise site to a handler.
     #
-    # A fix that refused every `raise` would pass (3b) and fail this one, and
-    # would take every `raise` in the corpus with it.
-    ("constr_an_uncaught_raise_outside_a_try_is_status_1",
+    # Two things are pinned and they are the two halves of the defect. The
+    # refusal row below is the positive half; THIS row is the negative half,
+    # because a repair that refused every `raise` would be a different wrong
+    # answer — an uncaught `raise` leaves with status 1, which is what CPython
+    # does with it (measured: CPython prints a traceback to STDERR and exits 1;
+    # this image exits 1 and says nothing, which is a documented limit of a
+    # path with no unwinder and not a wrong answer about a value). So the line
+    # the fix draws is `handlers`, and this row is what says so from the other
+    # side of it.
+    ("constr_an_unraised_exception_is_only_the_exit_it_always_was",
      "class MyErr(ValueError):\n"
      "    \"\"\"no fields at all\"\"\"\n"
      "\n"
@@ -12319,13 +12302,69 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n):\n"
      "    boom()\n"
-     "    printf(\"v=%d\", n)\n"
+     "    print(\"after\")\n"
      "    return 0\n", 1, ""),
-    # (3e) And the other negative: an arm around a call that CANNOT raise is
-    # still emitted, arms and all, because there is nothing to catch and nothing
-    # to lose. Without this row the refusal above reads as "a `try` with an arm
-    # is refused", which is a different and much larger rule — `except OSError:`
-    # around I/O is the commonest shape in the corpus.
+    # The refusal itself, on the program the doc filed, and on the same program
+    # with a base this image DECLARES. One needle, both backends, and the
+    # shared text is what makes it one refusal rather than two that happen to
+    # agree — which is the row `test_formal_run.py`'s `refuse:` runner asserts.
+    # The declared-base case is here because it is the one that rules out the
+    # reading this row's own comment starts with: if an unresolvable base were
+    # the cause, the second program would build.
+    ("constr_a_try_over_a_raising_function_is_refused",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:this image has no unwinder", None),
+    ("constr_a_try_with_a_declared_exception_base_is_refused_too",
+     "class MyBase:\n"
+     "    var msg: String\n"
+     "\n"
+     "class MyErr(MyBase):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:this image has no unwinder", None),
+    # And the half that must KEEP working, because the refusal reads
+    # `stmt.handlers` and nothing else. `try:`/`finally:` is a cleanup scope
+    # rather than an exception scope: `finally` needs no runtime, and
+    # `formal/arm64_codegen.py::_emit_try` lowers it on all three exits. A
+    # repair that refused every `try` would pass the three rows above and lose
+    # this one, so it is a row and not a comment.
+    ("constr_a_try_finally_is_still_lowered",
+     "def main(n):\n"
+     "    try:\n"
+     "        printf(\"body %d\", n)\n"
+     "    finally:\n"
+     "        printf(\"fin\")\n"
+     "    return 0\n", 0, "body 10fin"),
+    # (3e) …and the OTHER negative, which is a different one and is here
+    # because the refusal above reads `stmt.handlers` and nothing else: an arm
+    # around a call that CANNOT raise is still emitted, arms and all, since
+    # there is nothing to catch and nothing to lose. `constr_a_try_finally_is_
+    # still_lowered` above is the same claim about `finally` rather than about a
+    # non-raising call, and without BOTH of them the refusal reads as "a `try`
+    # with an arm is refused" — a different and much larger rule, since
+    # `except OSError:` around I/O is the commonest shape in the corpus.
     ("constr_a_try_arm_around_a_call_that_cannot_raise_still_builds",
      "def helper(n):\n"
      "    return n * 2\n"
