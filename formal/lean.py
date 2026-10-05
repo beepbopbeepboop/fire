@@ -921,21 +921,42 @@ _DECL_NAME_RE = re.compile(r"^\s*(?:private\s+|protected\s+|noncomputable\s+)*"
 # `sorry`` and there is nothing to parse, so a caller that wants positions has to
 # ASK for them in the file it generates.
 #
-# **The label's module name is NOT delimited by the guillemets**, which is the
-# shape a first reader would parse it by: the label is a `Name`, and Lean
+# **The label's module name is NOT delimited by the guillemets**, which is
+# the shape a first reader would parse it by: the label is a `Name`, and Lean
 # parenthesises only the component that is not a bare identifier, so a module
 # under a directory prints as `«.tmp».tmpcmqrxbe0` — a balanced-looking pair
 # around the WRONG part. What is unambiguous is that the position is the
-# `:line:col` the message ENDS in, so that is what this reads, and the module is
-# not captured at all: nothing downstream wants it, because the caller has the
-# file it generated and matches on the line.
+# `:line:col` the message ENDS in, so that is what `_SORRY_LABEL_RE` below
+# reads, and it captures no module at all.
 #
 # The trace option a project reaches for first — `trace.Meta.Tactic.sorryAx` —
 # does not exist in the pinned 4.32.2 (`error: Unknown option`), which is why this
 # is a reader of the warning rather than a probe: no second elaboration, no
 # `run_cmd` block, no `import Lean.Elab.Command` in a generated file.
+
+#: **There is no end-of-line anchor here, and that is the fix rather than a
+#: simplification.** This used to end `\s*$`, and `$` under `re.M` matches at a
+#: `\n` or at the very end of the string but NOT in the middle of a line — while
+#: every caller concatenates the two streams (`p.stdout + p.stderr`), so a
+#: warning that is the LAST line of stdout and arrives without its trailing
+#: newline comes GLUED to the first line of a non-empty stderr and the anchor
+#: fails on a message that is perfectly well formed. Measured on this tree's own
+#: output: the patched `const2` proof's warning joined to a
+#: `libc++abi: terminating…` line gives `[]` where the unjoined stdout gives
+#: `[(363, 12)]`, so `_run_lean` reported "a hole fired and I cannot say where"
+#: and `test_lean_says_which_sorry_fired_and_the_report_names_it` failed with
+#: `None != "hstep7's side condition, line 363"` on an otherwise correct run.
+#:
+#: What replaces the anchor is `(?![0-9])`, and it is not the same claim: it says
+#: the digits END there rather than that the LINE does. That distinction is the
+#: point — the position is the `:line:col` the message ends in, so a `:363:12`
+#: followed by a backtick, by a space, or by the next stream's first character is
+#: all the same answer, while a `:363:129` must not read as `:363:12`. Measured:
+#: `x:363:129` gives `[(363, 129)]`, and a warning with no label at all
+#: (`declaration uses `sorry``) still gives `[]`, which is the answer that lets a
+#: caller tell "no position" from "a position".
 _SORRY_LABEL_RE = re.compile(
-    r"declaration uses\s+[`'\u2018]?sorry\b[^\n]*?:(\d+):(\d+)[`'\u2018\u2019]?\s*$",
+    r"declaration uses\s+[`'‘]?sorry\b[^\n]*?:(\d+):(\d+)(?![0-9])",
     re.M)
 
 
@@ -953,9 +974,79 @@ def sorry_source_positions(text: str) -> list:
     the warning once per declaration — measured on a three-theorem control, where
     the declaration with two `sorry`s reported one — so this is the first live
     hole in a file and not the census of them.
+
+    **A hole in an IMPORTED MODULE is not a position in this one, and this
+    function cannot tell them apart.** The label carries a module name
+    (`«lib».ProofLib`), and every caller throws that name away, so a warning
+    about a `.olean` we merely imported arrives here looking exactly like one
+    about the generated file — at the library's line, which is a line number in
+    a DIFFERENT file. Measured on `formal/examples/const2.mojo`'s emitted text (722
+    lines): a `«lib».X86:503:8` position resolves through `hole_at` to
+    `"hstep11's side condition, line 503"`, a confident and wrong answer, while
+    `«lib».ProofLib:4624:8` returns `None` only because 4624 is past the end of
+    the generated file. Neither is the truth. `sorry_source_labels` is the reader
+    that keeps the module; this one is the position-only reader its callers
+    already have, and a caller that has the generated file's own module name to
+    compare against should use that.
     """
     return [(int(m.group(1)), int(m.group(2)))
             for m in _SORRY_LABEL_RE.finditer(text or "")]
+
+
+#: The SAME warning with its module name kept, as `(module, line, col)`. This is
+#: the answer to "WHOSE hole", and it is separate from `sorry_source_positions`
+#: rather than a replacement for it because the two answer different questions
+#: and only one of them can be answered by the digits: a position without its
+#: module cannot be attributed to a file, which is the whole of the
+#: misattribution `sorry_source_positions`' own docstring names.
+#: The label as a whole — everything between the backtick that opens it and the
+#: `:line:col` that closes it — so that a module spelled with guillemets and one
+#: spelled bare are BOTH captured by one pattern rather than by two. Guillemet
+#: position is not the thing being read (see the note above): this keeps the
+#: label intact and `sorry_source_labels` takes the LAST dotted component, which
+#: is the one that names the file in either spelling.
+_SORRY_LABEL_TEXT_RE = re.compile(
+    r"declaration uses\s+[`'‘]?sorry\s+[`'‘]([^\n]*?)[»'’]?"
+    r":(\d+):(\d+)(?![0-9])",
+    re.M)
+
+
+def sorry_source_labels(text: str) -> list:
+    """`(module, line, col)` per `declaration uses` warning, module INCLUDED.
+
+    The module is what says the hole is in a file the caller generated rather
+    than in an `.olean` it imported, and that is a question no amount of reading
+    the digits can answer: `«lib».ProofLib:4624:8` and `<tmp>.lean:4624:8` are the
+    same three numbers and completely different facts.
+
+    **`module` is the LAST component of the label, and that is what identifies
+    the file.** Lean's own spelling is the awkward one this has to survive: the
+    guillemets wrap the component that is not a bare identifier, so a module
+    under a directory prints as `«.tmp».tmpcmqrxbe0` — the pair sits around the
+    WRONG part — and a top-level module prints with no guillemets at all. Reading
+    the last component of the dotted name gives `tmpcmqrxbe0` and `topmod`
+    respectively, which is the basename of the file in both cases, so a caller
+    can compare it against the file it generated. Measured on the three shapes
+    Lean actually emits on this tree:
+
+        «.tmp».tmpcmqrxbe0:363:12   ->  ('tmpcmqrxbe0', 363, 12)
+        «lib».ProofLib:4624:8        ->  ('ProofLib', 4624, 8)
+        topmod:10:2                  ->  ('topmod', 10, 2)
+
+    A warning with NO label — `declaration uses `sorry``, i.e. a file that did not
+    set `pp.sorrySource` — is absent from this list rather than present with an
+    empty module, because there is no position to attach a module to. That is the
+    distinction `sorry_source_positions` reports as `[]`, and a caller that has
+    both readers can say "a hole fired and I know whose file it is in" against "a
+    hole fired and I know nothing", which are different reports.
+    """
+    out = []
+    for m in _SORRY_LABEL_TEXT_RE.finditer(text or ""):
+        label = m.group(1).replace("«", "").replace("»", "").strip()
+        out.append((label.rsplit(".", 1)[-1], int(m.group(2)),
+                    int(m.group(3))))
+    return out
+
 
 
 def _declaration_at(lines, lineno: int) -> str:
