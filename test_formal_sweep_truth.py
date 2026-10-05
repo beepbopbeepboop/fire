@@ -564,35 +564,148 @@ class TestCensusReport(unittest.TestCase):
 # `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
 # wave and its measurement are written down.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
-# Modules with no readable names that STILL have users, so their rows are real:
-# `itertools` (>=3 files spell it), `builtins` (>=2), `atexit` (1, through
-# `test_ab_native.py`'s `atexit.register`). Asserted to still have users, so a
-# future reader cannot extend this section to "every module with no readable
-# names" by accident.
-_ROWS_WITH_REAL_USERS = ("itertools", "builtins", "atexit")
+
+# **THE ROWS THAT STILL HAVE USERS ARE NOT LISTED HERE, and that is the second
+# half of a fix that began with `itertools` going red on 2026-10-05.**
+#
+# This section used to carry `_ROWS_WITH_REAL_USERS = ("itertools", "builtins",
+# "atexit")` and assert each name still had a file that reads it. `itertools`
+# stopped having one, and the honest reason is neither of the two this section
+# knows how to talk about: there is still no `formal/hostmods/itertools.mojo`
+# (so it is not modelled, and `test_the_premise_each_row_is_unbuildable` would
+# have said so) — its last two import statements were REPLACED, on 2026-10-05,
+# by index loops that yield the same sequence (`test_formal_dylib.py`,
+# `test_module_cache.py`, then `test_formal_run.py`'s generator), which is
+# pinned from the other side by `test_formal_host_import_shapes.py::
+# test_ratchet_itertools_is_not_imported_again` (`files=14 live=0`). So the row
+# emptied because its files stopped SPELLING it, and a hand-written list of rows
+# that must keep users cannot tell that apart from a module that got a model —
+# both look like "this name now has no users", and only one of them is a fact
+# about this tree.
+#
+# So the list is DERIVED, by `_host_row_census` below, from the two authorities
+# rather than from a human: the rows are every name the build REFUSES (in
+# `formal/imports.py`'s tier tables and with no `formal/hostmods/` source, so a
+# modelled module cannot appear) that a file of THIS CHECKOUT imports. A name
+# that gains a model leaves the first set; a name whose importers are all
+# replaced leaves the second. Neither can fail a test again, which is the whole
+# point, and a genuinely new dead-import row now fails it instead of waiting for
+# somebody to remember to widen a tuple.
+#
+# `abc` is the one name that is in the derived set and is NOT expected to have a
+# reader, so it is named with its reason rather than left to look like a bug in
+# the derivation: `fire_compiler.py:62`'s `from abc import abstractmethod` is
+# read by nothing, because line 8401 emits the TEXT `@abstractmethod` into
+# GENERATED source. That dead import is the tree's only one and is deliberately
+# not fixed here — the file is the AST source of truth and deleting the line
+# belongs to whoever owns it, which `test_formal_host_import_shapes.py::
+# test_the_whole_tree_has_one_dead_host_import_and_it_is_named` already records
+# with the same reason.
+_ROWS_WITH_A_NAMED_DEAD_IMPORT = ("abc",)
+
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
               "stage3", "formal_sweep_cache", "__pycache__"}
 
 
-def _repo_py_files():
-    """Every `.py` this repository's own sweep covers, in sorted order.
+def _walked_py_files(root):
+    """Every `.py` under `root` on the FILESYSTEM, minus the derived trees.
 
-    The same walk `tools/formal_sweep.py` does over the repository's own source,
-    minus the directories that are not part of it. `formal/hostmods` is excluded
-    because a host module is SUPPOSED to name the modules it models.
+    The fallback for a checkout git cannot answer for, and the shape the census
+    used to have unconditionally — which is the bug `_tracked_py_files` below
+    exists to fix, so this is deliberately the WEAKER of the two and says so.
     """
     out = []
-    for dirpath, dirnames, filenames in os.walk(HERE):
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         for name in sorted(filenames):
             if not name.endswith(".py"):
                 continue
             path = os.path.join(dirpath, name)
-            rel = os.path.relpath(path, HERE)
+            rel = os.path.relpath(path, root)
             if rel.startswith("formal" + os.sep + "hostmods"):
                 continue
             out.append((rel, path))
     return sorted(out)
+
+
+def _tracked_py_files(root=HERE):
+    """Every TRACKED `.py` of THIS checkout, as `(rel, path)`, sorted.
+
+    **`git ls-files` and not a directory walk, and the reason is that a census
+    which differs per machine is not a census.** This function used to walk, and
+    `_SKIP_DIRS` had no rule for a dot-directory, so on the reference checkout
+    it descended into `.claude/worktrees/agent-<id>/` — a whole second COPY of
+    this repository, 226 extra `.py` files — and answered questions about it:
+    the "imports `zlib` and reads nothing" census named
+    `.claude/worktrees/agent-a4427eb542b05159d/gimple_codegen.py`, and
+    `builtins` read as 11 files instead of 7. None of those files is this
+    checkout's, so the number that decides whether a row is a row of work
+    depended on which worktrees happened to exist beside the runner. The
+    dot-rule alone would not have been enough either: another checkout could be
+    beside this one under any name, and "is this file tracked source?" is a
+    property that holds for every file and needs no denylist — the same argument
+    `tools/dangling_doc_refs.py` and `tools/suite.py` make for their own walks.
+    """
+    import subprocess
+    names = None
+    try:
+        ls = subprocess.run(['git', '-C', root, 'ls-files', '-z'],
+                            capture_output=True, text=True, timeout=120,
+                            errors='replace')
+        if ls.returncode == 0 and ls.stdout:
+            names = [n for n in ls.stdout.split('\0') if n.endswith('.py')]
+    except (OSError, subprocess.SubprocessError):
+        names = None
+    if names is None:
+        return _walked_py_files(root)
+    return sorted((n, os.path.join(root, n)) for n in names
+                  if not n.startswith("formal/hostmods/"))
+
+
+def _repo_py_files(root=HERE):
+    """Every `.py` this repository's own sweep covers, in sorted order.
+
+    The same set `tools/formal_sweep.py` walks over the repository's own source,
+    minus the directories that are not part of it. `formal/hostmods` is excluded
+    because a host module is SUPPOSED to name the modules it models.
+    """
+    return _tracked_py_files(root)
+
+
+def _host_row_census(repo_files=None):
+    """`{module: {"files": [...], "readers": [...]}}` for the host-import rows.
+
+    Both halves are derived, neither is written down:
+
+      * the names are `formal/imports.py`'s tier tables MINUS every name with a
+        `formal/hostmods/` source, so this is the set the build actually refuses
+        — a module that has been MODELLED is not in it and cannot be reported as
+        a row of work;
+      * the rows are the names a file of THIS CHECKOUT has an import statement
+        for, so a name whose importers were all replaced drops out on its own
+        (which is `itertools`' 2026-10-05 exit, and the reason a hand-written
+        row list could not express).
+
+    `readers` is `tools/formal_sweep_causes.py::_host_mentions_module`, the same
+    reader the ranking's `uses` fallback asks, so this census and the report
+    cannot disagree about what a use is.
+    """
+    import formal.imports as I
+    refused = {n.split('.')[0] for n in I.HOST_MODULES
+               if C._host_model_source(n) is None}
+    rows = {}
+    for rel, path in (_repo_py_files() if repo_files is None else repo_files):
+        for imported in _imports_of(path):
+            top = imported.split('.')[0]
+            if top not in refused:
+                continue
+            row = rows.setdefault(top, {"files": [], "readers": []})
+            if rel in row["files"]:
+                continue
+            row["files"].append(rel)
+            if C._host_mentions_module(path, top):
+                row["readers"].append(rel)
+    return rows
 
 
 def _imports_of(path):
@@ -678,28 +791,122 @@ class TestHostImportRowsAreNotDeadImports(unittest.TestCase):
             + "\n  ".join(dead))
 
     def test_the_other_rows_still_have_users(self):
-        """The rows NOT in this section still have files that read the module.
+        """Every OTHER row still has files that read the module.
 
         A check over the `_DEAD_ROW_MODULES` names cannot see a fourth, and the
         way it gets extended by accident is by widening the list. So the rows
         that share their shape and are NOT dead imports are asserted to have
         users — which is the statement that keeps them out.
+
+        **DERIVED, from `_host_row_census`, and the derivation is the fix.**
+        This used to walk a hand-written tuple of names (`itertools`, `builtins`,
+        `atexit`), and `itertools` went red on 2026-10-05 with a message that
+        said to put it in `_DEAD_ROW_MODULES` — advice that would have been
+        wrong twice over: its two import statements were replaced by index
+        loops, so there is no dead import to delete and no row left at all, and
+        `tools/formal_host_import_shapes.py` reads `files=14 live=0` for it,
+        which is what `test_ratchet_itertools_is_not_imported_again` pins. A
+        census computed from the tier tables and from what the checkout actually
+        spells cannot make that mistake twice: a name that gains a model leaves
+        the refused set, and a name nothing imports any more is not a row.
         """
-        users = {}
-        for rel, path in _repo_py_files():
-            for imported in _imports_of(path):
-                top = imported.split(".")[0]
-                if top not in _ROWS_WITH_REAL_USERS:
-                    continue
-                if C._host_mentions_module(path, top):
-                    users.setdefault(top, []).append(rel)
-        for name in _ROWS_WITH_REAL_USERS:
+        rows = _host_row_census()
+        self.assertTrue(rows,
+                        "the derived census is empty, so this row is asserting "
+                        "nothing; the enumeration above has stopped finding the "
+                        "repository's own imports")
+        without = {name: row["files"] for name, row in rows.items()
+                   if not row["readers"]
+                   and name not in _DEAD_ROW_MODULES
+                   and name not in _ROWS_WITH_A_NAMED_DEAD_IMPORT}
+        self.assertEqual(
+            without, {},
+            "these host-import rows are nothing but dead imports — every file "
+            "that names them reads nothing through them — which is a row of "
+            "work that is not work. Either delete the import that reads "
+            "nothing, or say in `_ROWS_WITH_A_NAMED_DEAD_IMPORT` why it "
+            "stays:\n  "
+            + "\n  ".join(f"{n}: {sorted(f)}" for n, f in sorted(without.items())))
+
+    def test_a_named_dead_import_is_still_named(self):
+        """Every exemption is a CLAIM about one dead import, and each is asked.
+
+        Without this the exemption above is a hole with a docstring in it: a
+        module could stop being a dead import (its import deleted, its name
+        read) and still be excused, and the census would be reporting a row of
+        dead imports as excused. So each name must still be in the census, must
+        still have files and NO readers, and must still be a name the build
+        refuses — the three facts the exemption was written for.
+        """
+        rows = _host_row_census()
+        for name in _ROWS_WITH_A_NAMED_DEAD_IMPORT:
             with self.subTest(module=name):
-                self.assertTrue(
-                    users.get(name),
-                    f"no file of this repository reads `{name}`, so its row is "
-                    f"dead imports like the ones above and belongs in "
-                    f"_DEAD_ROW_MODULES rather than in this list")
+                self.assertIn(name, rows,
+                              f"`{name}` no longer has a file that imports it at "
+                              f"all, so it is not a dead-import row and does not "
+                              f"need an exemption; drop it from "
+                              f"_ROWS_WITH_A_NAMED_DEAD_IMPORT. The rows the "
+                              f"census does have are {sorted(rows)}")
+                self.assertFalse(rows[name]["readers"],
+                                 f"`{name}` now has a file that reads it "
+                                 f"({rows[name]['readers']}), so the dead import "
+                                 f"the exemption names is gone; drop it")
+                self.assertIsNone(C._host_model_source(name),
+                                  f"`{name}` has a model at "
+                                  f"{C._host_model_source(name)!r}, so importing "
+                                  f"it builds and it is not a refusal at all")
+
+    def test_the_census_cannot_see_another_checkout(self):
+        """`_repo_py_files` enumerates THIS checkout, and can be shown to.
+
+        The census this section reasons over used to come from a directory walk
+        whose skip list had no rule for a dot-directory, so it descended into
+        `.claude/worktrees/agent-<id>/` — a whole second copy of this repository
+        — and printed `.claude/worktrees/agent-a4427eb542b05159d/
+        gimple_codegen.py: imports `zlib` and reads nothing from it` in a dead-
+        import census run from a checkout where that file does not exist. A
+        claim that depends on which worktrees are beside the runner is not a
+        claim about the code.
+
+        Checked by PLANTING one rather than by looking for `.claude`: a temp
+        directory holding an untracked `ghost.py` and a tracked `real.py`, with
+        the untracked one importing `zlib` and reading nothing. Git answers the
+        enumeration, so the ghost is not a row and the real file is — and the
+        filesystem fallback, which is the walk that used to be the only path, is
+        asserted to see the ghost, so the first check is evidence about git and
+        not about a walk that happens to agree.
+        """
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.join(td, "tree")
+            os.makedirs(root)
+            ghost = "ghost.py"
+            real = "real.py"
+            for name, text in ((ghost, "import zlib\n"),
+                               (real, "import zlib\nprint(zlib.crc32)\n")):
+                with open(os.path.join(root, name), 'w') as fh:
+                    fh.write(text)
+            subprocess.run(['git', 'init', '-q', root], check=True,
+                           capture_output=True)
+            subprocess.run(['git', '-C', root, 'add', '--', real], check=True,
+                           capture_output=True)
+            found = dict(_repo_py_files(root))
+            self.assertIn(real, found,
+                          "a tracked .py of the tree under test is not in the "
+                          "enumeration, so this row is not evidence that an "
+                          "untracked one is excluded")
+            self.assertNotIn(ghost, found,
+                             f"an UNTRACKED file is in the enumeration "
+                             f"({sorted(found)}), so this census would answer "
+                             f"differently in two checkouts of one commit — "
+                             f"which is how `.claude/worktrees/agent-*/` got "
+                             f"into it")
+            walked = dict(_walked_py_files(root))
+            self.assertIn(ghost, walked,
+                          "the filesystem fallback no longer sees an untracked "
+                          "file, so the check above cannot distinguish git's "
+                          "answer from the walk's")
 
 
 # ── 4. the sweep's reach split, and the system-module-call class ─────────────
