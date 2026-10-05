@@ -18408,6 +18408,44 @@ def _namespace_containers(reexports: dict, linked: list) -> list:
     return out
 
 
+def _record_reexports(manifest_path: str, reexports: dict,
+                      dylib_syms: dict) -> None:
+    """Record what this library FORWARDS, for a library that also has code.
+
+    **The half of `_record_namespace` that is not about being a namespace**, and
+    it exists because the namespace half was the only caller: a module that
+    declares its own function AND re-exports one took the code path, wrote its
+    manifest through `write_dylib_manifest` and finished — so `reexports` never
+    reached the file, and every consumer read an EMPTY `forwarded` table for a
+    module that publishes a real name. Measured, three flat modules (`leaf`
+    defines `base`, `mid` does `from leaf import base as aliased` and defines
+    `own`, `prog` does `from mid import aliased` and calls it): correct Mojo,
+    and the build refused `main: 'aliased' is called, and it is imported from
+    'mid' … That module does not export it` — `doc/ABI.md`'s export-rule
+    paragraph, naming four exclusions none of which applies, for a module that
+    publishes the name under BOTH spellings. Instrumented at the refusal:
+    `by_module = {'leaf': ['base'], 'mid': ['own']}`, `forwarded = {}`. The
+    same tree with the alias removed builds and runs.
+
+    So this is not a namespace question and must not be gated on being one. The
+    condition is "does this module forward anything", which is a property of its
+    statements and not of whether it happens to define code as well — and a
+    module that does both is the ordinary shape of a package that has grown a
+    helper of its own.
+
+    The SYMBOL is looked up under the entry's `defining_name`, not under the
+    key, for the reason `_record_namespace` gives: `from x import f as g`
+    publishes `g` and the symbol is `f`'s.
+    """
+    def _mark(payload):
+        payload["reexports"] = {
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
+                "defines": v[2]}
+            for n, v in sorted(reexports.items())}
+
+    update_dylib_manifest(manifest_path, _mark)
+
+
 def _record_namespace(manifest_path: str, reexports: dict,
                       dylib_syms: dict, traits: list = None) -> None:
     """Mark a manifest as a NAMESPACE library and record what it forwards.
@@ -18428,23 +18466,14 @@ def _record_namespace(manifest_path: str, reexports: dict,
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
 
-    The SYMBOL is looked up under the entry's `defining_name`, not under the
-    key. `dylib_syms` is the flat `{bare export name: symbol}` map assembled
-    from the linked libraries' manifests, and a defining module exports its own
-    name — so for every re-export that existed before aliases were recorded the
-    two are the same string, and for an ALIAS they are not: `from x import f as
-    g` publishes `g`, the symbol is `f`'s, and looking `g` up returns None,
-    which is how an aliased re-export reached the consumer as a name with no
-    symbol behind it. `defines` records the name the symbol was found under, so
-    a reader can tell an alias from a definition and neither has to re-derive
-    the import statement.
+    **It delegates the forwarding itself to `_record_reexports`**, because a
+    library with code forwards names too and used to lose them: this function
+    was reachable only from the empty-`entries` path, so the half of its work
+    that has nothing to do with being a namespace was done for a namespace
+    library and skipped for every other one. Two callers, one writer.
     """
     def _mark(payload):
         payload["kind"] = "namespace"
-        payload["reexports"] = {
-            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
-                "defines": v[2]}
-            for n, v in sorted(reexports.items())}
         if traits:
             # Absent rather than empty for a pure re-export package: the key
             # means "this library declares traits", and writing `[]` there
@@ -18453,6 +18482,8 @@ def _record_namespace(manifest_path: str, reexports: dict,
             payload["traits"] = sorted(set(traits))
 
     update_dylib_manifest(manifest_path, _mark)
+    if reexports:
+        _record_reexports(manifest_path, reexports, dylib_syms)
 
 
 def compile_formal_dylib(source_paths: list, output: str = None,
@@ -19034,6 +19065,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             constants=constants)
         if linked:
             _record_link_deps(manifest_path, linked)
+        # A library that ALSO forwards names has to say so in its manifest, on
+        # this container exactly as on Mach-O: `dylib_export_tables` builds one
+        # `forwarded` table from both, and a name the manifest omits is a name
+        # no consumer can bind. See `_record_reexports`.
+        if reexports:
+            _record_reexports(manifest_path, reexports, dylib_syms)
         result = {
             "manifest_path": manifest_path,
             "path": output,
@@ -19147,6 +19184,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         containers=sorted(n for n, s in library_slots.items() if not s.mutable))
     if linked:
         _record_link_deps(manifest_path, linked)
+    # **The library has code AND forwards names, and both belong in its
+    # manifest.**  `reexports` used to be written only by `_record_namespace`,
+    # which is reachable only when the export table is EMPTY — so the ordinary
+    # module that re-exports one thing and defines another published nothing
+    # about it, every consumer read an empty `forwarded` table for it, and a
+    # call to the forwarded name was refused with `doc/ABI.md`'s export-rule
+    # paragraph (a leading `_`, a generic template, an overload, a C library
+    # name) — four exclusions, none of which applied. Measured, three flat
+    # modules: `leaf` defines `base`, `mid` does `from leaf import base as
+    # aliased` and defines `own`, `prog` does `from mid import aliased` and
+    # calls it. Correct Mojo, refused. Same tree with the alias removed builds.
+    if reexports:
+        _record_reexports(manifest_path, reexports, dylib_syms)
 
     result = {
         "manifest_path": manifest_path,
