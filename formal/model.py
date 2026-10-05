@@ -8277,6 +8277,131 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
     return None
 
 
+def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
+    """`"float"` / `"int"` / None — which side of a FLOATING conversion this is.
+
+    THE evidence for `printf_kind_conversion_refusal`, and it is a second
+    function rather than an extension of `printf_arg_text_evidence` because the
+    two axes have different evidence available: a `%s` handed an integer is
+    caught by "this function bound the name to an integer", which is evidence a
+    NAME can carry, while the floating axis needs `FLOAT_KIND`, and `FLOAT_KIND`
+    is never a default — it comes from an annotation, a literal, a declared
+    return type or a float initializer. So `"float"` needs no such hunt and
+    `"int"` does, and folding them into one three-way would have had to pick
+    which axis's discipline governs the other.
+
+    **No conversion is unwrapped, and that is the difference from
+    `printf_arg_text_evidence`'s step 1.** There, `String(x)`/`int(x)` move the
+    word and change nothing, so the question about the call is the question
+    about its operand. Here `float(7)` is a DOUBLE and `Int(2.5)` is an
+    integer, so the conversion is exactly where the answer changes: unwrapping
+    would answer `printf("%d", Int(2.5))` about `2.5` and refuse a program that
+    prints 2.
+
+    The two sources of `"int"`, and both are POSITIVE:
+
+      * a NAME this function bound to an integer on that statement's own shape
+        (`ValueKinds.own_shape_kind`), which is the evidence `%s` uses and the
+        reason an unannotated parameter is not enough — `INT_KIND` is this
+        model's DEFAULT for a word, so reading it as a claim refuses correct
+        programs;
+      * an EXPRESSION that cannot be seeded by a default at all: a literal, an
+        arithmetic result, a subscript. `printf("%.17g", 7)` is the reproducer
+        and it is the same defect as `%d` of a double in the other direction —
+        measured on BOTH architectures it printed
+        `3.4584595208887258e-323`, which is the integer 7 read as the bit
+        pattern of a double.
+
+    A CALL is never evidence, for the reason `_own_shape_of` gives: `kind_of`
+    answers `INT_KIND` for a callee it cannot see, and `printf("%.17g",
+    get())` may well be handed a double by a caller this build knows nothing
+    about.
+    """
+    if is_float is not None and is_float(expr):
+        return "float"
+    if isinstance(expr, F.IdentExpr):
+        if vk is not None and vk.own_shape_kind(expr.name) == INT_KIND:
+            return "int"
+        return None
+    if isinstance(expr, F.CallExpr) or vk is None:
+        return None
+    return "int" if vk.kind_of(expr) == INT_KIND else None
+
+
+def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
+                                   class_of=None) -> str | None:
+    """Why a conversion whose CLASS disagrees with its operand's kind is refused.
+
+    The mirror of `printf_text_conversion_refusal`, and the same rule read from
+    the other side: a `printf` conversion states what the C library will do
+    with the word it is handed, and both halves have to agree. `%d`/`%c`/`%u`/
+    `%x` read the vararg as an integer and `%f`/`%g`/`%e` read it as a double,
+    so a double at `%d` is the bit pattern rendered as a decimal and an integer
+    at `%f` is the same word read as an exponent. Neither is a rounding; both
+    are a wrong number that prints, which is why this is a refusal and not a
+    conversion. **Converting is the language's job and it is already there**:
+    `Int(x)` is `FCVTZS` (`float_conversion_lowering`'s `FLOAT_TO_INT` arm) and
+    `float(x)` is `SCVTF`, so the message names both rather than offering a
+    guess.
+
+    Measured, both architectures, before this existed:
+
+        def f(x: Float64): printf("[%d]", x)      # x = 3.9
+        def main(): f(3.9)
+
+    printed `[858993459]`, which is `0x33333333` — the low 32 bits of 3.9's bit
+    pattern — and `printf("[%c]", x)` printed `[3]`, which is `0x33`, the same
+    two bytes as a character. The other direction printed
+    `[3.4584595208887258e-323]` for `printf("%.17g", 7)`. Green builds, exit 0,
+    wrong numbers on the screen.
+
+    `class_of` is `printf_arg_float_evidence`'s three-way answer and the
+    permissive direction is load-bearing: **None never refuses.** An
+    unannotated parameter holding a double (`def show(x): printf("%f", x)`
+    called `show(2.5)`) is a program this path prints correctly today, because
+    both backends place a vararg from the FORMAT rather than from the operand's
+    kind, so a word in the right register is enough. Reading "the source does
+    not say" as "not a float" would refuse it.
+
+    `None` for a format this does not parse, the same permissive direction
+    `printf_conversion_specifiers` takes: a call whose conversions cannot be
+    enumerated keeps whatever behaviour it had.
+    """
+    if class_of is None:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if j >= len(args):
+            continue
+        got = class_of(args[j])
+        if got is None:
+            continue
+        wants_float = conv in PRINTF_FLOAT_CONVERSIONS
+        if (got == "float") == wants_float:
+            continue
+        what = ("a double" if got == "float"
+                else "a value this function bound to an integer")
+        return (
+            f"the `%{conv}` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as "
+            f"{'a double' if wants_float else 'an integer'}, and "
+            f"`{spelled(args[j])}` is {what}. The two do not have to be "
+            f"guessed at: `%{conv}` tells the C library how to interpret the "
+            f"word it is handed, and the word's own kind says what it is, so a "
+            f"disagreement is a rendering of the wrong value rather than a "
+            f"rounding of the right one — measured on BOTH architectures, "
+            f"`printf(\"[%d]\", x)` for a `Float64` `x` printed 3.9's bit "
+            f"pattern as a decimal and `printf(\"[%.17g]\", 7)` printed the "
+            f"integer as a denormal. Refused rather than converted, because "
+            f"the conversion is the source's decision and this path already "
+            f"has both of them: `Int(x)` truncates toward zero and `float(x)` "
+            f"rounds to the nearest double"
+        )
+    return None
+
+
 def one_word_value_text_evidence(candidates, int_names=(), string_names=(),
                                  decls=None):
     """`True` / `None` / an evidence string: is a ONE-FIELD struct's value text?
@@ -8453,34 +8578,43 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
 
 
 def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
-                         text_of_arg=None):
+                         text_of_arg=None, class_of=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now three ways a format string fails here — a `%s`
+    than two: there are now four ways a format string fails here — a `%s`
     handed something that is not text (`printf_text_conversion_refusal`), a
     conversion with no argument behind it
-    (`printf_missing_operand_refusal`), and a WIDTH on a `%s` whose argument is
-    text that is not ASCII (`printf_text_width_refusal`) — and two emitters that
-    each had to remember them is exactly how arm64 and x86-64 come to disagree
-    about what a `printf` means. One function, one order, one message table.
+    (`printf_missing_operand_refusal`), a WIDTH on a `%s` whose argument is
+    text that is not ASCII (`printf_text_width_refusal`), and a conversion whose
+    CLASS disagrees with the kind of the argument behind it
+    (`printf_kind_conversion_refusal`) — and two emitters that each had to
+    remember them is exactly how arm64 and x86-64 come to disagree about what a
+    `printf` means. One function, one order, one message table.
 
     The order is the one that matters if two could fire: a missing operand and
     a `%s` of a non-text argument are both more basic facts about the CALL than
     the width is, and naming them first is the more useful refusal, since the
-    fix is in the format rather than in the argument's text.
+    fix is in the format rather than in the argument's text. The class check
+    comes last because it is the only one that needs the argument's VALUE rather
+    than its text, and a format already known to be unusable is not worth a
+    second, deeper question about the same call.
 
-    `text_of_arg` is the fourth hook and it is the only one that is optional:
-    it answers "what TEXT does this argument carry" (None for anything whose
-    text this build cannot see) where `text_of` answers "is this argument text
-    at all". The width question needs the first and the conversion question
-    needs the second, and a caller that has no way to answer the first passes
-    None — which is the permissive direction, exactly as `text_of`'s own None
-    row is.
+    `text_of_arg` is the fourth hook and it is the only one of the first two
+    that is optional: it answers "what TEXT does this argument carry" (None for
+    anything whose text this build cannot see) where `text_of` answers "is this
+    argument text at all". The width question needs the first and the conversion
+    question needs the second, and a caller that has no way to answer the first
+    passes None — which is the permissive direction, exactly as `text_of`'s own
+    None row is. **`class_of` is optional for the same reason**: it is
+    `printf_arg_float_evidence`'s three-way answer, and a caller that has no
+    `ValueKinds` to hand passes None, which never refuses.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
-                                             text_of_arg))
+                                             text_of_arg)
+            or printf_kind_conversion_refusal(callee, fmt_text, args,
+                                              class_of))
 
 
 

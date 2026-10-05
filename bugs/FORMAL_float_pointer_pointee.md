@@ -82,3 +82,70 @@ every program that does `printf("%d", *p)`, which is the failure mode
 `formal/model.py`'s pointer-refusal docs are three paragraphs long about. A
 refusal whose reason is "the context has not established a kind" is the honest
 answer at the boundary, and the work is to widen what the context can establish.
+## Status, 2026-10-05 (`formal29-2-r2`): the load is still refused, and the
+## PREREQUISITE this list did not know about now exists
+
+Nothing in "What has to change to let it through" has landed, and item 1 is
+still the first step. What has landed is a piece of item 3's machinery, plus the
+finding that makes it a prerequisite rather than a convenience — **so read this
+before starting, because the order in the list above is not the safe order.**
+
+### The hazard: allowing the load without a kind creates a NEW wrong answer
+
+Both backends place a `printf` vararg from the FORMAT, not from the operand's
+kind, so with the `Float64` row of `POINTEES_REFUSED` deleted and no kind
+flowing, `printf("%d", p.value())` would compile and print the double's bit
+pattern as a decimal — the defect measured and fixed in
+`bugs/FORMAL_float_binary64_only.md`'s last section, in the same shape
+`printf("[%d]", x)` had for a named `Float64` parameter (`[858993459]` for 3.9).
+The refusal here is the only thing standing between a wrong answer and that
+source today, which is why the two changes have to land together and not
+either-or.
+
+### What exists now: the operand-kind reader both emitters ask
+
+`model.printf_arg_float_evidence(expr, vk, is_float)` is the reader item 3 asks
+for — "the operand-kind reader has to see through the dereference" — with the
+evidence discipline already written: a `FLOAT_KIND` operand is positive evidence
+from the emitter's own `_expr_str_kind`, an integer is positive evidence from
+`ValueKinds.own_shape_kind`, and **None never refuses**, because both backends
+place from the format and an unclassified operand is correct there.
+
+**Its hook is where the pointee's kind goes.** `is_float` is the one thing it
+cannot derive, and the natural content for it is a `pointer_pointee`-backed
+answer — `pointer_pointee(fn, expr, decls, functions)` already resolves the
+declared pointee of a name, a `recv.field`, a pointer construction and a
+`bitcast`, and `Float64` is a key of `POINTEES_REFUSED` already, so the reader
+that classifies a dereference exists in every respect but the one question. That
+is item 1's channel, and it wants to be a `ValueKinds` hook beside
+`declared_kind`/`param_kind` so `_expr_str_kind` inherits it rather than each
+emitter re-deriving it.
+
+### The remaining work, with the two consumers that are NOT covered
+
+Good news first: both backends' float-to-int conversion arms already expect the
+operand's bits in a GENERAL-PURPOSE register and do the register-file crossing
+themselves — arm64 `encode_fmov_gpr_to_v` + `encode_fcvtzs_xn_dn`, x86-64
+`encode_movq_xmm_rm64` + `encode_cvttsd2si_r64_xmm` — which is exactly where an
+`LDR`/`mov` of eight bytes leaves them. So item 2 (`Int(p.value())` becomes
+`FCVTZS`) needs the kind hook and nothing else, and item 3's `printf("%f", …)`
+case needs the kind hook and nothing else, because the placement is already the
+format's.
+
+Two consumers are NOT covered by that, and they are the reason this is still a
+project rather than the two-line change it looks like from here:
+
+  1. **an argument in WORD position.** `g(p.value())` for `def g(x: Int)` puts
+     a double's bits into a parameter the source declared an integer. There is no
+     float-mismatch rule for call arguments; `float_binary_refusal` is about
+     operators, and the kind flow does not reach `g`'s parameter list.
+  2. **a `return` under an integer annotation.** `def f(p: Pointer[Float64]) ->
+     Int: return p.value()` — the declared return type is what a caller asks
+     about (`func_kind`), so the callee looks like it produces an integer and
+     every consumer of the result is right to believe it.
+
+Each of those is a silent wrong answer rather than a refusal, so the load cannot
+go through until both are refused by name. That is the exact next step, and it
+is one shape at a time: a call-argument class check beside
+`printf_kind_conversion_refusal` (the same rule, the same evidence, one more
+place the format's analogue does not exist), then the return annotation.

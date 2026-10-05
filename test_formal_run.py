@@ -15949,6 +15949,86 @@ FLOAT_CASES = [
 ]
 
 
+# The float family REFUSALS, kept beside `FLOAT_CASES` because they are the
+# other half of the same value model: `FLOAT_CASES` is every program this path
+# gets RIGHT about binary64 and these are the two shapes it used to get wrong
+# the same way, in opposite directions.
+#
+# **A `printf` conversion states what the C library will do with the word it is
+# handed, and the word's kind states what it is.** Both backends place a vararg
+# from the FORMAT rather than from the operand's kind (AAPCS has one register
+# file, and SysV's classifier reads the conversions), so a disagreement is not
+# an ABI problem — it is a wrong NUMBER, printed, from a green build, exit 0.
+# Measured on both architectures before `model.printf_kind_conversion_refusal`:
+FLOAT_REFUSALS = [
+    # A `Float64` at an INTEGER conversion. `x = 3.9` is
+    # 0x400FF33333333333, so the low 32 bits are 0x33333333 = 858993459 and
+    # that is what `%d` printed. `printf("[%d]", x)` answered `[858993459]`
+    # where CPython's `Int(x)` answers 3.
+    ("float_refuse_an_integer_conversion_of_a_double",
+     "def show(x: Float64) -> Int:\n"
+     "    printf(\"[%d]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(3.9)\n",
+     "refuse:the `%d` conversion in printf's format string reads `x` as an "
+     "integer, and `x` is a double", None),
+    # …and at a `%c`, which is the same two bytes read as a character: 0x33 is
+    # `'3'`, so `printf("[%c]", x)` printed `[3]`. A separate row because a
+    # `%c` reader is a different code path from a `%d` reader in any libc, and
+    # one row per mechanism is how a fix that repairs only one of them fails.
+    ("float_refuse_a_character_conversion_of_a_double",
+     "def show(x: Float64) -> Int:\n"
+     "    printf(\"[%c]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(3.9)\n",
+     "refuse:the `%c` conversion in printf's format string reads `x` as an "
+     "integer, and `x` is a double", None),
+    # The other direction, and the one that reads WORSE: the integer 7 as a
+    # double is `3.4584595208887258e-323`, so `printf("%.17g", 7)` printed a
+    # denormal. CPython's `"%.17g" % 7` is `7`, so this is a program a reader
+    # would write believing the two spellings agree — which is why the needle
+    # is the CONVERSION and not the operand: the fix is `float(7)` or `%d`.
+    # The evidence this row needs is a NAME, because a literal is refused by
+    # `printf_arg_float_evidence`'s third rule (an expression that cannot be
+    # seeded by a default); `var a = 7` is the shape that proves the name rule.
+    ("float_refuse_a_floating_conversion_of_an_integer",
+     "def main() -> Int:\n"
+     "    var a = 7\n"
+     "    printf(\"[%.17g]\", a)\n"
+     "    return 0\n",
+     "refuse:the `%g` conversion in printf's format string reads `a` as a "
+     "double, and `a` is a value this function bound to an integer", None),
+    # The CONTROL, and the reason the rule is not "refuse unless the operand is
+    # known to be a double": an UNANNOTATED parameter is the permissive
+    # direction. `def show(x): printf("%f", x)` called `show(2.5)` prints 2.5
+    # today and must keep doing so — both backends place the word from the
+    # FORMAT, so a caller that passed a double needs no annotation here. A rule
+    # that read "the source does not say" as "not a float" would refuse a
+    # program that is right, which is the failure mode every evidence rule in
+    # this file is written against.
+    ("float_an_unannotated_parameter_at_a_floating_conversion_still_prints",
+     "def show(x):\n"
+     "    printf(\"[%.17g]\", x)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(2.5)\n", 0, "[2.5]"),
+    # The other control: `%d` of an INTEGER and `Int(x)` of a double are the
+    # two directions the rule must NOT refuse, and `Int(x)` is the conversion
+    # the refusal message names — so a rule that broke the conversion while
+    # refusing the mismatch would still pass the three rows above.
+    ("float_an_integer_conversion_of_an_integer_still_prints",
+     "def main() -> Int:\n"
+     "    var a = 7\n"
+     "    printf(\"[%d %d]\", a, Int(2.5))\n"
+     "    return 0\n", 0, "[7 2]"),
+]
+
+
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
 
@@ -21672,6 +21752,7 @@ def main():
                   + TYPE_VALUE_NUMBER_CASES \
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
+                  + FLOAT_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS

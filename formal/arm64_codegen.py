@@ -5592,6 +5592,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         """
         return M.string_literal_text(arg)
 
+    def _printf_arg_conversion_class(self, arg):
+        """`"float"` / `"int"` / None — see `model.printf_arg_float_evidence`.
+
+        The third hook of `model.printf_format_refusal`, and the same two facts
+        the other two ask for: this function's `ValueKinds` and the flow-
+        sensitive `_expr_str_kind`. The DECISION about which conversions
+        disagree with which operand is the model's, so x86-64's copy of this
+        method cannot come to disagree with this one about what `%d` means — it
+        can only be edited in one place.
+        """
+        return M.printf_arg_float_evidence(
+            arg, self._vkinds,
+            is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
+
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
         """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
@@ -5622,7 +5636,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             name, F.decoded_literal(fmt) if isinstance(fmt, F.StringLiteral)
             else None,
             args[idx + 1:] if idx is not None else args[1:],
-            self._printf_arg_is_text, self._printf_arg_text)
+            self._printf_arg_is_text, self._printf_arg_text,
+            self._printf_arg_conversion_class)
         if reason is not None:
             raise CodegenError(reason)
 
