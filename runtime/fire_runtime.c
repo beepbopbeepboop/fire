@@ -2373,6 +2373,23 @@ void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
  * by any bytes operation is immutable, which is what lets every reader
  * (notably memoryview `.readonly`) trust the flag without asking where
  * the object came from. */
+/* Registry of every MojoBytes this runtime allocates — the fourth member of
+ * the container-registry family, added with `len()` on a polymorphic
+ * parameter in mind (emit_infra._len_of_boxed). A boxed bytes value is
+ * pointer-shaped and is none of a list, dict, set or box, so
+ * `mojo_boxed_is_str` calls it a STRING; `mojo_strlen` over it then walked
+ * the bytes object's own payload for a NUL, and answered a length that
+ * happened to be right only because `MojoBytes.len` sits at the same offset
+ * as `MojoList.len`. Registered in `mojo_bytes_alloc` and NEVER removed —
+ * this runtime has no `mojo_bytes_free`, so a bytes object's address is
+ * never recycled and there is no stale entry to reason about. */
+static _PtrReg _reg_bytes;
+
+int mojo_is_registered_bytes(int64_t addr) {
+    if (addr < 65536) return 0;
+    return _pr_has(&_reg_bytes, (uint64_t)addr);
+}
+
 static MojoBytes *mojo_bytes_alloc(int64_t len)
 {
     MojoBytes *b = malloc(sizeof(MojoBytes));
@@ -2380,6 +2397,11 @@ static MojoBytes *mojo_bytes_alloc(int64_t len)
     b->data = malloc((size_t)(len < 0 ? 0 : len) + 1);
     b->data[len < 0 ? 0 : len] = 0;
     b->readonly = 1;
+    /* Every bytes object this runtime builds comes from here, so this is the
+     * one place the container-registry family needs to know about them (see
+     * `mojo_is_registered_bytes`'s own comment for why there is no
+     * matching removal). */
+    _pr_add(&_reg_bytes, (uint64_t)(uintptr_t)b);
     return b;
 }
 

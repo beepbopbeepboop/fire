@@ -1495,8 +1495,24 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
 # Without those in the key a fix to emit_loops.py would serve a recorded PASS for
 # a test whose whole subject is emit_loops.py, which is the one failure mode
 # `extra` exists to prevent.
+# `timeout=1500`, measured rather than chosen (2026-10-04, and the same
+# discipline the `memclass` ledger follows). This job was registered at 900 s,
+# which is UNDER what the job needs: `test_silent_noop_iter.py` is 26
+# compile-and-execute cases and takes **18m42s (1122 s) ALONE**, with nothing
+# else running, measured on this tree and on a pristine `git archive` copy of
+# the merge base — so it was over its own timeout before any change of mine,
+# and a `TIMEOUT` is a FAILURE in its own class (it is listed under `FAILED:`
+# tagged `[TIMEOUT]` and is deliberately not something an `expect=` marker can
+# forgive). 1500 s is 1122 s plus a third; the content passes.
+#
+# NOT a "make the red go away": the job's CONTENT was green in every
+# measurement, and the clock was the only thing failing. Where the time goes
+# is measured too — 4m36s of user CPU inside 18m42s of wall is 24% of one
+# core, i.e. the job is WAITING-bound (its subprocesses: gcc, the compiled
+# binaries), not computing. Making it cheaper is a separate project; the
+# registration is the thing that was wrong.
 test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True,
-     deps=['preflight'], timeout=900,
+     deps=['preflight'], timeout=1500,
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
                              RUNTIME_SRC, RUNTIME_HDR],
      desc='the silent no-op class: no loop may iterate zero times, read a '
@@ -3477,7 +3493,7 @@ BUCKETS = {
                 # where the whole formal picture is.
                 'formal-optional',
                 # …and `formal-field-walk`, named in `check` above and here for
-               # `formal-read-before-store`'s reason: `proofs` is where the
+                # `formal-read-before-store`'s reason: `proofs` is where the
                # whole formal picture is, and expansion schedules a test once
                # per run, so the second bucket costs nothing.
                 'formal-field-walk',

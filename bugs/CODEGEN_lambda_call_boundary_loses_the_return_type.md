@@ -146,14 +146,15 @@ return p; return inner()` prints the pointer's address). That is
 answer for a local bound to a nested `FunctionDef` — with a recursion guard,
 because two mutually recursive nested defs would otherwise infer each other.
 
-**Also open, and a different bug (filed separately as
-`bugs/CODEGEN_materialized_lambda_env_double_does_not_survive_the_call.md`):**
-`k(p: float)` and `n()` above are the MATERIALIZED shape (a bound method plus
-an env struct), and there the env's `double` field does not survive the call
-even though the store, the field declaration and the read all agree in the
-emitted C. This change makes the declared type right there, so `k(2.5)` prints
-`2.0` where it used to print `2` — both wrong (CPython: `5.0`), and the value
-was already wrong before it.
+**The MATERIALIZED shape (a bound method plus an env struct) was a separate
+bug, and it is now FIXED.** `k(p: float)` and `n()` above are that shape, and
+there the env's `double` field did not survive the call even though the store,
+the field declaration and the read all agreed in the emitted C: it read as
+`1.0`, i.e. from a block nothing wrote. Measured on this tree's base
+(`ccb157ed`) that whole repro now prints CPython's `3.5 / 3.5 / 5.0`, so the
+defect is gone rather than reduced — pinned by
+`gimple_materialized_lambda_keeps_a_double_capture` in test_gimple_runner.py,
+which is the case this section describes and did not exist.
 
 ## Status (2026-10-02, `work/bugs4-3-c`) - the `double` half, landed
 

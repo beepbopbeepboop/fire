@@ -3380,15 +3380,54 @@ def gen_module_impl(self, stmts):
             # field deeper: parse the target module's OWN source (it has not
             # been compiled yet) to find the constructor's param names, then
             # record each literal argument's ctype under
-            # "<home-qualifier>::<struct>::<param>", for the defining
+            # "<home-qualifier>::<struct>::<FIELD>", for the defining
             # temp_gen to apply directly into its own struct_field_types.
+            #
+            # The key's last segment is the FIELD each constructor parameter
+            # FEEDS, not the parameter's own name, and the two are not the
+            # same thing: `def __init__(self, tokens): self.toks = tokens`
+            # is the ordinary spelling of a class whose field is named after
+            # what it holds. Keying on the parameter minted a FIELD the class
+            # does not have — `struct_field_types` grows it, so the struct
+            # typedef, the generated `_mojo_getattr_`/`_mojo_setattr_` and
+            # the field dump all answer for an attribute that was never
+            # assigned — and `getattr(obj, '<param>')` returned that
+            # never-written slot instead of raising. Exit 0, no diagnostic,
+            # and the value was a plausible-looking empty container because
+            # that is what an unwritten container slot is initialised to.
+            #
+            # So the walk reads the `self.<field> = <param>` assignments, and
+            # a parameter that feeds NO field records nothing: there is no
+            # field for the argument's type to be evidence about, which is
+            # the same reason the same-module `_ctor_init_params` pass has
+            # always keyed on real field names reached through an assignment.
+            # ONE parameter can feed SEVERAL fields (`self.s = s` plus
+            # `self.n = s`), and every one of them is the same value, so the
+            # answer is a LIST of fields per parameter and the hint is
+            # recorded once per field — that is the same coverage the
+            # `cross_module_ctor_param_types_every_field` case pins, and
+            # keying on one field per parameter would have narrowed it.
+            # Source order, no dedup: `self.n = s` twice is one hint applied
+            # to the same field, which the conflict rule then sees as
+            # agreement rather than as a disagreement with itself.
             def _xf_struct_init_params(_xfm, _xfs):
+                """[(param_name, [field, ...])] for the struct's `__init__`."""
                 for _xfstmt in _xg_parse_mod(_xfm):
                     if isinstance(_xfstmt, StructDef) and _as_str(_xfstmt.name) == _xfs:
                         for _xfmeth in _xfstmt.methods:
                             if _as_str(_xfmeth.name) == '__init__':
                                 _xfnames = gimple_ctypes._param_names_stripped(_xfmeth.params)
-                                return [n for n in _xfnames if n != 'self']
+                                _xfout = {n: [] for n in _xfnames if n != 'self'}
+                                for _xfn in _walk_ast(_xfmeth.body):
+                                    if not isinstance(_xfn, AssignStmt):
+                                        continue
+                                    _xff = _gmi_self_member(_xfn.target)
+                                    if not _xff or not isinstance(_xfn.value, IdentExpr):
+                                        continue
+                                    _xfv = _as_str(_xfn.value.name)
+                                    if _xfv in _xfout and _xff not in _xfout[_xfv]:
+                                        _xfout[_xfv].append(_xff)
+                                return [(n, _xfout[n]) for n in _xfout]
                         return None
                 return None
 
@@ -3502,7 +3541,13 @@ def gen_module_impl(self, stmts):
                     _xfct = _xf_lit_ctype(_xfa)
                     if not _xfct:
                         continue
-                    _xf_record(_xf_key_base + '::' + _xf_pnames[_xfi], _xfct)
+                    # `_xf_pnames[_xfi][1]` is the list of FIELDS this argument
+                    # feeds, and empty when the parameter feeds no field at
+                    # all — then the argument's type is not evidence about
+                    # any field, so there is nothing to record. See
+                    # `_xf_struct_init_params`'s own docstring.
+                    for _xf_fld in _xf_pnames[_xfi][1]:
+                        _xf_record(_xf_key_base + '::' + _xf_fld, _xfct)
 
         for _mc_iter in sorted(modules_to_compile):
             # FRESH `_mn` local, NOT `module_name = _as_str(module_name)`:
@@ -7605,6 +7650,41 @@ def gen_module_impl(self, stmts):
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
             _fn_by_name[_as_str(_fbn_s.name)] = _fbn_s
+
+    # Per-callee memo of "what container ELEMENT type does this function
+    # RETURN", read by `_static_arg_elems`'s CallExpr arm below. Memoized
+    # because `_infer_return_elem_type` walks the whole body and this arm sits
+    # inside a per-call-site walk over every caller body, so an unmemoized
+    # call would re-scan the same function once per call site that passes its
+    # result onward. Keyed by name, not by node id: the same FunctionDef is
+    # reached from every call site in the program and there is exactly one
+    # answer per name.
+    _callee_ret_elem_memo: dict = {}
+
+    def _callee_return_elem(fname):
+        """The container element C type `fname` returns, or None.
+
+        The callee's OWN body is the only evidence there is for this, and it
+        is the same evidence Pass 2c's `_return_elem_types` table is built
+        from — which does not exist yet at Pass 1.3d, so it is asked directly.
+        A callee this compile has no FunctionDef for (an imported extern, a
+        method reached through a receiver) answers None, i.e. no evidence,
+        never a guess. One try/except: `_infer_return_elem_type` runs a whole
+        nested scan over AST shapes this pass has no stake in, and a decline
+        there must be silence rather than an exception out of a pre-pass.
+        """
+        if fname in _callee_ret_elem_memo:
+            return _callee_ret_elem_memo[fname]
+        _fd = _fn_by_name.get(fname)
+        if _fd is None:
+            _callee_ret_elem_memo[fname] = None
+            return None
+        try:
+            _e = self._infer_return_elem_type(_fd.body, _fd)
+        except Exception:
+            _e = None
+        _callee_ret_elem_memo[fname] = _e
+        return _e
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -7633,7 +7713,26 @@ def gen_module_impl(self, stmts):
         expression, or (None, None). IdentExpr defers to the caller's
         scanned local map; a container LITERAL is provable on the spot,
         which is what the IdentExpr-only walk above could not see either
-        (`total([1.0, 2.0])` read its argument as int64 bits)."""
+        (`total([1.0, 2.0])` read its argument as int64 bits); and a CALL
+        RESULT resolves through the callee's own return element type.
+
+        The CallExpr arm is the third shape of the same question, and its
+        absence was a hole rather than a limit: `total([T(1), T(2)])` typed
+        its argument from the literal and `total(mylist)` from the caller's
+        scan, but `total(build(10))` — a parameter whose EVERY call site is
+        handed a function's return value — had no evidence at all, fell to
+        `int64_t`, and the callee's `for t in xs:` read the elements with
+        `mojo_list_get_int`, so `t.numel()` degraded to the no-op stub and `s`
+        accumulated a `T *`'s own bits. Exit 0, no diagnostic: a heap address
+        where CPython prints `21`. Both one-hop neighbours of that shape were
+        already right, which is what makes it a gap.
+
+        What is NOT interchangeable with a callee's own parameter type: the
+        element type comes from the RETURN (`build`'s `return [T(n), T(n+1)]`
+        list literal), so this asks `_callee_return_elem` and nothing else.
+        Admission discipline is the sibling arms' unchanged: `int64_t` is
+        never positive evidence (see the IdentExpr arm), and `_record_param_
+        elem`'s conflict rule still erases rather than merges."""
         if isinstance(a, gimple_ctypes.IdentExpr):
             _n = _gmi_as_str(a.name)
             if _n in elem:
@@ -7677,6 +7776,14 @@ def gen_module_impl(self, stmts):
                 if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
                     return 'MojoList *', self._infer_list_elem_type(a.elements[0].elements)
                 return _gmi_as_str(_e), None
+        if isinstance(a, gimple_ctypes.CallExpr) and isinstance(a.func, gimple_ctypes.IdentExpr):
+            # Only a bare-name callee: a `module.f(...)` / `recv.m(...)` has
+            # no FunctionDef in `_fn_by_name`, so it answers None, the same
+            # no-evidence answer every other unrecognised shape gives.
+            _e = _callee_return_elem(_gmi_as_str(a.func.name))
+            if _e is None or _e == 'int64_t' or _e == '':
+                return None, None
+            return _gmi_as_str(_e), None
         return None, None
 
     for caller_name, body in _caller_bodies:
@@ -13051,6 +13158,43 @@ def gen_module_impl(self, stmts):
                 for _ckw in ('default', 'register', 'auto', 'static', 'extern',
                              'volatile', 'inline'):
                     signature = re.sub(r'\b' + _ckw + r'\b(?=\s*[,)])', f'_kw_{_ckw}', signature)
+                # A `(void)` prototype is a statement about a function that
+                # takes NO arguments, and this one demonstrably does: the same
+                # translation unit already carries the defining module's own
+                # forward declaration, `int64_t p_lister_hits_2dbb98 (int64_t,
+                # int64_t)`, emitted from the DEFINITION's inferred parameter
+                # types. gcc rejects the unit — `conflicting types ... have
+                # 'int64_t(void)'` against `previous definition ... with type
+                # 'int64_t(int64_t, int64_t)'`, and then `too many arguments`
+                # at every call through it.
+                #
+                # The scanned signature reached `(void)` because it is the
+                # IMPORTER's snapshot (`module_loader`'s text scan of the
+                # import), and a diamond — `main -> {p.lister, p.checker}`,
+                # `p.checker -> p.lister` — is the shape where the two scans
+                # disagree. The DEFINING module's own committed signature is
+                # already in a whole-program store, keyed by home qualifier,
+                # and it is the one that has to win for the same reason it
+                # wins in `_imported_def_pts`: only a unit that defines the
+                # name writes there.
+                #
+                # Scoped to the empty-parameter case on purpose. When the scan
+                # DID resolve a parameter list, this block already prints the
+                # scan's types and overriding them would change many currently
+                # green externs on the strength of a second inference; the
+                # contradiction this fixes is the one where the scan says
+                # "no parameters" and the definition says otherwise.
+                if not sym_info.get('c_parameters') and not sym_info.get('parameters'):
+                    _sig_pts = _ggf_dup._imported_def_pts(self, _sn)
+                    if _sig_pts:
+                        _sig_ret = _as_str(sym_info.get('c_return_type')) \
+                            or _as_str(sym_info.get('return_type')) or 'int64_t'
+                        if _sig_ret and _sig_ret != 'unknown' \
+                                and not any(c in _sig_ret for c in ('*', ' ')):
+                            pass
+                        else:
+                            _sig_ret = 'int64_t'
+                        signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             ret_type = _as_str(sym_info.get('return_type', 'int64_t'))

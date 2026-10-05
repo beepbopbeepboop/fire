@@ -545,6 +545,105 @@ def test_elaboration_failure_is_not_cached(wd):
 
 
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
+def test_instantiation_nested_gcc_is_retried(wd):
+    """The nested `gcc -c` in `monomorphize.instantiate`'s build is retried,
+    and a retry cannot hide a real defect.
+
+    That one step is the only impure thing in `elaborate_generic_struct`, and
+    on an 18-worker sweep every worker spawns a gcc for every instantiation it
+    needs — so a `gcc -c` that lost its output file to the OS is a different
+    event from one that rejected the source, and only the second is a bug. It
+    produced a one-off `stdlib-syntax` failure on a file whose elaboration had
+    already been cached correctly by a LATER run.
+
+    A retry is defensible here precisely because the build is content-keyed and
+    deterministic (`cas.instantiation_key` covers the template source, the type
+    args, the gcc and the flags): a second attempt either succeeds — which is
+    the transient — or fails with the SAME stderr, which is a real defect and is
+    still raised. So this cannot turn a red into a green.
+
+    Both directions are asserted, because "it retried" and "it still raises"
+    are different properties and only the second makes the first safe:
+      * a gcc that fails twice and then succeeds produces the object, and the
+        attempt count is 3;
+      * a gcc that always fails still raises, and the exception carries EVERY
+        attempt's stderr — so "it worked on the third try" is visible to
+        whoever reads the next occurrence rather than silently smoothed over.
+    """
+    import subprocess as real_sp
+    src = "struct RetryBox[T]:\n    var v: T\n"
+    real_key = cas.instantiation_key
+    real_sub = mm.subprocess
+    real_os_mkdtemp = mm.tempfile.mkdtemp
+
+    class _Failed:
+        returncode = 1
+        stderr = 'simulated transient nested-gcc failure'
+        stdout = ''
+
+    def _run_with(fail_times, tag):
+        state = {'n': 0}
+
+        def _fake_run(cmd, *a, **k):
+            if '-c' in cmd and str(cmd[-1]).endswith('.c'):
+                state['n'] += 1
+                if state['n'] <= fail_times:
+                    return _Failed()
+            return real_sp.run(cmd, *a, **k)
+        # A fresh working dir and a fresh key per scenario, so neither can be
+        # served from the CAS by the other one's build.
+        wd2 = os.path.join(wd, 'retry_' + tag)
+        os.makedirs(wd2, exist_ok=True)
+        mm.subprocess = type('S', (), {'run': staticmethod(_fake_run)})
+        mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
+            lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
+        cas.instantiation_key = (lambda *a, **k: 'retrytest_' + tag)
+        try:
+            return state, mm.instantiate(src, {'T': 'Int64'})
+        finally:
+            mm.subprocess = real_sub
+            mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
+            cas.instantiation_key = real_key
+
+    state, res = _run_with(2, 'transient')
+    check("elaborate: a nested gcc that fails transiently is retried and "
+          "succeeds",
+          state['n'] == 3 and bool(res[1]),
+          f"{state['n']} attempts, object={bool(res[1])}")
+    state, _ = None, None
+    state2 = {'n': 0}
+
+    def _always_fail(cmd, *a, **k):
+        if '-c' in cmd and str(cmd[-1]).endswith('.c'):
+            state2['n'] += 1
+            return _Failed()
+        return real_sp.run(cmd, *a, **k)
+
+    wd2 = os.path.join(wd, 'retry_permanent')
+    os.makedirs(wd2, exist_ok=True)
+    mm.subprocess = type('S', (), {'run': staticmethod(_always_fail)})
+    mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
+        lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
+    cas.instantiation_key = (lambda *a, **k: 'retrytest_permanent')
+    try:
+        mm.instantiate(src, {'T': 'Int64'})
+        raised = None
+    except RuntimeError as e:
+        raised = str(e)
+    finally:
+        mm.subprocess = real_sub
+        mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
+        cas.instantiation_key = real_key
+    check("elaborate: a nested gcc that always fails still raises, so a retry "
+          "cannot hide a real defect",
+          raised is not None and state2['n'] == 3,
+          f"raised={raised is not None}, {state2['n']} attempts")
+    check("elaborate: ... and the exception carries every attempt's stderr, so "
+          "a transient that needed the retry is visible",
+          raised is not None and raised.count('simulated transient') == 3,
+          (raised or '')[:200])
+
+
 def test_elaboration_overload(wd):
     import elaborate
     from gimple_codegen import compile_linked
@@ -2099,6 +2198,7 @@ def main():
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
         test_elaboration_failure_is_not_cached(wd)
+        test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)

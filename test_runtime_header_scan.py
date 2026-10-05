@@ -409,8 +409,8 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    # 565 -> 577 (2026-10-04, the merge of `work/gatefix9` and `work/bugs6-1`).
-    # ONE row for TWELVE names, because the five this ledger had been short by
+    # 565 -> 578 (2026-10-04, the merge of `work/gatefix9`, `work/bugs6-1`
+    # and `work/bugs6-2`). ONE row for THIRTEEN names, because the five this ledger had been short by
     # were RECOVERED rather than rounded off. What each is for:
     #   +4  `mojo_str_count_from`, `mojo_str_endswith_from`,
     #       `mojo_str_rfind_from`, `mojo_str_startswith_from` — the
@@ -446,11 +446,23 @@ def test_every_declaration_is_seen():
     #       from the `_kw` read that looks it up, so `d[("a",)] = True` was one
     #       source-level assignment and two dict entries.
     #
-    # The total is written as MEASURED (577) rather than as this merge's own
+    # The total is written as MEASURED (578) rather than as this merge's own
     # arithmetic, because a count that reads as a formula when it is an
     # observation is the failure this file exists to prevent.
     #
-    for header, want in (('fire_runtime.h', 577),
+    #   +1  `mojo_is_registered_bytes` — the fourth and last member of the
+    #       container-registry family (`work/bugs6-2`). A boxed
+    #       `MojoBytes *` is pointer-shaped and is none of a list, dict, set or
+    #       box, so `mojo_boxed_is_str` classified it as a STRING — harmless
+    #       until `len()` on a polymorphic parameter read the answer through
+    #       that classification (`emit_infra._len_of_boxed`), where
+    #       `mojo_strlen` walked the bytes payload for a NUL and got a length
+    #       right only because `MojoBytes.len` sits at `MojoList.len`'s
+    #       offset. One name, taken from the call; the codegen half
+    #       (`_len_of_boxed`'s block layout) adds no runtime entry point, and
+    #       the registry entry itself is file-local.
+    #
+    for header, want in (('fire_runtime.h', 578),
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr

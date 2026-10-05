@@ -2896,6 +2896,15 @@ def test_the_compiler_imports_from_every_real_entry_point():
         `mojo/backend_gimple/module_gen.py` -> `module_shared` ->
         `funcs_shared` -> `gimple_codegen`.
 
+    The exemption list this used to carry is now EMPTY (2026-10-04). All
+    eight `mojo/middle/*` modules opened with a module-level `import
+    gimple_codegen`, and only three of them read anything from it —
+    `_SELFHOST_DIR` and `_selfhost_impl_py_files` — so those three now import
+    inside the function that uses them. That is the whole fix: `import X`
+    binds a module object and survives a half-initialised X (its attribute
+    reads happen later, at call time), while `from X import NAME` resolves
+    EAGERLY and does not. Every other middle-tier module's copy was dead code.
+
     Each module that can be a process's FIRST `mojo.*` import is therefore
     probed in a FRESH interpreter. Checking from inside this process would
     prove nothing: by the time this test runs, `sys.modules` already holds
@@ -2955,6 +2964,16 @@ def test_the_compiler_imports_from_every_real_entry_point():
             last = [l for l in r.stderr.strip().splitlines() if l.strip()]
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
+
+    # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
+    # which imports the gimple backend, which imports them back. That list is
+    # now EMPTY: the middle tier no longer imports `gimple_codegen` at module
+    # level at all, so there is nothing to exempt. Kept as a named declaration
+    # rather than deleted because the check that reads it is checked in BOTH
+    # directions, and a list that can silently reappear is the point.
+    # No `mojo/backend_gimple/*` module is exempt: the backend sits
+    # downstream of `gimple_codegen`, so every one of them is reachable first
+    # and a new cycle among them would be caught here.
     declared: set = set()
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
@@ -2965,6 +2984,68 @@ def test_the_compiler_imports_from_every_real_entry_point():
     check('imports: the probe actually probed something', len(entries) >= 30,
           f'only reached {len(entries)} modules — the glob or the list went '
           f'stale and this check is vacuous')
+    # The exemption list is now EMPTY, which means the check above is
+    # currently `not bad`. Assert that it is not vacuous by construction: an
+    # empty list with a non-empty failure set is the state this whole test
+    # exists to prevent, and `failed <= declared` alone would pass it.
+    check('imports: no middle-tier module needs an exemption any more',
+          not (declared or failed),
+          f'exempt={sorted(declared)} failing={sorted(failed)} — the middle '
+          f'tier must not import gimple_codegen at module level (see '
+          f'mojo/middle/methods_shared.py\'s header comment for the rule)')
+
+
+def test_every_backend_call_of_a_gen_method_has_the_delegate():
+    """`mojo/backend_gimple/*` calls the codegen's methods as `gen.X(...)`,
+    and every one of them has to be a method `GimpleGen` actually has.
+
+    The backend is a set of module-level functions that take the generator as
+    their first argument, so `gimple_codegen.py`'s `GimpleGen` is nothing but
+    the delegating half of one API — and the two halves are edited separately.
+    A merge that takes `gimple_codegen.py` from one side and `emit_stmts.py`
+    from the other produces a call to a method nobody defined, and the only
+    symptom is an `AttributeError` raised during codegen, on the four test
+    cases that happen to reach that store. It is invisible to `gcc`, to the
+    linker and to every exit code: the failure never gets far enough to have
+    an artifact. That is how a doc could sit open describing a one-line fix —
+    `'GimpleGen' object has no attribute '_emit_dict_int_value_store'`, on
+    four bytes-dict tests — while every gate stayed green.
+
+    Checked statically over CALLS only. A bare `gen._registry` read of an
+    attribute `__init__` assigns is not this defect — and there are ~330 of
+    them, so including reads would drown the ~2 real ones in noise.
+    `mojo/backend_gimple/spec_gen.py` is excluded because its `gen` is the
+    spec generator's own object, not a `GimpleGen`; it is the only backend
+    module whose `gen` is not one.
+    """
+    import glob
+
+    import gimple_codegen
+    cls = gimple_codegen.GimpleGen
+    known = set(vars(cls))
+    tree = ast.parse(open(os.path.join(HERE, 'gimple_codegen.py')).read())
+    cdef = next(n for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == 'GimpleGen')
+    for n in ast.walk(cdef):
+        # `self.x = ...` inside any method, plus the class-level constants.
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                and n.value.id == 'self':
+            known.add(n.attr)
+        if isinstance(n, ast.Name):
+            known.add(n.id)
+    bad = []
+    for path in sorted(glob.glob(os.path.join(HERE, 'mojo/backend_gimple/*.py'))):
+        if os.path.basename(path) == 'spec_gen.py':
+            continue
+        for n in ast.walk(ast.parse(open(path).read())):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id in ('gen', 'gen0')
+                    and n.func.attr not in known):
+                bad.append(f'{os.path.relpath(path, HERE)}:{n.lineno} '
+                           f'gen.{n.func.attr}')
+    check('the backend never calls a gen method GimpleGen does not have',
+          not bad, '; '.join(bad))
 
 
 # Every `.py` and `.mojo` whose text can end up in a refusal a test pins, and

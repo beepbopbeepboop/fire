@@ -636,6 +636,19 @@ int mojo_boxed_is_str(int64_t v);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);
+/* Bytes-shaped sibling of those three, and the one container kind whose
+ * absence from `mojo_boxed_is_str`'s exclusions was harmless until now:
+ * a `MojoBytes *` is pointer-shaped and is not a list, a dict, a set or a
+ * box, so `mojo_boxed_is_str` classified a boxed bytes value as a STRING.
+ * Nothing read such a value as a string until `len()` on a polymorphic
+ * parameter did (emit_infra._len_of_boxed), where `mojo_strlen` over the
+ * bytes object's own bytes answered a length that was right only by the
+ * accident that `MojoBytes.len` sits at the same offset as `MojoList.len`.
+ * Registered on allocation and NEVER removed: this runtime has no
+ * `mojo_bytes_free` (see bugs/PERF_printed_container_repr_leaks_its_cat_
+ * buffers.md), so a bytes object's address is never recycled and a stale
+ * entry is not possible. */
+int mojo_is_registered_bytes(int64_t addr);
 /* `list(<a str>)`: one fresh 1-character string per byte — the element type
  * Python's own `for c in s` binds, and what the codegen's string loop
  * (emit_loops.py's `_gen_for_str`) builds with mojo_strlen +

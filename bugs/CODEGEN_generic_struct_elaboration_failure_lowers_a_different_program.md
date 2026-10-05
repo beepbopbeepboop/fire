@@ -151,6 +151,26 @@ is defensible precisely because the build is content-keyed and deterministic —
 a second attempt either succeeds or fails identically, so it cannot hide a
 real defect). If it turns out to be something else, the stderr line names it.
 
+**Landed 2026-10-04: the bounded retry.** `monomorphize.instantiate`'s
+`build()` now runs the nested `gcc -c` up to three times and keeps every failed
+attempt's stderr in the exception. The argument above is the whole argument,
+and it is what makes the retry safe rather than a way of making a red go away:
+`cas.instantiation_key` covers the template source, the type args, the gcc and
+the flags, so the build is deterministic and a second attempt either succeeds —
+which is the transient — or fails with the SAME stderr, which is a real defect
+and is still raised. Measured both ways in
+`test_module_cache.py::test_instantiation_nested_gcc_is_retried`: a gcc that
+fails twice then succeeds produces the object on attempt 3, and a gcc that
+always fails still raises after 3 attempts carrying all three stderrs.
+
+That leaves exactly one thing open, and it is the same one as before: the
+sweep's own concurrency. The retry is deliberately the smaller half — it makes
+a recurrence *observable* (three stderrs and an attempt count, on the run that
+hit it) without claiming to know the cause. If the stderrs of a future
+occurrence are all DISTINCT, the retry is not the answer and the concurrency
+is; if they are identical, the transient was not the nested gcc and the stderr
+line names whatever it was.
+
 ## Where
 
 * the swallow: `mojo/backend_gimple/emit_resolve.py`, `_ensure_generic_struct`

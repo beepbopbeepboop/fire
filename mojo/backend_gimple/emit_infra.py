@@ -5114,6 +5114,85 @@ def _repr_boxed_container(gen, value: str):
     return _res
 
 
+def _len_of_boxed(gen, value: str) -> str:
+    """`len()` of a container or string held in an `int64_t` box, as an
+    `int64_t` temp.
+
+    The same question `_repr_boxed_container` above answers, for the same
+    reason and by the same mechanism — the box is this codegen's answer for a
+    value with no single C type, and one C type per parameter means a
+    genuinely polymorphic parameter gets ONE of them. `def lst(x): return
+    len(x)` called as both `lst([1, 2, 3])` and `lst("abcd")` declares `int64_t
+    x`, and the answer then depends entirely on which kind the lowering
+    commits to: `mojo_list_len` read the string's own bytes as a `MojoList`
+    header and printed `7308325556857761645` where CPython prints `4`.
+
+    That was not a value comparison anyone could have caught: it is whatever
+    heap bytes follow the pointer, so it is stable per run and arbitrary
+    across runs.
+
+Order matters and is the same one `_repr_boxed_container` uses: the live
+    container registries first — list, dict, set AND bytes, because
+    `mojo_boxed_is_str` calls a boxed bytes value a string (it is
+    pointer-shaped and is none of a list, dict, set or box) and `mojo_strlen`
+    over a bytes object walks its payload for a NUL, answering a length right
+    only by the accident that `MojoBytes.len` sits at `MojoList.len`'s offset
+    — and then the model's own `mojo_boxed_is_str` discriminator, and
+    `mojo_list_len` LAST as the unconditional fallback. That last arm is what
+    keeps this a strict improvement rather than a change of behaviour for
+    everything else: the previous lowering was `mojo_list_len`
+    unconditionally, so every input the registries do not recognise still gets
+    exactly the answer it got before.
+    """
+    _res = gen._new_temp('int64_t')
+    _it64 = gen._new_val('int64_t', value)
+    bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
+    bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+    bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
+    bb_byt = gen._new_bb(); bb_not_byt = gen._new_bb()
+    bb_str = gen._new_bb(); bb_not_str = gen._new_bb()
+    bb_after = gen._new_bb()
+    isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _it64)])
+    gen._emit(f'  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};')
+    gen._emit_label(bb_dict)
+    _dp = gen._coerce_to_type('int64_t', 'MojoDict *', _it64)
+    gen._emit(f'  {_res} = mojo_dict_len ({_dp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_dict)
+    iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', _it64)])
+    gen._emit(f'  if ({iss}) goto {bb_set}; else goto {bb_not_set};')
+    gen._emit_label(bb_set)
+    _sp = gen._coerce_to_type('int64_t', 'MojoSet *', _it64)
+    gen._emit(f'  {_res} = mojo_set_len ({_sp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_set)
+    isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', _it64)])
+    gen._emit(f'  if ({isl}) goto {bb_list}; else goto {bb_not_list};')
+    gen._emit_label(bb_list)
+    _lp = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
+    gen._emit(f'  {_res} = mojo_list_len ({_lp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_list)
+    isb = gen._call_expr('int', 'mojo_is_registered_bytes', [('int64_t', _it64)])
+    gen._emit(f'  if ({isb}) goto {bb_byt}; else goto {bb_not_byt};')
+    gen._emit_label(bb_byt)
+    _bp = gen._coerce_to_type('int64_t', 'MojoBytes *', _it64)
+    gen._emit(f'  {_res} = mojo_bytes_len ({_bp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_byt)
+    ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _it64)])
+    gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
+    gen._emit_label(bb_str)
+    _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
+    gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_str)
+    _lp2 = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
+    gen._emit(f'  {_res} = mojo_list_len ({_lp2});')
+    gen._emit_label(bb_after)
+    return _res
+
+
 def _is_may_hold_str_param(gen, node) -> bool:
     """Is `node` an expression that may hold a STRING in an `int64_t`?
 
