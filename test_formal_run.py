@@ -14102,6 +14102,46 @@ STDERR_CASES = [
      "    return 0\n",
      1, ["dict store of 'k' into 'd'", "cannot reserve",
          "not built by a dict LITERAL"]),
+    # `a + b` where the estimate of the element total is LOWER than what the
+    # operands' own count words say at run time — the reservation is a static
+    # estimate, and the count is read from the operands, so no pass over the
+    # source can reconcile them.  The loop here has NO compile-time trip count,
+    # which is what keeps the reservation at the one-per-site bound
+    # (`_blob_site_growth`'s own decision, pinned by the GUARD row in `CASES`
+    # above), and 5000 executions is comfortably past it.
+    #
+    # **arm64 had NO guard on this path at all** and wrote straight past its own
+    # reservation — measured before this case existed: the same program printed
+    # `len=5001` having written 5001 elements into 65 words of frame.  x86-64
+    # HAD one and it was a bare `exit(1)`, so this program stopped with nothing
+    # on either stream.  Three needles: the construct says which operator, the
+    # count says which number was exceeded, and "ESTIMATE" says the rule — a
+    # reader who cannot tell this from `list_append_overflow_is_loud` above
+    # (whose capacity is the number of append SITES, a different fact with a
+    # different remedy) would go and look at the wrong thing.
+    ("blob_growth_concat_past_its_reservation_is_loud",
+     "def main(n):\n"
+     "    var s = [0]\n"
+     "    var i = 0\n"
+     "    while i < 5000:\n"
+     "        s = s + [1]\n"
+     "        i = i + 1\n"
+     "    printf(\"len=%d\", len(s))\n"
+     "    return 0\n",
+     1, ["a list concatenation overflowed its reservation", "reserved room for",
+         "ESTIMATE"]),
+    # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
+    # limitation worth stating rather than a gap. `run_stderr_case` requires the
+    # program to build on BOTH architectures, and x86-64 refuses `a | b` by name
+    # (`model.set_union_refusal` — lowering it as a concatenation answers
+    # `[1,2] | [2,3]` with four elements), so a two-architecture stderr
+    # comparison has nothing to compare. What is checkable for all three sites
+    # on both backends is the question this row's mechanism cannot ask — does
+    # the site have a guard at all — and that is
+    # `check_blob_growth_guards` / `_BLOB_GROWTH_PROBES`, which is where `*`
+    # and `|` are pinned. `*` builds on both, so the difference there is that
+    # its reservation is exact for a literal operand: the run-time total cannot
+    # exceed the estimate without a name in one of them.
 ]
 
 # `d[k] = v` INSERTS, and these are the answers CPython gives. They are in
@@ -22452,7 +22492,150 @@ def check_stack_floor_decision(verbose=False):
     return passed, failures
 
 
-# HOW DEEP A CHAIN GETS, asked of `model.call_graph_depth` — the half of the
+# EVERY site that RESERVES a blob and then COPIES into it at run time, and the
+# smallest program that reaches it on each backend.
+#
+# This is the structural half of `STDERR_CASES`'s blob-growth row, and it exists
+# because the row cannot cover the set. A run-time stop is only observable on a
+# program whose estimate is wrong, and for two of the three sites there is no
+# such program that builds on BOTH machines: x86-64 refuses `a | b` outright
+# (`model.set_union_refusal`, and it is right — lowering it as a concatenation
+# answers `[1,2] | [2,3]` with four elements), so a two-architecture stderr
+# comparison has nothing to compare. What is left is the question the run cannot
+# ask: **does this site have a guard at all.** Before this, `*` had none on
+# either backend and `|` had none on either backend, and only `+` had one on
+# x86-64 — and that one was a bare `exit(1)`, which is why it is in
+# `STDERR_CASES` now.
+#
+# The check is BEHAVIOURAL and not a source grep: `_emit_blob_growth_guard` is
+# wrapped, a program is compiled through `formal/build.py`, and the sites that
+# actually emitted are recorded. A grep would pass on an emitter that calls the
+# helper from a branch nothing reaches, and would go red on a site that is
+# spelled differently — neither of which is the question.
+#
+# `(backend, tag, source)`, and `want` is the set of `what` strings the guard
+# must be called with — the operator's own noun phrase, which is also what
+# `frame_blob_refusal` is given for the compile-time half of the same bound, so
+# a reader is not told one thing by a refusal and another by the run-time stop.
+_BLOB_GROWTH_PROBES = [
+    # `+` on two blobs. Reachable on both, and the one site whose run-time stop
+    # is also pinned end-to-end by
+    # `blob_growth_concat_past_its_reservation_is_loud`.
+    ("arm64", "cat",
+     "def main(n):\n    var s = [0]\n    var i = 0\n"
+     "    while i < 3:\n        s = s + [1]\n        i = i + 1\n"
+     "    return len(s)\n", {"a list concatenation"}),
+    ("x86_64", "cat",
+     "def main(n):\n    var s = [0]\n    var i = 0\n"
+     "    while i < 3:\n        s = s + [1]\n        i = i + 1\n"
+     "    return len(s)\n", {"a list concatenation"}),
+    # `xs * n`, whose reservation is `blob_est(blob) * count` and whose run-time
+    # total is `len(blob) * count` read from the blob's own count word — the two
+    # disagree exactly when `blob_est` is the fallback, which is every bare name.
+    ("arm64", "rep",
+     "def main(n):\n    var t = [1, 2] * 3\n    return len(t)\n",
+     {"a list repetition"}),
+    ("x86_64", "rep",
+     "def main(n):\n    var t = [1, 2] * 3\n    return len(t)\n",
+     {"a list repetition"}),
+    # `a | b`. arm64-only, and that is the POINT of the row: this is a site that
+    # existed on one architecture only, with no guard on it, and the check is
+    # what stops a fourth blob-producing site appearing on one backend alone.
+    ("arm64", "uni",
+     "def main(n):\n    var a = [1, 2]\n    var b = [2, 3]\n"
+     "    var u = a | b\n    return len(u)\n",
+     {"a set union"}),
+]
+
+# The fewest instructions a guard can emit and still BE one. Both backends'
+# helpers are far above it — arm64's is a `movz`/`cmp`/`cset`/`cbnz` plus the
+# diagnostic's `adrp`/`add`/`movz`/`movz`/`movz`/`svc`, the `fflush` and the
+# exit trap, and x86-64's is the same shape with a libc `write` and `exit` — so
+# the bound is set by what a guard has to DO (compare a run-time count against a
+# literal, branch on it, and leave the machine) rather than by either
+# implementation, which is what lets one number check both.
+_BLOB_GROWTH_MIN_WORDS = 8
+
+
+def check_blob_growth_guards(verbose=False):
+    """Every blob-producing site emits the run-time capacity guard.
+
+    Returns `(passed, failures)`; one probe per `(backend, tag)`, and the
+    assertion is that the site reached while compiling that probe's program
+    emitted a guard for that `tag` — so a site that stopped being reachable is
+    as loud as one that lost its guard, which is the property that keeps this
+    from rotting into a check of nothing.
+    """
+    build = __import__("formal.build", fromlist=["build"])
+    passed, failures = 0, []
+    import tempfile
+    for arch, tag, source, want in _BLOB_GROWTH_PROBES:
+        mod = __import__(f"formal.{'arm64' if arch == 'arm64' else 'x86_64'}"
+                         f"_codegen", fromlist=["codegen"])
+        cls = getattr(mod, "ARM64Codegen" if arch == "arm64" else "X86_64Codegen")
+        real = cls._emit_blob_growth_guard
+        got = []
+
+        def spy(self, what, total_reg, capacity, site_tag, _real=real, _got=got):
+            before = len(self.asm.sections["text"])
+            _real(self, what, total_reg, capacity, site_tag)
+            # The WORDS the guard contributed, not merely that it was called:
+            # a helper whose body is stubbed out still gets called by every
+            # site, so counting calls alone would pass on a tree where the
+            # guard exists and emits nothing — which is the state this check
+            # exists to catch, and the state `*` and `|` were in.
+            _got.append((what, capacity, site_tag,
+                         (len(self.asm.sections["text"]) - before) // 4))
+
+        cls._emit_blob_growth_guard = spy
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                src = os.path.join(td, f"blob_growth_{tag}.mojo")
+                with open(src, "w") as f:
+                    f.write(source)
+                build.compile_formal(src, output=os.path.join(td, "a.out"),
+                                     prove=False, check=False, arch=arch)
+        except Exception as e:                     # noqa: BLE001 - reported
+            failures.append(
+                f"{arch}/{tag}: the probe did not compile ({type(e).__name__}: "
+                f"{e}), so it cannot show whether the site has a guard. A probe "
+                f"that stops compiling is a hole in this check, not a pass")
+            continue
+        finally:
+            cls._emit_blob_growth_guard = real
+        mine = [g for g in got if g[2] == tag]
+
+        if not mine:
+            failures.append(
+                f"{arch}/{tag}: the site emitted NO capacity guard, so a "
+                f"reservation this path cannot keep is a silent frame overrun "
+                f"rather than a stop that says which bound was hit")
+            continue
+        said = {g[0] for g in mine}
+        if said != want:
+            failures.append(
+                f"{arch}/{tag}: guarded as {sorted(said)}, want {sorted(want)} "
+                f"— the run-time stop and the compile-time refusal "
+                f"(`frame_blob_refusal`) name one bound two ways")
+            continue
+        # A comparison, a conditional branch and a way out: the fewest words a
+        # guard can be and still be one are the two that TEST a bound and the
+        # one that LEAVES on it. Below that the site has a label and no check.
+        thinnest = min(g[3] for g in mine)
+        if thinnest < _BLOB_GROWTH_MIN_WORDS:
+            failures.append(
+                f"{arch}/{tag}: the guard emitted {thinnest} instruction(s), "
+                f"fewer than the {_BLOB_GROWTH_MIN_WORDS} a bound check needs "
+                f"— it is called and emits nothing, which is the state `*` and "
+                f"`|` were in and which counting call sites cannot see")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  blob-growth-guard: {arch}/{tag} "
+                  f"{[(g[0], g[1], g[3]) for g in mine]}")
+    return passed, failures
+
+
 # residual the guard cannot reach, and the number that decided
 # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
 #
@@ -23093,6 +23276,13 @@ def main():
           f"FAIL={len(sf_failures)}")
     passed += sf_passed
     failed += len(sf_failures)
+    bg_passed, bg_failures = check_blob_growth_guards(args.verbose)
+    for detail in bg_failures:
+        print(f"  FAIL  blob-growth-guard: {detail}")
+    print(f"formal run: blob-growth-guard PASS={bg_passed} "
+          f"FAIL={len(bg_failures)}")
+    passed += bg_passed
+    failed += len(bg_failures)
     tg_passed, tg_failures = check_type_value_tag_generator(args.verbose)
     for detail in tg_failures:
         print(f"  FAIL  tag-generator: {detail}")
