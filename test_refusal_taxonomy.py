@@ -1977,13 +1977,17 @@ _LOWERABLE = ("FloatLiteral___int__: `self.__int_literal__().__int__(...)` "
               "cannot be lowered: `self.__int_literal__()` is a `IntLiteral`, "
               "and that IS established — this is not a missing-type refusal")
 
-# A message NOBODY names, which is the b12 failure itself and cannot be built
-# from any one function because there is no function for it: it is what a new
-# refusal looks like for the day it lands.
-_NAMELESS = ("hostmods/os/_syscalls.mojo: `len(s)` is refused: this module's "
-             "own text is not ASCII, so on this path it would answer in BYTES "
-             "where CPython answers in CHARACTERS, and no statement here says "
-             "which")
+# A message NOBODY names — which is what a NEW refusal looks like on the day it
+# lands, and is the b12 failure's shape. Deliberately NOT a paraphrase of a
+# refusal that does have a row: the first version of this fixture was the
+# text-encoding refusal with a clause moved, which is unclassified only because
+# its marker is a longer substring of the real sentence, so it tested a
+# near-miss in a marker rather than the case under test. This one shares no
+# clause with any row in either table.
+_NAMELESS = ("widgets.mojo: `Widget` is 3 slots wide and this path builds "
+             "objects one word at a time, so there is no layout to give it: the "
+             "image has nowhere to put slot 2, and dropping it would answer a "
+             "different value than CPython's")
 
 
 def _synthetic_log(rows, arch="arm64", files=None, passed=None):
@@ -2127,10 +2131,9 @@ def _unclassified_alarm_checks(failures):
           f"['deep.py', 'plain.py']: a `not-answerable` row's own reason "
           f"matches no family and is not a refusal, a chain must be peeled to "
           f"its end, and a named message must stay named")
-    check(unclassified and "is refused: this module's own text is not ASCII" in
-          unclassified[0][1],
-          "the unclassified message is not the TERMINAL one, so the clause the "
-          "markers key on is the one two refusals further out")
+    check(unclassified and "no layout to give it" in unclassified[0][1],
+          "the unclassified message is not the TERMINAL one, so the clause "
+          "that would carry a marker is the one two refusals further out")
 
     # And the whole path from that log through the CAUSES tool's own CLI, which
     # is where a reader meets this finding in practice.
@@ -2319,7 +2322,12 @@ def _baseline_alarm_checks(failures):
           f"four files that swapped a named row for the nameless refusal "
           f"without changing class reported nothing, and a class-only rule "
           f"misses every one of the b12 round's 110:\n{text}")
-    check("m0.py" in text and S.unclassified_shape(_NAMELESS) in text,
+    # The shape is taken from the TERMINAL message, so the `<file>: ` prefix
+    # `formal/imports.py` adds is stripped before it is reduced — which is why
+    # the expected shape is computed through the same peel the tool uses rather
+    # than off the fixture string.
+    terminal_shape = S.unclassified_shape(S._terminal_reason(_NAMELESS))
+    check("m0.py" in text and terminal_shape in text,
           f"the same-class group does not name the files, or names them "
           f"without the shape they share:\n{text}")
 
