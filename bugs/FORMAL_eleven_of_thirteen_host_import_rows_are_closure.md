@@ -412,11 +412,56 @@ them no-compiler so they cost a second rather than a minute of images:
 
 ### What is left on the row
 
-`functools` for `version.py` and `copy` for `tools/apply_extraction.py`, one
-file each, and both are still §2's shapes: `lru_cache` is a decorator over a
+**`functools` for `version.py`, one file.** `lru_cache` is a decorator over a
 function value (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`, and
 `version.py`'s one use is `@functools.lru_cache(maxsize=1)` on a function this
-repository could spell as a plain cached call), and `copy`'s is `deepcopy` over
-objects this path has no heap for. Neither is a module worth writing; the honest
-statement is that two files in this repository are one stdlib call away from
-being swept and each call is a capability question rather than a missing file.
+repository could spell as a plain cached call), which is a capability question
+and not a missing file.
+
+**`copy` for `tools/apply_extraction.py` is NOT a row — the doc said it was, and
+that was false (2026-10-05, `formal28-3`).** The paragraph above recorded it as
+*"`copy`'s is `deepcopy` over objects this path has no heap for"*. Measured:
+**the file imports `copy` and reads it ZERO times.** No `deepcopy`, no
+`copy.copy`, no `ast.Name` load of the name — one occurrence of the string in the
+whole file, the `import` line itself. So it was the `alone` row of
+`tools/formal_host_import_wall.py`'s ranking (the file's ONLY unresolved name,
+`alone 1`) and therefore the whole of what stood between it and a build, for a
+module it does not use.
+
+That is the same answer `itertools` got for `test_formal_run.py` in §4 — the
+dependency leaves the file rather than the module being written — and it is now
+what happened: `import copy` is deleted, the file is **byte-identical in
+behaviour** (same JSON spec through both, same output, exit 0 both), and its
+verdict moves off the host-import wall onto a subject about its own source:
+
+```
+build: an f-string literal on line 88 is refused on this path: its value is its
+  INTERPOLATED text, and this path has no buffer to hold it
+```
+
+which is `FORMAL_string_composition_has_no_buffer.md`'s row and a claim a person
+can act on, where a module nobody has written is not. **Pinned** by
+`test_formal_imports.py`'s `a dead import is not a wall this tree has to climb`,
+which asks the question the row turns on — *does anything READ it* — rather than
+"is the import gone", and which keeps a REAL wall red on purpose:
+`test_formal_time.py`'s `fractions` is genuinely read (it is the oracle), so that
+assertion requires it to still be there.
+
+**Re-measured with the committed tool** (`tools/formal_host_import_wall.py`, 749
+files), because the two closures this document names have both moved:
+
+| module | alone | what it is |
+|---|---:|---|
+| `collections` | **10** | the largest reachable row, up from the 5 this document recorded; the files are 10 of this repository's own `tools/` and `consolidate_string_pool.py` |
+| `unittest` | **7** | `unreachable` — a second process |
+| `builtins` | 2 | `unreachable` |
+| `datetime` | 2 | modelled |
+| `functools` | 1 | `version.py` — the row above |
+| `fractions` | 1 | `test_formal_time.py` — a real oracle use, correctly a wall |
+| `copy` | **0** | was 1; the dead import is gone |
+
+**So the honest statement is now one file**, not two: `version.py` is one
+`functools.lru_cache` away from being swept, and that call is a capability
+question rather than a missing file. `collections` at 10 is the larger reachable
+row and is `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue, not
+this document's.

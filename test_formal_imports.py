@@ -4392,6 +4392,99 @@ def test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel(tmpdir, _s
     check(W.sweep_rows("") == {} and W.sweep_rows("/nope") == {},
           "a missing sweep log must be an empty column, not an error")
 
+
+def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
+    """A module in the file's closure that the file never READS is not a wall.
+
+    `tools/apply_extraction.py` imported `copy` and used it zero times, so it was
+    the `alone` row of `tools/formal_host_import_wall.py`'s ranking — the file's
+    ONLY unresolved name, and therefore the whole of what stood between it and a
+    build. `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`
+    recorded that row as "`copy`'s is `deepcopy` over objects this path has no
+    heap for", which is false of this file: there is no `deepcopy` in it, and no
+    reference to the module at all. The honest reading is that the import is
+    DEAD, and a dead import is removed rather than modelled — which is the same
+    answer `itertools` got for `test_formal_run.py` in that document's own §4.
+
+    The claim asked here is the one a reader can act on: for a handful of files
+    in this repository, every module in the import closure is either resolvable
+    or genuinely read. `copy` is named explicitly because it is the row that was
+    measured, and because a future re-addition of the import would put the file
+    straight back on the wall with nothing failing here.
+    """
+    root = HERE
+    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
+        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+
+    def closure_unresolved(path):
+        seen, stack, out = set(), [path], set()
+        while stack:
+            p = stack.pop()
+            rp = os.path.realpath(p)
+            if rp in seen or not p or not os.path.exists(p):
+                continue
+            seen.add(rp)
+            for m in I.imported_modules(I.module_statements(p)):
+                d = I.resolve_module_path(m, relative_to=p,
+                                          project_root=root)
+                if d is None and os.path.isdir(stdlib):
+                    d = I.resolve_module_path(m, relative_to=p,
+                                              project_root=stdlib)
+                out.add(m) if d is None else stack.append(d)
+        return out
+
+    # THE ROW, and the fact that makes it a dead import rather than a use: the
+    # module is in the file's statements and in NO expression. A file that
+    # really used it would fail this, which is the point — the check is not
+    # "the import is gone" but "nothing reads what it imports".
+    target = os.path.join(root, "tools", "apply_extraction.py")
+    check(os.path.exists(target), f"{target} is gone, so this row is stale")
+    with open(target) as fh:
+        stmts = I.module_statements(target)
+    names = I.imported_modules(stmts)
+    check("copy" not in names,
+          f"`tools/apply_extraction.py` imports `copy` again, which puts it "
+          f"back on the host-import wall as the file's ONLY unresolved name; "
+          f"its modules are {sorted(names)}")
+    import ast as _ast
+    with open(target) as fh:
+        tree = _ast.parse(fh.read())
+    reads = [n for n in _ast.walk(tree)
+             if isinstance(n, _ast.Name) and n.id == "copy"]
+    check(not reads,
+          f"`copy` is imported and read {len(reads)} time(s) — then this is a "
+          f"use, not a dead import, and the wall is a real one")
+    un = closure_unresolved(target)
+    check("copy" not in un,
+          f"`tools/apply_extraction.py` still has `copy` in its unresolved "
+          f"closure: {sorted(un)}")
+
+    # The general shape, over the files the ranking measured as being one stdlib
+    # call from a sweep. **`fractions` is excluded and named**, because it is a
+    # REAL wall rather than a dead import: `test_formal_time.py` imports
+    # `fractions.Fraction` and uses it as the oracle. The distinction the row
+    # turns on is not "is the module in the closure" but "does anything READ
+    # it" — the check above asks the second question of `copy` for exactly this
+    # reason, and a file that genuinely reads its wall is supposed to be red.
+    for rel in ("tools/apply_extraction.py",):
+        p = os.path.join(root, rel)
+        if not os.path.exists(p):
+            continue
+        un = closure_unresolved(p)
+        check(not un,
+              f"{rel} has an unresolved import the formal sweep files as "
+              f"not-answerable/host-import: {sorted(un)}")
+
+    # And the half that is a real wall STAYS one: `fractions` is read, so this
+    # is the case that keeps the row above honest — a check that only ever saw
+    # dead imports would pass with the whole ranking still red.
+    tf = os.path.join(root, "test_formal_time.py")
+    if os.path.exists(tf):
+        check("fractions" in closure_unresolved(tf),
+              "test_formal_time.py no longer has `fractions` in its unresolved "
+              "closure — either the import went away (then this row is stale) "
+              "or it resolves (then the tool's `alone` column is stale)")
+
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -4549,6 +4642,8 @@ TESTS = [
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",
      test_the_wall_instrument_separates_reach_from_alone),
+    ("a dead import is not a wall this tree has to climb",
+     test_a_dead_import_is_not_a_wall_this_tree_has_to_climb),
     ("the wall instrument measures a delta on one tree",
      test_the_wall_instrument_measures_a_delta_on_one_tree),
     ("the wall instrument reads the sweep column with its own peel",
