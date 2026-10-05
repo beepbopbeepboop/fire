@@ -935,6 +935,38 @@ main()
     # Every iterable shape is a separate `_compr_*_loop` arm with its own bind
     # site, so one program per family: list (also the module-constant case),
     # range, set, dict-key, enumerate, char* string, two nested clauses.
+    # `_mojo_repr_pair` is for a PAIR, and the walker used to decide "is a pair"
+    # from the element's LENGTH alone — which an ordinary two-element list also
+    # is. `mojo_mark_as_tuple` is called at every real pair site
+    # (`mojo_dict_items`, `mojo_zip`, `mojo_list_repeat`, `mojo_list_concat`)
+    # and `mojo_is_tuple` reads it back, so the marker is the predicate and the
+    # length is only a cheap guard in front of it. Measured before the fix:
+    # `x = [1, 2]; print([x])` printed `[(1, 2)]` where CPython prints
+    # `[[1, 2]]`.
+    #
+    # Every REAL pair is in this program, which is what makes tightening the
+    # predicate safe to land: a tuple display, a tuple inside a list beside a
+    # plain list, an `enumerate` pair, and a `dict.items()` pair. `zip` is NOT
+    # here — `list(zip([1, 2], [3, 4]))` prints decimals for a DIFFERENT reason
+    # (a `mojo_zip` result read as plain ints, the element-type half) and is
+    # filed as `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # The dict key here is a STRING on purpose: an INTEGER key is quoted by
+    # this repr (where CPython does not quote it) because a `keykind == 2`
+    # slot has to remember whether the source wrote `1` or `"1"` and does
+    # not — that is the absent arm `_mojo_repr_dict`'s own comment declines,
+    # and asking for it here would put a second, unrelated red in this case.
+    test_gimple_matches_cpython("gimple_two_element_list_is_not_a_pair", """\
+x = [1, 2]
+print([x])
+print([(1, 2)])
+print([sorted([1, 2])])
+print([(1, 2), [3, 4]])
+print([(1, 2), [3, 4], (5, 6)])
+print(list(enumerate([7, 8])))
+print(sorted({'k': 'a'}.items()))
+print([[1, 2], [3, 4]])
+""")
+
     test_gimple_matches_cpython("gimple_comprehension_target_binds_its_own_scope", """\
 G = 5
 S = 'zz'

@@ -60,13 +60,18 @@ modes, in `test_gimple_runner.py`:
 Two residues are real, measured, and each has its own doc rather than being
 folded in here:
 
-* `bugs/CODEGEN_a_registered_two_element_list_is_not_always_a_pair.md` — the
-  generated repr walker's "any registered two-element list is a runtime-built
-  pair" heuristic prints `[(1, 2)]` for an ordinary inner list `[1, 2]`, which
-  is where the third shape's `(1, 2)` bracket comes from. The vararg PACKING
-  that shape is really about is correct and is asserted through `len(a)` and
-  `sorted(a)`; a test that pinned it through the printed tuple would have been
-  pinning this other bug.
+* the generated repr walker's "any registered two-element list is a
+  runtime-built pair" heuristic, which printed `[(1, 2)]` for an ordinary
+  inner list `[1, 2]` — that is where the third shape's `(1, 2)` bracket came
+  from. FIXED 2026-10-04 (`work/bugs7-1`): the predicate now asks
+  `mojo_is_tuple`, which is what `mojo_mark_as_tuple` records at every real
+  pair site, with the length left as a cheap guard in front of it; pinned by
+  `test_gimple_runner.py`'s `gimple_two_element_list_is_not_a_pair`, which
+  holds every real pair shape (tuple display, tuple beside a plain list,
+  `enumerate`, `dict.items()`) in the same program. The vararg PACKING that
+  the third shape is really about was already correct and is asserted through
+  `len(a)` and `sorted(a)`; a test that pinned it through the printed tuple
+  would have been pinning this other bug.
 * `bugs/CODEGEN_a_star_spread_of_a_string_beside_its_own_slots_prints_its_int_
   zero_as_none.md` — `(0, *'ab')` prints `(None, 'a', 'b')` where CPython
   prints `(0, 'a', 'b')`. `[*'ab']` alone is right. Making the mixed spelling
