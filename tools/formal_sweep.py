@@ -683,6 +683,18 @@ _EXTERN_MARK = "import(s) dyld cannot resolve"
 # agent [4] extended the same audit there, so the classifier was half-fixed
 # before and is now fully wrong.
 _EXTERN_BUILD_MARK = "symbol(s) that nothing provides"
+# The NAMES in that message's own sentence, which is what makes the marker
+# narrowable. `_unaccounted_report` spells them as a comma-joined list between
+# `so it could not be loaded: ` and the next full stop — "the image would bind 2
+# symbol(s) that nothing provides, so it could not be loaded: Bag_get, foo."
+# — so a rule that wants to ask WHICH symbols they are can read them rather
+# than pattern-match the whole diagnostic.
+#
+# The stop is the boundary because a symbol cannot contain one: `_c_export_name`
+# admits only `[A-Za-z0-9_]`, so the list cannot run past its own sentence into
+# the per-name clauses that follow.
+_UNPROVIDED_NAMES_RE = re.compile(
+    r"nothing provides, so it could not be loaded: (?P<names>[^.]*)\.")
 _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # ONE message naming SEVERAL of a file's unresolvable imports, one indented
 # line each, which is what `formal/imports.py`'s `unresolvable_import_errors`
@@ -1113,6 +1125,14 @@ _REFUSAL_FAMILIES = (
     ("cannot catch it, so the `try` is refused",
      "a `try` that can reach a raise, whose arm cannot catch it"),
     ("takes exactly one value to convert", "wrong argument count"),
+    # A missing symbol that is a METHOD OF A STRUCT IN THE FILE THAT REFUSED.
+    # Its own family, and it is here rather than folded into the link-line story
+    # because the fix is on this side of the boundary: the definition was never
+    # emitted into the image, so no link line could have provided it and adding
+    # one would not help. `_own_unprovided_methods` is the reader and
+    # `_struct_methods` is what it reads.
+    ("are METHODS OF A STRUCT IN THIS FILE",
+     "a method of this file's own struct was never emitted"),
     # Reachable from `codegen` only through a rule that has not fired yet; it
     # is here so the breakdown has a name for the day it does, and so a future
     # message that does not match it lands in "other refusal" — visible —
@@ -1317,6 +1337,72 @@ def _source_imports(source, name: str) -> bool:
     top = re.escape(name.split(".")[0])
     return re.search(rf"^[ \t]*(?:import|from)[ \t]+{top}\b", source,
                      re.M) is not None
+
+
+def _declared_method_symbols(path) -> set:
+    """The `<Struct>_<method>` symbols this file's own structs DECLARE, or {}.
+
+    **`formal.build._struct_methods` is the reader, not a second spelling of the
+    mangling.** It is the function that decides which of a struct's methods are
+    lifted into the compiled set at all (`struct_fits_one_word` or
+    `struct_is_framed`), and each one it returns carries the name
+    `model.method_function_name` gave it — so a set built from it is exactly
+    "the method symbols this file owes its own image". Re-deriving the
+    `<Struct>_<method>` shape here would be a second answer to a question
+    `formal/` already answers, and the two would come apart the first time that
+    spelling changed.
+
+    `{}` for a file that cannot be read or parsed, and for no path at all
+    (`classify` called without one, which is most of the test suite). That is
+    the direction that matters: this narrows a rule, and a reader that cannot
+    answer must leave the caller's rule exactly as it was rather than narrow it
+    on nothing.
+    """
+    if not path:
+        return set()
+    try:
+        from formal.build import _struct_methods
+        from formal.imports import module_statements
+        return {getattr(fn, "name", "") for fn in _struct_methods(
+            module_statements(path))}
+    except Exception:
+        return set()
+
+
+def _own_unprovided_methods(detail: str, path) -> list:
+    """The unprovided symbols that are METHODS OF A STRUCT IN THIS FILE.
+
+    **This is the narrower form of `_EXTERN_BUILD_MARK` the env-family needed,
+    and it exists because the marker was right about the case it was written for
+    and wrong about a real one.** "Nothing on the link line provides this
+    symbol" is a fact about the TARGET only when the symbol's definition is
+    somewhere else. When the missing symbol is a method of a struct the file
+    itself declares, the definition was never supposed to be on any link line —
+    it was supposed to be EMITTED INTO THIS IMAGE — so its absence is a defect
+    in the backend's own lowering of this file (the shape
+    `formal/build.py::_struct_methods`'s docstring records: a method call that
+    was never rewritten falls through to a `BL` against a symbol nothing
+    defines), and the class that says "a fact about the target" is exactly
+    backwards for it.
+
+    Measured: `external_call["setenv", T]`'s bracket list put a 55-file family
+    here, and `codegen coverage` read 10.2% instead of something lower for the
+    wrong reason (`bugs/FORMAL_env_family_next_terminal.md`).
+
+    A LIST and not a boolean, because the two causes really do coexist in one
+    image — a dangling call to an unlowered builtin AND a method this file never
+    emitted — and a rule that answered "codegen" for the whole message on the
+    strength of one of them would file the other as a gap in the target. The
+    names are returned so the caller can name them.
+    """
+    declared = _declared_method_symbols(path)
+    if not declared:
+        return []
+    m = _UNPROVIDED_NAMES_RE.search(detail)
+    if not m:
+        return []
+    return sorted(n.strip() for n in m.group("names").split(",")
+                  if n.strip().lstrip("_") in declared)
 
 
 def _declared_host() -> frozenset:
@@ -1917,6 +2003,26 @@ def classify(ok: bool, detail: str, cause=None, source=None,
 def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     """(class, reason) for the innermost message of a build's own answer."""
     if _EXTERN_MARK in detail or _EXTERN_BUILD_MARK in detail:
+        # FIRST, the narrower form of the marker: a missing symbol that is a
+        # method of a struct in THIS file is not a fact about the link line,
+        # because the link line was never where its definition belonged. This
+        # runs before the class is chosen rather than after it, so a message
+        # carrying one of these cannot be filed as `not-answerable` however it
+        # is worded — and `_own_unprovided_methods` returns a LIST because the
+        # message may also carry names that really are the link line's business,
+        # which then stay in the class below with their count intact.
+        mine = _own_unprovided_methods(detail, path)
+        if mine:
+            total = _EXTERN_BUILD_COUNT_RE.search(detail)
+            return CLASS_CODEGEN, (
+                f"{len(mine)} of the "
+                f"{total.group(1) if total else '?'} unprovided symbol(s) "
+                f"are METHODS OF A STRUCT IN THIS FILE "
+                f"({', '.join(mine)}), so the link line is not what is "
+                f"missing: those definitions were never emitted into this "
+                f"image at all, which means a method call here was not "
+                f"rewritten into a call on the lifted function. That is a fact "
+                f"about this file's own lowering and not about the target")
         m = (_EXTERN_BUILD_COUNT_RE if _EXTERN_BUILD_MARK in detail
              else _EXTERN_COUNT_RE).search(detail)
         caught = ("nothing on the link line provides it, caught when the build "

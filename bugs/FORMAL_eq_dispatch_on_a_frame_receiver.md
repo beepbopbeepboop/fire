@@ -217,3 +217,112 @@ a reason with nothing to do with it: `from struct import calcsize` is refused by
 em-dashes). Recorded here because the old status listed that file among the
 suites this claim rests on, and a reader who re-runs it deserves to know which
 of its 163 failures are theirs.
+
+## Status, 2026-10-05 (`formal31-3`): the remaining refusal was RIGHT and its
+## REASON was false, and following the advice could not have fixed it
+
+§1 says of `a == b` across two structs: *"It is REFUSED rather than left wrong,
+because `_eq_dispatch_call` sees two candidate lists that do not settle on one
+struct — which is the correct verdict for the wrong reason, and the message
+(`compares two FRAME ADDRESSES … does not settle it`) says so."*
+
+**It did not say so. The message named a reason that is false about half the
+shapes that reach it, and its advice could not work.** Re-measured, both
+architectures, on the reproducer the section above already describes:
+
+```mojo
+struct A:
+    var x: Int
+    def __eq__(self, other: A) -> Bool:
+        return self.x == other.x
+struct B:
+    var x: Int
+
+def main(n):
+    var a = A()
+    a.x = 1
+    var b = B()
+    b.x = 1
+    if a == b:            # CPython: True.
+        return 1
+```
+
+```
+build: a == b compares two FRAME ADDRESSES, so the answer is the frame's own
+struct's `__eq__` — which means WHICH struct is the whole of the question, and
+A, B does not settle it: A declares one; B declares none. Each name holds a
+different frame on each path that binds it, and this analysis has no path
+sensitivity to say which one is live at this comparison, …  Give each name one
+binding, or give every candidate the same `__eq__`
+```
+
+Every clause of that tail is wrong for this program:
+
+  * **`a` and `b` are each bound once.** There is no path, so "no path
+    sensitivity" is not the obstacle.
+  * **"Give each name one binding"** is impossible — each already has one.
+  * **"Give every candidate the same `__eq__`" makes it WORSE, and this is the
+    part that matters.** `model.struct_dunder_dispatch_candidates`'s decision is
+    `if len(owners) > 1 or have != len(rows): refuse`, so a `B` that declares a
+    `__eq__` too puts two names in `owners` and takes the `len(owners) > 1`
+    arm — the same refusal, with the same message, forever.
+
+A reader who follows this message is sent after a non-bug, which
+`formal/model.py`'s own note on `FRAME_KIND` calls the expensive direction and
+`test_refusal_taxonomy.py` is the standing check for. **This is a defect in its
+own right**, independent of the `NotImplemented` work the section defers.
+
+### What landed
+
+`model.eq_dispatch_candidates_disagree` now takes the two per-side candidate
+SIZES (passed by `formal/build.py::_eq_dispatch_decide`, which already has both
+lists) and answers in **two messages for two different facts**:
+
+  * **a NAME IS NOT PINNED** (`left_count > 1` or `right_count > 1`) — the
+    existing text unchanged, because it is exactly right: which struct is live
+    depends on the path, and giving each name one binding does settle it.
+  * **EACH SIDE IS PINNED AND THEY ARE DIFFERENT STRUCTS** (`1` and `1`) — a new
+    text that says there is no path to be insensitive to, names CPython's
+    REFLECTED dispatch as the reason (`A.__eq__(a, b)` is handed a `B`, which is
+    not a well-typed call in Mojo; CPython's answer is `NotImplemented`, which
+    asks the other operand's `__eq__` and falls back to identity), says the
+    representation for that is absent, **says explicitly that changing the
+    bindings will not fix it and that giving both structs a `__eq__` will not
+    either — two owners is the case that refuses** — and then says what a
+    program CAN do: compare the fields, or make the two sides the same struct.
+    It ends with this document's path, so the next reader arrives here.
+
+### The tests
+
+`test_formal_value_model.py`'s `REFUSALS` already had one row per shape, and its
+needles were the SHARED opening clause and `"does not settle it"` — which is to
+say both rows passed whichever message the rule produced. They are now the two
+halves of the split, which is what pins it:
+
+| row | needle |
+|---|---|
+| `one_name_two_candidate_structs_is_refused` | `no path sensitivity to say which one is live at` |
+| `two_structs_only_one_with_a_dunder_is_refused` | `CPython's REFLECTED dispatch` |
+
+Both on both architectures (that is what a `refuse:` row in this file asserts),
+**83/83 in `test_formal_value_model.py`**, and the eq family in
+`test_formal_run.py` is unaffected — `eq_operator_reaches_a_declared_eq`,
+`eq_no_declared_dunder_stays_identity` and
+`eq_chain_with_a_call_in_the_middle_reaches_a_declared_eq` all still pass, which
+is the control that says the split did not move the DECISION, only the wording
+of one of its two refusals.
+
+The stale clause in that table's header comment — *"The pre-change tree answered
+both of them with a flag-setting compare of two addresses and no diagnostic"* —
+is corrected in place: `cross_struct` did get a diagnostic, it was just
+half-written.
+
+### What is STILL open, and it is the same thing
+
+`NotImplemented` as a dunder's return value is a value-model change shared with
+the Lean proof, and nothing here is a step towards it: `a == b` across two
+structs is refused before and after, on both backends, with a message that now
+says why. §3's standing caveat is unchanged — the sweep was not re-run, so
+"nothing that answered before is refused now" rests on the narrow suites
+(`test_formal_value_model.py` 83, `test_formal_run.py`'s eq rows,
+`test_formal_returned_frame.py` 46, `test_formal_method_param_field.py` 32).

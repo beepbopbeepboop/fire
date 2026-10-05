@@ -6046,6 +6046,70 @@ TYPE_KIND = "type"
 # story.  See `bugs/FORMAL_float_binary64_only.md`.
 FLOAT_KIND = "float64"
 
+# BYTES THE KERNEL SUPPLIED, as a kind, which is new and is the whole of what a
+# `readdir(3)` name or a `getenv(3)` value is on this path: **a bare `char *` to
+# NUL-terminated bytes that are not in the image.**  Every other text on this
+# path is interned in `__TEXT,__text` and therefore ASCII by construction, which
+# is the assumption the whole TEXT ENCODING block rests on; this kind is the one
+# value that breaks it, and it breaks it in the direction that produces a number
+# nobody wrote rather than a refusal.
+#
+# IT IS NOT A `bytes` AND IT IS NOT A `str`, and both of those are wrong in
+# opposite directions, which is the whole reason it needs its own row:
+#
+#   * CPython's `len()` of `os.listdir(p)[0]` counts CHARACTERS.  A `strlen`
+#     counts BYTES, and for an ASCII name the two are the same number, so the
+#     byte answer looks right on every ordinary run.  Measured on BOTH
+#     architectures, over a directory holding `plain` and `héllo`:
+#     `sum(len(x) for x in listdir(d))` answered **11** where CPython answers
+#     **10** — a UTF-8 `é` is two bytes and one character — green build, exit 0,
+#     nothing on stderr.
+#   * CPython's `os.listdir` does not hand back the bytes at all: it DECODES them
+#     with `surrogateescape`, so the object is a `str` and a program that
+#     compares it, prints it or takes a prefix of it is doing the right thing.
+#     The BYTE reading is only CPython's answer for `os.fsencode`, which is a
+#     different function.
+#
+# So the kind is a statement about PROVENANCE, and provenance is the only thing
+# that decides anything here: every other `char *` in the image is text this
+# build wrote down, so the ASCII assumption is sound for it, and this one is not
+# because nothing in the source states what the kernel said.  That is also why it
+# cannot be reached by a spelling the way `receiver_is_declared_bytes` reaches a
+# `Pointer[UInt8]`: a loop target over `listdir(p)` has no declaration of its own
+# (`bugs/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`), and
+# the annotation above it is `-> List[String]`, which is the honest word for a
+# Python-level list of `str`.  The kind is therefore SEEDED where foreign bytes
+# ENTER an image — `FOREIGN_BYTES_EXPORTS` below — and inherits through the
+# container element axis (`list:fbytes`) exactly as `str` does.
+#
+# **Scope of what this changes, stated so a reader can check it.**  It is seeded
+# at the host-module exports whose last writer was the kernel, and it is
+# deliberately NOT a blanket annotation of `String`: exempting `String` would be
+# the silent-wrong-answer direction, and it would be wrong for every `String` in
+# this corpus that really does hold text, which is nearly all of them.  It also
+# does not follow a value through a COMPOSITION — `os.path.join(getcwd(), p)` is
+# a host-side `malloc` of the caller's bytes and a kernel's, and the kind of the
+# result is the kind of the arguments, which this path does not track; the
+# consequences are named in that bug document rather than left to be found.
+# Everything that treats a `char *` as bytes keeps working, because every such
+# question is asked through `string_operand_is_string` and that predicate is
+# where this kind is admitted: `==`, `in`, `startswith`, `%s` and `print` all
+# answer on the bytes, and CPython agrees on every one of them for a name the
+# kernel supplied.  The ONE construct whose CPython answer is not a property of
+# the bytes is a CHARACTER COUNT, and `len_operand_lowering` refuses it.
+FOREIGN_BYTES_KIND = "fbytes"
+
+
+def is_foreign_bytes_kind(kind) -> bool:
+    """True when `kind` names bytes that came from outside the image.
+
+    One predicate so the two backends, the value model and the build passes
+    cannot each decide what "foreign" means, for the reason
+    `is_byte_blob_kind` exists one level down: the question is about the KIND's
+    content and a set of literal spellings is a second answer waiting to drift.
+    """
+    return kind == FOREIGN_BYTES_KIND
+
 
 def is_number_kind(kind) -> bool:
     """Whether a value of this kind is printed as a NUMBER.
@@ -6833,6 +6897,19 @@ def len_operand_lowering(kind, expr=None) -> str | None:
     printing a blob address as if it were a count. Correcting the kind fixes
     `len` and has to be considered together with that, which is a change to the
     kind table rather than to the string representation.
+
+    **`== STR_KIND` here and `string_operand_is_string` everywhere else is not an
+    oversight, and it is the one decision this row has to get right.**
+    `FOREIGN_BYTES_KIND` is a `char *` in every respect except the one that
+    matters for a LENGTH: its bytes are the kernel's, so `strlen` answers in
+    bytes where CPython answers in characters, and the whole reason the kind
+    exists is that the build cannot tell which of the two it is holding. So it
+    falls through to `None` — a refusal by name — while every other
+    string-shaped question (`==`, `in`, `%s`, `print`, a method) is answered
+    through `string_operand_is_string`, which admits it. Writing
+    `string_operand_is_string` HERE would answer `len()` in bytes for a
+    directory entry and reproduce, in one line, the defect the kind was added to
+    remove.
     """
     if kind == STR_KIND:
         return LEN_FROM_STRLEN
@@ -6895,6 +6972,14 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
         is advice about a name that already has one. A tag is a word and a
         container is a count field or a run of bytes; there is no third reading
         of it.
+      * FOREIGN BYTES is the row that is not about a representation at all: the
+        value is a perfectly good `char *` and the question is what the KERNEL
+        wrote into it. `FOREIGN_BYTES_KIND`'s own comment carries the
+        measurement; what belongs here is that it is a distinct row rather than
+        the `None` one, because "the source does not say what this operand
+        holds" is FALSE about it — the source says `str` and CPython agrees,
+        and what is missing is a fact about the target rather than a fact about
+        the program.
 
     `slot_ann` / `slot_kind` are the DECLARED annotation of the operand's field
     and the kind that annotation gives, UNGATED by whether the slot's value is
@@ -6952,6 +7037,31 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
             f"and the word there is the integer itself. A string's length is a "
             f"strlen over its bytes and a list's is its count field, and an int "
             f"is neither")
+    if is_foreign_bytes_kind(kind):
+        return (
+            f"len({spelled}) is len() of bytes the KERNEL supplied — a name "
+            f"from readdir(3), a value from the environment, a path from "
+            f"getcwd(3) — and this path cannot answer it. A `strlen` counts "
+            f"BYTES and CPython counts CHARACTERS, and the two agree for every "
+            f"ASCII name and disagree for every other one: measured on both "
+            f"architectures, `sum(len(x) for x in listdir(d))` over a directory "
+            f"holding `plain` and `héllo` answered 11 where CPython answers 10, "
+            f"green build, exit 0, nothing on stderr. Nothing in the SOURCE "
+            f"says what the kernel said — the declaration above this value is "
+            f"`-> List[String]`, which is the honest word for a Python-level "
+            f"list of `str` — so there is no spelling the build could read to "
+            f"learn whether the name it is holding is ASCII, and a byte count "
+            f"presented as a character count is the most plausible wrong number "
+            f"in this file: a small positive integer, identical on both "
+            f"architectures and stable across runs. Refused rather than "
+            f"emitted. What this path CAN do with the same value: everything "
+            f"that is a property of the BYTES is already right — `==` against a "
+            f"literal, `in`, `startswith`, `printf(\"%s\", …)` and `print`, "
+            f"because CPython writes the same bytes back out under its "
+            f"`surrogateescape` handler. And if you want the byte count on "
+            f"purpose, ask for it as bytes: `os.str_len({spelled})` is the "
+            f"`strlen` this path would otherwise have emitted, spelled so that "
+            f"the reader knows it is bytes")
     if kind == TYPE_KIND:
         # Its own row rather than the `None` one above, and this is the whole of
         # what the TYPE_KIND kind is for. The source DOES say what the operand
@@ -8104,8 +8214,20 @@ def string_operand_is_string(kind) -> bool:
     The single question both string lowerings ask, so that `len` and `==`
     cannot end up disagreeing about which values are strings — the
     `string_method_yields_string` lesson, one level down.
+
+    **TWO kinds answer it, and the second one is why this is a function rather
+    than a comparison.** `FOREIGN_BYTES_KIND` is a `char *` too — the same
+    representation, the same `strcmp`, the same `%s`, the same `strlen` — and
+    the ONLY construct whose CPython answer is not a property of the bytes is a
+    CHARACTER COUNT, which `len_operand_lowering` refuses on its own row. So the
+    admission has to be here rather than in each consumer: spelled `== STR_KIND`
+    in nine places, the second kind would have silently lost string methods,
+    string equality, `%s` and `print` — and it would have lost them
+    DIFFERENTLY on the two architectures the moment one copy was updated and the
+    other was not, which is the failure `string_method_yields_string` was filed
+    for. `subscript_element_kind` reads this same predicate for the same reason.
     """
-    return kind == STR_KIND
+    return kind in (STR_KIND, FOREIGN_BYTES_KIND)
 
 # ── `%s`, the one conversion that DEREFERENCES its argument ─────────────────
 #
@@ -11563,7 +11685,20 @@ def truthy_lowering(kind, expr=None) -> str:
     `range(...)` call classifies as an integer but lowers to a counted blob, so
     `if range(3):` must be FALSE and `if range(0):` must be too, and the answer
     depends on what it lowers to rather than on what the kind says.
+
+    **A FOREIGN-BYTES value is asked here before `len_operand_lowering` and not
+    through it**, because it is the one kind for which the two answers differ: a
+    `char *` to `""` is a real address and is therefore non-zero, so
+    `TRUTHY_NONZERO` would say an empty directory entry is truthy. Its length is
+    not answerable as a CHARACTER count (`len_operand_lowering` refuses it, and
+    that refusal is right), and truthiness does not need it to be: emptiness is
+    the same question on both readings, because a name with zero bytes has zero
+    characters and a name with one has one or more. So the answer is `strlen`
+    here — the construction, not the count — and that is why this is a separate
+    arm rather than a widening of `len_operand_lowering`.
     """
+    if string_operand_is_string(kind):
+        return TRUTHY_FROM_STRLEN
     if kind == FLOAT_KIND:
         # A double is the ONE kind for which the word's own zeroness is not the
         # value's zeroness, and it is worth being exact about why, because
@@ -11718,7 +11853,7 @@ def frame_slot_value_refusal(spelled: str, ann, slot_kind) -> str | None:
         return None
     if is_list_kind(slot_kind):
         return _frame_slot_blob_refusal(spelled, ann)
-    if slot_kind == STR_KIND:
+    if string_operand_is_string(slot_kind):
         return _frame_slot_string_refusal(spelled, ann)
     if slot_kind == INT_KIND:
         return _frame_slot_int_refusal(spelled, ann)
@@ -13174,7 +13309,7 @@ def value_method_refusal(method: str, receiver_kind, dotted: str, *,
     on whatever word the receiver happens to hold, and a struct's `.copy()`
     would be a `strstr` over a frame address. Both build. Both are wrong."""
     if method in POINTER_BOUNDED_METHODS and method not in LENGTH_DEPENDENT_METHODS:
-        if receiver_kind == STR_KIND:
+        if string_operand_is_string(receiver_kind):
             return None
         if receiver_kind is None:
             return (f"{dotted}() is a method on a string, and the source does "
@@ -13195,7 +13330,7 @@ def value_method_refusal(method: str, receiver_kind, dotted: str, *,
         # `STRING_IDENTITY_METHODS`'s own comment is the difference between them
         # (this one computes nothing) and a reader who is told "the source does
         # not say what its receiver holds" is being told the truth either way.
-        if receiver_kind == STR_KIND:
+        if string_operand_is_string(receiver_kind):
             return None
         if receiver_kind is None:
             return (f"{dotted}() converts a string to a `char *`, and the "
@@ -19399,6 +19534,15 @@ def subscript_element_kind(base_kind):
     NOT the SLICE: `s[1:3]` is a new string, not a byte, and the slice arm of
     `kind_of` answers it separately (`FORMAL_string_value_model.md`).
 
+    **`FOREIGN_BYTES_KIND` is answered HERE by the same predicate and for the
+    same reason, and the reason is stronger than for `str`.** A byte of a
+    kernel-supplied name is a byte — that is what `readdir(3)` wrote and what
+    `os.fsencode` would give — so the integer IS CPython's answer for
+    `os.fsencode(name)[i]` and is NOT an answer at all for `name[i]`. The
+    character reading is refused separately by `string_element_refusal`, which
+    is the block that owns that question; this function's job is only to say
+    that the load is ONE BYTE, which is what both emitters already emit.
+
     **A BYTE BLOB yields an integer for the same reason a `char *` does**, and
     it is the other half of the decision the width axis rests on: `b[i]` off a
     `bytearray` loads one byte (`LDRB`, `MOVZX`) and a byte IS the integer
@@ -19409,7 +19553,7 @@ def subscript_element_kind(base_kind):
     is the integer. Measured on both architectures: `printf("%d %d", b[0],
     b[1])` over `bytearray(2)` with `b[0] = 65` prints `65 0`.
     """
-    if base_kind == STR_KIND:
+    if string_operand_is_string(base_kind):
         return INT_KIND
     if is_byte_blob_kind(base_kind):
         return INT_KIND
@@ -21326,7 +21470,8 @@ class ValueKinds:
         method = func.member
         if method not in POINTER_BOUNDED_METHODS:
             return None
-        if not string_method_yields_string(call, self.kind_of(func.obj) == STR_KIND):
+        if not string_method_yields_string(
+                call, string_operand_is_string(self.kind_of(func.obj))):
             return None
         return POINTER_BOUNDED_METHODS[method][1]
 
@@ -21728,6 +21873,130 @@ def dylib_export_return_kind(entry) -> str | None:
     return STR_KIND if ret.replace("const", "").strip() == "char *" else None
 
 
+# The host exports whose value — or whose CONTAINER's element — is bytes the
+# KERNEL supplied, keyed by `(module identity, bare export name)` because that is
+# the identity `dylib_callee_export` resolves to and the one `entry` carries.
+# Both spellings of a package re-export resolve to the forwarding module, so the
+# `fs_*` rows are `(os, fs_cwd)` and not `(os._syscalls, fs_cwd)`; that is the
+# manifest's own `module` field and not a naming convention of this table.
+#
+# EVERY ROW HERE IS A CLAIM ABOUT ONE FUNCTION'S BODY, and each one was read in
+# that body rather than inferred from the name. The three families:
+#
+#   * `readdir(3)` — `listdir`'s blob and its accessor, and `walk`'s blob, whose
+#     `_walk_fill` calls `listdir` on each path. `formal/hostmods/os/__init__`
+#     `.mojo`'s `_listdir_fill` is the whole proof: `nm = fs_dirent_name(e)`
+#     with `e` a `readdir(3)` result.
+#   * `getcwd(3)` / `getenv(3)` / the environment — `getcwd`, `getenv`,
+#     `getenv_or` and the six `environ_*` accessors, all of which bottom out in
+#     `fs_cwd` / `fs_getenv` or read a pair out of a blob `fs_environ_vec`
+#     filled from `environ`.
+#   * `uname(2)` / `sysctlbyname(3)` — `platform`'s six exports, all of which
+#     return `uts_str(U_x)` or `kern_str(MIB)` and nothing else. `node` is a
+#     HOSTNAME, which is the row most likely to be non-ASCII on a real machine
+#     and the reason `platform` is here rather than only `os`.
+#   * `mkdtemp(3)` and `glob`'s directory walk — one new name made by the kernel
+#     and one list of names the kernel made, which are the same two shapes
+#     `listdir` already covers arriving through two more modules.
+#
+# **The rows that answer `""` or a `default` are seeded anyway**, and the reason
+# is that the build cannot tell which branch ran: `getenv_or(name, default)`
+# returns the caller's own bytes when the variable is unset and the kernel's when
+# it is set, and `environ_get_or` is the same shape. Refusing `len` over the
+# caller's bytes in that case is the conservative direction and it is one row
+# of diagnostic text, against a byte answer that would be wrong for the set case
+# — which is the case a caller writes the function for.
+FOREIGN_BYTES_EXPORTS = {
+    ("os", "listdir"): list_kind(FOREIGN_BYTES_KIND),
+    ("os", "walk"): list_kind(FOREIGN_BYTES_KIND),
+    ("os", "listdir_get"): FOREIGN_BYTES_KIND,
+    ("os", "getcwd"): FOREIGN_BYTES_KIND,
+    ("os", "getenv"): FOREIGN_BYTES_KIND,
+    ("os", "getenv_or"): FOREIGN_BYTES_KIND,
+    ("os", "environ_key"): FOREIGN_BYTES_KIND,
+    ("os", "environ_value"): FOREIGN_BYTES_KIND,
+    ("os", "environ_keys"): FOREIGN_BYTES_KIND,
+    ("os", "environ_get"): FOREIGN_BYTES_KIND,
+    ("os", "environ_get_or"): FOREIGN_BYTES_KIND,
+    ("os", "environ_pop"): FOREIGN_BYTES_KIND,
+    ("os", "fs_cwd"): FOREIGN_BYTES_KIND,
+    ("os", "fs_getenv"): FOREIGN_BYTES_KIND,
+    ("os", "fs_dirent_name"): FOREIGN_BYTES_KIND,
+    ("glob", "glob"): list_kind(FOREIGN_BYTES_KIND),
+    ("tempfile", "gettempdir"): FOREIGN_BYTES_KIND,
+    ("tempfile", "mkdtemp"): FOREIGN_BYTES_KIND,
+    ("platform", "system"): FOREIGN_BYTES_KIND,
+    ("platform", "node"): FOREIGN_BYTES_KIND,
+    ("platform", "release"): FOREIGN_BYTES_KIND,
+    ("platform", "version"): FOREIGN_BYTES_KIND,
+    ("platform", "machine"): FOREIGN_BYTES_KIND,
+    ("platform", "mac_ver_release"): FOREIGN_BYTES_KIND,
+    ("platform", "mac_ver_machine"): FOREIGN_BYTES_KIND,
+}
+
+
+def foreign_bytes_export_kind(entry) -> str | None:
+    """`FOREIGN_BYTES_KIND` for a host export whose bytes are the KERNEL's.
+
+    ## Why this is a table keyed on `(module, export)` and not a rule
+
+    There is nothing in a declaration, a signature or a call site that says
+    "the bytes in this value did not come from this image".  Provenance is not
+    in the type system, and the only place in the tree that knows it is the
+    BODY of the host module that made the call — `formal/hostmods/os/
+    __init__.mojo`'s `listdir` ends in `_listdir_fill(d, b)`, whose body is
+    `b[1 + n] = nm` with `nm = fs_dirent_name(e)` and `e` a `readdir(3)`
+    result.  That is a fact about one function in one file, so a table is the
+    honest shape for it and a rule would be a guess.
+
+    It is a table of the HOST's API and not of the target, which is the
+    distinction that keeps it from being a per-target fact: `os.listdir` is
+    foreign bytes on every platform this path builds for, and the alternative
+    spelling of the same kind — annotating `List[String]`'s element — would be
+    a claim about the type that is false for every OTHER `String` in the corpus.
+
+    ## What the value is, per row
+
+    `FOREIGN_BYTES_KIND` for a value, and `list_kind(FOREIGN_BYTES_KIND)` for a
+    CONTAINER of them — which is the whole of what makes the element axis work:
+    `for x in names` and `names[i]` both read the element kind, so a row that
+    returned the bare scalar kind for `os.listdir` would have refused
+    `len(names)` (a count field) instead of `len(x)`, which is the construct the
+    kind exists for.  The `list:` prefix carries it and `list_elem_kind` reads
+    it, exactly as `list:str` does.
+
+    ## What is NOT here, and why each exclusion is right
+
+    * **`os.sep`, `os.curdir`, `os.devnull`, `os.linesep` and the rest of the
+      one-word constants.**  They are `malloc`'d copies of literals that are in
+      this image's text section, so they are ASCII by the same argument every
+      other string on this path is.  `tempfile.gettempprefix` is one too, and
+      `platform.architecture_bits` / `architecture_linkage` answer `"32bit"`
+      and `"64bit"`.
+    * **`glob.escape`, `platform.platform`, `platform.platform_string` and
+      `platform.system_alias_*`.**  Their results are compositions of the
+      CALLER's own bytes — `_alias_part` picks one of three arguments — so the
+      kind of the result is the kind of the arguments and this path does not
+      track that.  A row for them would refuse `len` over a string the caller can
+      see every byte of, which is the direction this whole kind exists to avoid.
+    * **`os.path.join` / `basename` / `dirname` / `splitext`.**  Their results
+      are compositions of the CALLER's own bytes, so the kind of the result is
+      the kind of the arguments and this path does not track that.  The
+      kernel-derived `os.path` exports (`realpath`, `abspath`, `expanduser`) are
+      mixed for the same reason and are therefore also absent — a stated gap
+      rather than a silent one, and it is what
+      `bugs/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`'s
+      Status records as the remainder of this work.
+    * **Every `String` in user code**, which is the point of the whole exercise:
+      an exemption here would be right for the few kernel strings and wrong for
+      the thousands of literals.
+    """
+    if not entry:
+        return None
+    return FOREIGN_BYTES_EXPORTS.get(
+        (entry.get("module") or "", entry.get("name") or ""))
+
+
 def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
                          decls=None) -> str | None:
     """What a call ACROSS a dylib boundary produces, or None for "not known".
@@ -21765,7 +22034,22 @@ def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
     whose manifest predates the contract — and then this is exactly
     `dylib_export_return_kind`, which is the whole of what it could answer
     before.
+
+    **THE FOREIGN-BYTES SEEDING IS ASKED FIRST AND IS NOT A DECLARATION**, which
+    is the one thing about it that needs saying here: `foreign_bytes_export_kind`
+    reads `(entry["module"], entry["name"])`, so it is a statement about which
+    LIBRARY published the name and what that library's body did, where both
+    halves of the declaration below are statements about what the SOURCE wrote.
+    A declaration cannot be overridden by a table and a table cannot stand in for
+    one — `os.listdir` declares `-> List[String]`, which is the honest word for a
+    Python-level list of `str` and which CPython agrees with, and the seeded
+    answer is `list:fbytes` because of the `readdir(3)` in the body behind it.
+    Both are true and they are about different facts, so the seed is asked first
+    and the declaration is what everything else falls back to.
     """
+    seeded = foreign_bytes_export_kind(entry)
+    if seeded is not None:
+        return seeded
     ann = getattr(declaration, "return_type", None) if declaration else None
     if isinstance(ann, str):
         kind = declared_type_kind(ann, int_names, string_names, decls)
@@ -26638,7 +26922,8 @@ def struct_dunder_dispatch_candidates(left_structs, right_structs, op: str):
     return (None, None, False, (False, [(st.name, False) for st in structs]))
 
 
-def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
+def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
+                                    left_count=None, right_count=None) -> str:
     """Why `a == b` has no single dunder to call, when the candidates disagree.
 
     The agree-or-refuse refusal for the comparison half, and a different message
@@ -26649,21 +26934,76 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
     `struct_dunder_dispatch_candidates` and the refusal names every row, for
     the reason its sibling gives: "they disagree" without saying which is which
     sends the reader to look at the wrong declaration.
+
+    ## TWO DISAGREEMENTS AND TWO MESSAGES, and the second one is why
+
+    `struct_dunder_dispatch_candidates` returns `disagree` for two different
+    facts, and until 2026-10-05 they shared one message whose tail was FALSE
+    about half of them. `left_count`/`right_count` are the sizes of the two
+    per-side candidate lists, and they are what tells the two apart:
+
+    * **A NAME IS NOT PINNED** (either side has more than one candidate). The
+      existing text is exactly right: which struct is live at this comparison
+      depends on the path, this analysis has no path sensitivity, and giving each
+      name one binding does settle it.
+    * **EACH SIDE IS PINNED AND THEY ARE DIFFERENT STRUCTS** — `A() == B()` with
+      one `A` and one `B` in the whole function. There is no path to be
+      insensitive to, the two names each hold exactly one frame, and the old
+      text was not merely beside the point: **its advice cannot work.**
+      "Give every candidate the same `__eq__`" makes `owners` hold two names,
+      which is the `len(owners) > 1` arm of the very decision that refused — so
+      a reader who follows the message is refused again with the same message,
+      and "give each name one binding" is impossible when each already has one.
+
+      The real reason is CPython's REFLECTED dispatch, and it is a value-model
+      gap rather than an analysis one: `A.__eq__(a, b)` is handed a `B`, which
+      in Mojo is not even a well-typed call, and CPython's answer for that is
+      `NotImplemented` — which asks the other operand's `__eq__`, and falls back
+      to identity when that is missing too. **This path has no representation
+      for `NotImplemented` as a dunder's return value**, so the three-way answer
+      a reflected `__eq__` needs cannot be lowered at all.
+
+      So the message says that, names what a program CAN do instead (compare the
+      fields, or give the two sides the same struct — which makes the comparison
+      homogeneous and the dispatch unambiguous), and says plainly that this is
+      not something an edit to the bindings will fix. That is the difference
+      between a refusal that names its own cause and one that sends the next
+      reader after a non-bug, which `formal/model.py`'s own note on
+      `FRAME_KIND` calls the expensive direction and which
+      `test_refusal_taxonomy.py` is the standing check for.
     """
     who = ", ".join(struct_names) if struct_names else "this struct"
-    return (
+    declared = "; ".join(f"{sn} declares one" if has else f"{sn} declares none"
+                         for sn, has in rows)
+    lead = (
         f"{spelled} compares two FRAME ADDRESSES, so the answer is the frame's "
         f"own struct's `__eq__` — which means WHICH struct is the whole of the "
-        f"question, and {who} does not settle it: "
-        + "; ".join(f"{sn} declares one"
-                    if has else f"{sn} declares none"
-                    for sn, has in rows)
-        + ". Each name holds a different frame on each path that binds it, and "
-          "this analysis has no path sensitivity to say which one is live at "
-          "this comparison, so the call this would lower to is one of two and "
-          "the program would build, run, and answer with whichever struct's "
-          "`__eq__` the other path would have called. Give each name one "
-          "binding, or give every candidate the same `__eq__`")
+        f"question, and {who} does not settle it: {declared}. ")
+    if left_count is not None and right_count is not None \
+            and left_count == 1 and right_count == 1:
+        return lead + (
+            "This one is not a question about which frame is live at this "
+            "comparison: each name is bound once and to a single struct, so "
+            "there is no path for a different struct to be the live one. It is "
+            "CPython's REFLECTED dispatch, and it is not answerable here: "
+            "`A.__eq__(a, b)` is handed a `B`, which is not a well-typed call "
+            "in Mojo, and CPython's answer for it is `NotImplemented` — which "
+            "asks the OTHER operand's `__eq__`, and falls back to identity when "
+            "there is none. This path has no representation for "
+            "`NotImplemented` as a dunder's return value, so the three-way "
+            "answer a reflected `__eq__` needs cannot be lowered at all. "
+            "Changing which frame a name holds will NOT fix this, and giving "
+            "both structs a `__eq__` will not either: two owners is the case "
+            "that refuses. Compare the fields, or make the two sides the same "
+            "struct so the comparison names one `__eq__` — "
+            "bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md")
+    return lead + (
+        "Each name holds a different frame on each path that binds it, and "
+        "this analysis has no path sensitivity to say which one is live at "
+        "this comparison, so the call this would lower to is one of two and "
+        "the program would build, run, and answer with whichever struct's "
+        "`__eq__` the other path would have called. Give each name one "
+        "binding, or give every candidate the same `__eq__`")
 
 
 def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:
@@ -40434,7 +40774,7 @@ def global_slot_is_string(name: str) -> bool:
     the literal spellings `global_slot_kind` returns `STR_KIND` exactly when
     `init[0] == "str"`, and for the one spelling it did not cover — a slot the
     module body fills from a callee declared `-> String` — it is the answer."""
-    return global_slot_kind(name) == STR_KIND
+    return string_operand_is_string(global_slot_kind(name))
 
 
 def global_slot_bytes(table: dict, base: int) -> bytes:

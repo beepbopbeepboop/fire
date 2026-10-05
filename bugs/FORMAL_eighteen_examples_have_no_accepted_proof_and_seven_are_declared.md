@@ -134,3 +134,81 @@ about eleven different proofs. The ratchet
 makes this exact question cheap to ask on every gate: it prints the per-example
 status table and fails when one of these rows gets worse, so the list above is a
 starting measurement rather than a thing that has to be re-derived by hand.
+## Status, 2026-10-05 (`formal31-3`): item 4's DECISION is taken, and the two
+## tools that answer the question now answer it the same way
+
+Item 4 said the honest options are *"to raise the ceiling for these two and
+record what they cost, or to record them as too large for the checker and stop
+reading them as failures"*, and that *"what must not happen is marking them
+`EXPECTED_FAILURES` without saying which of the two it is"*.
+
+**The decision is the second option, and nothing is marked.** The first is
+already measured false and `formal/lean.py`'s own comment on `LEAN_MEMORY_MB`
+says why in as many words: capping Lean at the project's 4 GB line is not paying
+the debt, it is breaking the build (with `-M 4096` the `lib/ProofLib.lean` build
+dies with exactly this sentence), so at some size a proof stops being CHECKED
+and the only true statement is "the checker ran out". `both` and `either` are at
+that size, and there is no budget that would make them cheap.
+
+### The defect was a DISAGREEMENT, not a missing marker
+
+`tools/formal_proof_census.py` had it right and had had it for a while: its
+`NOT_A_VERDICT` class is `{"too-large", "bound-exceeded"}`, its rank table gives
+both the same rank on purpose, and its docstring says the number is the absence
+of a measurement. **`test_formal.py` had no such class** — three tags, `PASS` /
+`KNOWN-GAP` / `FAIL`, so `both` and `either` were `FAIL` in the suite and
+`too-large` in the census for one sentence, which is the disagreement this
+document's §4 is really about and not the marking it is phrased as.
+
+**And the sentence had TWO readers.** `tools/formal_proof_census.py` carried its
+own `_LEAN_MEMORY_RE`; nothing in `formal/` knew the phrase. `formal/lean.py` is
+the module that SETS `-M`, so it is now the only place that can say both halves
+of the claim — that the sentence is a bound firing and that the bound is ours —
+through `lean_refused_on_its_own_memory_ceiling(text)`, which returns the LINE
+Lean said rather than a boolean, so a caller prints the message instead of
+paraphrasing it. The census's copy is deleted and it asks that function.
+
+### What landed
+
+  * `formal/lean.py::LEAN_MEMORY_REFUSAL_RE` and
+    `lean_refused_on_its_own_memory_ceiling`.
+  * `tools/formal_proof_census.py::_classify_failure` asks it; its own regex is
+    gone. Its `NOT_A_VERDICT` and its ranks are unchanged, so the committed
+    `formal_proof_census_baseline.json` reads exactly as it did.
+  * **`test_formal.py` grows a FOURTH tag, `TOO-LARGE`**, reported on its own
+    line of the summary and NOT inside `FAIL`. It is deliberately not
+    `KNOWN-GAP` either, and `EXPECTED_FAILURES`'s own comment now says why:
+    "known unproven" is a claim about the proof, and the whole content of this
+    class is that nobody has one — plus the practical half, which is that Lean
+    is not run at all for a stem expected to fail, so a ceiling firing on a
+    marked stem is not something the runner could even observe.
+  * The decision was lifted out of the `concurrent.futures` loop into a pure
+    `test_formal.py::classify_stem(stem, passed, detail, expected_failures)`,
+    because the alternative is that the only reader of this question in that file
+    cannot be reached by anything — which is why `test_formal_proof_census.py`
+    could test the census tool's version of it and not the runner's.
+
+**The tests are `test_formal_proof_census.py`'s new
+`TestRunnerClassification`, five rows and no Lean run at all** (54 tests, 0
+failures; 49 before): a pass, a rejection, a marked stem — where the marker wins
+over a ceiling, with the reason — both spellings of the ceiling classified
+`TOO-LARGE`, and **the row that is the point: the two readers are asked the same
+question about the same three sentences and must agree.** That last row is what
+fails if either grows its own copy of the regex, which is cheaper than finding
+out from a suite that reports a correct proof as wrong because the checker gave
+up.
+
+### What is NOT done here, and whose it is
+
+Items 1, 2, 3 and 5 are all **other claims** and were not touched: `fact`,
+`sqsum`, `sum` are `FORMAL_three_examples_fail_their_proofs_on_master.md`'s
+(`formal28-6-r2`); `sgt8`, `sle8`, `ug8` are
+`FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`'s
+(`formal28-2`); `floordiv`, `udivmod` are
+`FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`'s
+(`formal28-2`); `sum_range` is
+`FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`'s
+(`formal31-1`). **And `test_formal.py` is one of the eight Lean-checking formal
+gate tests that are `disabled=`,** so this change is not gating and was verified
+by its own classifier rows rather than by a run; the integration run over the
+whole corpus belongs to whoever re-enables that job.

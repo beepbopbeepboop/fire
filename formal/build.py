@@ -6433,7 +6433,15 @@ def _eq_dispatch_decide(node, op: str, left, right, cands_l, cands_r):
         raise CodegenError(M.eq_dispatch_candidates_disagree(
             f"{getattr(left, 'name', left)} {op} "
             f"{getattr(right, 'name', right)}",
-            sorted({st.name for st in cands}), rows))
+            sorted({st.name for st in cands}), rows,
+            # The two per-side SIZES, and they are what lets the refusal tell
+            # "a name is not pinned" from "each name is pinned and they are
+            # different structs". The second is not a path-sensitivity question
+            # at all and the first message's advice cannot fix it, so passing
+            # them is what stops the refusal being right for the wrong reason —
+            # `eq_dispatch_candidates_disagree`'s own docstring says what the
+            # false reason was.
+            left_count=len(cands_l), right_count=len(cands_r)))
     if owner is None:
         return None
     call = F.CallExpr(
@@ -10294,6 +10302,10 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
     four `elif` walks is deleted, so this names the defect instead — it is a
     `refuse_*` sentence that should not be reachable for a field the `if` arm
     of the same shape accepts.)
+    The four walks that had that shape are all on `model.rewrite_tree`
+    now, which descends the `(condition, body)` pair itself
+    (`ffcd9542`), so `_rewrite_self_fields` is on it too and misses no
+    arm.
 
     The replacement is handed back and not descended into, which is
     `rewrite_tree`'s rule rather than a decision here: it is `F.IdentExpr(root)`,
@@ -12004,12 +12016,14 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     runs EARLIER in the same pipeline and normalizes every `elif` pair into a
     LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
     assigned into). So this walk reached the arms by an accident of ANOTHER
-    pass's traversal, with nothing recording the dependency — and `_rewrite_self_fields`
-    is still tuples by then and still misses every arm — so this walk is
-    reached by an accident of another pass's traversal and depends on it
-    continuing to normalise. That is worth a case of its own
-    (`test_formal_run.py`'s `elif` group pins the three walks that were
-    rewritten, not this dependency).
+    pass's traversal, with nothing recording the dependency. **All four of the
+    walks that had that shape are now on `model.rewrite_tree`, which descends
+    the `(condition, body)` pair itself** — this one and
+    `_rewrite_self_fields` included, so neither misses an arm any more, and the
+    dependency this paragraph records is gone rather than merely described. The
+    measurement and the four pinned rows are in the commit that closed it
+    (`ffcd9542`; its document is deleted with its fix, which is why this names
+    the commit and the symptom rather than the path).
 
     A store's TARGET and a call's CALLEE are the two positions a name must not be
     rewritten in, and each is a node the walk HANDLES rather than descends:

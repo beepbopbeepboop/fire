@@ -9893,10 +9893,9 @@ CONDITIONAL_ARM_CASES = [
      "    return pick[2](15, 5, 30)\n", 45, None),
     # ── the three remaining REWRITES that stopped at an `elif` ──
     #
-    # Four walks recursed on `isinstance(node, list)` and therefore missed
-    # every `elif` arm (the doc that inventoried them is deleted with the last
-    # of the fixes, so this names the shape rather than a path);
-    # two of them had been moved onto `model.rewrite_tree` already, and these are
+    # The four walks that recursed on `isinstance(node, list)` and therefore
+    # missed every `elif` arm. All four are on `model.rewrite_tree` now, which
+    # descends the `(condition, body)` pair itself (`ffcd9542`), and these are
     # the other two. What the arm costs is DIFFERENT for each, which is why they
     # are four cases and not one:
     #
@@ -22569,22 +22568,144 @@ def check_assigned_type_evidence(verbose=False):
 
 
 def _every_type_tag_is_distinct_source(chunk: int = 26) -> str:
-    """A program that returns 1 if any two admitted type names share a tag."""
-    import itertools
+    """A program that returns 1 if any two admitted type names share a tag.
+
+    **TWO INDEX LOOPS AND NOT `itertools.combinations`, and the reason is what
+    this file's own import closure is.** `itertools` was the LAST name in this
+    file's import closure the formal sweep could not resolve (measured 2026-10-05
+    with `formal/imports.py`'s own `resolve_module_path`: every other import
+    resolves, so the sweep filed all 1043 rows of this suite under
+    `not-answerable/host-import` — a class excluded from the coverage denominator
+    — instead of showing a verdict about the file), and
+    `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` §2 prices
+    modelling it as NOT WORK: the one name this corpus uses "answers a SEQUENCE",
+    and a run-time-length sequence is `FORMAL_listdir_no_run_time_sequence.md`'s
+    subject, not something to write a host module for.
+
+    But the pairs are not a sequence *question* here at all — `part` is a slice
+    of a list whose length this generator knows, so every pair is an index pair
+    in a double loop and the comprehension that used to consume a generator has
+    two shapes it can take without one. **The generated Mojo is unchanged, and
+    that is the claim checked rather than the ORDER the two spellings happen to
+    emit**: `check_type_value_tag_generator`'s first row reads the `if X == Y`
+    lines back out of the generated text and asks that every unordered pair of
+    every chunk is compared exactly once — which is what the case is for — and
+    deliberately says nothing about their order, because two orderings are two
+    images and the same answer and pinning one would be pinning a detail under
+    a coverage claim. The row's failure text names the order rule's absence so a
+    reader does not think it was forgotten. So the
+    row is not weakened, it loses a dependency.
+    """
     funcs, index, made = [], 0, 0
     while index < len(_TYPE_VALUE_TAG_NAMES):
         part = _TYPE_VALUE_TAG_NAMES[index:index + chunk]
         if len(part) < 2:
             break
         body = [f"def tag{made}(n):\n"]
-        body += [f"    if {a} == {b}: return 1\n"
-                 for a, b in itertools.combinations(part, 2)]
+        body += [f"    if {part[i]} == {part[j]}: return 1\n"
+                 for i in range(len(part)) for j in range(i + 1, len(part))]
         funcs.append("".join(body) + "    return 0\n")
         made += 1
         index += chunk
     main = ["def main(n):\n", '    printf("distinct")\n']
     main += [f"    if tag{j}(n): return 1\n" for j in range(made)]
     return "".join(funcs) + "".join(main) + "    return 0\n"
+
+
+def check_type_value_tag_generator(verbose=False):
+    """Two rows about `_every_type_tag_is_distinct_source`, and no compiler.
+
+    Both exist because that generator stopped importing `itertools`
+    (2026-10-05, `work/formal31-3`), and a dependency removed for a reason is a
+    dependency that can come back unnoticed: the case it feeds still builds and
+    runs, so nothing else in this file would notice either change.
+
+    Returns `(passed, failures)`, in the shape the other no-compiler checks in
+    this file use.
+    """
+    import re
+    passed, failures = 0, []
+    chunk = 26
+
+    # ROW 1 — THE PAIRS ARE COVERED, which is the claim the case makes: it
+    # returns 1 if any two admitted type names share a tag, so every unordered
+    # pair of a chunk has to be compared once and no pair twice. Read back out
+    # of the GENERATED Mojo rather than out of the loop that produced it, which
+    # is what makes this a property of the program the backend will compile and
+    # not a restatement of the expression that wrote it: an f-string that
+    # dropped the second operand would leave the loop's own pair list intact and
+    # this row would still fail.
+    #
+    # The ORDER is deliberately not checked, and the docstring says why it does
+    # not need to be: two orderings of the same comparisons are two images and
+    # the same answer, so asserting one of them would be pinning a detail while
+    # calling it a coverage claim.
+    src = _every_type_tag_is_distinct_source(chunk=chunk)
+    compared = re.findall(r"^    if (\S+) == (\S+): return 1$", src, re.M)
+    chunks = [list(_TYPE_VALUE_TAG_NAMES[i:i + chunk])
+              for i in range(0, len(_TYPE_VALUE_TAG_NAMES), chunk)]
+    chunks = [c for c in chunks if len(c) >= 2]
+    want = [frozenset((a, b)) for part in chunks for i, a in enumerate(part)
+            for b in part[i + 1:]]
+    got = [frozenset((a, b)) for a, b in compared]
+    if len(got) != len(set(got)):
+        dupes = [tuple(p) for p in set(got) if got.count(p) > 1][:4]
+        failures.append(
+            f"the generated program compares the same pair more than once "
+            f"(e.g. {dupes}); {len(got) - len(set(got))} duplicate comparison(s)")
+    elif set(got) != set(want):
+        missing = sorted(set(want) - set(got))[:4]
+        extra = sorted(set(got) - set(want))[:4]
+        failures.append(
+            f"the generated program compares {len(got)} pairs and the chunks "
+            f"have {len(want)}: missing {missing}, unexpected {extra}")
+    else:
+        passed += 1
+        if verbose:
+            print(f"  PASS  tag-generator: {len(got)} pairs over "
+                  f"{len(chunks)} chunk(s), each exactly once")
+
+    # ROW 2 — this file's IMPORT CLOSURE, which is the reason the generator
+    # changed. `formal.imports`'s own `resolve_module_path` is the resolver the
+    # build itself uses, so this is the same walk the sweep's host-import row
+    # does rather than an `ast` approximation of it: a row that said "this file
+    # imports only modelled modules" and meant "it imports nothing this file's
+    # own reader can see" would pass on a file the sweep still files as
+    # `not-answerable/host-import`.
+    #
+    # The ROOT is this repository and the stdlib is resolved as a second root
+    # where the first does not answer, because `resolve_module_path` takes one
+    # `project_root` and a stdlib module is not reachable from this directory
+    # through it.
+    from formal import imports as I
+    here = os.path.abspath(__file__)
+    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
+        os.path.dirname(os.path.dirname(here)),
+        "new-modular", "Mojo", "stdlib", "std")
+    seen, stack, unresolved = set(), [here], set()
+    while stack:
+        p = stack.pop()
+        rp = os.path.realpath(p)
+        if rp in seen or not p or not os.path.exists(p):
+            continue
+        seen.add(rp)
+        for m in I.imported_modules(I.module_statements(p)):
+            d = I.resolve_module_path(m, relative_to=p, project_root=here)
+            if d is None and os.path.isdir(stdlib):
+                d = I.resolve_module_path(m, relative_to=p, project_root=stdlib)
+            (unresolved.add(m) if d is None else stack.append(d))
+    if unresolved:
+        failures.append(
+            "this file's import closure does not resolve: "
+            + ", ".join(sorted(unresolved))
+            + " — every one of those is a `not-answerable/host-import` row in "
+              "the sweep and takes this file's 1043 build-and-run rows with it")
+    else:
+        passed += 1
+        if verbose:
+            print(f"  PASS  tag-generator: {len(seen)} modules, closure resolves")
+
+    return passed, failures
 
 
 TYPE_VALUE_TAG_CASES = [
@@ -22935,6 +23056,13 @@ def main():
           f"FAIL={len(sf_failures)}")
     passed += sf_passed
     failed += len(sf_failures)
+    tg_passed, tg_failures = check_type_value_tag_generator(args.verbose)
+    for detail in tg_failures:
+        print(f"  FAIL  tag-generator: {detail}")
+    print(f"formal run: tag-generator PASS={tg_passed} "
+          f"FAIL={len(tg_failures)}")
+    passed += tg_passed
+    failed += len(tg_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")

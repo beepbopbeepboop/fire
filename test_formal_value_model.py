@@ -1314,14 +1314,31 @@ MODULE_GLOBAL_CASES = [
 
 # (name, source, needle the refusal must contain)
 #
-# AGREE-OR-REFUSE, and both of these are the shape the rule exists for: the
-# name holds a different frame on each path that binds it, and only ONE of the
-# candidates declares a dunder, so which call the comparison lowers to depends
-# on the path and this analysis has no path sensitivity.  The pre-change tree
-# answered both of them with a flag-setting compare of two addresses and no
-# diagnostic — and for `cross_struct` that was a wrong answer, because CPython
-# asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
-# and this path has no representation for NotImplemented to be returned as.
+# AGREE-OR-REFUSE, and the two rows are now TWO DIFFERENT REFUSALS rather than
+# one — which is what their needles are for, because they are the two halves of
+# the split and a rule that answered either shape with the other's message would
+# pass the looser of the pair.
+#
+#   * `one_name_two_candidate_structs`: the NAME holds a different frame on each
+#     path that binds it and only ONE candidate declares a dunder, so which call
+#     the comparison lowers to depends on the path and this analysis has no path
+#     sensitivity. The needle is that clause.
+#   * `two_structs_only_one_with_a_dunder`: each name is bound ONCE and to a
+#     single struct, so there is no path to be insensitive to and that clause
+#     was FALSE about this program. The real reason is CPython's REFLECTED
+#     dispatch — it asks the RIGHT operand's `__eq__` when the left one's returns
+#     `NotImplemented`, and this path has no representation for `NotImplemented`
+#     to be returned as — so the needle is that. The message also says the old
+#     advice could not have worked ("giving both structs a `__eq__` will not
+#     either: two owners is the case that refuses").
+#
+# **The pre-change tree answered `cross_struct` with a flag-setting compare of
+# two addresses and NO DIAGNOSTIC**, and that was a wrong answer rather than an
+# absent one; the refusal above replaced it, and its REASON was a half-written
+# paragraph until 2026-10-05 — it told a reader to "give each name one binding,
+# or give every candidate the same `__eq__`", neither of which can fix a program
+# whose names are already bound once each. See
+# `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
 REFUSALS = [
     # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
     # its sibling two entries below this list apart is the case where there IS
@@ -1511,7 +1528,10 @@ REFUSALS = [
      "        v = B(1, 2, 3)\n"
      "    printf(\"r=%d\", 1 if v == v else 0)\n"
      "    return 0\n",
-     "compares two FRAME ADDRESSES"),
+     # The PATH-SENSITIVITY clause, and it is this row's needle rather than the
+     # shared opening one because the two rows here share that opening and the
+     # SPLIT is what this pair exists to pin.
+     "no path sensitivity to say which one is live at"),
     ("two_structs_only_one_with_a_dunder_is_refused",
      "class A:\n"
      "    x: int\n"
@@ -1536,7 +1556,13 @@ REFUSALS = [
      "    var b = B(1, 2, 3)\n"
      "    printf(\"r=%d\", 1 if a == b else 0)\n"
      "    return 0\n",
-     "does not settle it"),
+     # The REFLECTED DISPATCH, which is the real reason and which the message
+     # did not say until 2026-10-05. `NotImplemented` is the load-bearing word
+     # behind it: it is the third answer a dunder needs, it has no
+     # representation on this path, and a message naming anything else would be
+     # telling the reader to change the bindings of a program whose bindings are
+     # already right.
+     "CPython's REFLECTED dispatch"),
     # A NAME THAT STOPS BEING A FRAME.  The holder set is additive — nothing
     # ever removes a name from it — so `r = 5` after `r = R()` leaves every
     # `r.<field>` lowered as a load at `[5 + 8·slot]`.  Measured on both

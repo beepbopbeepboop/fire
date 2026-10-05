@@ -282,6 +282,29 @@ def _try_around_raise_message():
 
 _TRY_AROUND_RAISE_REFUSAL = _try_around_raise_message()
 
+
+# The planner's spelling of the SAME cause as `OWN_METHOD_FAMILY` above, and it
+# is spelled here independently of `tools/formal_sweep_causes.py::CAUSES` for
+# the reason `STRING_COMPOSITION_CAUSE` is: the two tables are keyed on
+# different things, so the pair of samples is what proves the two spellings
+# still agree. A label that drifted would make `check_cause_table` report a
+# cause that matches nothing while reading as one that blocks nothing.
+OWN_METHOD_FAMILY = ("a method of this file's own struct was never emitted")
+OWN_METHOD_CAUSE = ("a method of this file's own struct was never emitted into "
+                    "the image")
+
+# The message both of those rows match, QUOTED from `tools/formal_sweep.py`'s
+# `_classify_terminal`. See the note on the family sample above for why this one
+# is not built from `formal/`: it is the sweep's own sentence, and the rule that
+# produces it is tested in `test_formal_sweep.py` where the build-side message
+# IS built.
+_OWN_METHOD_MESSAGE = (
+    "1 of the 2 unprovided symbol(s) are METHODS OF A STRUCT IN THIS FILE "
+    "(Bag_get), so the link line is not what is missing: those definitions "
+    "were never emitted into this image at all, which means a method call here "
+    "was not rewritten into a call on the lifted function. That is a fact "
+    "about this file's own lowering and not about the target")
+
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
     # The frame-address families. All one design defect, five costumes; the
@@ -541,6 +564,27 @@ SAMPLES = [
     # dead-marker failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
+    # A symbol this image BINDS and nothing provides, where the symbol is a
+    # METHOD OF A STRUCT IN THE FILE THAT REFUSED. Its own family because the
+    # fix is on this side of the boundary: the definition was never emitted into
+    # the image, so no link line could have provided it and adding one would not
+    # help.
+    #
+    # **QUOTED AND NOT BUILT, and that is the exception this file states once.**
+    # Every other sample here is a message `formal/` words, and it is built by
+    # calling the function that words it so a reword fails this row. This one is
+    # written by `tools/formal_sweep.py` ITSELF — it is the sweep's own
+    # classification, because `formal/build.py`'s bind audit cannot tell a
+    # missing method of this file from a missing libc name, and the sweep is the
+    # only layer that has both ends. There is therefore no `formal/` text to
+    # build it from, and the drift risk is real rather than theoretical: the
+    # classifier and this copy are two statements of the same clause. The RULE
+    # is exercised where it can be built, in `test_formal_sweep.py`'s
+    # `test_a_method_of_this_files_own_struct_is_a_codegen_finding`, which asks
+    # `formal/build.py::_unaccounted_report` for the message and then runs the
+    # classifier on it; this row pins the MARKER against a reword of the text
+    # above, which is what a sample of a sweep-written clause can do.
+    (OWN_METHOD_FAMILY, _OWN_METHOD_MESSAGE),
 ]
 
 # ── the SECOND table: `tools/formal_sweep_causes.py` ────────────────────────
@@ -1071,6 +1115,13 @@ CAUSE_SAMPLES = [
     # each other — and the built sample is what proves that, rather than a
     # reading of the two markers.
     (TRY_AROUND_RAISE_CAUSE, _TRY_AROUND_RAISE_REFUSAL),
+
+    # The SAME construct as the family row above, and a second table because the
+    # two are keyed on different things — the family on the shape of the
+    # message, the cause on what a fix would have to CHANGE. Quoted for the
+    # reason the sample above gives: this message is `tools/formal_sweep.py`'s
+    # own, and there is no `formal/` function that words it.
+    (OWN_METHOD_CAUSE, _OWN_METHOD_MESSAGE),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

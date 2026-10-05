@@ -704,6 +704,72 @@ class TestClassifyShape(unittest.TestCase):
         self.assertEqual((got.status, got.phase), ("refused", "generate"))
 
 
+class TestRunnerClassification(unittest.TestCase):
+    """`test_formal.py::classify_stem` — the OTHER reader of the same question.
+
+    `tools/formal_proof_census.py`'s `_classify_failure` and `test_formal.py`'s
+    `classify_stem` both decide "is this Lean saying the proof is wrong, or is
+    this Lean saying it could not look?" — and until 2026-10-05 the second one
+    had no third answer at all, so `both` and `either` were `FAIL` in the suite
+    and `too-large` in the census for the same sentence. That is the
+    disagreement
+    `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+    §4 is about, and it is why the SENTENCE has one reader (`formal.lean`) and
+    both questions are asked of it.
+
+    Four rows, and the two that matter are the ones that would each be a lie:
+    a ceiling firing is not `FAIL`, and it is not `KNOWN-GAP` either. No Lean
+    runs here — the classifier is a pure function of four values, which is the
+    reason it was lifted out of the futures loop in the first place.
+    """
+    MEM = ("build: both_proof.lean:2600:8: error: (kernel) excessive memory "
+           "consumption detected")
+    OTHER_CEILING = "build: e_proof.lean:1:1: error: maximum memory has been reached"
+    REJECTED = "build: sum_proof.lean:2880:16: error: Tactic `rfl` failed"
+
+    def setUp(self):
+        import test_formal
+        self.T = test_formal
+
+    def test_a_pass_is_a_pass_whatever_else_is_true(self):
+        self.assertEqual(self.T.classify_stem("ret42", True, "", set()), "PASS")
+
+    def test_a_rejection_is_a_fail(self):
+        self.assertEqual(
+            self.T.classify_stem("sum", False, self.REJECTED, set()), "FAIL")
+
+    def test_a_marked_stem_is_a_known_gap_and_nothing_else(self):
+        # The marker wins over every other reading, INCLUDING a ceiling: a stem
+        # in EXPECTED_FAILURES is not run at all (that is what the list is for),
+        # so a ceiling cannot be observed on one — and if one were reported
+        # anyway, `KNOWN-GAP` is the tag that says "known unproven, for the
+        # stated reason", which is the claim the list's own comment makes.
+        self.assertEqual(
+            self.T.classify_stem("count", False, self.MEM, {"count"}),
+            "KNOWN-GAP")
+
+    def test_a_ceiling_is_too_large_and_not_a_fail(self):
+        # Both spellings of the same ceiling, because `formal.lean`'s regex has
+        # two alternatives and a row that exercised only the first would leave
+        # the second dead.
+        for text in (self.MEM, self.OTHER_CEILING):
+            self.assertEqual(
+                self.T.classify_stem("both", False, text, set()), "TOO-LARGE",
+                f"not classified for {text!r}")
+
+    def test_the_two_readers_agree_on_the_same_sentence(self):
+        # The row that is the POINT: one sentence, two readers, one answer. If
+        # either grows its own copy of the regex this fails, which is cheaper
+        # than finding out from a suite that says a proof is wrong when the
+        # checker gave up.
+        import formal.lean as L
+        for text in (self.MEM, self.OTHER_CEILING, self.REJECTED):
+            self.assertEqual(
+                (L.lean_refused_on_its_own_memory_ceiling(text) is not None),
+                (self.T.classify_stem("x", False, text, set()) == "TOO-LARGE"),
+                f"the readers disagree about {text!r}")
+
+
 class TestEntryPoint(unittest.TestCase):
     """`--list` builds nothing, which is what makes the tool inspectable."""
 

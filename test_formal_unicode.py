@@ -1479,6 +1479,116 @@ def model_checks():
     ok("bytes: no function in hand is no exemption",
        M.receiver_is_declared_bytes(None, F.IdentExpr("e"), {}, {}), False)
 
+    # ── `FOREIGN_BYTES_KIND`: bytes the KERNEL supplied ────────────────────
+    #
+    # The rows are grouped by what each one can get wrong, and the order is the
+    # order of the decisions rather than of the table.
+    #
+    # FIRST the seed, one row per KERNEL SOURCE rather than one per export: the
+    # three sources are `readdir(3)`, the environment and `getcwd(3)`, and a
+    # table that had covered only the first would leave the other two silent —
+    # which is the whole failure mode of a change that edits a list.
+    def seeded(name, module="os"):
+        return M.foreign_bytes_export_kind({"module": module, "name": name})
+
+    ok("foreign: readdir's listing is a CONTAINER of them",
+       seeded("listdir"), "list:fbytes")
+    ok("foreign: readdir's accessor is one of them",
+       seeded("listdir_get"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: the walk is the same container",
+       seeded("walk"), "list:fbytes")
+    ok("foreign: getcwd is the third source",
+       seeded("getcwd"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: the environment is the second",
+       seeded("getenv"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: a re-exported fs_* row resolves to the SAME bytes",
+       seeded("fs_getenv"), M.FOREIGN_BYTES_KIND)
+    # And the exclusions, which are as much a part of the answer as the rows
+    # above: the one-word constants are literals in this image's text section,
+    # and a module this table says nothing about is unclassified rather than
+    # foreign.
+    ok("foreign: an image literal is not foreign",
+       seeded("sep"), None)
+    ok("foreign: another module's export is not this table's business",
+       seeded("join", module="os.path"), None)
+    ok("foreign: an entry with no module is not seeded",
+       M.foreign_bytes_export_kind({"name": "listdir"}), None)
+    ok("foreign: no entry at all is not seeded",
+       M.foreign_bytes_export_kind(None), None)
+    # The other three MODULES, because a seed that only ever covered `os` would
+    # be one file's fix rather than a kind: `glob` walks directories, `mkdtemp`
+    # makes a name, and `uname(2)` is where `platform.node` — a HOSTNAME, which
+    # is the export most likely to be non-ASCII on a real machine — comes from.
+    ok("foreign: glob's listing is the same container of them",
+       seeded("glob", module="glob"), "list:fbytes")
+    ok("foreign: glob.escape composes the CALLER's bytes and is not seeded",
+       seeded("escape", module="glob"), None)
+    ok("foreign: mkdtemp's name is the kernel's",
+       seeded("mkdtemp", module="tempfile"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: tempfile's prefix is a literal in this image",
+       seeded("gettempprefix", module="tempfile"), None)
+    ok("foreign: a hostname is the kernel's",
+       seeded("node", module="platform"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: the product version is the kernel's too",
+       seeded("mac_ver_release", module="platform"), M.FOREIGN_BYTES_KIND)
+    ok("foreign: platform's bit count is an ASCII literal",
+       seeded("architecture_bits", module="platform"), None)
+
+    # THEN the one construct whose CPython answer is not a property of the
+    # bytes. `len` is refused and `os.str_len` is the spelling that asks for the
+    # byte count on purpose — so the refusal names a way forward rather than
+    # only saying no.
+    ok("foreign: len is not answerable",
+       M.len_operand_lowering(M.FOREIGN_BYTES_KIND), None)
+    msg = M.len_refusal(M.FOREIGN_BYTES_KIND, "x")
+    ok("foreign: the len refusal says where the bytes came from",
+       "KERNEL supplied" in (msg or ""), True)
+    ok("foreign: the len refusal names the byte count on purpose",
+       "str_len" in (msg or ""), True)
+    # …and `str` still answers, because the refusal is about PROVENANCE and not
+    # about the representation. Without this row a `string_operand_is_string`
+    # widened the wrong way would satisfy everything above.
+    ok("foreign: len of an image string is still a strlen",
+       M.len_operand_lowering(M.STR_KIND), M.LEN_FROM_STRLEN)
+    ok("foreign: len of a foreign value is refused, not folded",
+       M.len_refusal(M.STR_KIND, "x"), None)
+
+    # THEN everything that IS a property of the bytes, which is the direction
+    # that has to stay unchanged or the seed costs the corpus its string
+    # methods: `string_operand_is_string` is the ONE predicate that answers it,
+    # and a copy spelled `== STR_KIND` anywhere would silently drop the kind.
+    ok("foreign: it is a char * for every string-shaped question",
+       M.string_operand_is_string(M.FOREIGN_BYTES_KIND), True)
+    ok("foreign: a subscript of it is ONE BYTE",
+       M.subscript_element_kind(M.FOREIGN_BYTES_KIND), M.INT_KIND)
+    ok("foreign: truthiness is emptiness and not the address",
+       M.truthy_lowering(M.FOREIGN_BYTES_KIND), M.TRUTHY_FROM_STRLEN)
+    # …and it is NOT a number, which is the same claim `FLOAT_KIND` and
+    # `TYPE_KIND` make for themselves: `printf("%d", …)` would read a `char *`
+    # as a decimal.
+    ok("foreign: it is not printed as a number",
+       M.is_number_kind(M.FOREIGN_BYTES_KIND), False)
+
+    # AND the element axis, which is what makes `for x in names` reach the kind
+    # at all: a loop target has no declaration of its own, so the container's
+    # element kind is the only channel.
+    ok("foreign: the container carries the element kind",
+       M.list_elem_kind(M.list_kind(M.FOREIGN_BYTES_KIND)),
+       M.FOREIGN_BYTES_KIND)
+
+    # LAST the ORDER: the seed is asked before the declaration, because
+    # `os.listdir` declares `-> List[String]`, which is the honest word for a
+    # Python-level list of `str` and which CPython agrees with. A table applied
+    # after the declaration would be dead code, and these two rows are what say
+    # so rather than leaving it to be found.
+    decl = type("D", (), {"return_type": "List[String]"})()
+    ok("foreign: the seed wins over the declaration",
+       M.imported_callee_kind({"module": "os", "name": "listdir"}, decl),
+       "list:fbytes")
+    ok("foreign: an unseeded export still answers from its declaration",
+       M.imported_callee_kind({"module": "os", "name": "walk_free"}, decl,
+                              string_names=("String", "str")), "list:str")
+
     return passed, failures
 
 

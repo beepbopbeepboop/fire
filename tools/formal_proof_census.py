@@ -258,12 +258,6 @@ STATUS_RANK = {
 #: wherever they appear, and never counted as "proved at all".
 NOT_A_VERDICT = {"too-large", "bound-exceeded"}
 
-#: Lean's own memory ceiling, in its own words on the pinned 4.32.2. Matched on
-#: the captured run's output rather than on `compile_formal`'s exception text,
-#: because the run IS the thing that said it. `maximum memory has been reached`
-#: is the shape the same ceiling takes when it fires from a different place.
-_LEAN_MEMORY_RE = re.compile(
-    r"excessive memory consumption detected|maximum memory has been reached")
 
 #: Lean's first diagnostic line, `file:line:col: error: …`, searched for
 #: ANYWHERE in the text rather than at the start of a line: a replayed
@@ -542,19 +536,24 @@ def _classify_failure(runs, detail):
       the verdict cache for exactly this reason), so it is its own class.
     * Lean's own memory ceiling — also not a verdict, and a different fact: the
       proof was too big for the checker, which is a property of the machine's
-      `-M` and of the proof's size.
+      `-M` and of the proof's size. **Asked of
+      `formal.lean.lean_refused_on_its_own_memory_ceiling`, not of a regex
+      here**, because `formal/lean.py` is what SETS that `-M` and a second copy
+      of the sentence is a second answer to "is this a verdict or an absence" —
+      which is the disagreement this classification exists to end
+      (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
+      declared.md`).
     * anything else — Lean elaborated the file and said no. That IS a verdict,
       and Lean's own message is the finding.
     """
+    from formal.lean import lean_refused_on_its_own_memory_ceiling
     if runs and runs[-1].exceeded:
         return "bound-exceeded", runs[-1].exceeded
     blob = (runs[-1].stderr or "") + (runs[-1].stdout or "") if runs else \
         str(detail or "")
-    if _LEAN_MEMORY_RE.search(blob):
-        first = next((ln.strip() for ln in blob.splitlines()
-                      if _LEAN_MEMORY_RE.search(ln)), "")
-        return ("too-large", " ".join((first or "lean refused the proof on "
-                                       "its own memory ceiling").split()))
+    ceiling = lean_refused_on_its_own_memory_ceiling(blob)
+    if ceiling:
+        return ("too-large", " ".join(ceiling.split()))
     return "lean-rejected", first_diagnostic(detail)
 
 
