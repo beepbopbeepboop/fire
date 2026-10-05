@@ -13338,7 +13338,8 @@ def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
                                   forwarded) is not None
 
 
-def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
+def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
+                          spelling: str = None):
     """The EXPORT refusal for `base_name[…](…)`, or None when the export rule
     is not what stops it.
 
@@ -13363,7 +13364,23 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
     that has not resolved imports) or a module with no readable export table
     yields an empty `published`, and an empty table is not evidence that
     anything is missing from it — so it returns None and the old verdict stands.
+
+    **A DOTTED base is None, always, and that is the half this function used to
+    get wrong.** `base_name` is the ROOT of the chain, so for
+    `import pairlib as L` + `L.Pair[Int]()` it was `L` — which resolves to the
+    module and is therefore not in that module's own published set, because a
+    module never publishes its own NAME. The export rule was asked a question
+    about a word that cannot be the answer, and the reader was told the module
+    exports no such symbol: a message about a LIBRARY's boundary, on a program
+    whose problem is that this build has no recogniser for a bracketed callee
+    spelled through a module. Measured on both architectures. `spelling` is the
+    dotted chain the scan already had (`model.member_chain_text(sub.obj)`), and
+    a base whose spelling carries a `.` is a MODULE — so the export rule is not
+    what stops it, and `model.dotted_specialization_refusal` is the sentence
+    that is true of it.
     """
+    if spelling and "." in spelling:
+        return None
     sym = M.module_symbol(base_name)
     if sym is None or getattr(sym, "site", None) != "imported":
         return None
@@ -13460,6 +13477,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     # not. Measured once per unit rather than per function: the answer is the same
     # for every function in the module and it costs a walk of every body.
     returns_container = M.functions_returning_containers(functions)
+    # …and WHICH PARAMETERS of this unit's own functions their bodies BRANCH
+    # THROUGH, for `model.parameters_called_through_a_value`'s reason: it is the
+    # conjunct that makes the passing end of the value-call analysis a statement
+    # about the CALLEE rather than about every call in the file, and one walk per
+    # unit rather than one per call site — the same arithmetic as the three
+    # tables above.
+    value_called_params = M.functions_calling_a_parameter_through_a_value(
+        functions)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -13542,6 +13567,66 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         arg.name, fdef.name, shape.positional[i],
                         M.param_annotation(fdef, shape.positional[i]),
                         fn.name))
+            # The OTHER end of the same analysis, and the one this pass is the
+            # only place to ask: the callee CALLS this parameter through the
+            # word, and the argument the call site put there is not a function.
+            # `apply(3, 17)` built, branched to the number 17 and died of
+            # SIGBUS on arm64 / SIGSEGV on x86-64, with CPython raising
+            # `TypeError` on the same program — so the word is provably not an
+            # address and the build can say so at the one place holding both
+            # ends of the call. The emitters ask the CALLING end (what the
+            # calling function's own statements bound the callee name to, which
+            # needs its `ValueKinds`) and cannot see the call site at all; this
+            # asks the PASSING end, whose evidence is the argument's own shape,
+            # and needs the callee's body — which it has only because the callee
+            # is a function of THIS unit.
+            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # is the doc for what is left of the whole-module half, and the
+            # words in that sentence are load-bearing: a callee in another image
+            # is not in `callee_defs` at all, so no position here is checked.
+            #
+            # Guarded on the three shapes whose POSITION is not `args[i]`, each
+            # for the reason `string_parameters_by_call_site` gives for the same
+            # one: a comptime SPECIALIZATION passes its brackets FIRST as leading
+            # arguments, a `*args` spread shifts everything after it, and a
+            # receiver is parameter 0 of the signature and is never bound by an
+            # argument list (`_positional_parameter_names`'s own paragraph). A
+            # call whose position cannot be established is left alone, which is
+            # the permissive direction and costs only the generics and the
+            # methods.
+            called_words = value_called_params.get(fdef.name) or ()
+            if isinstance(call.func, F.SubscriptExpr) or not called_words:
+                continue
+            if any(isinstance(a, F.UnaryOp) and a.op in ("*", "**")
+                   for a in (call.args or ())):
+                continue
+            if shape.positional and shape.positional[0] in M.struct_receivers(fdef):
+                continue
+            slots, _err = M.bind_call_arguments(
+                fdef.name, fdef, call.args or [], call.kwargs or [])
+            if slots is None:
+                continue
+            for pname, value in zip(shape.positional, slots):
+                if pname not in called_words or value is None:
+                    continue
+                # The callee's own DECLARATION is the better witness when it
+                # refuses, and it is the witness that NAMES the type: this row
+                # would answer "a container" for `call_container(xs, 4)` while
+                # `f: List[Int]` says exactly what the word is and which
+                # parameter it is (`callee_value_refusal`, raised from the
+                # emitter's own line). So this pass defers to it, which is also
+                # why the two cannot disagree — one of them fires and the other
+                # is silent, by construction rather than by luck.
+                if not M.value_callee_can_hold_a_function(
+                        M.param_annotation(fdef, pname)):
+                    continue
+                holds = M.value_argument_is_not_an_address(value, fn)
+                if holds is not None:
+                    raise CodegenError(M.not_a_code_address_refusal(
+                        M.receiver_shape_text(value), holds, where=fn.name,
+                        passed=(f"passed to `{fdef.name}()` as parameter "
+                                f"`{pname}`, which `{fdef.name}()` calls "
+                                f"through a value")))
         frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a
@@ -14070,6 +14155,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # IS a call's bracketed base, so the name is the base name by
                 # that fact rather than by asking again.
                 base_name = root_ident.name
+                # The ROOT is the module for a DOTTED base, and
+                # `specialization_call_refusal` has to say so: `L.Pair[Int]()`
+                # arrived here as `base_name == "L"`, so the refusal named the
+                # module as the template and told the reader to write
+                # `L[<a type>](…)`, which is not a spelling. The dotted name is
+                # `member_chain_text(sub.obj)`, the ONE reader for the chain —
+                # `sub.obj` is a MemberExpr on this arm and an IdentExpr on the
+                # bare one, so the same call answers a bare name unchanged and
+                # a dotted one in full. `model.dotted_callee_sentence` is what
+                # turns the difference into the sentence, and it is asked of the
+                # NAME rather than of the node so the emitters' two copies of
+                # this refusal cannot spell it differently.
+                callee_spelling = M.member_chain_text(sub.obj)
                 if (base_name not in _callee_defs(functions)
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
@@ -14082,8 +14180,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
                         else (_bracketed_export_gap(
-                            base_name, fn.name, link_line)
-                            or M.specialization_call_refusal(base_name)))
+                            base_name, fn.name, link_line, callee_spelling)
+                            or M.specialization_call_refusal(callee_spelling)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
                     # for, and it is a different KIND of answer from the three

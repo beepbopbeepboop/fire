@@ -457,6 +457,13 @@ CAUSES = (
     # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
     ("a bracketed specialization of a callee this unit does not compile",
      (("so the brackets cannot be bound",),)),
+    # …and its DOTTED sibling, which is a different sentence about a different
+    # thing: the bare name is a symbol this unit does not compile, and the dotted
+    # one is a spelling the ONE recogniser of a bracketed callee cannot see. The
+    # marker is a phrase that only the new text has, so the two cannot shadow
+    # each other in either order.
+    ("a bracketed specialization spelled through a module",
+     (("is a bracketed callee spelled THROUGH A MODULE",),)),
     # A CALL to a name the DEFINING module does not export, which is the largest
     # row in the corpus and had NO row at all until 2026-10-04: 170 of the 710
     # files on the b10 sweep, 55% of every codegen finding in the tree, all of
@@ -504,6 +511,12 @@ CAUSES = (
      (("is a bracketed call through a VALUE",),)),
     ("a keyword argument in a call through a value",
      (("no declaration to bind it by NAME",),)),
+    # …and the two ends that need no DECLARATION: the source's own statements
+    # say what the word holds. One cause and one marker, because the two ends
+    # share a message (`formal/model.py::not_a_code_address_refusal`), and a
+    # planner reading a file blocked by this wants the one row.
+    ("a call through a word the source says is not an address",
+     (("is called as a FUNCTION and the source says it holds",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",

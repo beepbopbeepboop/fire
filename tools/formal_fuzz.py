@@ -423,6 +423,17 @@ STACK_TRAP_STATUS = 2
 #
 # `str_subscript` is the row still standing, and it is the shape of the claim
 # the other two carried: `bugs/FORMAL_string_value_model.md` owns it.
+#
+# `no_return_call` is the second row, and **it is legitimate only because the
+# generator now produces the construct** — which is what
+# `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+# §3 requires before a row may name it ("a row nothing can trigger is a row
+# that has stopped measuring", and "if the generator is ever taught to emit a
+# helper with an empty body, this is the construct to add"). Until
+# `nor_define`/`nor_call` existed the minimiser reached this class constantly
+# and `blame` had no way to name it, which is what 21 of the 27
+# `MISMATCH-X86` rows in the `strings` sweep at scale actually were
+# (`bugs/FORMAL_fuzz_ledger.md` §4.11).
 KNOWN_DIVERGENCES = {
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
@@ -443,6 +454,14 @@ KNOWN_DIVERGENCES = {
     "set_order": (
         "a set lowers as a LIST, so it iterates in INSERTION order where CPython "
         "iterates in hash order (bugs/FORMAL_set_value_model.md)"),
+    "no_return_call": (
+        "a `def` with no `return` yields a word where CPython yields None, "
+        "so `f() == 0` takes this path's arm and CPython's takes the "
+        "other (bugs/"
+        "FORMAL_a_function_with_no_return_yields_a_word_where_cpython_"
+        "yields_None.md); the PRINTED spelling is refused at build time "
+        "and `None + 1` is a TypeError in the oracle, so `==` against a "
+        "literal is the only observable one"),
 }
 
 # The constructs that make a feature marker true. Checked against the minimised
@@ -459,6 +478,11 @@ FEATURE_PATTERNS = {
     # BINDING says which. The empty pattern tuple is how this table says
     # "handled specially".
     "set_order": (),
+    # Decided by `features_of`, not a pattern, for the same reason
+    # `str_subscript` is: the marker is a property of the PROGRAM (does it
+    # define a `def` that falls off its end?) and not of a line. A pattern
+    # here would match `return` and fire on every program.
+    "no_return_call": (),
 }
 
 # How to take one known construct out of a program WITHOUT changing its shape:
@@ -467,6 +491,67 @@ FEATURE_PATTERNS = {
 # because the alternative — deleting the statements that mention the construct —
 # takes the definitions with them, so the program then fails for a reason that
 # has nothing to do with the disagreement and nothing is learned.
+def observes_a_call_against_a_literal(source: str) -> bool:
+    """Whether the program COMPARES a call's result against a numeric literal.
+
+    The observation half of the `no_return_call` marker, and it is a small
+    bracket matcher rather than a regex because the argument is an arbitrary
+    expression: `nf6((w4 & 7)) == 0` and `nf8(s2, ((w5 & 0xFFFF) << 1)) == 0`
+    are the same construct at two and three levels of nesting, and a pattern
+    written for one of them misses the other — measured, on programs this
+    generator emitted: a `[^()]*` argument class marked 4 of 7 and the 3 it
+    missed were the corpus's own.
+
+    Deliberately not `print(f(...))`: `model.returnless_value_refusal` refuses
+    that at build time on both architectures, so a program carrying it is a
+    REFUSAL and not a disagreement, and marking it would make `blame` neutralise
+    a program's one real construct because of another program's spelling of the
+    same class.
+    """
+    for line in source.splitlines():
+        for i, ch in enumerate(line):
+            if not (ch.isalpha() or ch == "_"):
+                continue
+            if i and (line[i - 1].isalnum() or line[i - 1] == "_"):
+                continue                      # not the start of a name
+            j = line.find("(", i)
+            if j < 0:
+                continue
+            k = _close_bracket(line, j)
+            if k < 0:
+                continue
+            rest = line[k + 1:].lstrip()
+            m = re.match(r"(?:==|!=|<=|>=|<|>)", rest)
+            if m and re.match(r"-?\d+", rest[m.end():].lstrip()):
+                return True
+    return False
+
+
+def _close_bracket(line: str, open_at: int) -> int:
+    """The index of the `)` closing the `(` at `open_at`, or -1."""
+    depth = 0
+    for i in range(open_at, len(line)):
+        if line[i] == "(":
+            depth += 1
+        elif line[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# The same observation as a PATTERN, for `NEUTRALISERS` (which is a table of
+# regexes because that is what `neutralise` applies). Built from the same shape
+# `observes_a_call_against_a_literal` matches — a name, a balanced argument, a
+# comparison, a literal — with the argument allowed three levels of nesting,
+# which is the deepest this generator emits: `((w5 & 0xFFFF) << 1)`. A fourth
+# level would not be *silently* missed: `features_of` would still mark the
+# program, and only the NEUTRALISATION would be a no-op, which `blame` already
+# reports as "present by pattern but not in a form the neutraliser can reach".
+_NOR_CALL_EQ = re.compile(
+    r"\b(\w+\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))\s*(==|!=|<=|>=|<|>)\s*(-?\d+)")
+
+
 NEUTRALISERS = {
     # The index is `-?\d+` and not `\d+` because the minimiser's literal pass
     # rewrites an index to `0`, `1` or `-1` and takes whichever still
@@ -483,6 +568,17 @@ NEUTRALISERS = {
     # changes the shape teaches nothing.
     "set_order": [(r"(?m)^(\s*)(\w+) *= *\{([^{}:]*(?:,\s*[^{}:]*)*)\} *$",
                    r"\1\2 = [\3]")],
+    # The comparison is what carries the divergence, so the comparison is what
+    # is replaced: the CALL is swapped for `0`, which is the same program with
+    # the construct gone rather than deleted — the `if`, the operator, the
+    # literal and both arms stay, so a reduction that takes this out keeps the
+    # same statement count and the same shape, and what it measures afterwards
+    # is a comparison this path and CPython agree about.
+    #
+    # `_NOR_CALL_EQ` is built from the same bracket matcher `features_of` uses,
+    # for the reason that reader is not a regex: the argument is an arbitrary
+    # expression and a pattern written for one nesting depth misses the others.
+    "no_return_call": [(_NOR_CALL_EQ.pattern, r"0 \2 \3")],
 }
 
 # The CPython side of the SAME TEXT.  A `def`'s annotations are evaluated when
@@ -1343,6 +1439,15 @@ MIXES = {
              ("assign", 2), ("print", 2)),
     "sets": (("set_build", 4), ("set_len", 3), ("set_in", 4), ("set_iter", 5),
              ("assign", 2), ("if", 2), ("print", 2)),
+    #   noreturn  a helper with NO `return`, watched through `==`.  Its own
+    #             mix rather than a kind inside `core`, for the reason
+    #             `MIX_MUST_GENERATE` is a separate table: a program
+    #             carrying this construct carries a KNOWN DIVERGENCE, and a
+    #             clean tally that has swallowed a few of them is not a
+    #             clean tally.  `core` therefore stays clean and this one
+    #             says what it is.
+    "noreturn": (("nor_define", 3), ("nor_call", 7), ("assign", 2),
+                 ("cmp", 2), ("if", 2), ("print", 2)),
 }
 
 #: `--max-min-steps` is not optional for `sets` in practice, and the reason is
@@ -1373,6 +1478,29 @@ SETS_MIN_STEPS = 30
 #: `bugs/FORMAL_fuzz_ledger.md` §1 calls out: "a mix that stops producing a
 #: construct reports the same clean tally as one that never produced it".
 MIX_MUST_GENERATE = {
+    "noreturn": (_NOR_CALL_EQ.pattern,
+                 # The OBSERVATION, not the absence — the construct is a `def`
+                 # with NO return, and a pattern cannot say "an absence".  This
+                 # is the half that is checkable as text, and it is the half
+                 # that rots in the direction that matters: a generator that
+                 # stopped emitting a return-less helper and began emitting an
+                 # ordinary one would keep matching this, and the mix would
+                 # report a clean tally while measuring nothing.
+                 #
+                 # The ABSENCE half is pinned elsewhere and is the only place it
+                 # can be: `test_formal_fuzz.py`'s generation check asks
+                 # `features_of` about the program's own text, and
+                 # `features_of` asks `_defines_a_return_less_function`, which
+                 # is a reader of the text rather than a pattern.  Saying so
+                 # here is what keeps this row from being read as the whole
+                 # claim.
+                 "`--mix noreturn` is the only place a function that falls off "
+                 "its end is generated, and it is where the value model's "
+                 "absence of `None` is measured (bugs/"
+                 "FORMAL_a_function_with_no_return_yields_a_word_where_cpython_"
+                 "yields_None.md); the `==`-against-a-literal spelling is the "
+                 "only observable one left now that the printed one is refused "
+                 "and `None + 1` is a TypeError in the oracle"),
     "signed": (r"//|(?<![\w)])%(?![a-zA-Z_(])",
                "`--mix signed` is the only place a signed-over-signed division "
                "is generated, and it is where `model.division_floors` is "
@@ -1399,6 +1527,14 @@ MAX_CLASSES = 2
 #: stack, and a signature with defaults is a longer definition per function.
 MAX_CLOSURES = 2
 MAX_ARGFUNCS = 3
+#: The same bound for the return-LESS helpers of `nor_define`. They are
+#: module-level definitions like `define_function`'s and the bound that matters is
+#: `MAX_FUNCS`'s — one `def` line each — but kept apart because the family
+#: exists for a reason of its own (it is the only construct that produces a
+#: function falling off its end, so a program carrying one is carrying a KNOWN
+#: divergence rather than a clean tally) and folding it into `MAX_FUNCS` would
+#: let a program's clean statements be displaced by divergence-carrying ones.
+MAX_NORFUNCS = 2
 #: The same bound for the `try_finally_return` helper: it is a module-level
 #: definition like `define_function`'s, and it exists to carry a `return` that
 #: must not end `main` (a `return` in `main` truncates the program there and
@@ -1445,6 +1581,7 @@ class Gen:
         self.closures = []    # (name, params, captured, outer, is_nested)
         self.closure_defs = []   # the `def` lines, spliced into main's body
         self.argfuncs = []    # (name, params, required count, defaults)
+        self.norfuncs = []    # (name, params) helpers with NO `return`
         self.tryfuncs = []    # (name, param) helpers with a return in a try
         self.closure_blobs = {}   # captured list name -> the index its body reads
         self.variadics = []   # (name, fixed arity) `*rest` defs
@@ -1765,6 +1902,7 @@ class Gen:
             "arg_define", "arg_call", "slice_read", "slice_step",
             "unpack_bind", "unpack_dict", "big_int", "big_shift", "chain_cmp",
             "str_interp", "variadic_define", "variadic_call",
+            "nor_define", "nor_call",
             "ctor_args", "dunder_len", "obj_nested_read",
             "alias_pair", "alias_field", "container_field", "mutate_param",
             "del_key", "iter_order",
@@ -1892,6 +2030,8 @@ class Gen:
             self.closure_stmt(indent, kind)
         elif kind in ("arg_define", "arg_call"):
             self.argshape_stmt(indent, kind)
+        elif kind in ("nor_define", "nor_call"):
+            self.noreturn_stmt(indent, kind)
         elif kind in ("slice_read", "slice_step"):
             self.slice_stmt(indent, kind)
         elif kind == "unpack_bind":
@@ -3367,6 +3507,108 @@ class Gen:
         pick = optional or params
         args.append(f"{self.rng.choice(pick)}={self.int_expr(0)}")
         self.emit(indent, f"print({name}({', '.join(args)}))")
+
+    # ── a helper that RETURNS NOTHING, observed through `==` ──
+
+    def noreturn_stmt(self, indent, kind):
+        """A call to a `def` with NO `return`, watched through a comparison.
+
+        **This is the construct the minimiser kept finding and the corpus could
+        not produce**, and §4.11 of `bugs/FORMAL_fuzz_ledger.md` measured that as
+        21 of the 27 `MISMATCH-X86` rows in the `strings` sweep at scale — a
+        class reached only because `shrink` deletes statements, and one
+        `blame` has no way to name. §3.3 filed it and
+        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+        §3 says exactly what had to become true first: "If the generator is ever
+        taught to emit a helper with an empty body, this is the construct to add,
+        and this doc is what it should point at." This is that.
+
+        **The shape is `==` against a LITERAL and not `print`, and the reason is
+        `§0b` of that doc's own landing.** `print(g(1, 2))` is now REFUSED at
+        build time on both architectures (`model.returnless_value_refusal`, asked
+        from each emitter's `_print_call`), and §0b measured that rule at 0 sites
+        in 379 files — so a printed one would measure the refusal, which is
+        coverage of a different thing. An OPERAND is not refused: `None == 0` is
+        a comparison CPython ANSWERS (`False`), so the program is one both
+        engines can run and one this path answers wrongly. That is the only
+        observable spelling left, and §0b's own list of what is left names it
+        ("the 142 rows that use the value as an OPERAND are a different defect
+        again").
+
+        Measured on this tree before this construct existed, both engines:
+
+            def g(a, b):
+                w = 1
+            def main() -> Int32:
+                if g(1, 2) == 0: print("zero")
+                else: print("notzero")
+
+        | | prints |
+        |---|---|
+        | CPython 3.14 | `notzero` — `None == 0` is `False` |
+        | this path, arm64 and x86-64 | `zero` — the word is `0`, so `0 == 0` |
+
+        **A return-less helper is emitted with a body that does work**, because
+        an EMPTY body would make the helper's own statements dead and the
+        program's statement count a lie; and the arms print DIFFERENT text, so a
+        lowering that computed the comparison correctly but the branch wrongly
+        cannot pass.
+        """
+        if kind == "nor_define" or not getattr(self, "norfuncs", None):
+            if len(getattr(self, "norfuncs", ())) >= MAX_NORFUNCS:
+                self.new_word(indent)
+                return
+            name = self.fresh("nf")
+            params = [self.fresh("r") for _ in range(self.rng.randint(0, 2))]
+            body = Gen(self.rng, "core")
+            body.counter = self.counter
+            body.defined = self.defined
+            body.decls, body.defs, body.out = [], [], []
+            body.stmt(1, 1)
+            self.counter = body.counter
+            self.defs.extend(body.defs)
+            lines = [f"def {name}({', '.join(params)}):"]
+            for dname, dval in body.decls:
+                lines.append(f"    {dname} = {dval}")
+            lines.extend(body.out)
+            if not lines[1:]:
+                # A `def` whose body is only the `def` line would not be a
+                # function at all, and CPython would refuse the file — so the
+                # one statement that makes it a body is emitted here rather than
+                # left to `body.stmt` above having happened to produce one.
+                lines.append(f"    {self.fresh('t')} = {self.rng.randint(0, 40)}")
+            # NO `return`, and that is the whole construct.
+            self.defs.extend(lines)
+            if not hasattr(self, "norfuncs"):
+                self.norfuncs = []
+            self.norfuncs.append((name, params))
+            return
+        name, params = self.rng.choice(self.norfuncs)
+        args = ", ".join(self.int_expr(1) for _ in params)
+        call = f"{name}({args})"
+        # `==` against a LITERAL, and never against a name: `None == None` is
+        # `True` and the word here is `0`, so the same comparison would be a
+        # second shape with the OPPOSITE answer and one row cannot carry both.
+        # A NAME on the other side refuses outright (`model`'s comparison rule
+        # will not compare two values it can only call numbers when one came
+        # from a call that does not say what it returns), so the literal is what
+        # this construct observes through.
+        #
+        # NON-NEGATIVE, and that is measured rather than stylistic: a negative
+        # literal is spelled with a sign the comparison rule reads as the shape
+        # of a POINTER, so `f(...) == -1` is REFUSED
+        # (`nf14(...) == -1 compares two values this path can only call numbers`)
+        # while `f(...) == 0` builds and diverges. Measured on this tree, both
+        # spellings, arm64. A mix whose observation is half-refused measures the
+        # refusal and not the construct, which is the same trade §4.8 records for
+        # `limits`.
+        lit = self.rng.choice([0, 1, 3, 7])
+        yes, no = self.fresh("Y"), self.fresh("N")
+        self.emit(indent, f"if {call} == {lit}:")
+        self.emit(indent + 1, f"print({self.rng.randint(1000, 9999)})")
+        self.emit(indent, "else:")
+        self.emit(indent + 1, f"print({self.rng.randint(1000, 9999)})")
+        del yes, no
 
     # ── a list slice: a NEW blob with the source's element kind ──
     #
@@ -5368,6 +5610,7 @@ def main():
     started = time.time()
     counts = {}
     blamed = {}
+    reductions = {}
     findings = []
     constructs = {}
     audits = {}
@@ -5380,6 +5623,13 @@ def main():
                 range(args.start, args.start + args.count)))
         for rec in recs:
             counts[rec["verdict"]] = counts.get(rec["verdict"], 0) + 1
+            # The reduction tally, counted over EVERY program and not over the
+            # findings: a reduction belongs to a record that has one, and the
+            # point of the line is that "0 stopped reproducing" is a fact about
+            # the campaign rather than about the subset of it that shrank.
+            reduced = reduction_tally_class(rec)
+            if reduced is not None:
+                reductions[reduced] = reductions.get(reduced, 0) + 1
             line = report(rec, args)
             if line and rec["verdict"] != "refusal":
                 print(line, flush=True)
@@ -5433,6 +5683,11 @@ def main():
     for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if v not in ALWAYS_REPORTED:
             print(f"  {v:<18} {n}")
+    # Always, zero included — see REDUCTION_TALLY's own paragraph. Placed with
+    # the refusal audit rather than among the verdicts because it is a tally
+    # ABOUT the findings rather than another verdict, and a reader looking for
+    # the verdict counts must not read its numbers as one.
+    print("  " + reduction_tally_line(reductions))
     if constructs:
         print("  refusals by construct (the mix this corpus reached, per backend):")
         for (backend, what), n in sorted(constructs.items(),
@@ -5501,9 +5756,47 @@ def features_of(source):
                              source) for n in sets):
                 out.add(name)
             continue
+        if name == "no_return_call":
+            if (_defines_a_return_less_function(source)
+                    and observes_a_call_against_a_literal(source)):
+                out.add(name)
+            continue
         if any(re.search(p, source) for p in pats):
             out.add(name)
     return out
+
+
+def _defines_a_return_less_function(source: str) -> bool:
+    """Whether the program defines a `def` whose body has no `return`.
+
+    Asked by reading the source, and the shape it looks for is a `def` line
+    whose body ends before the next `def`/dedent — which is the construct
+    itself, so a reader that had to know more than that would be a second
+    definition of "a function that falls off its end" and could disagree with
+    the generator about whether it emitted one.
+
+    `nonlocal`-free and indentation-driven on purpose: this is the one property
+    in `features_of` that is about the program rather than about a line, and the
+    cheapest honest reading of "a `def` with no `return` in it" is the text.
+    """
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r"^def\s+\w+\s*\(", line):
+            continue
+        body = []
+        for nxt in lines[i + 1:]:
+            # Dedented to module level: this body ends here.  Anything after it
+            # belongs to the NEXT definition, so a `return` down there must not
+            # be read as this one's.
+            if nxt.strip() and not nxt.startswith((" ", "\t")):
+                break
+            body.append(nxt)
+        if not any(b.strip() for b in body):
+            continue                       # not a function at all
+        if any(re.match(r"\s*return\b", b) for b in body):
+            continue                       # this one DOES return
+        return True
+    return False
 
 
 def neutralise(source, feature):
@@ -5625,6 +5918,60 @@ MIN_KINDS = {"x86_64": "x86", "arm64": "arm"}
 #: are here.  A CPython timeout is the ORACLE's verdict and says nothing about
 #: the backends, which is why it is neither a finding nor counted as one.
 ALWAYS_REPORTED = ("match", "trapped", "refusal", "CPYTHON-TIMEOUT")
+
+#: What became of each finding's REDUCTION, counted and printed ALWAYS. §4.12 of
+#: `bugs/FORMAL_fuzz_ledger.md` put `reduced_verdict` on the record and named the
+#: honest next step: it is a REPORT with no owner, because nothing acts on it —
+#: "the two programs above are the only findings the `strings` corpus still
+#: produces on one backend, and `reduced_verdict` for a reduction that stopped
+#: disagreeing is a REPORT with no owner — nothing acts on it. The honest next
+#: step is a tally line for it, the way `REFUSAL-FALSE` is a tally line for a
+#: message that is false of the program". This is that line.
+#:
+#: A campaign's number is its findings, so a number about its REPRODUCERS is a
+#: number about the campaign: `stopped-reproducing` counts shrinker regressions
+#: that a reader would otherwise meet one `findings.json` at a time, and it is
+#: the honest complement of `verdict`, which is never changed by it (the finding
+#: is about the program that produced it).
+#:
+#: Printed zero-included for the reason `ALWAYS_REPORTED` gives — a sweep that
+#: shrank nothing has to be able to say so, and a line that appears only when it
+#: is non-zero cannot. `no-oracle` is the third class rather than folded into
+#: the second because a reduction CPython cannot run has not STOPPED
+#: reproducing; it was never measured, and counting it as a shrinker regression
+#: would blame the shrinker for CPython's answer.
+REDUCTION_TALLY = ("reproduced", "stopped-reproducing", "no-oracle")
+
+
+def reduction_tally_class(rec) -> str | None:
+    """Which of `REDUCTION_TALLY` this finding's reduction is, or None.
+
+    None for a finding the minimiser did not shrink — `--max-min-steps 0`, or a
+    refusal a predicate could not reduce — and None rather than
+    `reproduced`, because "it reproduced" is a claim about a reduction that
+    exists and there is none here.
+    """
+    if "reduced_verdict" not in rec:
+        return None
+    if rec.get("reduced_want") is None:
+        return "no-oracle"
+    return ("reproduced" if rec["reduced_verdict"] == rec["verdict"]
+            else "stopped-reproducing")
+
+
+def reduction_tally_line(counts: dict) -> str:
+    """The summary's one reduction line, every class in `REDUCTION_TALLY`.
+
+    A function rather than a `print` in the summary because the summary is
+    `main()` and `main()` needs a compiler, an oracle and a `--work`
+    directory — so a line written there is a line nothing can check. `AUDIT_
+    VERDICTS`'s own line is spelled in the summary for the same reason it is
+    spelled in one place; this one is a function for the stronger reason, which
+    is that the field order and the zero-inclusion are the two properties worth
+    pinning and neither is visible from a dict.
+    """
+    return "reductions: " + ", ".join(
+        f"{v}={counts.get(v, 0)}" for v in REDUCTION_TALLY)
 
 #: The refusal audit's own verdicts, in the order a summary prints them.  Named
 #: here rather than derived from the records so the line is the SAME four fields

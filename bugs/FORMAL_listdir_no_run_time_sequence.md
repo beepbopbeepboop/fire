@@ -292,3 +292,52 @@ is what the `-> List[String]` declaration bought: `len(names)`, `names[i]` and
 `for x in names`. The three accessors are still there and still the honest
 spelling for a caller who frees the result, because a Python list on this path
 has no `free`.
+
+## 2026-10-05 (`work/formal19-3-r2`): items 2 and 3 are ONE piece and it is two
+## instructions' worth — measured on arm64, and x86-64 is the only thing left
+
+**Items 2 and 3 are implementable together and do NOT need the caller-side block
+this document's §"What is still missing" specifies.** The measurement is in
+`bugs/FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`'s new
+section, which carries the whole of it; this section records what it means for
+the two items as stated here, because this document is where they are written
+down and the answer changes their shape.
+
+* **Item 2 ("a `list` LITERAL's frame reserve cannot be a run-time value, so
+  `xs = []` followed by `n` appends has nowhere to put them … With (1) that
+  becomes a `malloc`") — the `malloc` half is DONE and measured on arm64.** The
+  length is word 0 of the blob, so it is a run-time count and no build-time size
+  is needed anywhere: `malloc((count+1)*8)` at the return, `memmove` of the blob,
+  and the caller holds a heap pointer. `return [11, 22, 33]` read after a second
+  call answers `11 22 33` on arm64, where it answered `7 8 9` before the refusal
+  existed.
+* **Item 3 ("a function returning a container … a frame address is not a value a
+  caller can use after the callee returns") — the SAME `malloc`.** This document
+  treats items 2 and 3 as one project and it is right, and it is also right that
+  the two together are the run-time-length blob. What it does not say is that the
+  caller-side block of `FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse.md`
+  §"The exact next step" is unnecessary: a callee that `malloc`s its own copy
+  needs no block from the caller, which is the difference between this being an
+  ABI change and it being two pieces in the callee.
+* **What is still open is x86-64 and nothing else.** The arm64 copy is correct;
+  the x86-64 copy is a correct instruction stream that loses the tail of the
+  blob, and the three candidates were each tested (length register, source
+  completeness, symbol). That measurement, and the three encoder traps it turned
+  up on the way, are in that document's section — a next attempt starts there and
+  not at the design.
+
+**The refusal stays on both architectures until then**, which is worth saying
+because it is the one decision in that section a reader might otherwise expect to
+have been made the other way: arm64 could have shipped alone, and
+`formal/model.py::returned_container_refusal`'s text is written so that a
+container is refused on both machines with the SAME sentence. A fix on one backend
+would make `formal/x86_64_codegen.py` and `formal/arm64_codegen.py` answer one
+construct differently, which is the outcome every "one recogniser, two backends"
+argument in this repository is about.
+
+**Item 2's OTHER half is unchanged and is not this.** A list built by a loop in
+the SAME frame (`xs = []` then `xs.append(…)` inside a `while`) still has nowhere
+to put the elements, because the frame reserve is the number of append SITES and
+the loud overflow of step 1 is what says so. A returned blob is copied at the
+return; a blob that grows inside the callee needs a heap blob that grows, which is
+a different piece of work and is not implied by the copy.

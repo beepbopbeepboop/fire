@@ -950,6 +950,34 @@ _REFUSAL_FAMILIES = (
      "value call: bracket unreadable"),
     ("no declaration to bind it by NAME",
      "value call: keyword unreadable"),
+    # The same construct from the other two ends: the word is not an address
+    # because the SOURCE says what it holds, rather than because a declaration
+    # says what it could hold. One message for both ends on purpose — see
+    # `formal/model.py::not_a_code_address_refusal` — so one marker and one
+    # family, and it sits with the three above rather than below them.
+    ("is called as a FUNCTION and the source says it holds",
+     "value call: the word is not an address"),
+    # A bracketed callee spelled THROUGH A MODULE (`L.Pair[Int]()`), and it has
+    # to be ABOVE `"would bind"` because the message contains "the brackets
+    # cannot bind" — which that row claims, and which would file a RECOGNISER's
+    # gap under the link line's. Measured: without this row
+    # `_refusal_family` answered `dependency binds what nothing provides` for
+    # `formal/model.py::dotted_specialization_refusal`, which is the exact
+    # mis-filing this table's precedence paragraph is about. Sibling of the
+    # bare-name row in `formal_sweep_causes.py`, which keys on a different
+    # sentence and therefore has its own rot.
+    ("is a bracketed callee spelled THROUGH A MODULE",
+     "specialization spelled through a module"),
+    # …and the BARE spelling of the same construct, which had a CAUSE row and no
+    # FAMILY row at all: `specialization_call_refusal` classified as
+    # `other refusal`, the bucket this table's own docstring calls "nobody has
+    # looked", for the largest single bracketed-callee row in the corpus. The
+    # marker is the phrase both wordings open with and it is above
+    # `"would bind"` for the same reason the row above it is — the dotted text
+    # says "cannot bind", and this one says "does not compile", so the two
+    # cannot shadow each other.
+    ("calls a name this unit does not compile, so the brackets cannot be bound",
+     "specialization of a callee this unit does not compile"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),

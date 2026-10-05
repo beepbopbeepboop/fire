@@ -1547,7 +1547,22 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # v3 added the library census (`lib_sorries`, `lib_detail`) to the stored body,
 # so the key changes rather than a v2 entry being read as "the library has no
 # holes" — which is exactly the claim v2 could not make and did not check.
-_VERDICT_VERSION = b"formal-proof-verdict-v3"
+#
+# v4 is the same argument about a fact the key never recorded at all: whether
+# the run FOUND the library. `_run_lean` handed `LEAN_PATH` the `lib_dir` it was
+# given, unresolved, while the process's cwd is the proof's own directory — so a
+# caller passing a relative `repo_root` (and `repo_root="."` is what a bug doc's
+# own reproduce command writes) got `error: unknown module prefix 'ProofLib'` at
+# `1:0`, before the theorem is read, and **that false verdict was published and
+# is content-addressed on inputs that do not change when the path is fixed**:
+# the proof's bytes and the library's `.olean` digests are identical either way,
+# so every later caller with the same file replayed it. `bugs/
+# FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s measurements were taken
+# through that entry point, which is why this bump and not a cache flush: a
+# flush cannot be done from a worktree (the CAS is machine-wide and shared), and
+# a version bump retires exactly the entries whose key cannot tell the two runs
+# apart.
+_VERDICT_VERSION = b"formal-proof-verdict-v4"
 # -1 in the `lib_sorries` field, distinct from 0: "not measured" and "measured,
 # no holes" are different facts and the report prints them differently.
 _LIB_UNMEASURED = -1
@@ -1935,8 +1950,27 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     to render ("hole census not measured").
     """
     env = os.environ.copy()
+    # ABSOLUTE, for the reason `library_census` states at its own `LEAN_PATH`
+    # and which this site did not act on: the path is resolved against the
+    # elaborating process's cwd, and the cwd below is the PROOF'S OWN DIRECTORY.
+    # A caller that hands `proof_census` a relative `repo_root` — which is what
+    # `repo_root="."` is, and what a bug doc's own reproduce command writes —
+    # therefore resolved `lib` to `<proofdir>/lib`, and every import of
+    # ProofLib failed with
+    #
+    #     error: unknown module prefix 'ProofLib'
+    #     No directory 'ProofLib' or file 'ProofLib.olean' in the search path
+    #     entries: <proofdir>  ./lib  <toolchain>
+    #
+    # **which is a verdict about the PROOF and not about the program.** It is
+    # reported at `1:0`, before the theorem that was to be checked is read at
+    # all, so every measurement taken that way is a measurement of a broken
+    # search path — and it is CACHED, because `proof_verdict_key` hashes the
+    # proof's bytes and the library's `.olean`s and neither of them records how
+    # the run found the library, so one caller's relative root replays the same
+    # false failure for every later caller with the same file.
     env["LEAN_PATH"] = os.pathsep.join(
-        (os.path.dirname(os.path.abspath(proof_path)), lib_dir))
+        (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,
                       wall_s=wall_s, cpu_s=cpu_s,
                       cwd=os.path.dirname(os.path.abspath(proof_path)))

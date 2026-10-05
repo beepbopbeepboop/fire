@@ -9301,6 +9301,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             if not M.value_callee_can_hold_a_function(ann):
                 raise CodegenError(M.callee_value_refusal(
                     name, self._cur_fn, M.member_chain_text(e.func), ann))
+            # The FLOW half of the same decision arm64 asks here, from the same
+            # two shared readers, because this function's own statements saying
+            # `f` is an integer or a container is not something
+            # `value_callee_can_hold_a_function`'s DECLARATION can see. The
+            # two architectures must refuse the same call with the same words,
+            # so both spell it through `model.not_a_code_address_refusal`.
+            holds = M.callee_word_is_not_an_address(
+                self._cur_fn, name, self._vkinds)
+            if holds is not None:
+                raise CodegenError(M.not_a_code_address_refusal(
+                    M.receiver_shape_text(e.func), holds,
+                    where=self._cur_fn.name))
             if isinstance(e.func, F.SubscriptExpr):
                 # A bracketed callee through a value: a specialization, or an
                 # index into a container. Only the parameter's declared type

@@ -361,6 +361,44 @@ class TestLeanOutput(unittest.TestCase):
                       "absolute")
         self.assertIn("os.pathsep.join((td, os.path.abspath(lib_dir)))", src)
 
+    def test_the_verdict_itself_is_run_with_an_absolute_library_path(self):
+        """The SAME property, at the site that decides `ok`, and it was wrong.
+
+        `library_census` above measures the library and already got this right.
+        `_run_lean` is the site that typechecks the PROOF, and it handed
+        `LEAN_PATH` the `lib_dir` it was given — while its `cwd` is the proof's
+        own directory. So a caller passing a relative `repo_root` resolved
+        `lib` to `<proofdir>/lib`, every import failed with `error: unknown
+        module prefix 'ProofLib'` at `1:0`, **before the theorem is read at
+        all**, and the failure looks exactly like a broken proof when it is a
+        verdict about a search path.
+
+        `repo_root="."` is not an exotic spelling: it is what
+        `bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
+        reproduce command writes, so that doc's measurements were taken through
+        this entry point.
+
+        **And the false verdict is CACHED**, which is what makes this more than
+        an annoyance: `proof_verdict_key` hashes the proof's bytes and the
+        library's `.olean` digests, and neither records how the run FOUND the
+        library — so the same file replays the same false failure for every
+        later caller. Fixing the path does not retire what was already
+        published, and a flush is not available from a worktree (the CAS is
+        machine-wide and shared with every other checkout), so the verdict
+        VERSION has to move. That is the second assertion, and it is here so a
+        future edit that finds the bump unnecessary sees why.
+        """
+        import inspect
+        src = inspect.getsource(L._run_lean)
+        self.assertIn("os.path.abspath(lib_dir)", src,
+                      "the LEAN_PATH handed to the proof check must be "
+                      "absolute, exactly as `library_census`'s is")
+        self.assertIn("formal-proof-verdict-v4", L._VERDICT_VERSION.decode(),
+                      "the published false verdicts were keyed on inputs that "
+                      "cannot tell a found library from an unfound one, so they "
+                      "replay; bump the verdict version rather than flushing a "
+                      "machine-wide CAS no worktree owns")
+
 
 # ── 3. the report: a sorried proof and a vacuous one are distinguishable ─────
 
