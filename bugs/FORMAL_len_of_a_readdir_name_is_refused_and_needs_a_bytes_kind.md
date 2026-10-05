@@ -126,9 +126,12 @@ It is a change to the value model on both backends and it owes a full
   prevalence in this corpus is 0 of 743 files, and
   `test_formal_unicode.py`'s `byte_pointer_over_text_is_the_residual_and_reads_
   its_byte` is the row a reader can measure it with.
-* The published axiom-closure table, which is `formal29-1`'s
-  (`bugs/FORMAL_axiom_closure_table_is_stale_so_the_census_gate_job_is_red.md`)
-  and is the one remaining failure in `formal-sweep-truth`.
+* The published axiom-closure table, which was `formal29-1`'s and is now
+  fixed — the closure census could not see a namespace-qualified `decide` axiom,
+  and `4d081b4f` is the commit that made it see one (its document is deleted
+  with its fix, which is why this names the commit rather than the path). It was
+  the one remaining failure in `formal-sweep-truth` when this document was
+  filed.
 ## Status, 2026-10-05 (`formal31-3`): the kind exists, `len` is refused, and
 ## the wrong number is gone
 
