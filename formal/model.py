@@ -20765,7 +20765,7 @@ def comptime_val_kind(vals: dict, name: str):
     return None
 
 
-def print_literal(lit, backend: str = "this path") -> str:
+def print_literal(lit) -> str:
     """A string LITERAL as a fragment of a `print` format string.
 
     Only `%` is transformed, and only because a format string is not a string:
@@ -20811,16 +20811,16 @@ def print_literal(lit, backend: str = "this path") -> str:
     `ab` this used to write. The escaping below would then be wrong TWICE over —
     the `b` and the quotes are characters the source did not write — so the
     `repr` is built first and this function's own transformation is applied to
-    it as a whole. `backend` is the word the one refusal in this path quotes; the
-    callers that cannot name a machine (`print_format`, for a `sep` or an `end`)
-    leave it at the default, and the default is unreachable for them because a
-    `sep`/`end` is a `str` literal by the time `print_kwargs` has checked it."""
+    it as a whole.
+
+    **A `bytes` literal's text is `lit.value` and NOT `decoded_literal(lit)`**,
+    and that is the whole of the `bytes` half: the parser has already decoded it,
+    to one character per byte, so decoding again turns the two characters
+    `\\` and `t` of `b"a\\tb"` into a TAB and the line prints `b'a\tb'` where
+    CPython prints `b'a\\tb'`. The section above has the citation
+    (`fire_compiler.Parser._decode_bytes_literal`) and the measurement."""
     if getattr(lit, "is_bytes", False):
-        text = F.decoded_literal(lit)
-        body = bytes_repr_body(text)
-        if body is None:
-            raise CodegenError(bytes_print_refusal(backend, text))
-        return print_literal_text("b" + body)
+        return print_literal_text("b" + bytes_repr_body(lit.value))
     return print_literal_text(F.decoded_literal(lit))
 
 
@@ -20834,8 +20834,44 @@ def print_literal_text(text: str) -> str:
     doubling — a synthesized `StringLiteral` is interned by the same
     `_intern_string` and decoded by it, so an un-doubled `%` in one of these
     would start a conversion specification with no argument behind it.
+
+    **A NUL in the text is refused here, and this is the one place that can
+    see it.** Every one of these fragments becomes a byte in a string table and
+    then a C string handed to `printf`, and C strings end at the first NUL, so a
+    literal holding one prints only up to it: `print("a\\x00b")` printed `a`
+    where CPython prints all three characters (measured on both architectures).
+    There is no spelling that works — the terminator and the data are the same
+    byte in the same buffer — so it is refused by name. Every caller comes
+    through this function, which is why one check covers a `str` operand, a
+    `sep=`, an `end=` and a synthesized `True`.
     """
+    if "\x00" in text:
+        raise CodegenError(nul_in_print_text_refusal(text))
     return text.replace("\\", "\\\\").replace("%", "%%")
+
+
+def nul_in_print_text_refusal(text: str) -> str:
+    """Why a `print` of text holding a NUL byte is refused rather than cut short.
+
+    The wording discipline is the rest of this section's: name what CPython
+    writes, name what this path's output is, and name the alternative. The
+    important half is the SECOND sentence — a reader who is told only "cannot
+    print this" reasonably concludes the character is unsupported, and will go
+    looking for an encoding to change; the absence here is structural (a C
+    string has no interior NUL) and no encoding fixes it.
+    """
+    at = text.index("\x00")
+    return (
+        f"print() of text holding a NUL byte is refused: CPython writes every "
+        f"character of the value, and this path's output is a C string — the "
+        f"literal is interned into a NUL-terminated table entry and printf's "
+        f"%s stops at the first NUL, so the line would be silently cut short "
+        f"at offset {at} of {len(text)} characters (measured on BOTH "
+        f"architectures: `print(\"a\\x00b\")` printed `a`). Refused rather than "
+        f"truncated, because a missing tail is a wrong answer that looks like "
+        f"the right length. Print the parts around it as separate calls, or "
+        f"build the text with an escape the image does not hold"
+    )
 
 
 def print_format(fragments: list, sep=" ", end="\n") -> str:
@@ -21091,81 +21127,75 @@ def bool_print_operand(e):
 # ── `bytes`: the one kind whose CPython rendering is a QUOTED, ESCAPED word ──
 #
 # `print(b)` writes `repr(b)` for a `bytes`, never its text: `b'ab'`, not `ab`,
-# and with CPython's own escaping and quote choice inside.  Handing the text to
+# and with CPython's own escaping and quote choice inside. Handing the text to
 # `%s` (what this path did, and what `string_operand_is_string` still admits for
 # FOREIGN_BYTES) prints the bytes WITHOUT the wrapper, so the line reads as an
 # ordinary string and a reader cannot tell a `bytes` from a `str` — measured on
 # both architectures, `print(b"ab")` printed `ab` where CPython prints `b'ab'`.
 #
-# CPython's rules for the wrapper, all of which `bytes_repr_body` below
-# implements, and which are stated here because they are the whole of the
-# answer rather than decoration on it:
+# **THE VALUE IS THE BYTES, one character per byte.** This is the fact the whole
+# rendering rests on and it is the parser's, not this file's:
+# `fire_compiler.Parser._decode_bytes_literal` "decode[s] its escape sequences to
+# a latin-1 string carrying one character per output byte (codepoints 0-255)",
+# and it is what `StringLiteral(is_bytes=True)` therefore holds. So a byte is
+# `ord(ch)` and every byte is recoverable — `b"\xff"` is the one character
+# U+00FF, and `b"\xc3\xa9"` is two — which is why nothing here is refused and
+# why `bytes_repr_body` can escape a non-printable byte instead of declining to.
 #
-#   * the PREFIX is `b`, and the QUOTE is `'` unless the bytes contain `'` and
-#     do not contain `"`, in which case it is `"` — so `b"a'b"` needs no
-#     escaping of its apostrophe;
-#   * `\\`, `\t`, `\n` and `\r` are the named escapes; every other byte outside
-#     0x20..0x7e is `\xNN` with two lowercase hex digits, which includes NUL
-#     and DEL;
-#   * a `"` inside single quotes is NOT escaped.
+# Two consequences worth stating, because both were measured the other way round
+# before this reader was written:
 #
-# **The limit, and it is a refusal rather than an approximation.**  A `bytes`
-# literal reaches the backends DECODED: `fire_compiler` stores `b"\xff"` as the
-# one-character text `ÿ` (U+00FF) and `_intern_string` puts it in the image as
-# its UTF-8 encoding, so the byte the source wrote is not recoverable from the
-# value by the time a `print` is lowered.  Every byte in 0x20..0x7e plus the four
-# named escapes round-trips exactly, and those are answered; anything else is
-# refused by name rather than rendered as a `\xNN` for a byte that was never
-# written, which would be a plausible wrong answer in the worst place.
+#   * **the value must not be decoded again.** `decoded_literal` would apply
+#     `decode_c_escapes` to already-decoded text, and a second decode is not a
+#     no-op: `b"a\\tb"` (a backslash and a `t` in the bytes) is stored as those
+#     two characters and would decode to a real TAB, so the line would print
+#     `b'a\tb'` where CPython prints `b'a\\tb'`. `print_literal` reads
+#     `lit.value` for a `bytes` and `decoded_literal` for a `str`, which is the
+#     same rule its own docstring already states for a `str`.
+#   * **a RAW bytes literal needs no special case either.** `_decode_bytes_literal`
+#     returns the body untouched for an `r` prefix, so `lit.value` holds the
+#     backslashes the source wrote and escaping them below is what turns
+#     `rb"a\nb"` into `b'a\\nb'` — CPython's answer for the same source.
+#
+# CPython's rules for the wrapper, all of which `bytes_repr_body` implements:
+#
+#   * the PREFIX is `b` (added by `print_literal`), and the QUOTE is `'` unless
+#     the bytes contain `'` and do not contain `"`, in which case it is `"` — so
+#     `b"a'b"` needs no escaping of its apostrophe;
+#   * `\\`, `\t`, `\n` and `\r` are the named escapes CPython uses; every other
+#     byte outside 0x20..0x7e is `\xNN` with two lowercase hex digits, which
+#     includes `\a\b\f\v` (0x07, 0x08, 0x0c, 0x0b — NOT named by CPython's
+#     `repr`, which writes them as `\xNN`), NUL and DEL;
+#   * a `"` inside single quotes is NOT escaped, and neither is a `'`.
 BYTES_REPR_ESCAPES = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
 
 
-def bytes_repr_body(text: str) -> str | None:
-    """CPython's `repr()` body for `bytes` whose literal text is `text`.
+def bytes_repr_body(value: str) -> str:
+    """CPython's `repr()` body for the bytes a `bytes` literal's value holds.
 
-    None when the text holds a byte this cannot reproduce exactly — a character
-    outside printable ASCII, or a NUL — for the reason the section above states:
-    the literal arrived decoded, so the byte is gone and any `\\xNN` written here
-    would name a byte the source never wrote.
+    `value` is the literal's `value` — the latin-1 image `print_literal` names in
+    the section above — and NOT `decoded_literal(lit)`, which is the mistake this
+    function's own comment records. One character is one byte, so the rule is
+    per CHARACTER and there is no shape of literal this cannot render: the
+    `\\xNN` arm is a byte outside printable ASCII, and a byte outside printable
+    ASCII is exactly what CPython escapes that way.
 
-    `text` is the literal's DECODED body (`decoded_literal`), so this is a pure
-    function of what the parser stored and of CPython's rules above, and it does
-    not care whether the literal was raw: a raw literal's stored body already
-    holds the backslashes the source wrote, and escaping them here is what turns
-    `rb"a\\n"` into `b'a\\\\n'` — CPython's answer.
+    The four named escapes are CPython's and only CPython's: `repr(bytes)` writes
+    `\\`, `\\t`, `\\n` and `\\r` by name and everything else numerically, so
+    `b"a\\x07b"` is `b'a\\x07b'` in both. The quote choice is CPython's too: `'`
+    unless the bytes hold `'` and not `"`.
     """
-    for ch in text:
-        if ch in BYTES_REPR_ESCAPES:
-            continue
-        if not (" " <= ch <= "~"):
-            return None
-    quote = '"' if ("'" in text and '"' not in text) else "'"
-    body = "".join(BYTES_REPR_ESCAPES.get(ch, ch) for ch in text)
-    return quote + body + quote
-
-
-def bytes_print_refusal(backend: str, text: str) -> str:
-    """Why this `bytes` literal is refused rather than rendered.
-
-    The wording discipline is `returnless_value_refusal`'s: name what CPython
-    prints, name what this path holds, name why they cannot be made to agree, and
-    name the alternative.  A reader told only "cannot render" goes looking for
-    something to look at, and here there is nothing: the byte is not in the image.
-    """
-    shown = "".join(c if c.isprintable() and c != " " else "\\x%02x" % ord(c)
-                    for c in text[:8])
-    return (
-        f"print() of a `bytes` literal is refused on the formal {backend} "
-        f"path when the literal is not printable ASCII (this one starts "
-        f"{shown!r}): CPython writes `b` followed by the `repr()` of the BYTES "
-        f"the source wrote, and a `bytes` literal reaches this path DECODED — "
-        f"`fire_compiler` stores it as text and `_intern_string` puts that text "
-        f"in the image as its UTF-8 encoding — so the byte is not recoverable "
-        f"here and no spelling of it would be the one CPython prints. Refused "
-        f"rather than rendered, because a `\\xNN` for a byte the source never "
-        f"wrote is a plausible wrong answer. Decode it yourself "
-        f"(`s.decode(...)`) if you meant text"
-    )
+    quote = '"' if ("'" in value and '"' not in value) else "'"
+    out = []
+    for ch in value:
+        esc = BYTES_REPR_ESCAPES.get(ch)
+        if esc is not None:
+            out.append(esc)
+        elif " " <= ch <= "~":
+            out.append(ch)
+        else:
+            out.append("\\x%02x" % ord(ch))
+    return quote + "".join(out) + quote
 
 
 # ── the two refusals a `print` of a FLOAT and of a CONTAINER now gets ───────
@@ -21195,14 +21225,19 @@ def float_print_refusal(backend: str) -> str:
     that function:
 
       * `%g` is six significant digits by default and drops the `.0` CPython
-        writes: `repr(0.1)` is `0.1` and `repr(100000.0)` is `100000.0`, where
-        `%g` writes `0.1` and `100000`;
+        writes: `repr(100000.0)` is `100000.0` where `%g` writes `100000`;
       * `%f` is six digits after the point: `1.5` becomes `1.500000`;
-      * neither writes `inf`, `-inf` or `nan` the way CPython spells them, and
-        `-0.0` is a sign on a zero that only the shortest-round-trip rule
-        preserves;
-      * `%.17g` round-trips but is not what CPython PRINTS — `repr(0.1)` is
-        `0.1` and `%.17g` writes `0.10000000000000001`.
+      * `%e` is never CPython's spelling — CPython uses scientific notation only
+        outside `[1e-4, 1e16)`;
+      * `%.17g` round-trips but is not what CPython PRINTS: `repr(0.1)` is `0.1`
+        and `%.17g` writes `0.10000000000000001`;
+      * `-0.0` needs the round-trip rule's own spelling: CPython writes `-0.0`,
+        `%f` writes `-0.000000` and `%g` writes `-0`.
+
+    (`inf`, `-inf` and `nan` are NOT part of this: measured on this target's
+    libc, all four conversions write them the way CPython spells them. An earlier
+    draft of this text claimed otherwise and the measurement corrected it — see
+    `bugs/FORMAL_a_float_has_no_print_spelling.md` §3 for the whole table.)
 
     So every conversion libc offers is either a wrong number or a wrong
     SPELLING, and this path's whole rule about output is that what lands on
@@ -21214,12 +21249,12 @@ def float_print_refusal(backend: str) -> str:
         f"one 64-bit word holding an IEEE-754 binary64, but CPython's `str()` "
         f"of a float is the shortest decimal that parses back to the same bits "
         f"(`repr(0.1)` is `0.1`, `repr(100000.0)` is `100000.0`), which is not "
-        f"any libc conversion — `%g` drops the `.0`, `%f` writes six digits "
-        f"after the point, `%.17g` round-trips but is not what CPython prints, "
-        f"and none of them writes `inf`/`nan`/`-0.0` as CPython spells those. "
-        f"Refused rather than emitted, because a float printed in a spelling "
-        f"the source never wrote is a wrong answer that looks right. Print an "
-        f"integer if you meant one"
+        f"any libc conversion — `%f` writes six digits after the point, `%g` drops the "
+        f"`.0`, `%e` is a fixed scientific spelling CPython only uses outside "
+        f"`[1e-4, 1e16)`, and `%.17g` round-trips without being what CPython "
+        f"prints. Refused rather than emitted, because a float printed in a "
+        f"spelling the source never wrote is a wrong answer that looks right. "
+        f"Print an integer if you meant one"
     )
 
 
@@ -21271,9 +21306,9 @@ def container_print_refusal(backend: str, kind, node_name: str) -> str:
 #   * `is_signed(expr)` — whether the operand's own type is a SIGNED integer,
 #     because the model's default integer is UNSIGNED and `%lld` on a `UInt64`
 #     whose top bit is set prints a negative number;
-#   * `is_bool(expr)` / `is_none(expr)` — the two declaration questions
-#     `bool_valued_shape` and `print_constant_text` cannot answer for themselves,
-#     because the evidence for either is a DECLARATION and the declaration
+#   * `is_bool(expr)` / `is_none(expr)` / `is_bytes(expr)` — the three
+#     declaration questions the shape readers cannot answer for themselves,
+#     because the evidence for each is a DECLARATION or a BINDING and those
 #     tables are the emitter's (`ValueKinds`' recorded annotations, the function
 #     table's return types).
 #
@@ -21290,7 +21325,7 @@ def container_print_refusal(backend: str, kind, node_name: str) -> str:
 # to print `0`.
 def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
                         is_signed=None, is_bool=None, is_none=None,
-                        backend="this path"):
+                        is_bytes=None, backend="this path"):
     """`(fragments, operands)` for `print(*args)` — see the section above.
 
     A fragment is a conversion (`%s`, `%lld`, `%llu`) or literal text that has
@@ -21310,7 +21345,7 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
             # `print_literal` renders a `str` literal's text and a `bytes`
             # literal's CPython `repr()`, and refuses the one `bytes` literal
             # whose bytes this path does not hold.
-            frags.append(print_literal(a, backend))
+            frags.append(print_literal(a))
             continue
         callee = no_value_callee(a) if no_value_callee else None
         if callee is not None:
@@ -21340,6 +21375,19 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
             frags.append("%s")
             operands.append(bool_print_operand(a))
             continue
+        # A `bytes`, which is `STR_KIND` and would print its bare text through
+        # the arm below. Asked here, after the bool arm and before the kind
+        # switch, for the same reason that arm is where it is: the kind answers
+        # `ab` where CPython answers `b'ab'`. A LITERAL is rendered (its bytes
+        # are a compile-time constant, so the text goes in the format string),
+        # and a NAME is refused — see `bytes_name_print_refusal` for why the
+        # second is not simply rendered the same way.
+        if is_bytes is not None and is_bytes(a):
+            lit = bytes_literal_of(a)
+            if lit is None:
+                raise CodegenError(bytes_name_print_refusal(backend, a))
+            frags.append(print_literal_text("b" + bytes_repr_body(lit.value)))
+            continue
         kind = kind_of(a) if kind_of else None
         if string_operand_is_string(kind):
             frags.append("%s")
@@ -21368,6 +21416,52 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
                 f"print a literal, or bind it to a literal first")
         operands.append(a)
     return frags, operands
+
+
+def bytes_name_print_refusal(backend: str, e) -> str:
+    """Why a `print` of a NAME holding `bytes` is refused rather than rendered.
+
+    The literal's own spelling is a compile-time constant of the LITERAL, which
+    is why `print(b"ab")` is answered exactly. A NAME's is a constant of the
+    BINDING, and this path does not track which literal a name was last bound
+    to — `ValueKinds.is_bytes_value` is flow-INsensitive, as every map in that
+    class is, so for `b = b"ab"` then `b = b"cd"` it can say "this name holds
+    bytes" and cannot say WHICH bytes, and printing the first binding's text
+    would be a plausible wrong answer in the worst place.
+
+    So it is refused, and the alternative is named: CPython agrees with the bare
+    text on every OTHER question about a `bytes` (`len`, `==`, `in`,
+    `startswith`), so a program that only measures or compares is already right
+    and only the rendering needs the literal at the use site.
+    """
+    name = e.name if isinstance(e, F.IdentExpr) else type(e).__name__
+    return (
+        f"print() of a `bytes` value is refused on the formal {backend} path "
+        f"when the value is the NAME {name} rather than a literal: CPython "
+        f"writes `repr(b)` for a `bytes` — `b'ab'`, never `ab` — and this "
+        f"path's `%s` writes the bytes, which is a plausible wrong answer "
+        f"rather than a missing one. The spelling is a compile-time constant "
+        f"of the LITERAL, and this build does not track which literal a name "
+        f"was last bound to, so it cannot say which bytes to write. Print the "
+        f"literal where you mean it; note that every other question about a "
+        f"`bytes` — `len`, `==`, `in`, `startswith` — is already CPython's "
+        f"answer on this path"
+    )
+
+
+def bytes_literal_of(e):
+    """The `bytes` LITERAL a `print` operand holds, or None.
+
+    Only the one shape whose bytes are a compile-time constant: the operand IS
+    the literal. A NAME bound to one is answered by the emitter's hook — it holds
+    the binding, not the literal — and the text it renders is that literal's, so
+    the two spellings cannot disagree: this returns the node and
+    `print_call_spelling` renders it with `bytes_repr_body`, which is the same
+    function the literal arm renders it with.
+    """
+    if isinstance(e, F.StringLiteral) and getattr(e, "is_bytes", False):
+        return e
+    return None
 
 
 def is_container_kind(kind) -> bool:
@@ -22224,7 +22318,8 @@ class ValueKinds:
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=(), bool_names=()):
+                 callee_returns_value=None, float_names=(), bool_names=(),
+                 callee_is_bool=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -22260,6 +22355,11 @@ class ValueKinds:
         # silent about the difference — while `d["a"]` reads a key out of one
         # and an ELEMENT OFFSET out of the other. See `is_dict_value`.
         self._callee_is_dict = callee_is_dict or (lambda name: False)
+        # …and its BOOL twin, asked by `is_bool_value` for the same reason and
+        # read the same way: the declared return type of a function of this
+        # module, which only the emitter's table holds. `None` (this class's
+        # "cannot say") rather than False for a callee nothing can answer for.
+        self._callee_is_bool = callee_is_bool or (lambda name: None)
         self._dict_names_vocab = frozenset(dict_names)
         self.locals: dict = {}
         self._conflicts: set = set()
@@ -22297,6 +22397,17 @@ class ValueKinds:
         # site.
         self._none_of: dict = {}
         self._none_conflicts: set = set()
+        # …and the FOURTH, which is a KIND-shaped fact the kind table does not
+        # carry rather than a spelling: a `bytes` literal is `STR_KIND` here (it
+        # is a `char *` to interned bytes like any other text), and every
+        # operation that asks a kind is RIGHT about that — `len`, `==`, `in` and
+        # `startswith` all agree with CPython on a `bytes` because a `bytes` and
+        # a `str` of the same characters compare and measure the same. The one
+        # operation that does NOT is `print`, which writes CPython's `repr(b)` —
+        # `b'ab'`, never `ab` — and that is a rendering decision rather than a
+        # type, so it gets the same narrow reader as the bool axis.
+        self._bytes_of: dict = {}
+        self._bytes_conflicts: set = set()
         # Per name, the kinds the statements of this function bound it to BY
         # THE EXPRESSION'S OWN SHAPE — `kind_of` and nothing else, so no
         # "unclassified means a word, and a word is an integer" default ever
@@ -22487,16 +22598,53 @@ class ValueKinds:
         the names the annotation never touches. The three axes are the same
         shape as `_bind_dictness` and share its rule — see
         `_bind_spelling`.
+
+        **The bool axis reads the VALUE and not `ann`, and that is a decision
+        rather than an omission.** An annotation is metadata about what the name
+        is FOR (`_kind_with_ann`'s own reading) while the value is a direct
+        statement about what flows into it, and on THIS axis the annotation is
+        the weaker of the two:
+
+            b: Bool = True     ->  the value is a `BoolLiteral`: True
+            t = a > b          ->  the value is a comparison: True
+            b = flag()         ->  the value is a `-> Bool` call: the hook
+            b: Bool = 5        ->  the value is an `IntLiteral`: nothing
+
+        and the last row is why the annotation is not consulted: CPython's
+        annotation does not convert, so `print(b)` is `5` and an annotation that
+        said True would be a wrong answer dressed as a declaration. A parameter
+        is the other shape and keeps its annotation (`__init__`'s loop), because
+        a signature binds a name no statement binds and the annotation is
+        genuinely all the evidence there is.
         """
         kind, own = self._kind_with_ann(value, ann)
         self._bind(name, kind, own=own)
         self._bind_dictness(name, self.is_dict_value(value))
-        self._bind_spelling(
-            name, self._bool_of, self._bool_conflicts,
-            True if annotation_is_bool(ann, self._bool_names_vocab) else None)
-        self._bind_spelling(
-            name, self._none_of, self._none_conflicts,
-            True if is_none_expression(value) else None)
+        self._bind_spelling(name, self._bool_of, self._bool_conflicts,
+                            self.is_bool_value(value))
+        self._bind_spelling(name, self._none_of, self._none_conflicts,
+                            self.is_none_expression_of(value))
+        self._bind_spelling(name, self._bytes_of, self._bytes_conflicts,
+                            self.is_bytes_value(value))
+
+    def is_none_expression_of(self, value):
+        """True / False / None: whether `value` IS / is NOT / is not stated `None`.
+
+        The tri-state `is_none_value` records, asked about a statement's VALUE
+        rather than about an expression at a use site. The `False` arm is what
+        makes the axis's unanimity rule reachable — without it every non-`None`
+        initializer is "no statement", the first binding's `True` stands, and
+        `n2 = None` then `n2 = 5` then `print(n2)` prints `None` where CPython
+        prints `5` (measured on both architectures before this arm existed).
+
+        It is `_NOT_NONE` and not "not `None`", for `_bind_dictness`'s reason: a
+        literal's other-ness is a fact and an unclassified expression's is not.
+        """
+        if is_none_expression(value):
+            return True
+        if isinstance(value, self._NOT_NONE):
+            return False
+        return None
 
     def _bind_spelling(self, name, table: dict, conflicts: set,
                        answer) -> None:
@@ -22533,7 +22681,7 @@ class ValueKinds:
             return
         table[name] = bool(answer)
 
-    def _note_spelling_axis(self, target, value, ann) -> None:
+    def _note_spelling_axis(self, target, value) -> None:
         """Record `target`'s two axis claims, for a statement that binds a TARGET.
 
         The `_bind_value` pair of axis records, for the `AssignStmt` arm of
@@ -22541,23 +22689,26 @@ class ValueKinds:
         it. One level deep into the target, and for the reason
         `_unpacked_element_kind` is asked in the same arm: `a, b = x, y` binds
         two names, and a container target is the same statement with more of
-        them. A `MemberExpr` target (`self.flag = True`) is a FIELD, not a name
-        this function binds, and a field's declared type is the `declared_kind`
+        them — and a container target's per-element VALUE is not the container,
+        so the elements are asked about `None` and claim nothing. A
+        `MemberExpr` target (`self.flag = True`) is a FIELD, not a name this
+        function binds, and a field's declared type is the `declared_kind`
         hook's question rather than this one's — so it claims nothing here,
         which is the conservative direction and leaves `print(self.flag)` as it
         was.
         """
         if isinstance(target, F.IdentExpr):
-            self._bind_spelling(
-                target.name, self._bool_of, self._bool_conflicts,
-                True if annotation_is_bool(ann, self._bool_names_vocab)
-                else None)
-            self._bind_spelling(
-                target.name, self._none_of, self._none_conflicts,
-                True if is_none_expression(value) else None)
+            self._bind_spelling(target.name, self._bool_of, self._bool_conflicts,
+                                self.is_bool_value(value))
+            self._bind_spelling(target.name, self._none_of,
+                                self._none_conflicts,
+                                self.is_none_expression_of(value))
+            self._bind_spelling(target.name, self._bytes_of,
+                                self._bytes_conflicts,
+                                self.is_bytes_value(value))
         elif isinstance(target, (F.TupleExpr, F.ListExpr)):
             for el in (getattr(target, "elements", None) or []):
-                self._note_spelling_axis(el, None, ann)
+                self._note_spelling_axis(el, None)
 
     def _bind_dictness(self, name, answer) -> None:
         """Record what a statement says about `name` on the DICT axis.
@@ -23006,15 +23157,12 @@ class ValueKinds:
                 self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
                 self._note_no_value_call(s.target, s.value)
-                # The `VarDecl` arm gets these from `_bind_value`, which is
-                # where the annotation is passed as well; this arm binds the
-                # TARGET rather than a name, so it asks the two axis readers
-                # itself. The target walk is `_bind_spelling_target`'s, one
-                # level deep for the same reason `_bind_target` is: a tuple
-                # target binds one name per element, and `a: Bool, b: Int = x,
-                # y` states two different things.
-                self._note_spelling_axis(
-                    s.target, s.value, getattr(s, "type_ann", None))
+                # The `VarDecl` arm gets these from `_bind_value`; this arm
+                # binds the TARGET rather than a name, so it asks the two axis
+                # readers itself, and it asks about the VALUE only — which is
+                # `_bind_value`'s rule and the reason the `type_ann` this arm
+                # also holds is not one of the arguments.
+                self._note_spelling_axis(s.target, s.value)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value,
                                  ann=getattr(s, "type_ann", None))
@@ -23327,6 +23475,21 @@ class ValueKinds:
 
     # ── querying ───────────────────────────────────────────────────────
 
+    # The literal shapes that are DEFINITELY not a bool, and the ones that are
+    # definitely not `None`. Both are asked by the axis readers below and both
+    # exist for one reason: an axis that can only ever record `True` cannot
+    # detect that two statements DISAGREE, and `_bind_spelling`'s unanimity rule
+    # is what makes `b = True; b = 5; print(b)` write `5` rather than the first
+    # binding's `True` (measured before this, on both architectures: it wrote
+    # `True`). `_bind_dictness` records `False` for the same reason. A literal
+    # is the one shape whose other-ness is a FACT rather than an inference,
+    # which is why these two tuples hold literals and nothing else — an
+    # arithmetic expression or a call claims nothing either way.
+    _NOT_A_BOOL = (F.IntLiteral, F.FloatLiteral, F.StringLiteral,
+                   F.ListExpr, F.TupleExpr, F.DictExpr, F.SetExpr)
+    _NOT_NONE = (F.IntLiteral, F.FloatLiteral, F.StringLiteral, F.BoolLiteral,
+                 F.ListExpr, F.TupleExpr, F.DictExpr, F.SetExpr)
+
     def is_bool_value(self, e):
         """True when `e` is a BOOL by this function's source, else False/None.
 
@@ -23348,7 +23511,15 @@ class ValueKinds:
           * a NAME this function bound — from `_bool_of`, under the same
             unanimity rule as `locals` and `_dict_names`: two statements that
             disagree leave the name out entirely, so the caller keeps what it
-            did before.
+            did before. **Which needs a False to be reachable at all** — see
+            `_NOT_A_BOOL`, without which this axis could never disagree with
+            itself and `b = True` then `b = 5` kept the first answer;
+          * a LITERAL of another kind — False, and the reader above is why that
+            is a fact rather than an inference;
+          * a CALL to a function of this module declared `-> Bool` — the
+            `callee_is_bool` hook, which is `_callee_is_dict`'s on this axis and
+            for the same reason (the evidence is about another function, so it
+            is the emitter's table and its recursion guard).
           * a PARAMETER or a bracketed parameter annotated `Bool` — recorded in
             `__init__` from the same loop that seeds `locals`, because a
             signature binds a name that no statement in the body binds.
@@ -23368,10 +23539,24 @@ class ValueKinds:
             return None
         if bool_valued_shape(e):
             return True
+        if isinstance(e, self._NOT_A_BOOL):
+            return False
         if isinstance(e, F.IdentExpr):
             if e.name in self._bool_conflicts:
                 return None
             return self._bool_of.get(e.name)
+        if isinstance(e, F.CallExpr):
+            # A `-> Bool` CALLEE, which is the `callee_is_dict` hook read on this
+            # axis and for the same reason: the evidence is about ANOTHER
+            # function, so it is the emitter's table and its recursion guard.
+            # Only the DECLARED return type is read — a callee that returns
+            # `True` from every `return` without saying `-> Bool` claims
+            # nothing, which is the conservative direction and keeps a new
+            # `return_*` axis out of this class for one spelling of one fact.
+            callee = _flat_callee(e) or subscript_callee_name(e)
+            if callee is None:
+                return None
+            return self._callee_is_bool(callee)
         return None
 
     def is_none_value(self, e):
@@ -23388,8 +23573,12 @@ class ValueKinds:
         at all, and that is a refusal this path states rather than a number.
 
         The evidence: the `None` expression itself (`is_none_expression`, which
-        knows both spellings the parser produces), and a NAME every statement of
-        this function binds to one, from `_none_of` under the unanimity rule.
+        knows both spellings the parser produces), a NAME every statement of
+        this function binds to one, from `_none_of` under the unanimity rule —
+        which needs a False to be reachable at all, so a literal of another kind
+        answers False (`_NOT_NONE`) and `n = None` then `n = 5` leaves the name
+        out instead of keeping the first binding — and a NAME every statement
+        binds to something else, which answers False for the same reason.
         `n = None; print(n)` printed `0` on both architectures before this
         existed; `n = None` then `n = 5` then `print(n)` claims nothing, which
         is the rule that keeps the first fix from being a wrong one.
@@ -23398,10 +23587,50 @@ class ValueKinds:
             return None
         if is_none_expression(e):
             return True
+        if isinstance(e, self._NOT_NONE):
+            return False
         if isinstance(e, F.IdentExpr):
             if e.name in self._none_conflicts:
                 return None
             return self._none_of.get(e.name)
+        return None
+
+    def is_bytes_value(self, e):
+        """True when `e` is a `bytes`, False when it is a `str`, None when this
+        function's source does not say.
+
+        The FOURTH axis with no KIND of its own, and the only one that is not
+        about spelling: a `bytes` literal classifies as `STR_KIND`
+        (`_kind_of_simple`), which is right for every kind-consuming question —
+        `len(b)`, `b == b"ab"` and `b"a" in b` all agree with CPython, because a
+        `bytes` and a `str` of the same characters measure and compare the same.
+        What CPython does NOT agree about is the one question that is not a
+        question about a kind: `print` writes `repr(b)`, which is `b'ab'` where
+        this path used to write `ab` (measured, both architectures, for a NAME as
+        well as for the literal — `b = b"ab"; print(b)`).
+
+        So the reader is asked by `print` alone, which is stated here so a second
+        caller is a decision rather than an accident. A NAME's answer comes from
+        `_bytes_of` under the same unanimity rule as the other three axes, so
+        `b = b"ab"` then `b = "ab"` claims nothing and the name prints as the
+        `str` it is.
+
+        Deliberately NOT asked about a `MemberExpr` or a `CallExpr`, for the
+        reasons `is_bool_value` gives: both need the emitter's tables, and a
+        `bytes` that arrives from a kernel call is `FOREIGN_BYTES_KIND` — where
+        printing the bare text is CORRECT, because a `char *` the kernel
+        supplied is not a `bytes` object and CPython would not print a `repr()`
+        of it either (`os.listdir(p)[0]` is a `str` there, per that kind's own
+        comment).
+        """
+        if e is None:
+            return None
+        if isinstance(e, F.StringLiteral):
+            return bool(getattr(e, "is_bytes", False))
+        if isinstance(e, F.IdentExpr):
+            if e.name in self._bytes_conflicts:
+                return None
+            return self._bytes_of.get(e.name)
         return None
 
     def is_dict_value(self, e):
@@ -40421,6 +40650,22 @@ def module_binding_literal(folded, value):
         return F.BoolLiteral(value=bool(value.value),
                              line=getattr(value, "line", 0) or 0,
                              col=getattr(value, "col", 0) or 0)
+    if is_none_expr(value):
+        # The SECOND shape the folded word does not carry, and the reader is the
+        # `None` SPELLING rather than the word: `N = None; print(N)` substituted
+        # `IntLiteral(0)` at the read, so a program whose value CPython prints as
+        # `None` printed `0` (measured, both architectures). Substituting the
+        # name `None` keeps the fact and hands it to the readers that already
+        # exist for it — `is_none_expr` at a use site, `refuse_none_comparisons`
+        # for `N == None`, `print_constant_text` for a `print` — which is both
+        # the right answer for the one and a refusal for the other, where the
+        # word 0 was a SILENT answer to both (`x = N + 1` computed 1 where
+        # CPython raises TypeError). `NONE_WORD` is unchanged and still the
+        # representation of a `None` inside an image; what changes is that a
+        # read of a module-level `None` no longer arrives wearing its clothes.
+        return F.IdentExpr(name=NONE_NAME,
+                           line=getattr(value, "line", 0) or 0,
+                           col=getattr(value, "col", 0) or 0)
     return folded_literal_node(folded, value)
 
 

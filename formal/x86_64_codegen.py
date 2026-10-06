@@ -3926,6 +3926,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             is_signed=lambda a: cmp_signed(self._ttype(a)),
             is_bool=self._print_operand_is_bool,
             is_none=self._vkinds.is_none_value,
+            is_bytes=self._vkinds.is_bytes_value,
             backend="x86-64")
 
     def _print_operand_is_bool(self, e) -> bool:
@@ -8927,6 +8928,8 @@ preference.
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
+            callee_is_bool=lambda callee: self._callee_is_bool(
+                callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
             param_kind=self._param_kinds.for_function(name))
@@ -9414,6 +9417,36 @@ ctor_field_value=self._ctor_field_value_for(name),
         if ann in TYPE_NAMES:
             return M.INT_KIND
         return vk.return_kind
+
+    def _callee_is_bool(self, name, stack):
+        """Whether a call to this unit's function `name` produces a BOOL.
+
+        `_callee_is_dict`'s twin on the bool axis, and it is the same method for
+        the same reason: a `Bool` result is `INT_KIND` here (a word holding 0 or
+        1), so the KIND cannot say it, and what is observable about it is that
+        CPython prints `True`/`False` where `is_number_kind` says `%lld` — so
+        `b = flag(); print(b)` printed `1` where CPython prints `True`, on both
+        architectures.
+
+        Only the DECLARED return type is read, where `_callee_is_dict` also
+        consults the RETURN STATEMENTS: `return_is_bool` would be a third
+        `return_*` axis on `ValueKinds` for a second spelling of the same fact,
+        and the declared type is what `_print_operand_is_bool` reads for the
+        same question at the same call site. A callee that returns `True`
+        without saying `-> Bool` claims nothing, which is the conservative
+        direction and leaves `print` with the number it printed.
+
+        The stack is `_callee_kind`'s, for the reason `_callee_is_dict`'s is: a
+        `def a(): return b()` / `def b(): return a()` cycle must stop rather
+        than recurse.
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.annotation_is_bool(getattr(fn, "return_type", None),
+                                BOOL_TYPE_NAMES):
+            return True
+        return None
 
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
         """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
