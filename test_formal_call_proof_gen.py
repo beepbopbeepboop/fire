@@ -2690,20 +2690,42 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
         return out
 
     def test_both_shapes_generate(self):
-        self.assertIsNone(self.range_err, self.range_err)
+        """The RANGE shape is now a REFUSAL, and that is the fix, not a gap.
+
+        This class exists to pin that a `B.cond` chain closes with ITS OWN flag
+        lemma, and `sum_range`'s chain did — with `arm64_flag_lt_s`, the SIGNED
+        one, which is correct. The defect was one level up: that signed lemma
+        rewrites the predicate to the SIGN-FLIPPED order, while the loop
+        contract's hypothesis is stated in the UNSIGNED order
+        (`while_lt_exit_contract_bottom` takes `UInt64`'s `<` and a fuel of
+        `b.toNat - r.toNat`), so the loop obligation became `flipped <` ↔ `<` —
+        FALSE for any bound at or above 2^63. It elaborated, because the
+        `_COND_ARITH_DEFAULT` leaf admits it with a `sorry`.
+
+        So the generator now DECLINES the contract for a signed loop test rather
+        than emitting a false theorem (`bugs/FORMAL_a_range_loop_contract_states_
+        the_unsigned_order_against_a_signed_flag.md`). The EQUALITY shape is
+        unaffected and still generates — it has no loop.
+        """
         self.assertIsNone(self.equal_err, self.equal_err)
+        self.assertIsNotNone(self.range_err,
+                             "sum_range generates again — if the loop contract "
+                             "can now be stated for a signed test, delete this "
+                             "expectation and say what closed it")
+        self.assertIn("SIGNED condition code 11", str(self.range_err))
+        self.assertIn("arm64_flag_lt_s", str(self.range_err))
+        self.assertIn("UNSIGNED order", str(self.range_err))
 
     def test_every_hcond_chain_closes_with_a_flag_lemma(self):
-        for name, path in (("range", self.ranges), ("equality", self.equal)):
-            closers = self._hcond_closers(path)
-            self.assertTrue(closers, f"{name}: no hcond chain found in {path}")
-            for hid, line in closers:
-                self.assertRegex(
-                    line, r"simp \[h, arm64_flag_",
-                    f"{name}: {hid} closes with `{line}` and no flag lemma, so "
-                    f"the raw arm64_matches_condition predicate has nothing to "
-                    f"reduce it and bv_decide is handed an expression with an "
-                    f"opaque register in it")
+        closers = self._hcond_closers(self.equal)
+        self.assertTrue(closers, f"no hcond chain found in {self.equal}")
+        for hid, line in closers:
+            self.assertRegex(
+                line, r"simp \[h, arm64_flag_",
+                f"equality: {hid} closes with `{line}` and no flag lemma, so "
+                f"the raw arm64_matches_condition predicate has nothing to "
+                f"reduce it and bv_decide is handed an expression with an "
+                f"opaque register in it")
 
     def test_the_lemma_is_the_one_the_branch_tests(self):
         """`b.lt` is a SIGNED less-than, and the signed lemma is the only right
@@ -2711,30 +2733,47 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
         order the machine does not test and the chain would still elaborate —
         which is the failure a presence check cannot see and a spelling check
         can.
+
+        The pairing is now read off the EQUALITY shape, which is the one that
+        still generates: it also lowers to `CMP` + `B.cond` on a signed `lt`, so
+        it exercises the same table row the range program's chain did. The range
+        program is covered by `test_both_shapes_generate` instead, which pins
+        the refusal that replaced its contract.
         """
-        chains = self._hcond_closers(self.ranges)
-        self.assertTrue(chains, "no hcond chain in the range proof")
+        chains = self._hcond_closers(self.equal)
+        self.assertTrue(chains, "no hcond chain in the equality proof")
         # The pairing: the branch a chain states is the branch whose code its
         # lemma names, so the two are read off the SAME chain rather than off
         # the file.  A chain whose statement says condition 11 and whose closer
         # does not name the signed lemma is the defect this test exists for.
-        with open(self.ranges) as fh:
+        with open(self.equal) as fh:
             text = fh.read()
         lines = []
         for hid, line in chains:
             stmt = re.search(r"have " + re.escape(hid) + r" : (.*?) := by",
                              text)
             lines.append((stmt.group(1) if stmt else "", line))
-        signed = [line for stmt, line in lines
-                  if "arm64_matches_condition 11" in stmt]
-        self.assertTrue(
-            signed,
-            "the range program's preheader branch is `b.lt` (raw condition code "
-            "11) and no chain mentions it, so this assertion is not looking at "
-            f"the branch it means to: {lines}")
-        for line in signed:
-            self.assertIn("arm64_flag_lt_s", line)
-            self.assertNotIn("arm64_flag_lt,", line)
+        # Every chain's closer must name the lemma for the code its OWN
+        # statement tests, read off the same chain — so this is a per-chain
+        # pairing rather than a search for one shape, and it holds for a
+        # program whose branch happens to be `ne` as well as one whose branch
+        # is `lt`. A chain stating condition 11 and closing with the UNSIGNED
+        # `arm64_flag_lt` is the defect; so is the same for any other code.
+        self.assertTrue(lines, f"no hcond chains at all: {lines}")
+        for stmt, line in lines:
+            code = re.search(r"arm64_matches_condition (\d+)", stmt)
+            self.assertIsNotNone(code, f"chain statement names no condition "
+                                       f"code: {stmt!r}")
+            import formal.arm64_proof_gen as _G
+            want = _G._COND_LEMMA.get(int(code.group(1)))
+            self.assertIsNotNone(want, f"no lemma for condition code "
+                                       f"{code.group(1)} in `_COND_LEMMA`")
+            self.assertIn(want, line,
+                          f"a chain stating condition {code.group(1)} closes "
+                          f"with `{line}`, which names no {want}: the predicate "
+                          f"is reduced to an order the machine does not test, "
+                          f"and the chain still elaborates — the failure a "
+                          f"presence check cannot see")
 
 
 class TestLoopContractBlocks(unittest.TestCase):
@@ -3330,14 +3369,22 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     `_gen_range_loop` matched nothing and the walk had no contract to apply at
     the re-entry.
 
-    Three things are pinned here, and the first is the regression itself:
+    **THE CONTRACT IS NOW DECLINED for this program, and that is the fix.**
+    The shape discovery all works — the loop top on the IMAGE is still the
+    self-looping block, which is what this class measures and what
+    `test_the_loop_top_is_a_self_looping_conditional_block` still asserts. What
+    changed is that the contract this shape feeds is stated in the UNSIGNED
+    order, and the loop's own test is a SIGNED `CSET lt`, so the obligation it
+    emits is `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63. It
+    elaborated, because the closing leaf admits it with a `sorry`.
 
-    * the program GENERATES a proof, on arm64;
-    * the generated proof carries the bottom-tested loop contract, so the
-      back edge was discharged rather than refused;
-    * the loop top on the IMAGE is the self-looping block, so a change in the
-      emitter that moves the test back above the body is caught here rather
-      than silently reducing the contract to no match.
+    So the generator refuses to state a false theorem
+    (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    signed_flag.md`), and what is pinned here is the refusal and its REASON —
+    not that the contract exists. The shape rows stay, because a change in the
+    emitter that moves the test back above the body would silently reduce this
+    to "no self-looping block, so nothing to decline", which is a different
+    failure with the same message.
     """
 
     SOURCE = ("def sum_range(n):\n"
@@ -3350,32 +3397,65 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="a2-bottomloop-")
         cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "bottomloop")
-        cls.result = None
-        if cls.error is None:
-            import formal.build as fb
-            src = os.path.join(cls.tmp, "bottomloop.mojo")
-            cls.result = fb.compile_formal(src, arch="arm64",
-                                           output=os.path.join(cls.tmp,
-                                                               "bottomloop2.aout"),
-                                           prove=False, check=False)
+        # The IMAGE is built UNCONDITIONALLY, with `prove=False`. The shape row
+        # below reads the emitter's own block partition, and it is the half of
+        # this class that must keep working when the PROOF is declined: a
+        # generator that refuses for the wrong reason and one that refuses for
+        # the right one look identical from the outside, and only the image
+        # tells them apart. Building it here rather than only on success is what
+        # makes that comparison possible at all.
+        import formal.build as fb
+        src = os.path.join(cls.tmp, "bottomloop.mojo")
+        cls.result = fb.compile_formal(src, arch="arm64",
+                                       output=os.path.join(cls.tmp,
+                                                           "bottomloop2.aout"),
+                                       prove=False, check=False)
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_it_generates(self):
-        self.assertIsNone(self.error, self.error)
-        self.assertIsNotNone(self.proof)
+    def test_it_is_refused_because_the_contract_would_be_false(self):
+        """The refusal, and the three facts in it that make it actionable.
 
-    def test_the_proof_carries_the_bottom_tested_loop_contract(self):
-        text = open(self.proof).read()
-        self.assertIn("while_lt_exit_contract_bottom", text,
-                      "no bottom-tested loop contract in the proof: the "
-                      "back edge was discharged by something else, or by "
-                      "nothing")
-        self.assertIn("_ltb_loop", text,
-                      "the contract is applied nowhere: the walk reached the "
-                      "re-entry without it")
+        Asserting the refusal ALONE would pass for any reason — a syntax error,
+        a missing lemma, a shape this walk never recognised — so the message is
+        checked for the cause. A reader who hits this has to be able to tell
+        "the loop shape is unrecognised" (an emitter change) from "the loop
+        shape is fine and the CONTRACT is wrong for it" (a library change), and
+        those have nothing in common as next steps.
+        """
+        self.assertIsNone(self.proof)
+        err = str(self.error)
+        self.assertIn("SIGNED condition code 11", err,
+                      "the refusal does not name the signed condition code, so "
+                      "a reader cannot tell which of the fourteen conditions "
+                      f"the loop tests: {err}")
+        self.assertIn("arm64_flag_lt_s", err,
+                      "the refusal does not name the lemma that made the "
+                      f"obligation false: {err}")
+        self.assertIn("while_lt_exit_contract_bottom", err,
+                      "the refusal does not name the contract whose unsigned "
+                      f"hypothesis is the mismatch: {err}")
+        self.assertIn("FALSE", err,
+                      f"the refusal does not say the obligation would be false: "
+                      f"{err}")
+
+    def test_it_is_not_admitted_with_a_sorry(self):
+        """The failure this replaces: a theorem that elaborates and is false.
+
+        `no proof was generated` is the whole claim — before the refusal, this
+        program produced a proof whose `loop_body_flag` obligation was
+        `sign-flipped <` ↔ `<` closed by
+        `all_goals first | ... | sorry -- arm64-cfg-leaf: loop-cond-flag`. A
+        reader diffing this test would see a missing file where the defect was a
+        present, elaborating, FALSE one, which is why the assertion is about the
+        absence rather than about a message.
+        """
+        self.assertIsNone(self.proof,
+                          "sum_range generates a proof again — if the loop "
+                          "contract can now be stated for a signed test, "
+                          "delete this and say what closed it")
 
     def test_the_loop_top_is_a_self_looping_conditional_block(self):
         """The premise the contract is generated from, measured on the image.
@@ -3404,10 +3484,16 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
             "this program is no longer the shape the bottom-tested contract "
             "is written for -- the row above would then pass for the wrong "
             "reason")
-        # The contract's `cbz_start` is that block's start, so the walk's
-        # `taken == ctx["loop_contract"]["cbz_start"]` test is what fires.
-        self.assertNotIn("unsupported cbz taken continuation",
-                         open(self.proof).read())
+        # The block's TERMINATOR is the signed compare, which is what the
+        # refusal is about — so it is read off the IMAGE here rather than
+        # assumed, and `loop_test_condition_code` is the same reader the
+        # generator's guard uses, so the two cannot disagree about which
+        # condition the loop evaluates.
+        term = self_loop[0]["instrs"][-1]
+        self.assertEqual(11, G.loop_test_condition_code(words, term),
+                         "the loop top's terminator is no longer the signed "
+                         "`lt`, so the refusal above is about something else "
+                         "and this class is no longer measuring what it says")
 class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
 
@@ -3615,22 +3701,54 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The twelve, grouped as the doc grouped them, so a reader can see which
-    #: family each is in.  `sum_range` is family 1's range loop and the one that
-    #: took the conditional back edge; it is in this tuple rather than in
-    #: `REFUSED` below because it generates.
+    #: The eleven that still generate, grouped as the doc grouped them, so a
+    #: reader can see which family each is in.
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
                 "both", "either",                               # family 3
-                "wdiff",                                        # family 4
-                "sum_range")                                    # family 1
+                "wdiff")                                        # family 4
 
-    #: Nobody refuses, and the shape says so: a stem here is pinned as NOT
-    #: generating, with the WORDING of the refusal rather than an address (an
-    #: address is `sum_range.mojo`'s loop header in today's layout and moves
-    #: with any layout change, while a message is the premise).  Adding a row
-    #: is how a newly-found refusal stops being a note in somebody's session.
-    REFUSED = {}
+    #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
+    #: is HERE rather than deleted because the refusal is the FIX and not a
+    #: regression: its loop contract is stated in the UNSIGNED order while the
+    #: loop's own test is a signed `CSET lt`, so the obligation was
+    #: `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63 — and it
+    #: elaborated only because the closing leaf admits it with a `sorry`
+    #: (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
+    #: generating proof that says something false.
+    #:
+    #: The needles are the three facts a reader needs to act, and the first two
+    #: are what tell this refusal apart from "the loop shape is unrecognised"
+    #: (an emitter change) and from "the contract is wrong for this shape" (a
+    #: library change). The third says the program itself is fine, which is the
+    #: fact that makes declining the right trade rather than a loss.
+    REFUSED = {
+        "sum_range": (["SIGNED condition code 11", "arm64_flag_lt_s",
+                       "while_lt_exit_contract_bottom"],
+                      "its loop test is signed and the contract is stated in "
+                      "the unsigned order, so the obligation would be false"),
+    }
+
+    #: The document each `REFUSED` stem's repair is owned by, when the owning
+    #: doc is named for the DEFECT rather than for the example. `sum_range` is
+    #: the only row, and its doc is
+    #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
+    #: flag.md` — a name that says what is wrong and deliberately does not
+    #: contain the stem, which is why `test_the_owner_of_the_one_refusal_still_
+    #: exists` cannot find it by prefix.
+    #:
+    #: The point of naming it is the same as the check's own: this refusal is a
+    #: STOP, not a fix, and the doc is what a reader has to find to learn that.
+    #: A row that pinned the refusal without naming the doc would let the doc be
+    #: deleted on the grounds that the refusal it describes is now recorded
+    #: here — which is the opposite of true, because the doc records the part
+    #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
+    #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
+    REFUSED_OWNER = {
+        "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
+                     "against_a_signed_flag.md",
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -3665,41 +3783,32 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                               f"{stem} generated a file with no end-to-end "
                               f"theorem in it; that is not a proof of anything")
 
-    def test_the_range_loop_is_proved_by_a_bottom_tested_contract(self):
-        """Why `sum_range` generates, and not by accident.
-
-        `for n:` lowers with the emptiness test in a PREHEADER, so the body, the
-        counter increment, the comparison and the back edge are ONE `cbz`-kinded
-        block whose taken edge targets its OWN start. The loop-discovery scan
-        used to ask "is this a `b` block whose target is a `cbz` block" — an
-        unconditional back edge — and so found no loop contract at all for this
-        shape, which is why the walk raised `unsupported cbz taken continuation`
-        rather than applying one.
-
-        So "generates" for this stem could be true for a reason that has nothing
-        to do with the loop, and the pin is that it is proved by the contract
-        for a test at the BOTTOM (`while_lt_exit_contract_bottom`, whose `Rn` of
-        31 is the zero register — see `lib/ProofLib.lean`'s
-        `arm64_step_neg_reads_zero_rn`), not by the top-tested one.
-        """
-        text, err = self._generate("sum_range")
-        self.assertIsNotNone(text, f"sum_range generates now? {err}")
-        self.assertIn("while_lt_exit_contract_bottom", text)
-        self.assertNotIn("while_lt_exit_contract ", text,
-                         "sum_range's test is at the bottom of its body, so the "
-                         "top-tested contract is the wrong one for it")
-
     def test_the_one_that_refuses_says_why(self):
-        for stem, (needle, why) in sorted(self.REFUSED.items()):
+        """Every needle of a `REFUSED` row, not just one of them.
+
+        A refusal row exists so a reader can act on it, and one needle cannot
+        carry that: for `sum_range` the actionable content is THREE facts —
+        which condition code the loop tests, which lemma made the obligation
+        false, and which contract is stated in the wrong order — and a
+        message carrying only the first still leaves the reader unable to tell
+        this refusal from "the loop shape is unrecognised". So the table takes a
+        LIST and every element is asserted, and `why` is the sentence that says
+        what the row is for.
+        """
+        for stem, (needles, why) in sorted(self.REFUSED.items()):
             with self.subTest(stem=stem):
                 text, err = self._generate(stem)
                 self.assertIsNone(
                     text, f"{stem} generates now ({err}); delete it from "
                           f"REFUSED and say what closed it — the doc this row "
                           f"cites names the owner of the fix")
-                self.assertIn(needle, err or "",
-                              f"{stem} refused, but not with the wording this "
-                              f"row pins: {err} ({why})")
+                if isinstance(needles, str):
+                    needles = [needles]
+                for needle in needles:
+                    self.assertIn(needle, err or "",
+                                  f"{stem} refused, but the message does not "
+                                  f"say {needle!r}, which is what makes the "
+                                  f"refusal actionable: {err} ({why})")
 
     def test_the_owner_of_the_one_refusal_still_exists(self):
         """A refusal whose owning doc is gone is a doc to delete, not to keep.
@@ -3709,30 +3818,37 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **Vacuous while `REFUSED` is empty, and that is asserted rather than
-        left to be discovered**: an empty table and a table whose rows all point
-        at deleted docs look identical from the outside, and the difference is
-        the difference between "nobody refuses" and "the records of the refusals
-        were thrown away".  So the empty case states the census it means — all
-        twelve reach a proof file — and the census is `GENERATE`, which the case
-        above walks.
+        **`REFUSED` is NOT empty** — `sum_range` joined it on 2026-10-05, when
+        its loop contract was declined for stating an unsigned order against a
+        signed flag — so this check does real work from the first row. It was
+        vacuous while the table was empty, and an empty table and a table whose
+        rows all point at deleted docs look identical from the outside: that is
+        the difference between "nobody refuses" and "the records of the
+        refusals were thrown away". The census is asserted explicitly for the
+        same reason.
         """
-        if not self.REFUSED:
-            self.assertEqual(
-                len(self.GENERATE), 12,
-                "REFUSED is empty, so this class now claims that ALL TWELVE of "
-                "the red examples generate. If the census changed, say so here "
-                "and name the new count — an empty table that quietly stops "
-                "meaning 'all of them' is how a refusal goes unrecorded")
-            return
+        # Not vacuous any more: `sum_range` moved from GENERATE to REFUSED on
+        # 2026-10-05, so the total is asserted rather than derived from a
+        # table that used to be empty. The number is the census this class
+        # claims; a silent change to either list is how a refusal goes
+        # unrecorded, and the OWNER check below is what makes the row survive
+        # its own fix.
+        self.assertEqual(
+            len(self.GENERATE) + len(self.REFUSED), 12,
+            "the census of the twelve red examples changed shape: "
+            f"{len(self.GENERATE)} generate and {len(self.REFUSED)} refuse. If "
+            "that is right, name the new split here — a total that moves "
+            "silently is how a refusal goes unrecorded")
         for stem in sorted(self.REFUSED):
+            declared = self.REFUSED_OWNER.get(stem)
             owners = [n for n in os.listdir(os.path.join(HERE, "bugs"))
-                      if n.startswith(f"FORMAL_{stem}")]
+                      if n == declared or n.startswith(f"FORMAL_{stem}")]
             self.assertTrue(
                 owners,
-                f"{stem} is pinned as refusing with no bug doc naming it; "
-                f"either the refusal is fixed (delete the row) or the doc that "
-                f"owns the repair is missing, and this row is what found that")
+                f"{stem} is pinned as refusing with no bug doc naming it "
+                f"(looked for {declared!r} and any FORMAL_{stem}*); either "
+                f"the refusal is fixed (delete the row) or the doc that owns "
+                f"the repair is missing, and this row is what found that")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
