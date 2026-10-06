@@ -1,5 +1,83 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status 2026-10-05 (`work/formal71-docs`): `computed_element` — the last of the
+`static_initializer_refusal_reason` remainders that was a SHAPE rather than a
+gap — is most of what it claimed to be, and its sentence was false about six
+programs with no call in them. `TBL = [1 + 2, 3]`, `[7 // 2, 3]`, `[2 ** 10, 3]`,
+`[1 << 4, 3]`, `[K, 3]` for a module constant, and `[1.5, 2]` all build and answer
+CPython on both architectures. The three shapes that remain get three SENTENCES,
+each naming the element, because only one of the three is a call. What is left of
+this document is unchanged: an EXPORTED SLOT and `argv`'s SOURCE.** Read this
+before "What is left" and before `computed_element`'s entry in it, which describes
+the remainder as "an element whose value is a call's result".
+
+**The measurement, both architectures, before the change.** Six programs, and
+every one was refused with the same sentence:
+
+```
+build: main: 'TBL' has storage here — it is one of the module-global slots in
+this image's `__DATA` … but that storage has no initializer: one of its elements
+is COMPUTED BY A CALL, and a container is laid out here as a run of words …
+```
+
+`TBL = [1 + 2, 3]` is arithmetic on two integer literals. `[7 // 2, 3]` is a floor
+division of two literals. `[K, 3]` is a module-level constant the build has
+already folded — `collect_module_symbols` decided its value and published it.
+`[1.5, 2]` is a float LITERAL. **So this was the 2026-10-04 `None` misdiagnosis
+again, one level out, and the cause is the same shape of question:**
+`model._static_word` asked four questions about a node's SHAPE — is it a literal,
+is it a sign, is it a container — where the tree already has folders that answer
+the fifth one, what does this expression COME TO. It was never a capability: the
+LOCAL spelling of every one of the six already worked (`var xs = [1 + 2, 3]`
+builds, runs and answers `3 3` on both machines), because a frame blob is built by
+instructions that compute the element and only a `__DATA` initializer has to
+compute it at BUILD time.
+
+**What landed is three arms, each asking one existing reader rather than writing
+arithmetic here.** An expression goes to `fold_literal_expr` and then
+`fold_module_int_expr` — the composition the latter's own `operand` helper already
+spells, applied to the node itself rather than to each of its operands, which is
+the whole gap (it answers a `BinaryOp`/`UnaryOp` and returns None for a bare
+`IntLiteral`, so a name's folded literal came out as no value at all). A float
+literal goes to `float_literal_bits`, the one reader both backends ask, read as a
+SIGNED word because `_lay_out_blob_words` writes an int with `signed=True` and an
+unsigned pattern would raise out of `to_bytes` — a compiler crash rather than a
+refusal. A name goes to `GlobalSymbol.literal`, the folded NODE
+`collect_module_symbols` built in source order, with a `bound` set so `A = B;
+B = A` refuses rather than chasing the cycle. The range check is
+`fold_module_value`'s, made at this call site because a folded value that is not
+one 64-bit word has no representation in `__DATA`: `TBL = [2 ** 64, 3]` is refused
+rather than written as 0.
+
+**And the sentence now says which of the three shapes it is**, through a new
+reader `container_element_without_a_word` that reports the element the walk could
+not answer (a `ContextVar` because the walk recurses into nested containers, so an
+out-parameter would have to be threaded through every level):
+
+| the element | what the build says now |
+|---|---|
+| `[seven(), 3]` | "its element `seven()` is computed by a CALL, and a call's result is not known before the program runs" — the only shape the old sentence was ever true of |
+| `[os.pi, 3]` | "its element `os.pi` is a NAME this build cannot fold — a value the program has and this path cannot see" |
+| `[2 ** 64, 3]`, `[1 // 0, 3]` | "its element … is an EXPRESSION and this build computes no word for it", naming the three reasons that can happen |
+
+**Tests: `test_formal_globals.py` is 61/61 (was 56)** — three answered rows
+(arithmetic over literals, a folded module constant including `MAX = 2 ** 63 - 1`
+and a string constant, a float element read with `%f`), and three refusal rows,
+one per shape, each asserting the sentence that is TRUE of it and, where there is
+one, the sentence that must be ABSENT. `call_computed_container_element_refused`'s
+needle moved from `"no initializer"` to the whole clause, because the clause is
+what says which element and why. The three answered rows go red without the fold.
+`test_formal_toplevel.py` 117/117 and `test_formal_module_attr.py` 35/35.
+
+**The remainder is now one shape and it is the honest one**: an element whose
+value is a CALL, which is not known before the program runs. That needs the
+module-level sequence to fill a `__DATA` CELL, which is a capability and not a
+fold — and the route through `_emit_global_init`'s lazy fill (a string element is
+already filled from code at first call, `GlobalDataImage.string_cells`) was
+measured and is NOT the answer: the fill would have to CALL, and the init flag is
+what stops that call from re-entering the fill, so a reader that ran during it
+would see the zero an unfilled cell gives.
+
 **Status (2026-10-04, `formal18-4`): §(2)'s member refusal had a THIRD arm
 missing, and it was the same disease that function was written to cure — a
 sentence false about the name it names. Fixed; the two items this document's
@@ -1038,6 +1116,16 @@ element computed by a call — both have a `None`, which is a word (0) and which
 message says: an element whose value is a call's result, whose result is not
 known before the program runs. The `imported` remainder is untouched — it is item
 2 of "the exact next step", an exported slot, and still a project.
+
+**…and on 2026-10-05 (`work/formal71-docs`) the sentence above became TRUE rather
+than aspirational, which is the only way it could have: the remaining shapes were
+closed.** Arithmetic on literals, a float literal and a folded module constant all
+have a word now (`model._static_word`'s three new arms, each asking an existing
+reader), so "an element whose value is a call's result" is what is actually left,
+and the message says so with the element's own spelling in it. The two shapes that
+are NOT a call — a name the build cannot fold, and an expression with no 64-bit
+value — get their own sentences rather than being described by this one; see the
+Status at the head of this file for the measurement and the table.
 
 ## What this costs, by name
 
