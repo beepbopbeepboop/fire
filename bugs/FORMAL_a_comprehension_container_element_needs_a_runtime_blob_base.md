@@ -5,17 +5,83 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: NOT FIXED, and this is the measurement of WHY** — the second half of
-`bugs/FORMAL_a_comprehension_element_container_aliases_every_iteration.md`, whose
-"next step" says *"if it is a slot reserved per element SITE (as
-`frame_slots`/the local allocator would do), the fix is a per-iteration
-materialisation or a copy at the append"* and that the machinery "is being used
-in the wrong place". **The machinery is not in the wrong place, and that is what
-this doc establishes.** There is no per-element-site allocator to use: a
+**Status: the REFUSAL branch has LANDED (2026-10-05) and the RELOCATION has
+not.** Every silent wrong answer in this class is gone — a comprehension whose
+element opens a container is now refused on both architectures with a sentence
+that names the element, the reservation and the iteration count — and the
+relocation steps below are unchanged and still the fix. Read "What landed" first;
+the two paragraphs under it say what the refusal costs, which is one row of the
+sibling document's acceptance set and nothing else.
+
+**The machinery is not in the wrong place, and that is what this doc
+establishes.** There is no per-element-site allocator to use: a
 comprehension's element site reserves through the ONE sequential frame ledger
 (`_reserve_blob` against `_list_cursor`), and it runs once at COMPILE time while
 running N times at RUN time — so any reservation it makes is one allocation for
 N iterations. Measured on both architectures.
+
+## What landed (2026-10-05): the refusal, and the ledger measurement that asks it
+
+**The question is asked of the emitters' OWN ledger, not of a predicate.**
+`_emit_compr_gen`'s leaf — the one place an element is emitted — now takes
+`self._list_cursor` either side of the element's emission and refuses when the
+delta is not zero. A container's blob is reserved by the `_reserve_blob` family
+through that one variable, so the delta *is* "this element allocated something",
+and the set of allocating constructs is whatever the emitters allocate rather
+than a list of node types kept in step with them by hand. A hand-kept list would
+be a second copy of `_reserve_blob`'s callers, and the defect this class is about
+— a construct nobody remembered — is exactly the defect such a list grows.
+
+`_refuse_an_element_blob` is one small method in each backend (both ask
+`model.comprehension_element_blob_refusal`, so the two architectures cannot
+refuse this differently), and `model.expr_spelling` gained a `Comprehension`
+arm because the nested case quoted `Comprehension` — the AST type name — in a
+diagnostic whose whole job is to name the line the reader has open.
+
+**`cap <= 1` is exempt, and that is soundness rather than politeness.**
+`_compr_cap` is an UPPER BOUND on the iteration count, so `cap == 1` means the
+body runs at most once and one shared blob is then shared by nothing. The sibling
+document's acceptance row *"the first program with ONE outer iteration, `for y in
+[10]`"* keeps answering `11`, and
+`test_formal_run.py::a_one_iteration_comprehension_element_container_still_builds`
+is the row that says so.
+
+**Measured, both architectures, after:**
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[y, y + 1] for y in [10, 20, 30]]`, `r[0][1] r[1][1] r[2][1]` | `11 21 31` | `31 31 31` | **refused** |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum of `v[0]` | `63` | `93`, exit 1 | **refused** |
+| `[[x + y for x in [1, 2]] for y in [10]]`, sum of `v[0]` | `11` | `11` | `11` (the `cap <= 1` exemption) |
+| `[i + j for i in [1, 2] for j in [3, 4]]`, flat, two generators | `4 5 5 6` | `4 5 5 6` | `4 5 5 6` |
+| `[x + y for x in [1, 2]]` as a statement in a `for` body | `66` | `66` | `66` |
+
+**What it costs, precisely.** One row of the sibling document's acceptance set:
+*"an element that does not depend on the loop variable (→ 3, correct today only
+because the shared blob happens to hold the right value)"*. That row is refused
+now, and it is the row the sibling document itself marks as "correct by
+coincidence — … which is why the coincidental row must not be mistaken for a
+pass". The other two acceptance rows survive, and so does the whole of
+`test_formal_run.py`'s `nested_comprehension_in_a_generator_iterable`, whose
+subject is the `_ci{d}`/`_cb{d}` DEPTH agreement for a comprehension reached
+through a generator's ITERABLE — an iterable allocates in the ITERABLE, not in
+the element, which is the distinction the refusal is drawn on. That row's fourth
+shape (a dict comprehension whose values are comprehensions) moved into
+`COMPREHENSION_ELEMENT_REFUSALS`, so the shape is still covered and is now
+covered by an assertion stronger than "builds and answers".
+
+**The coverage census, and it is ZERO on this tree — which corrects the sibling
+document's "6 of the 610 stdlib modules".** Measured 2026-10-05 over 443
+`*.mojo` files (this worktree plus the 252 files of
+`../new-modular/Mojo/stdlib/std`, `.tmp`/`.git` pruned): **0 files** hold a
+comprehension at all, live. The three the grep finds
+(`std/python/numpy.mojo`, `formal/hostmods/textwrap.mojo`,
+`formal/hostmods/ast.mojo`, `mojo_failures.mojo`) are docstring examples inside
+`>>> [c for c in range(128) …]`, which the parser throws away. So the sibling
+document's "6 of the 610" counted prose. **That is why the refusal was
+affordable here and it is also why it must not be read as evidence that the
+construct is rare** — a corpus that writes no comprehension measures nothing
+about it, and the next module that writes one pays this refusal.
 
 ## What was run
 
@@ -106,9 +172,19 @@ break, which are the reason a partial landing is not one:
 * a two-generator FLAT comprehension (`[i + j for i in [1,2] for j in [3,4]]` →
   20, which is B1's shape).
 
+**The second of those three is the ONE the refusal cannot have**, and it is
+stated here rather than discovered by the next reader: with the wrong answer
+gone there is nothing left to distinguish it from the first row, so a refusal at
+this position takes it. The other two survive and are pinned by
+`test_formal_run.py::a_one_iteration_comprehension_element_container_still_builds`
+and the `nested_comprehension_in_a_generator_iterable` /
+`comprehension_body_is_not_a_container_position` rows.
+
 **A refusal is the alternative and it is cheap**, which is the trade the other
 doc names and measures (6 of the 610 stdlib modules contain a comprehension
-whose element opens a list literal). Refusing
+whose element opens a list literal — **and that count is wrong**: see "What
+landed" above, where the measured figure is 0 files with any comprehension in
+them, because the six are docstring examples). Refusing
 `model.comprehension_element_is_per_iteration`-shaped elements by name is a
 `model.py` predicate plus one call site per backend and needs no allocator
 change at all — a wrong element list is worse than a refusal, because a caller
@@ -116,6 +192,9 @@ that appends to the comprehension's result gets a list whose elements are all
 one object, which is silent in a way a missing feature is not. **Whoever takes
 this should decide between the refusal and the relocation before writing the
 relocation**, and the census above is what makes the refusal affordable.
+**Decided: the refusal.** The predicate is `model.comprehension_element_blob_refusal`
+and it is asked of the ledger rather than of the node type; the census that made
+it affordable is the measured 0 above.
 
 ## Reproducing
 
@@ -124,6 +203,20 @@ relocation**, and the census above is what makes the refusal affordable.
     $ python3 .tmp/ds/alias.mojo                        # 63
     $ python3 tools/memslot.py --gb 8 --label t -- \
           python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
-    $ .tmp/al                                                  # 93
+    build: a comprehension in main: the element `[…] for …` opens a container, …
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
+    $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
     $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
+
+and the tests, no builds for the census:
+
+```sh
+python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_refused \
+  a_nested_comprehension_as_the_element_is_refused \
+  a_dict_comprehension_whose_value_opens_a_container_is_refused \
+  a_comprehension_element_that_is_a_set_literal_is_refused \
+  a_one_iteration_comprehension_element_container_still_builds \
+  nested_comprehension_in_a_generator_iterable \
+  comprehension_body_is_not_a_container_position
+python3 test_refusal_taxonomy.py
+```

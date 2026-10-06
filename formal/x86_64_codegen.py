@@ -3309,6 +3309,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._list_cursor += nbytes
         return offset
 
+    def _refuse_an_element_blob(self, element, cap: int, bytes_: int) -> None:
+        """Refuse a comprehension whose ELEMENT allocated a frame blob.
+
+        Asked with the delta the caller measured across the element's own
+        emission, and raised only when it is non-zero — so the question is
+        "did this element allocate", which the ledger answers, rather than a
+        predicate over node types that would be a second list of `_reserve_blob`'s
+        callers to keep in step. The arm64 backend asks the same question of its
+        own ledger in its own leaf; the MESSAGE is `model`'s, so the two
+        architectures cannot refuse this differently.
+        """
+        if not bytes_ or cap <= 1:
+            return
+        raise CodegenError(M.comprehension_element_blob_refusal(
+            f"a comprehension in {self.func_name or '<module>'}", element,
+            cap, bytes_))
+
     # ── how many times the code being emitted runs ────────────────────
     #
     # A blob's reservation is made ONCE per site, so a site inside a loop has
@@ -8714,13 +8731,27 @@ preference.
         """
         gens = expr.generators
         if gi >= len(gens):
+            # The ELEMENT's own footprint, measured on the ledger this emitter
+            # already keeps. A container's blob is reserved by the `_reserve_blob`
+            # family through `_list_cursor`, so a non-zero delta across the
+            # element's emission IS "this element allocated something", with no
+            # list of allocating constructs to keep in step with them — and the
+            # comprehension runs that same element `cap` times, so one blob is
+            # every iteration's blob and each one overwrites the last.
+            # `model.comprehension_element_blob_refusal` has the measurement;
+            # the arm64 backend's leaf is the same shape.
+            _before = self._list_cursor
             if is_dict:
                 self._emit_expr(expr.element)          # KEY
                 self._push_slot(Reg.RAX)
                 self._emit_expr(expr.key)              # VALUE
+                self._refuse_an_element_blob(expr.element, cap,
+                                             self._list_cursor - _before)
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
+                self._refuse_an_element_blob(expr.element, cap,
+                                             self._list_cursor - _before)
                 self._compr_append_elem(res_offset, cap)
             return
 
