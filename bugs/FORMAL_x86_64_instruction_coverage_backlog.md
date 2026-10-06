@@ -81,6 +81,12 @@ $ python3 - <<'EOF'
 EOF
 ```
 
+(The list is as `emit_terminates` reports it, so `neg`/`not` are grouped under one
+`<form not wired>` line; `printf_int`'s `movsxd_r64_r32` is the one row here that
+**no document in `bugs/` names**, and it is also one of the three `NO-RUN`s of the
+registered `formal-x86-machine-model` job — see
+`bugs/FORMAL_the_x86_machine_model_job_is_red_with_no_marker.md`.)
+
 `no step lemma wired for: neg` reads like the model cannot do a negation. It can;
 `lib/X86.lean`'s `F7 /3` arm has been there from the start. What was missing was
 `x86_step_neg_r64`, `x86_step_not_r64` and two `_SUCCS` rows, and both lemmas are
