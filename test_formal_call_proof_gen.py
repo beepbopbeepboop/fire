@@ -4628,6 +4628,115 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                              f"divisor: {p.stdout!r}")
 
 
+class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
+    """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
+
+    `bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
+    and not with the arithmetic, and gives a reason about the FLAGS ("it has
+    the flags to get right rather than a register") rather than about
+    PROVABILITY. This class is the measurement behind that choice, and it is a
+    question about LEAN rather than about arm64 — which is why it is three
+    two-line files with no ProofLib import (0.3 s each, not a proof run), one
+    per question, so each verdict is its own exit status and nothing has to be
+    parsed out of a shared transcript:
+
+    * a `Float` ORDER has a `Decidable` instance and `native_decide` closes it.
+      An `FCMP` arm's result is an `if`-chain over `<` / `unordered`
+      (`lib/IEEE754.lean`'s `key` and `unordered` decide the flags), so that is
+      the shape the order supports.
+    * the KERNEL does not reduce `Float.decLt` (`decide` fails where
+      `native_decide` succeeds). Anything in a `work_step_*` proof that needs
+      kernel reduction over a comparison — `bv_decide` above all — therefore
+      cannot see a float.
+    * a `Float` EQUALITY has **no `Decidable` instance at all**. So an arm whose
+      result is a float VALUE — `FADD`, `FSUB`, `FMUL`, `FDIV`, `SCVTF`,
+      `FCVTZS`, the two `FMOV`s — has no `rfl`, `simp` or `decide` to close its
+      lemma with, because all three need that equality.
+
+    That is the difference between the one arm the doc asks for first and the
+    nine it defers, and it is worth three tests because the alternative is a
+    worker writing `work_step_fadd` against a `Decidable` that is not there —
+    and, worse, an arm that "almost" works and is never checked.
+    """
+
+    #: `name -> (source, must_succeed, needle_when_it_fails_or_not)`.
+    QUESTIONS = {
+        # The order, by the compiler: this is what `native_decide` gives an
+        # `FCMP` arm's `if`-chain.
+        "order_native": ("theorem t : (1.0 : Float) < 2.0 := by native_decide",
+                         True, None),
+        # The same order by the kernel: the load-bearing negative, because a
+        # `work_step_*` proof is `unfold; rw [if_neg …]; rfl`, and `rfl` is
+        # kernel reduction.
+        "order_kernel": ("theorem t : (1.0 : Float) < 2.0 := by decide",
+                         False, "did not reduce"),
+        # The equality the arithmetic arms would need.
+        "value_equality": ("example : Decidable "
+                           "((0.0 : Float) / (0.0 : Float) = (0.0 : Float)) "
+                           ":= inferInstance",
+                           False, "failed to synthesize"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean:
+            raise unittest.SkipTest("no Lean: every assertion here is about "
+                                    "what Lean's own instances do, and none of "
+                                    "them is answerable without it")
+        cls.tmp = tempfile.mkdtemp(prefix="a2-float-dec-")
+        from formal import lean as FLEAN
+        cls.out = {}
+        for name, (src, _ok, _needle) in cls.QUESTIONS.items():
+            path = os.path.join(cls.tmp, name + ".lean")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(src + "\n")
+            r = FLEAN.run_lean(lean, [os.path.basename(path)], cwd=cls.tmp,
+                               env={"LEAN_PATH": os.path.join(HERE, "lib")})
+            cls.out[name] = (r.returncode, (r.stdout or "") + (r.stderr or ""))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _ask(self, name):
+        rc, out = self.out[name]
+        want_ok, needle = self.QUESTIONS[name][1:]
+        if want_ok:
+            self.assertEqual(rc, 0,
+                             "%s: Lean's answer changed, and this class is "
+                             "the measurement behind the ORDER of work in "
+                             "`bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` "
+                             "-- re-read it before believing the row below: %s"
+                             % (name, out[:400]))
+        else:
+            self.assertNotEqual(rc, 0,
+                                "%s: this now WORKS, so the obstacle it was "
+                                "measured to be is gone and the document that "
+                                "cites it is stale: %s" % (name, out[:400]))
+            self.assertIn(needle, out,
+                          "%s: it fails for a different reason than the one "
+                          "recorded, which means the recorded reason is not "
+                          "what is stopping the work: %s" % (name, out[:400]))
+
+    def test_a_float_ORDER_is_decidable_and_native_decide_closes_it(self):
+        """What makes `FCMP` — and only `FCMP` — writable in this shape."""
+        self._ask("order_native")
+
+    def test_the_kernel_does_not_reduce_a_float_order(self):
+        """`decide` failing where `native_decide` succeeds, which is why no
+        `bv_decide` in a `work_step_*` can ever see a float operand."""
+        self._ask("order_kernel")
+
+    def test_a_float_VALUE_equality_is_not_decidable_at_all(self):
+        """The obstacle for the other NINE arms, and the reason it is not
+        "just a bit more work": there is no instance for `rfl`, `simp` or
+        `decide` to use, so an arithmetic `work_step_*` cannot be finished at
+        all until a `Decidable` over `Float` (or a bit-pattern representation
+        of the D registers) exists."""
+        self._ask("value_equality")
+
+
 class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     """The measurement itself: the residual is `1 = 0`, and it is FALSE."""
 
