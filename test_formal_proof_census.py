@@ -632,13 +632,42 @@ class TestClassifyShape(unittest.TestCase):
 
     def setUp(self):
         import formal.build as FB
+        from formal import lean as L
         self.real = FB.compile_formal
+        self.real_census = L.proof_census
         self.proof_body = ("theorem t : True := by native_decide\n"
                            "theorem u : True := by bv_decide\n")
+        # `formal/lean.py::proof_census` ELABORATES the proof on a verdict-cache
+        # miss — `_cached_hole_count`'s own docstring says so — so on a cold
+        # cache it put a real Lean run inside a class whose subject is the
+        # classification, and then
+        # `test_a_failed_check_with_a_proof_on_disk_is_a_lean_verdict`'s
+        # "a replayed verdict measures no time" read `round(0.04, 1) == 0.0`
+        # for a run nothing asked for. Measured on 2026-10-05: red on the first
+        # run after a `_VERDICT_VERSION` bump, green on every run after, which
+        # is the worst shape a test can have — its answer is the MACHINE's
+        # history rather than the code's.
+        #
+        # So the census READER is faked too, and `asked` records that it was
+        # consulted, so the patch cannot hide a regression in
+        # `_cached_hole_count`: a path that stopped asking leaves `asked` empty
+        # and the assertion says so.
+        self.asked = []
+
+        class _Census:
+            n_sorries = 0
+
+        def census(proof_path, **kw):
+            self.asked.append(proof_path)
+            return _Census()
+
+        L.proof_census = census
 
     def tearDown(self):
         import formal.build as FB
+        from formal import lean as L
         FB.compile_formal = self.real
+        L.proof_census = self.real_census
 
     def _fake(self, side_effect=None, result=None, write_proof=False):
         import formal.build as FB
@@ -694,6 +723,11 @@ class TestClassifyShape(unittest.TestCase):
         self.assertTrue(got.cached, "no run was captured, so the verdict was "
                                    "replayed and the row must say so")
         self.assertIsNone(got.lean_cpu_s, "a replayed verdict measures no time")
+        self.assertEqual(got.n_sorries, 0)
+        self.assertTrue(self.asked,
+                        "no hole count was asked for, so `measure_example` no "
+                        "longer reaches `_cached_hole_count` and this class has "
+                        "stopped measuring the path it is named for")
         self.assertEqual(got.decide_sites, {"native_decide": 1, "bv_decide": 1})
         self.assertEqual(got.proof_lines, 2)
 
