@@ -5361,48 +5361,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
         self._emit_jcc_bool(Reg.R11, COND_E, zero_label)
         self._emit_expr(stop_e)
-        # span = stop - start, taken in the DIRECTION THE STEP WALKS, so that a
-        # range pointing away from its stop lands on a negative span.
-        #
-        # **Both halves of that sentence are this fix**, and the old code had
-        # neither. It computed `span = stop - start` and then negated it only
-        # when the step was a LITERAL negative (`_static_int(step_e) or 1) < 0`),
-        # so:
-        #
-        #   range(0, 5, -1)   literal negative step, so `span = 0 - 5` was negated
-        #                      to `+5`, and the count came out 5. CPython's
-        #                      `range(0, 5, -1)` is EMPTY — a descending range
-        #                      whose stop is above its start never runs — so the
-        #                      image reserved nothing, materialised five elements
-        #                      and exited 1 at the cap check that follows, while
-        #                      CPython answers 0. Measured on this tree: exit 1,
-        #                      no output, arm64 answering `0` for the same text.
-        #   range(9, 0, s)    with `s` a NAME holding -3, `_static_int` is None,
-        #                      `None or 1` is 1, so nothing was negated: `span =
-        #                      0 - 9` stayed negative and the divide was a divide
-        #                      of a negative dividend by a positive divisor,
-        #                      whose unsigned quotient is enormous.
-        #
-        # So the negation is now driven by the RUNTIME sign of R11 — the same
-        # `test`/`jge` pair the `|step|` computation below already uses for the
-        # same reason — and a span that is not positive after it IS the empty
-        # range CPython says it is. `exact` above already had this right
-        # (`max(0, …)`), which is why the RESERVATION and the COUNT disagreed:
-        # the reservation was 0 and the count was 5, and the cap check that
-        # reconciles them is what turned that disagreement into exit 1.
+        # span = |stop - start|
         self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R10))
-        span_label = f"{self.func_name}_rspan{rid}"
-        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
-        self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
-        self._emit_jcc(COND_GE, span_label)
-        self.asm.emit(encode_neg_r64(Reg.RAX))
-        self.asm.label(span_label)
-        # A span that did not survive the direction change (0, or negative
-        # because the step walks away from the stop) means there is no element
-        # to materialise, and `zero_label` is exactly that answer — the same
-        # one the step==0 path above already takes.
-        self.asm.emit(encode_cmp_r64_imm32(Reg.RAX, 0))
-        self._emit_jcc(COND_LE, zero_label)
+        if (self._static_int(step_e) or 1) < 0:
+            self.asm.emit(encode_neg_r64(Reg.RAX))
         # count = ceil(span / |step|). |step| has to be computed as a
         # CONDITIONAL negate, not an unconditional one: NEG of 1 is
         # 0xFFFF_FFFF_FFFF_FFFF, and `span + |step| - 1` then wraps, so the
@@ -5442,33 +5404,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R9))
         # Fill: out[1+j] = start + j*step, walking the source by 8*|step| is
         # not possible (the step is a runtime value), so compute each element.
-        #
-        # **The product goes in RDX, not in R8, and that is the whole bug this
-        # comment exists for.** `imul` is the TWO-operand form: `imul R8, R11`
-        # means `R8 = R8 * R11`, so using the loop index as its destination
-        # DESTROYS the index on every iteration. R8 then stops counting `j` and
-        # starts counting `j*step`, which is only the same number when
-        # `step == 1` — so the one shape every other case in this tree uses
-        # (`range(n)`, `range(a, b)`) is the single shape that could not see it.
-        # Measured on this tree, both symptoms out of the same two instructions:
-        #
-        #   range(5, 0, -1)   index walks 0, 1, -1, 0, 1, -1 ... and the `j >= n`
-        #                      test is never true, so the fill runs off the end
-        #                      of the blob. It wrote 40 elements into a 5-element
-        #                      reservation and the image died of SIGSEGV (exit
-        #                      -11) inside the fill loop, where arm64 answered 5.
-        #   range(0, 10, 2)   index walks 0, 1, 3, 7 — it OVERSHOOTS `n` after
-        #                      three iterations, so the loop exits early, the
-        #                      count field says 5 and only three elements were
-        #                      ever written: `r[2]` read 6 where CPython answers
-        #                      4, and `r[4]` read whatever was above the blob.
-        #
-        # RDX is dead here and is the right register for the product: the `div`
-        # above is the last thing that wrote it, its remainder is never read
-        # again, and no code after `done_label` depends on it (`done_label` only
-        # moves RDI into RAX). arm64's twin needs no such care — it accumulates
-        # with `add X4, X4, X6` rather than multiplying, so the index is an
-        # ADDEND there — which is why the two architectures disagreed.
         self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
         self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
         self._emit_mov_imm(Reg.R8, 0)
@@ -5477,9 +5412,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc(COND_AE, done_label)
         # value = start + j*step
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
-        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.R8))
-        self.asm.emit(encode_imul_r64_r64(Reg.RDX, Reg.R11))
-        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RDX))
+        self.asm.emit(encode_imul_r64_r64(Reg.R8, Reg.R11))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R8))
         self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
         self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
         self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))

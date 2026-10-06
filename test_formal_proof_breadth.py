@@ -690,33 +690,6 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
     `test_formal_value_model.py`'s `BUILTIN_CASES` / `BUILTIN_REFUSALS`, because
     that is the file whose stated job is "build, run, and require the same
     bytes CPython prints", and a table of sentences is not a measurement.
-
-    **THE TWO SETS ARE A SUBSET RELATION, NOT AN EQUALITY, and the equality was
-    a coincidence of 2026-09-28 that 35 more builtin names then broke.** The two
-    answer different questions and always did:
-
-      * `formal/model.py`'s table is the FRONTIER — every CPython builtin this
-        path does not lower, each with what lowering it would take. It grew by
-        35 on 2026-10-05 (`test_formal_builtins_conformance.py`'s census of
-        CPython's builtin namespace), because 26 of those names were reaching
-        the LINK AUDIT with a message about SYMBOLS — "bind the name from a
-        library that provides it" — and 7 were being refused for something else
-        entirely (`len()` blaming an integer for `globals()` not being lowered).
-      * `BUILTIN_NAMES` is the census's WORKING SET — the names a synthesised
-        `main` may call, chosen so the corpus exercises the PROOF LAYER rather
-        than stopping in codegen. It is deliberately small.
-
-    So `missing` is a superset of `allowed - lowered`, and asserting equality
-    asserted that the frontier and the working set happen to coincide. The
-    direction that MATTERS is the one that keeps a hole closed: every name the
-    census allows must be MEASURED, or a candidate could read a name nobody
-    probed. That is `allowed <= lowered | missing` below, and it is what this
-    class is for. The other direction would force the frontier to be truncated to
-    whatever this one census draws from, and the only ways to satisfy it are both
-    wrong: delete true rows from the model's table (`float`'s row is exactly the
-    case that documents why a row can be true about the value model and false
-    about the call), or widen the allow-list so the census spends its corpus on
-    programs codegen refuses before the proof layer is reached.
     """
 
     def test_every_allowed_name_is_either_lowered_or_named_as_missing(self):
@@ -730,12 +703,12 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
             allowed - lowered - missing, set(),
             "these names are in the census's allow-list and in NEITHER half: "
             "nobody has measured whether the formal path lowers them, which is "
-            "the state this file's docstring says produced the finding, and it "
-            "is the half that MATTERS — the census allows a name nothing has "
-            "probed, so a candidate could read one. The OTHER direction is "
-            "deliberately NOT asserted: the model's table is the whole frontier "
-            "and the allow-list is a working set inside it, so `missing` is a "
-            "superset and its saying so says nothing about the census")
+            "the state this file's docstring says produced the finding")
+        self.assertEqual(
+            lowered | missing, allowed,
+            "these names are measured and are not in the allow-list, so the "
+            "census will disqualify a candidate for reading a name the "
+            "measurement says is fine")
 
     def test_every_missing_name_says_what_lowering_it_would_take(self):
         for name, why in sorted(B.NOT_LOWERED_BUILTINS.items()):
