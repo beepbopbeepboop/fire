@@ -2013,7 +2013,7 @@ def module_templates_by_path(path: str, project_root: str = None) -> dict:
     the demand belongs to the module that owns the definition, not to the one
     whose name the importer happened to import. `std/collections/__init__.mojo`
     re-exporting `BinaryHeap` is the measured case, and it is 162 of the 165
-    files in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1.
+    files in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1.
 
     Which declared names are templates is `formal/monomorph.py`'s question and is
     answered there by `reflect.export_exclusions` — the same rule the export
@@ -3128,7 +3128,7 @@ def library_free_edges(importer_path: str, stmts: list,
     `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
     swept files their build, because `build_module_dylib` refused the library
     whether or not the importing chain wanted it
-    (the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1).
+    (`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1).
 
     **Which names are templates is read from `reflect.export_exclusions`**, by
     `formal/monomorph.py::template_names`, which is the SAME rule

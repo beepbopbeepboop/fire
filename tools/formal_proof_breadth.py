@@ -1019,17 +1019,8 @@ def run_item(item, arch, timeout, workdir, check=True):
         if FB.proof_refused(e):
             return verdict("proof-refused", str(e), phase="generate")
         names = _unlowered_builtins_in(item.source)
-        cls = _refusal_class(str(e), item.source)
-        # The names lead the detail only when the refusal is ABOUT a builtin,
-        # and the test for that is the class `_refusal_class` just gave — which
-        # is itself half the build's own words. Applying them whenever the
-        # source merely SPELLS a name from the table is how a ledger row comes
-        # to say a program stopped on `max` when the build refused it at the
-        # PROOF layer: the names went in front of a sentence about something
-        # else, and `builtin_frontier` — which reads the marker back out of the
-        # detail — counted a frontier the run never reached.
-        return verdict(cls, builtin_refusal_detail(
-            names if cls == "refused-builtin" else [], e))
+        return verdict(_refusal_class(str(e), item.source),
+                       builtin_refusal_detail(names, e))
     except NotImplementedError as e:
         # The generator's own refusal, REACHABLE only where nothing re-wraps it
         # (the arm above carries the wrapped form and classifies it by the flag).
@@ -1139,20 +1130,6 @@ def _unlowered_builtins_in(source):
     program the census emitted — which is in hand here and is the same text
     `_entry_call` wrote. A NAME that merely appears (`x = max` binds a local
     called `max`) is not a call, so the read is of call positions only.
-
-    **A CALL OF A SHAPE THIS PATH LOWERS IS NOT IN THE ANSWER**, and that is
-    `formal/model.py`'s `extremum_call_is_a_select` asked rather than
-    re-derived: `max(n, 1)` is a compare and a select and is lowered
-    (`formal/build.py`'s `_lower_builtin_extremum`), so naming `max` for a
-    program that only spells it that way puts a frontier row on a builtin that
-    stopped nothing. `max` is in the table because its OTHER THREE shapes still
-    refuse, which is exactly the case a name-only scan cannot see — so the
-    arity rule is asked from the one place that owns it, and this file keeps no
-    copy. The operand half of the rewrite's guard (purity, an integer literal)
-    is deliberately NOT re-implemented here: a call the census still names and
-    the build did not refuse costs one row its `refused-builtin` refinement and
-    nothing else, because `builtin_refusal_detail` now leads with the names
-    only when the refusal itself carries a builtin marker.
     """
     try:
         tree = ast.parse(source)
@@ -1164,9 +1141,6 @@ def _unlowered_builtins_in(source):
             continue
         func = node.func
         if isinstance(func, ast.Name) and func.id in NOT_LOWERED_BUILTINS:
-            if _model.extremum_call_is_a_select(func.id, len(node.args),
-                                                len(node.keywords)):
-                continue
             out.add(func.id)
     return sorted(out)
 

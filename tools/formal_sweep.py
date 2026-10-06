@@ -1704,7 +1704,7 @@ def unclassified_report(pairs, total, say=print, other_classify=None,
     if loud:
         say("  (a shape over the bar is a HOLE IN THE RANKING TABLES rather "
             "than a row of work, and closing it is adding the row — the same "
-            "two-part job the `b12` round of `bugs/FORMAL_sweep_work_map.md` §5.2 "
+            "two-part job `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §5.2 "
             "did for the refusal that hid 229 files behind one module)")
     return loud
 
@@ -2643,7 +2643,7 @@ def _bind_symbols(binary: bytes) -> list:
 # all, and until 2026-10-02 the tool answered that by refusing to answer —
 # which cost 7 correct images their verdict outright and made the x86-64 sweep's
 # pass count a floor rather than a number
-# (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
+# (bugs/FORMAL_sweep_work_map_2026-10-01.md §4). Reading the trie answers the
 # same question from the same bytes, on any host. `formal/build.py`'s
 # `macho_dylib_exports` is already this project's independent reader of that
 # format (an independent one deliberately: `formal/macho_linker.py` writes these
@@ -2717,7 +2717,7 @@ def _host_cputype():
     derived entirely from a limitation of the instrument. Measured: it is the
     whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
     an image that builds and links correctly for its architecture
-    (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    (bugs/FORMAL_sweep_work_map_2026-10-01.md §4).
 
     It then became a SECOND limitation, having stopped being the first: the same
     mismatch made the tool decline to look the names up at all, filing those 7
@@ -3672,7 +3672,7 @@ def report_history(prev, verdicts: dict) -> None:
 # that needs the second and could not use the first: 229 of 735 files stopped
 # building behind one module because six lines of em-dash prose were added to a
 # docstring, and the only record of it was a work map written afterwards from two
-# logs by hand (the `b12` round of `bugs/FORMAL_sweep_work_map.md` §1). Nobody ran
+# logs by hand (`bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §1). Nobody ran
 # the diff, because the diff needs the previous round's log, which is a file on
 # somebody's machine from three days ago.
 #
@@ -4148,7 +4148,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
     say("    (a class count that moved is not the finding; the file list is. "
         "A host model landing moves files in BOTH directions over one edit, so "
         "read the direction before reading the count — "
-        "the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.4 is the record)")
+        "`bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §3.4 is the record)")
     return True
 
 
@@ -4361,7 +4361,7 @@ def _drain_in_flight(futs, collect) -> None:
     pool had taken. Each of those publishes its verdict to the CAS before
     `run_one` returns, so a drain that ignored them would leave verdicts in the
     cache that the run's own output never mentions — which is what forced
-    the `b6` round of `bugs/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
+    `bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §2.3 to reconstruct a run's
     numbers from the cache instead of reading its log.
 
     Waited for rather than killed, and the cost is bounded: each in-flight build

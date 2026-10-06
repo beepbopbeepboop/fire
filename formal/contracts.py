@@ -789,16 +789,9 @@ _MASK = (1 << 64) - 1
 # `bv_decide` is DELIBERATELY absent.  It decides `BitVec` goals; `UInt64` is
 # `Lean.UInt64`, a `Fin (2^64)`, which is a STRUCTURE and not a bitvector, so on
 # a goal in this module it is a category error rather than a weaker tactic --
-# and it is a MEASURED one: `bv_decide` abstracts `arm64_reg 0 (S14 (start n))`
-# as an opaque variable and reports a spurious counterexample, because
-# `Arm64State` is a structure and not a bitvector.  Measured on the dylib
-# export contract `hreg`, which is where the diagnosis and the fix both live
-# (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
-# memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
-# ever wanted, THIS is where it goes, and the note travels with it.
+# the same mistake `bugs/FORMAL_contract_work_handoff.md` §3 records as having
+# produced a spurious counterexample on `arm64_reg`.  If a clause over `BitVec`
+# is ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`
 # takes the first rung that CLOSES it; the last rung is `omega`, whose failure
@@ -813,6 +806,40 @@ LADDER = ("simp_all", "omega", "decide")
 # anything needing a simp set -- so a new rung that needs one has to be added
 # here rather than to the `first` block.
 _LADDER_LEMMAS = {"simp_all"}
+
+# The order bridge the ladder's `simp_all` rung carries, beside `sKey` and the
+# two `u64_*_iff` lemmas.  `bugs/FORMAL_contract_ladder_reach.md` §3 measured why
+# it is needed and §4 named the shape of the fix; the measurement is the short
+# version:
+#
+#   * `Lean.UInt64` is NOT an integer type `omega` has.  It is a bitvector type
+#     whose `<` and `≤` are the *order on `toNat`* but whose `^^^` is a BIT
+#     operation, so a clause stated over the sign-flipped words
+#     (`i ^^^ 0x8000000000000000 ≤ n ^^^ 0x8000000000000000`, which is what
+#     makes the comparison signed and therefore what CPython means for an `Int`)
+#     hands `omega` a goal it reports as "No usable constraints found … which
+#     may also involve … modular remainder" -- with BOTH preconditions already
+#     in context, because `intro hpre0 / obtain ⟨…⟩ := hpre` puts them there.
+#   * `simp` could not do it either, for the same reason: `^^^` on a bitvector is
+#     not a simp-normal form, so `simp_all [sKey]` turns the goal into the same
+#     un-normalised comparison it already had.
+#
+# These three names are what does it.  `UInt64.lt_iff_toNat_lt` and
+# `UInt64.le_iff_toNat_le` are the tree's own statement that the two orders are
+# the order on `toNat`; rewriting with them turns every hypothesis AND the goal
+# into arithmetic on `Nat`, where `Nat.le_of_lt` -- the step from a strict bound
+# to a weak one, which is the whole of `bounds_index.mojo`'s contract -- is a
+# simp lemma rather than an absence.
+#
+# A library lemma was considered and rejected: the obvious spelling
+# (`sKey_lt_iff` in `lib/work.lean`, which is what the doc §4 prescribed) is a
+# proof about the *sign flip* being an involution, and the goal is already
+# stated over flipped words -- the flip is not what is in the way, the ORDER is.
+# So this is three names in this module's own simp set, no `lib/` change, no
+# `.olean` rebuild, and the same three names work for any goal over `UInt64`
+# rather than only for the shapes they were found on.
+_ORDER_BRIDGE = ("UInt64.lt_iff_toNat_lt", "UInt64.le_iff_toNat_le",
+                 "Nat.le_of_lt")
 
 
 def _ladder_script(simp: str) -> str:
@@ -964,7 +991,8 @@ def contract_theorems(contract, params, model_name=None, fn=None,
                 if splits else "")
     simp = (", ".join(hs + pre_names + [model, "sKey",
                                         "u64_lt_iff_false_of_le",
-                                        "u64_le_iff_false_of_lt"]))
+                                        "u64_le_iff_false_of_lt"]
+                       + list(_ORDER_BRIDGE)))
     # The ladder, BUILT FROM `LADDER` rather than written out beside it.  It
     # was written out beside it, and then `LADDER` and the script disagreed --
     # `LADDER` listed four rungs and the script had three -- so `Verdict.why`
@@ -994,8 +1022,32 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     # One bullet per postcondition, each opening with the case split the model
     # needs.  Bullets rather than one `And` split because each postcondition is
     # then separately checkable: a failure names which one broke.
+    #
+    # The conjunction is SPLIT before the first bullet, and a `constructor`
+    # precedes every bullet but the LAST.  Two defects, both measured on
+    # `formal/contracts/clamped.mojo`, and both of which report a contract the
+    # ladder DOES close as UNREACHED -- which is the one failure this module
+    # exists to prevent, and it does it by accident:
+    #
+    #   * With no `constructor` before the first bullet, the single
+    #     `· first | … | … | …` is handed the WHOLE conjunction and `simp_all`
+    #     closes it outright whenever it can discharge every conjunct.  The
+    #     bullets after it then have no goal and Lean reports "No goals to be
+    #     solved" -- the exit status of an unproved theorem.
+    #   * With one before every bullet, the split is against the WRONG nesting:
+    #     `_lean_of` renders `P0 ∧ P1 ∧ … ∧ Pn` right-nested, so `constructor`
+    #     peels off the head and leaves the tail to be split again, and the
+    #     bullet after the peel is handed `Pn-1 ∧ Pn` rather than `Pn-1`.
+    #     Measured on four postconditions: the third bullet is handed a
+    #     conjunction, which is its own "no goals to be solved".
+    #
+    # Peeling the head before every bullet but the last is the one shape that
+    # matches both: bullet `i` is handed `Pi` and the leftover `Pi+1 ∧ … ∧ Pn-1`
+    # is what the next `constructor` splits.  For a single postcondition there
+    # is nothing to split, which is why the rule is about the LAST bullet rather
+    # than about the first.
     for i, _p in enumerate(post_text):
-        if i:
+        if i < len(post_text) - 1:
             lines.append("  constructor")
         lines.append(f"  · {by_cases}{rung}")
     if source_note:

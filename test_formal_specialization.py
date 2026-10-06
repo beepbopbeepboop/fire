@@ -1062,7 +1062,7 @@ def test_a_specialization_through_a_value_runs_on_both_architectures(tmpdir):
     """THE ROW: `workgroup_function[tile_size](offset)`, both machines, CPython.
 
     `std/algorithm/backend/tile.mojo:83`, and the shape the 163-file chain in
-    the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 lands on: a
+    `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 lands on: a
     specialization whose CALLEE is a word. Three things have to be true at once
     and none of them is implied by the other two, which is why this is one case
     and not three:

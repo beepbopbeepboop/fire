@@ -395,6 +395,115 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     check("the_PROVED_reason_names_the_rungs_that_ran",
           all(r in v.why for r in CT.LADDER), v.why)
 
+
+def _postcondition_shape(count):
+    """A contract with `count` postconditions, and its emitted script.
+
+    `result <= n` is chosen because it renders to a comparison and nothing
+    else, so what the script says about SPLITTING is what it says about the
+    postcondition and not about the ladder reaching it.
+    """
+    from formal import contracts as CT
+    ens = "".join(f"@ensures(result <= n + {i})\n" for i in range(count))
+    src = f"@requires(n >= 0)\n{ens}def shape(n):\n    return n\n"
+    fn = functions(parse(src))[0]
+    e = CT.contract_theorems(contract_of(fn, "shape.mojo", src), ["n"], fn=fn)
+    body = e.lean.split(":= by")[-1]
+    return e, [ln.strip() for ln in body.splitlines() if ln.strip()]
+
+
+def test_a_multi_postcondition_contract_is_split_before_its_first_bullet(
+        tmpdir=None):
+    """The bullet list has to match how `_lean_of` NESTS the conjunction.
+
+    Both shapes this file used to emit report a contract the ladder closes as
+    UNREACHED, and neither reports it as an error a reader could act on -- Lean
+    says "No goals to be solved", which is the exit status of an unproved
+    theorem.  Measured on `formal/contracts/clamped.mojo`, whose three
+    postconditions the ladder closes:
+
+      * no `constructor` before the FIRST bullet, so the one `simp_all` is
+        handed the whole `P ∧ Q ∧ R` and closes it outright -- and the bullets
+        after it have nothing left;
+      * a `constructor` before EVERY bullet, so the peel is against the wrong
+        nesting (`_lean_of` renders right-nested) and a bullet is handed a
+        conjunction instead of its postcondition.
+
+    Peeling the head before every bullet but the last is the shape that
+    matches: bullet `i` gets `Pi`, and what the next `constructor` splits is
+    `Pi+1 ∧ … ∧ Pn-1`.  A SINGLE postcondition gets no `constructor` at all --
+    there is nothing to split, and `constructor` on `P` is an error.
+    """
+    for count in (1, 2, 3, 4, 5):
+        e, lines = _postcondition_shape(count)
+        # The ladder is a MULTI-line block (`first` and one line per rung), so
+        # the shape is the SEQUENCE of `constructor`/`· ` lines rather than an
+        # index arithmetic over them -- the first version of this row indexed
+        # every other line and therefore passed with the fix undone.
+        seq = [ln.split(" ")[0] for ln in lines
+               if ln.startswith(("constructor", "· "))]
+        check(seq.count("·") == count,
+              f"{count}_postconditions_get_{count}_bullets",
+              "\n".join(lines))
+        check(seq == ["constructor", "·"] * (count - 1) + ["·"],
+              f"{count}_postconditions_split_before_every_but_the_last",
+              "\n".join(lines))
+    # And the two examples in the tree that have the shape, read from the
+    # generator rather than from a transcription: `mini.mojo` is TWO
+    # postconditions and `clamped.mojo` THREE, so the two shapes of the rule
+    # (one split, two) are the examples' own.
+    for name, fnname, count in (("mini.mojo", "mini", 2),
+                                ("clamped.mojo", "clamped", 3)):
+        path = os.path.join(EXAMPLES, name)
+        src = open(path).read()
+        fn = [f for f in functions(parse(src, path))
+              if getattr(f, "name", None) == fnname][0]
+        from formal import contracts as CT
+        e = CT.contract_theorems(CT.read_contracts(fn, path, src),
+                                 CT._param_names(fn), fn=fn)
+        seq = [ln.strip().split(" ")[0] for ln in e.lean.splitlines()
+               if ln.strip().startswith(("constructor", "· "))]
+        check(seq == ["constructor", "·"] * (count - 1) + ["·"],
+              f"{name}_splits_{count - 1}_times",
+              str(seq))
+
+
+def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
+    """`UInt64` is a bitvector type whose `<`/`≤` are the order on `toNat`,
+    which is why `omega` reports "No usable constraints found … which may also
+    involve … modular remainder" on a clause stated over the sign-flipped
+    words -- with BOTH preconditions already in context.  Three names in the
+    `simp_all` rung's set are what turn those into arithmetic `Nat` can see,
+    and this row is what keeps them there.
+
+    They are asserted on the emitted script and not only on the module
+    attribute, because the attribute is the one thing a future reader would
+    not think to check when they changed the set: `simp_all [ … ]` is written
+    out in the theorem, so a set that lost a name is a proof that quietly stops
+    closing.  `bugs/FORMAL_contract_ladder_reach.md` is where the measurement
+    behind each name is.
+    """
+    from formal import contracts as CT
+    for name in CT._ORDER_BRIDGE:
+        check(name.startswith(("UInt64.", "Nat.")),
+              f"the_bridge_names_{name}", str(CT._ORDER_BRIDGE))
+    e, lines = _postcondition_shape(2)
+    simp_lines = [ln for ln in lines if "simp_all" in ln]
+    check(len(simp_lines) == 2, "the_simp_rung_is_emitted_once_per_bullet",
+          "\n".join(lines))
+    for name in CT._ORDER_BRIDGE:
+        check(all(name in ln for ln in simp_lines),
+              f"the_emitted_simp_set_carries_{name}", "\n".join(lines))
+    # The bridge is the order on `toNat`, and that is a FACT about `UInt64`
+    # rather than a hope: it is what makes the clause signed and therefore
+    # what CPython means for an `Int`.  Asserted so a re-spelling of the set
+    # cannot quietly drop one name and keep the other two.
+    check(sorted(CT._ORDER_BRIDGE) == sorted(["UInt64.lt_iff_toNat_lt",
+                                              "UInt64.le_iff_toNat_le",
+                                              "Nat.le_of_lt"]),
+          "the_bridge_is_these_three_order_names_and_no_other",
+          str(CT._ORDER_BRIDGE))
+
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
     `@requires(n >= 0)` is TRUE for small `n` and FALSE at `n = 2^63 - 1`,
@@ -759,12 +868,23 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # theorem that closes proves the emitter writes a real proof, and one that
     # does not prove it is not a `sorry` wearing a `theorem` header.
     #
-    # `mini.mojo`, `clamped.mojo`, `abspos.mojo` and `bounds_index.mojo` are
-    # NOT in this list because their contracts are UNREACHED by the ladder and
-    # their verdict is UNKNOWN.  That is the honest answer and
-    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` is what holds the line; the
-    # reason it happens is in `bugs/FORMAL_contract_ladder_reach.md`.
+    # `bounds_index.mojo` and `clamped.mojo` joined this list with the
+    # `UInt64` order bridge (`formal/contracts.py::_ORDER_BRIDGE`) and the
+    # conjunction split, and they are the two shapes that fix bought, so they
+    # are the two rows that would go red if either were undone:
+    # `bounds_index` is a clause whose ONLY step is `<` into `≤` on `UInt64`,
+    # and `clamped` is THREE postconditions, which is the shape whose split was
+    # mis-nested.  A ladder that lost either reads as UNKNOWN on a contract it
+    # used to close, which is silent -- so both are named here.
+    #
+    # `mini.mojo` and `abspos.mojo` are still NOT in this list because their
+    # contracts are UNREACHED by the ladder and their verdict is UNKNOWN.  That
+    # is the honest answer and `test_UNKNOWN_is_reachable_and_is_not_a_pass` is
+    # what holds the line; the reason each one is still unreached, measured, is
+    # in `bugs/FORMAL_contract_ladder_reach.md`.
     cases = [("mini2.mojo", "mini2", True),
+             ("bounds_index.mojo", "at_offset", True),
+             ("clamped.mojo", "clamped", True),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
         path = os.path.join(EXAMPLES, name)
@@ -814,6 +934,8 @@ ALL = [
     test_a_comparison_is_SIGNED_in_both_printers,
     test_the_mojo_printer_emits_MOJO_and_not_LEAN,
     test_the_ladder_is_generated_from_the_list_it_reports,
+    test_a_multi_postcondition_contract_is_split_before_its_first_bullet,
+    test_the_ladders_simp_set_carries_the_UInt64_order_bridge,
     test_a_false_contract_is_REFUTED_with_the_input,
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,

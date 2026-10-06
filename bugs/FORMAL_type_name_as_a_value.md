@@ -173,7 +173,7 @@ So: of the four reachable files, the three that moved share ONE next question
 (the bracketed callee in `random.mojo`, which they reach through the same import
 chain) and the fourth has another (a read-before-store). **None of them is this
 construct.** The honest reading of the count is the same one
-the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reached for the `L[T]()` half of
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 reached for the `L[T]()` half of
 the same row: the row's "41 files" was one false diagnostic, a dylib export rule,
 a bare-type-name rule and premise B2 — and this document is the bare-type-name
 rule, which is the smallest of the four.

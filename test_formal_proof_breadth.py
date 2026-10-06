@@ -745,16 +745,8 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
     def test_a_builtin_refusal_is_its_own_class_and_names_the_builtin(self):
         """Both architectures, because the link audit's message is one message
         and the class must not depend on which emitter produced it."""
-        # `max` with ONE argument, and that is the whole of what this fixture
-        # is: the case is "a call to a builtin this path does not lower", and
-        # `max(n, 1)` stopped being one on 2026-10-05 — two positional arguments
-        # and no keyword is a compare and a select, which
-        # `formal/build.py`'s `_lower_builtin_extremum` lowers. A fixture that
-        # named a shape the path now answers would have kept asserting a class
-        # against a refusal that no longer happens, which is the stale-marker
-        # failure `expect=` has in the test suite and this file has in its rows.
         src = ("def f(n):\n"
-               "    return max(n)\n"
+               "    return max(n, 1)\n"
                "def main(x):\n"
                "    return f(x)\n")
         for arch in ("arm64", "x86_64"):
@@ -778,16 +770,8 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         read."""
         marker = ("`append` is a call this build emitted and nothing provides "
                   "it, so that call is not lowered on this path")
-        # `max(n)` — ONE argument, so it is one of the three shapes the name
-        # still refuses. `max(n, 1)` was this fixture's call until 2026-10-05,
-        # and it stopped being a call the census may name the moment
-        # `formal/build.py::_lower_builtin_extremum` began lowering the
-        # two-argument form: `_unlowered_builtins_in` asks
-        # `model.extremum_call_is_a_select` and skips a lowered shape, which is
-        # the correct answer and would have made this row assert that a program
-        # which does not stop on a builtin stops on one.
         src = ("def f(n):\n"
-               "    return max(n)\n")          # a call, but not THE call
+               "    return max(n, 1)\n")          # a call, but not THE call
         src_without_call = "def f(n):\n    return n + 1\n"
         self.assertEqual(B._refusal_class(marker, src_without_call),
                          "codegen-refused")
@@ -799,7 +783,7 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         is not in this run's frontier, and one four items called is worth four
         times the sentence."""
         src = ("def f(n):\n"
-               "    return max(n)\n"
+               "    return max(n, 1)\n"
                "def main(x):\n"
                "    return f(x)\n")
         import shutil
@@ -817,7 +801,7 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
         self.assertNotIn("`pow`", text,
                          "the frontier is what this run reached; `pow` stopped "
                          "nothing here and is printed as if it had")
-        self.assertIn("ARE A COMPARE AND A SELECT", text,
+        self.assertIn("a compare and a select", text,
                       "the frontier section without the sentence is the "
                       "allow-list assertion this file is about")
 

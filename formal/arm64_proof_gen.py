@@ -996,39 +996,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             # `^` already uses and `UInt64.xor` is 64-bit, so the whole
             # complement is one term with no library helper.
             return f"({op} ^^^ 0xFFFFFFFFFFFFFFFF)"
-        if e.op == "+":
-            # Unary plus is the IDENTITY, and it used to be modelled as a
-            # LOGICAL NEGATION: this arm had three cases (`-`, `~`, and
-            # everything else), `not` was the only thing the third was for, and
-            # `+` fell into it. So
-            #
-            #     def up(n):
-            #         return +n
-            #
-            # was emitted as
-            #
-            #     def up_go (n : UInt64) : UInt64 := (if n = 0 then 1 else 0)
-            #
-            # which is `not n` — **a model of a program the source does not
-            # contain**. Measured on this tree: the IMAGE answers 10 for `+10`
-            # on both backends (it is the identity in the emitter too), and the
-            # x86-64 and arm64 run tests — `result n = mojo n`, decided by
-            # `native_decide` over the machine model — are what caught it, as a
-            # FALSE obligation. That is the run tests doing their job, and it
-            # is also the only reason this was ever a question: the corpus had
-            # no example with a unary `+` in it until
-            # `formal/examples/unary_ops.mojo`, whose proof Lean rejected at
-            # `unary_ops_proof.lean:81:2` with a spurious counterexample for a
-            # program whose only unusual operator is the one that was modelled
-            # wrongly.
-            return op
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"model: the unary operator `{e.op}` has no term in the semantic "
-            f"model, and answering the one below for an operator nobody "
-            f"wrote down is how `+` came to be modelled as `not`. Refusing "
-            f"rather than guessing: `{op}`")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go(e.right, param, env, vtypes, call_types, scope)
@@ -1208,93 +1176,11 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         helper_env = dict(env)
         helper_env[param] = p
         cond = _cmp_go(st.condition, param, helper_env, vtypes, call_types, scope)
-        body_env = helper_env
-        # `_bind_one`, the one binder, for the reason its own docstring gives:
-        # the rule "an assignment binds this name to this term" was written out
-        # four times and the copies DIVERGED by being incomplete, so it is now
-        # defined once. This fold was the fifth copy and it was incomplete in
-        # exactly the way the other three were -- it recognised `Assign` and
-        # nothing else, so `total += i` and `var step: Int = i + 1` inside a
-        # `while` body bound nothing. What that cost is measured, not
-        # conjectured: `formal/examples/var_typed_loop.mojo` (a `var` with a
-        # type, declared and read inside a `while`) was REFUSED with
-        #
-        #     model: `step` is read here and this generator binds it to nothing
-        #     (the model's environment is ['i', 'n', 'total'])
-        #
-        # which is FALSE about the source -- `_stmts_go`'s own top-level arm
-        # binds the same statement three lines above -- and no earlier example
-        # could see it, because every loop in the 52-example corpus assigned
-        # with `=`.
+        body_env = dict(helper_env)
         for b in st.body:
-            body_env = _bind_one(body_env, b, param, _expr_go, vtypes,
-                                 call_types, scope)
-        # **The loop's state is ONE word, and this fold says so.** The helper
-        # below takes the recursion's single argument, so the only name whose
-        # value can cross an iteration is the one that argument carries. A body
-        # that changes any OTHER name has a loop the model cannot state: the
-        # update is dropped, so the term is not the source's arithmetic.
-        #
-        # What that used to cost is measured, and it is worse than a lost
-        # update. `formal/examples/accum_max.mojo`:
-        #
-        #     i = 0
-        #     best = 0
-        #     while i != n:
-        #         if i > best:
-        #             best = i
-        #         i = i + 1
-        #     return best
-        #
-        # has an induction variable (`i`) that is NOT the entry parameter, so
-        # `updated` was the parameter's own unchanged value and the emitted
-        # helper was
-        #
-        #     partial def accum_max_go_loop_0 (n_0 : UInt64) : UInt64 :=
-        #       (if ((UInt64.ofNat 1) ≠ n_0) then accum_max_go_loop_0 (n_0)
-        #        else (UInt64.ofNat 0))
-        #
-        # — a `partial def` that DIVERGES on every input that enters the loop,
-        # emitted as `mojo`. On arm64 that never reached a proof file (the
-        # `eval_eq_mojo` gate refuses the shape first). **On x86-64 it did**,
-        # because `x86_64_proof_gen` shares this fold, and the generator then
-        # emitted its run test over it:
-        #
-        #     theorem accum_max_runs_10 : accum_max_result 10 = mojo 10 := by
-        #       native_decide
-        #
-        # `mojo 10` diverges and `accum_max_result 10` is 9, so that obligation
-        # is FALSE, and `native_decide` does not report a false obligation — it
-        # runs the interpreter until the launcher's bound kills it. Measured on
-        # this tree: 7+ minutes with no verdict, against 25 s for the same
-        # proof's siblings.
-        #
-        # So the rule is the honest one: a loop whose state is not one word, or
-        # whose body is not a straight-line run of bindings, is REFUSED here
-        # rather than modelled as something that is not the program. On x86-64
-        # the refusal reaches the generator's own placeholder path
-        # (`_placeholder_model`), which emits the gap as a gap and omits the
-        # run tests instead of stating a false one — see
-        # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_
-        # no_contract.md`.
-        dropped = sorted(name for name, term in body_env.items()
-                         if name != param and term != helper_env.get(name))
-        shaped = [type(b).__name__ for b in st.body
-                  if not isinstance(b, (Assign, AugAssign, VarDecl))]
-        if dropped or shaped:
-            raise NotImplementedError(
-                "model: this `while` loop's state is more than the one word "
-                "the model carries"
-                + (f" — the body changes {', '.join(dropped)}, and the loop "
-                   f"helper's single argument can carry only the induction "
-                   f"variable" if dropped else "")
-                + (f", and its body is not a straight-line run of bindings "
-                   f"({', '.join(shaped)})" if shaped else "")
-                + f", so the fold would emit a model that is not this "
-                f"program's arithmetic. Refusing rather than emitting one: "
-                f"`_dec_while_pattern` (a counter that IS the parameter) and "
-                f"`_range_loop_pattern` (a range loop with one accumulator) "
-                f"are the shapes the model can state today")
+            if isinstance(b, Assign):
+                body_env[_target_name(b)] = _expr_go(
+                    b.value, param, body_env, vtypes, call_types, scope)
         updated = body_env.get(param, p)
         rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter,
                                helpers, vtypes, call_types, scope)
@@ -1376,15 +1262,7 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
             # how the narrow result is read back.
             return _t_wrap(
                 f"({op} ^^^ 0x{mask_of(resolve(t)):x})", t)
-        if e.op == "+":
-            # The typed twin of `_expr_go`'s identity arm, and the same defect:
-            # `+` fell through to the logical negation below. See that comment.
-            return _t_wrap(op, t)
-        if e.op == "not":
-            return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
-        raise NotImplementedError(
-            f"typed model: the unary operator `{e.op}` has no term in the "
-            f"semantic model; refusing rather than guessing")
+        return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go_t(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go_t(e.right, param, env, vtypes, call_types, scope)
@@ -2577,25 +2455,7 @@ def _expr_ast(e, scope=None) -> str:
         # itself wrong -- the bridge compared two renderings of `not` for a
         # program whose machine answer is MVN/NOT, and agreed about a different
         # program than the one that ran.
-        # `+` is the identity and `evalExpr`'s catch-all arm
-        # (`MojoExpr.unop _ operand => evalExpr … operand`) already evaluates it
-        # as one, so it needs no case in `lib/ProofLib.lean` — but it does need
-        # its own NAME here, because this mapping used to spell it `"not"`:
-        # `.get(e.op, "not")` is right for `not` and wrong for everything else,
-        # which is the same defect `_expr_go`'s unary arm had (see there). The
-        # two agreed with each other about `+` being a negation, so `simp`
-        # closed `eval_eq_mojo` over a program neither side had — and the run
-        # test caught it. An operator this table does not name is now refused
-        # rather than guessed.
-        if e.op == "not":
-            opname = "not"
-        elif e.op in ("-", "~", "+"):
-            opname = {"-": "neg", "~": "bnot", "+": "pos"}[e.op]
-        else:
-            raise NotImplementedError(
-                f"AST bridge: the unary operator `{e.op}` has no "
-                f"`MojoExpr.unop` name here, and the old table's catch-all "
-                f"(`\"not\"`) is how `+` came to be evaluated as a negation")
+        opname = {"-": "neg", "~": "bnot"}.get(e.op, "not")
         return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand, scope)}))'
     if isinstance(e, BinOp):
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
@@ -7676,23 +7536,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
                 if not _is_bit_test and (not _Xs or _fl is None):
-                    # `NotImplementedError`, not `ValueError`: this is the same
-                    # "I will not write a model I do not have" signal every
-                    # other refusal in this file raises, and the TYPE is what
-                    # two readers depend on.
-                    # `tools/formal_proof_census.py` classifies a
-                    # `NotImplementedError` as `refused` (rank 4, a statement
-                    # about the generator) and anything else that escapes as
-                    # `crash` (rank 5, "something was RAISED that is not a
-                    # refusal — a bug"), so the old spelling made
-                    # `formal/examples/dead_branch.mojo` — a program refused for
-                    # a reason stated in a sentence — read as the most alarming
-                    # class in the census. `test_formal.py` treats the two the
-                    # same way (a non-zero build), which is why nothing else
-                    # noticed.
-                    raise NotImplementedError(
-                        "unsupported: branch condition value flow "
-                        "(frame/flag unavailable)")
+                    raise ValueError("unsupported: branch condition value flow (frame/flag unavailable)")
 
                 def _rw_spills(tolerant, line_instrs, cur_instrs, state):
                     """The `rw` that resolves this path's spill reads, if any.

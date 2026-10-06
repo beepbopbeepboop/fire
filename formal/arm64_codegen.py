@@ -2644,7 +2644,7 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_stmt(s)
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
-    def _emit_exit(self, status, computed: bool = False) -> None:
+    def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
         raw Darwin trap.  Never returns, and nothing is emitted after it.
 
@@ -2682,25 +2682,6 @@ dylib_exports: list = None, globals_base: int = None,
         of the trap is how twenty call sites come to differ, and the flush is
         the part that is easy to forget at the twenty-first.
 
-        **`computed` is the one caller that has no immediate to put in X0**, and
-        it is a flag rather than a second exit because the flush is the part
-        that must not be duplicated. With it, the status is ALREADY in X0 (an
-        expression was emitted for it) and the two extra instructions are what
-        carry it across the `fflush` call — which clobbers every caller-saved
-        register, X0 included, and would otherwise leave the exit status as
-        whatever `fflush` returned. `STP X0, XZR, [SP,#-16]!` /
-        `LDP X0, XZR, [SP],#16` is the pair `_flush_pending_finally` already
-        emits for exactly this reason, and 16 bytes is chosen because the stack
-        this model keeps is 16-byte aligned, so the push cannot unalign the
-        frame's own invariant.
-
-        The mask is HERE and not in `model.raise_exit_status` because a
-        computed value does not exist until this point: `exit(3)` truncates to
-        a byte, so a `raise SystemExit(code())` where `code()` returns -1 must
-        leave 255 and not 2^64-1. Measured both ways, both architectures; the
-        row is `systemexit_with_a_computed_status` in
-        `test_formal_exceptions.py`.
-
         **What it costs the proof layer, stated rather than left to be found.**
         `arm64_step` cannot step past a `BL` (it takes the call's target, which
         is outside the image, and returns `none`), so a program whose image
@@ -2712,22 +2693,13 @@ dylib_exports: list = None, globals_base: int = None,
         `formal/examples/` emits NO exit trap at all (measured, `svc` absent from
         each entry function's range), so no example's proof changed.
         """
-        if computed:
-            self.asm.emit(encode_stp_sp_pre(0, 31))
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        if computed:
-            self.asm.emit(encode_ldp_sp_post(0, 31))
-            # `exit(3)`'s `status & 0xFF`, so a computed value out of byte range
-            # is the number the C library would deliver rather than the word the
-            # expression produced.
-            self.asm.emit(encode_and_xd_xn_imm(0, 0, 8))
-        else:
-            self.asm.emit(encode_movz_wd_imm(0, status))
+        self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self, status=1, computed: bool = False) -> None:
+    def _emit_diverge(self, status: int = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
@@ -2744,7 +2716,7 @@ dylib_exports: list = None, globals_base: int = None,
         passes nothing and gets the 1 the whole hierarchy leaves behind.
         """
         self._flush_pending_finally()
-        self._emit_exit(status, computed=computed)
+        self._emit_exit(status)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -2794,47 +2766,9 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_expr(value)
             self._emit_diverge()
             return
-        status = M.raise_exit_status(exc_name, value,
-                                 argument_is_int=self._sys_exit_status_is_int(
-                                     value))
-        if status is None:
-            # COMPUTED, and the only caller of `_emit_exit(computed=True)`: the
-            # status is not in the text, so it has to be a VALUE, and X0 is
-            # where an expression leaves one. The FIRST argument is emitted for
-            # its value here and the rest for their effects, rather than every
-            # argument being emitted twice — `raise SystemExit(code())` runs
-            # `code()` once, which is what the source says and what the
-            # `for arg in raise_arg_exprs(value)` loop below does for the
-            # non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
-                self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_exit(None, computed=True)
-            return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
-        self._emit_diverge(status)
-
-    def _sys_exit_status_is_int(self, value) -> bool:
-        """Is `raise SystemExit(value)`'s argument an INTEGER this build can
-        compute — `model.raise_exit_status`'s gate, asked with this function in
-        hand.
-
-        The one reader of it in this backend, and the reason it is a method and
-        not a module function is that it needs `self._vkinds`: the answer is
-        about the kinds of THIS function's names and calls, which
-        `_scan_value_kinds` has already computed WITH this backend's
-        `func_kind` hook and which `model.py` cannot rebuild — see
-        `model.raise_status_argument_is_an_integer`'s measurement of what a
-        hookless `ValueKinds` gets wrong about a `-> str` callee.
-        """
-        args = M.raise_arg_exprs(value) if value is not None else []
-        if not args:
-            return False
-        return bool(M.raise_status_argument_is_an_integer(
-            args[0], getattr(self, "_vkinds", None)))
+        self._emit_diverge(M.raise_exit_status(exc_name, value))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -5828,19 +5762,15 @@ ctor_field_value=self._ctor_field_value_for(name),
           which is the hand-off question and not this one, so `self._fd.write(s)`
           refuses with the receiver's SHAPE in the message rather than being
           lowered on the strength of a name it does not have.
-        * A CALL RESULT, and this arm was here for a long time as a stated
-  non-coverage — "so `open(p, "w").write(s)` refuses … because a method on a
-  call result never reaches this code at all". **It was not a refusal: the
-  method arm was not taken, so the chain reached the extern path as the C
-  library's `write(2)` on whatever the argument registers held, and the program
-  built, exited 0, printed its next line and wrote nothing.** `_is_value_receiver`
-  now answers True for a `CallExpr` (see its own docstring), so the method call
-  reaches here at all, and `model.is_open_call` — which already answers the
-  DESCRIPTOR question for this spelling — is what makes this arm fire rather
-  than refuse. The earlier note's other half still stands: the RECEIVER also has
-  to be lowered by whatever emits the call, which is `_emit_open`, and it is."""
-        if isinstance(expr, F.CallExpr):
-            return M.is_open_call(expr)
+        * A CALL RESULT, so `open(p, "w").write(s)` refuses. Not because a
+          descriptor there is unknowable — `model.is_open_call` answers it — but
+          because a method on a call result never reaches this code at all:
+          `_is_value_receiver` says a CallExpr is not a value receiver, so the
+          call is not a method call on this path. That is a real gap and a
+          separate bug (the receiver is also not lowered by `_emit_open`, so it
+          yields the descriptor with a mis-lowered open); it is recorded here
+          rather than papered over, because an arm of this function that can
+          never run would read as support for a shape that does not work."""
         if isinstance(expr, F.IdentExpr):
             return expr.name in self._fd_vars
         if isinstance(expr, F.MemberExpr):
@@ -6178,40 +6108,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         and then dies in the loader. A frame slot is explicitly NOT a
         register or spill home (`_collect_var_names` leaves it out for
         exactly that reason), so the membership test below has to be extended
-        rather than left to find it by accident.
-
-        **A CALL RESULT is a value too, and leaving it out was a SILENT WRONG
-        ANSWER rather than a refusal** — which is the worst of the three and is
-        why it is worth stating what happened. `open(path, "w").write(s)` is a
-        method call on the descriptor `open` returned; `_is_value_receiver`
-        answered False, so the method arm was never taken, `_callee_symbol`
-        flattened the chain to the bare name `write`, and the extern path called
-        the C library's `write(2)` with whatever was in the argument registers.
-        Measured on both architectures:
-
-            def main(n) -> Int:
-                open("/tmp/fw.txt", "w").write("hello\\n")
-                printf("done\\n")
-                return 0
-
-        builds green, exits 0, prints `done`, and **writes nothing** — no file
-        is created, because the inner `open` never ran in a way the outer call
-        could use. The identical program with the descriptor bound to a NAME
-        writes the file on both machines. So this was `write(2)` on a register
-        that held the address of the path string, which is the "program runs,
-        writes nothing and exits 0" outcome `VALUE_METHOD_RECEIVERS`'s own
-        comment describes for a descriptor this path cannot establish.
-
-        It is a value because a call returns one — `model.receiver_shape`'s own
-        table says so ("a call result is whatever that call was declared to
-        produce"), and the two backends share that reader, so the arm is a
-        shared decision rather than one emitter's. `model.is_open_call` already
-        answers the DESCRIPTOR question for `open`, so `_expr_is_fd` is asked
-        about this spelling too (its docstring records that it deliberately was
-        not, and why — that is the note this arm supersedes)."""
+        rather than left to find it by accident."""
         if isinstance(obj, F.StringLiteral):
-            return True
-        if isinstance(obj, F.CallExpr):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
@@ -9149,25 +9047,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                                                site[1]):
             self._emit_nested_frame_defaults(child, child_off)
 
-    def _emit_frame_bringup(self, st, offset: int) -> None:
-        """Bring ONE frame up: its slots at their class-level defaults, then its
-        own constructor's stores.
-
-        **Both halves are one method because a frame bring-up IS a construction,
-        and before this was one method the second half did not happen.** Mojo
-        `T(...)` calls `T.__init__`; the placement walk here wrote field DEFAULTS
-        and stopped, so a struct whose sole field holds a frame whose own struct
-        declares `__init__` came up at its class-level values. Measured, both
-        architectures, `Box()` over `struct Box: var inner: Opt` printing
-        `b=0` where CPython prints `b=41` — building, running, exiting 0, nothing
-        on stderr. The order is the language's: default-initialize, then run
-        `__init__`, and it is why the stores come after the loop rather than
-        being merged into it.
-
-        `nested_frame_constructor_stores` is `struct_construction_plan` asked
-        with a synthesized zero-argument call, so "which fields does this
-        `__init__` store" has ONE reader and this backend cannot answer it
-        differently from x86-64's."""
+    def _emit_frame_defaults(self, st, offset: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
         for slot, (kind, payload) in enumerate(
                 M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
@@ -9185,10 +9066,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._emit_mov_imm("X0", int(payload or 0))
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
-        self._emit_frame_constructor_stores(st, offset)
 
     def _emit_nested_frame_defaults(self, st, offset: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first, then its stores.
+        """`st`'s nested subtree, defaults first, deepest first.
 
         The same walk `model.struct_block_direct_children` describes, and it is
         the recursion that used to crash: it unpacked FOUR values out of
@@ -9208,44 +9088,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         `Inner2`'s defaults at 16, on top of `Inner`'s own frame, and the read of
         `o.inner.inner2.x` then returned a DIFFERENT garbage number on each
         architecture.
-
-        **The constructor's stores come after this level's defaults and before
-        the level above's**, which is the language's order: default-initialize,
-        then run `__init__`. Before this, the stores were never emitted at all
-        for a frame brought up this way, so `Box()` whose `inner: Opt` has an
-        `__init__` wrote 0 where CPython writes 41 — on both architectures, with
-        nothing refused and nothing printed. The stores come from
-        `model.nested_frame_constructor_stores`, which is `struct_construction_
-        plan` asked with a synthesized zero-argument call, so "which fields does
-        this `__init__` store" is the ONE reader's answer and not a second walk
-        of the body here.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, offset):
             self._emit_nested_frame_defaults(child, child_off)
-        self._emit_frame_bringup(st, offset)
-
-    def _emit_frame_constructor_stores(self, st, offset: int) -> None:
-        """This frame's own constructor's stores, at `offset + 8·slot`.
-
-        The register discipline is `_emit_frame_defaults`' and not
-        `_emit_block_store`'s, and the difference is the base: a construction
-        SITE's block is one fixed X29-relative address (`site[1]`) while a
-        nested frame's is `offset`, a distance INTO that block, so the two
-        cannot share a helper without the caller passing a site this walk does
-        not have. The store itself is the same three instructions.
-        """
-        stores, refusal = M.nested_frame_constructor_stores(
-            st, self._structs, self._frame_candidates, self._return_types)
-        if refusal is not None:
-            raise CodegenError(refusal)
-        for _field, slot, value in stores:
-            if isinstance(value, int):
-                self._emit_mov_imm("X0", value)
-            else:
-                self._emit_expr(value)
-            self._emit_frame_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+        self._emit_frame_defaults(st, offset)
 
     def _emit_frame_nested_addresses(self, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -9559,7 +9406,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # out of the tuple it is handed, so passing the nested pair brings a
             # subtree up at the offset the layout chose.
             self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_bringup(nested, site[1])
+            self._emit_frame_defaults(nested, site[1])
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the
@@ -12113,13 +11960,32 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _is_pure_expr(self, e) -> bool:
         """True when evaluating `e` can be neither observed nor fatal.
 
-        The allow-list and every word of why it is that narrow are in
-        `formal/model.py::is_pure_expression`, which is where they now live:
-        `formal/build.py`'s `_lower_builtin_extremum` asks the same question for
-        the same reason — a `TernaryExpr` names its operands twice — so this is
-        a delegation rather than a second copy of the answer.
-        """
-        return M.is_pure_expression(e)
+        Deliberately narrow, because CSEL evaluates BOTH arms. An arm holding
+        a call may print, mutate a blob, or hit a cap, and running it when its
+        value is thrown away is a behaviour change, not an optimisation. So the
+        allow-list is literals, locals, field reads, and arithmetic over them.
+
+        Container literals are excluded even though a list display is
+        side-effect-free in principle: a list arm reserves frame space for its
+        blob, and reserving both arms' worth at once is a frame-pressure
+        change for no benefit. Calls are excluded even for known-pure builtins,
+        because the builtin set is exactly what grows over time and a stale
+        allow-list here would silently change semantics when it does."""
+        if isinstance(e, (F.IntLiteral, F.StringLiteral, F.BoolLiteral,
+                          F.IdentExpr)):
+            return True
+        if isinstance(e, F.MemberExpr):
+            return self._is_pure_expr(e.obj)
+        if isinstance(e, F.UnaryOp):
+            return self._is_pure_expr(e.operand)
+        if isinstance(e, F.BinaryOp):
+            return (self._is_pure_expr(e.left)
+                    and self._is_pure_expr(e.right))
+        if isinstance(e, F.TernaryExpr):
+            return (self._is_pure_expr(e.condition)
+                    and self._is_pure_expr(e.then_val)
+                    and self._is_pure_expr(e.else_val))
+        return False
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a list/set/tuple blob."""

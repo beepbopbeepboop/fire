@@ -13,7 +13,7 @@ analysis is the 2026-10-03 one.
 
 **The terminal cause of the largest group on the row was a module this
 document does not mention**, and the map could not even name it:
-the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 records the row's 59 files
+`bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §4 records the row's 59 files
 as "33 blocked by `constants.mojo`" and then says the `uses:` line is
 **NOT MEASURED** — "the chain names this module by basename only and that
 basename is absent or ambiguous in this tree". It is ambiguous: this tree has
@@ -61,8 +61,7 @@ blocker on this row: `_io.mojo` went 23 → 56 because the 33 that used to stop 
 `constants.mojo` now get one level further and stop there instead. That is the
 shape this project's own instruments warn about — "a file's terminal cause is
 the first refusal its build walk reaches, so fixing one moves the file to the
-next with the count unchanged" (the `b13` round of
-`bugs/FORMAL_sweep_work_map.md` §4) —
+next with the count unchanged" (`FORMAL_sweep_work_map_2026-10-05_b13.md` §4) —
 and it is why a row count is an upper bound and not a coverage number.
 
 **What the change is worth is therefore not a row count, and claiming one would
