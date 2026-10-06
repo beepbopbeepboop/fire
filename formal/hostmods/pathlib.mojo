@@ -20,7 +20,7 @@ answers checked against CPython's own by `test_formal_os.py`. `pathlib` and
 name that answers it, because a module that answers a question twice is two
 implementations to keep in step, and this tree has already paid for one of
 those — a second implementation of a shift is
-`FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8`.
+`bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`.
 
 What is left is the part that is pathlib's own and posixpath has no name for:
 the DECOMPOSITION of a path into its name, stem, suffix and parent, the three
