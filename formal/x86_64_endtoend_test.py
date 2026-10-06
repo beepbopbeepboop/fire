@@ -697,21 +697,37 @@ _SUCCS = {
     # overrides only two, so a successor that also asserted `cf`/`of_` would be
     # a claim about a field the instruction does not set.
     #
-    # `$sh` is the count after the model's clamp, kept as one term because the
-    # lemma states it three times and a caller that inlined its own spelling
-    # would have to match all three.
+    # `x86_shift_post`, the model's own named successor, and NOT a
+    # re-derivation of it. The three rows here each spelled out the shift and
+    # then took ZF and SF from `x86_flags_logic`, which was the model as it
+    # stood before `formal/x86_64_model_fuzz.py --census` found three things
+    # wrong with it: the COUNT was clamped to 64 rather than masked to six bits
+    # (`shr r8, cl` with CL = 0x40 gave 0 here and 0x1e25f9b on the hardware),
+    # CF was never set at all, and `sar` reached for `x86_sign_extend32` — which
+    # is `movsxd`'s helper and extends bit 31, so it computed a 32-bit
+    # arithmetic shift and threw away the top half.
+    #
+    # The model was corrected and its lemmas followed it; these three rows did
+    # not, and each stale row is a `Type mismatch` naming the whole successor
+    # record and none of the fields that differ. Same mechanism as `setcc`
+    # below and `imul` further down, and the same rule: **a successor table is
+    # a copy of the model, so a correction to the model is a correction to
+    # every copy of it.** Naming `x86_shift_post` rather than restating it is
+    # what makes that automatic from now on — there is one place left to be
+    # wrong, and `x86_step_shl_imm8`/`_shr`/`_sar` are proved against it.
+    #
+    # `$digit` is the `/digit` field (4 shl, 5 shr, 7 sar) and `$k` the count
+    # read out of the byte at `m + 3` and MASKED, which is what the instruction
+    # means — not a pre-computed number.
     "shift_imm8:shl":
-        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
-        "($rm + x86_rex_b $rex)) <<< $sh) with rip := $next, "
-        "zf := ($fl).zf, sf := ($fl).sf }",
+        "{ x86_shift_post $s ($rm + x86_rex_b $rex) $digit "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) $k with rip := $next }",
     "shift_imm8:shr":
-        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
-        "($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
-        "zf := ($fl).zf, sf := ($fl).sf }",
+        "{ x86_shift_post $s ($rm + x86_rex_b $rex) $digit "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) $k with rip := $next }",
     "shift_imm8:sar":
-        "{ x86_set_reg $s ($rm + x86_rex_b $rex) (x86_sign_extend32 "
-        "(x86_get_reg $s ($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
-        "zf := ($fl).zf, sf := ($fl).sf }",
+        "{ x86_shift_post $s ($rm + x86_rex_b $rex) $digit "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) $k with rip := $next }",
     # `= true` explicitly.  The model's `if` is over a `Bool`, and the
     # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
     # the same way on both sides is what lets the hypothesis rewrite it.  It is
@@ -745,15 +761,40 @@ _SUCCS = {
         "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat, rsp := $s.rsp - 8, "
         "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat "
         "(UInt64.ofNat ($m + 5)) 8 }",
+    # `x86_set_reg_narrow … 1`, and NOT `x86_set_reg`: a `setcc` writes ONE byte
+    # and leaves the other 56 alone, which is what `x86_set_reg_narrow` says and
+    # what `x86_step_setcc_r8` concludes. This row was the second copy of the
+    # model's old semantics — the model had its narrow-write rule added
+    # (`x86_set_reg_narrow`, with `setcc al` on RAX = 0xdeadbeefcafebabe measured
+    # against the hardware) and the lemma followed it, and this table did not.
+    #
+    # So every `setcc` step was a `Type mismatch` naming the whole successor
+    # record and neither of the two fields that differ, which is the same
+    # mechanism as the `cqo` row's `x86_sign_extend32` above and B2's rule one
+    # level up: **a successor table is a copy of the model, so a change to the
+    # model is a change to every copy of it.** It was invisible for the reason
+    # `bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`
+    # records — no gate runs this file, so 26 of 26 `terminates` cases were red
+    # and nothing said so. Fixed here and pinned Lean-free by
+    # `test_formal_sweep_truth.py::TestX86EndToEndEmitter`.
     "setcc":
-        "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
+        "{ x86_set_reg_narrow $s $rmv 1 (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
         # `imul` reads its first multiplicand from the reg field -- the same field
-    # it writes -- so `$dst` appears on both sides of the product, and it sets
-    # no flags, so there is nothing else in the successor.
+    # it writes -- so `$dst` appears on both sides of the product. **It also
+    # SETS FOUR FLAGS**, through `x86_set_flag4`: ZF and SF from the product and
+    # CF and OF both from "the product is not its own sign extension", which is
+    # how the model detects the signed overflow of a multiply. This row said it
+    # set no flags, which was true of the model before the `imul` arm was
+    # corrected and false after; the same stale-copy mechanism as `setcc` and
+    # the shifts, and it was 9 of the 19 remaining failures.
+    #
+    # `$p` is the product, kept as one substitution because the lemma states it
+    # five times and a caller that inlined its own spelling would have to match
+    # all five.
     "imul_r64_r64":
-        "{ x86_set_reg $s $dst (x86_get_reg $s $dst * "
-        "x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
+        "(x86_set_flag4 { x86_set_reg $s $dst $p with rip := $next } $p "
+        "($p != x86_sign_extend64 $p) ($p != x86_sign_extend64 $p))",
 "alu_rr:cmp":
         "{ $s with rip := $next, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
@@ -1022,7 +1063,12 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # source register.  The mismatch then reads as an opaque "Type
         # mismatch" on a 14-field record.
         extra_succ = {"$dst": str(dst), "$rm": str(rm), "$reg": str(reg),
-                      "$rex": str(rex)}
+                      "$rex": str(rex),
+                      # The product, in the model's own spelling, for the
+                      # successor's `x86_set_flag4` — the flags are part of what
+                      # the instruction does and the row has to say so.
+                      "$p": "(x86_get_reg $s %d * x86_get_reg $s (%d + "
+                            "x86_rex_b %d))" % (dst, rm, rex)}
     elif form == "movsx_r64_r8":
         # `REX 0F BE /r`, so the ModRM is `raw[3]` — the same off-by-one as
         # `imul` and `setcc` above, and for the same reason: an `0F` escape puts
@@ -1095,20 +1141,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         rex, modrm = raw[0], raw[2]
         digit, rm = (modrm >> 3) & 7, modrm & 7
         extra_args = " %d %d %d" % (rex, modrm, rm)
-        # The count is the byte at `m + 3`, read as a byte and clamped, and it
-        # is emitted as the model's own expression rather than as the decoded
-        # number: the clamp is what makes a shift of 64 or more mean 64, so
-        # substituting the number here would state a different thing for any
-        # count outside 0..63.  `rc` is this file's name for what the lemma
-        # calls `code`.
-        sh = ("UInt64.ofNat (if (%s %d).toNat ≥ 64 then 64 else (%s %d).toNat)"
-              % (code_name, addr + 3, code_name, addr + 3))
-        a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
-        res = {"shl": "(%s <<< %s)" % (a, sh), "shr": "(%s >>> %s)" % (a, sh),
-               "sar": "(x86_sign_extend32 %s >>> %s)" % (a, sh)}[
-            form.split(":")[1]]
-        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$sh": sh,
-                      "$fl": "x86_flags_logic $s %s" % res}
+        # The count is the byte at `m + 3`, MASKED to six bits — which is what the
+        # instruction means, and what `x86_shift_post`'s `k` is — and it is
+        # emitted as the model's own expression rather than as the decoded
+        # number. The old spelling here clamped to 64, and that was one of the
+        # three things the model's own correction replaced; see the `_SUCCS`
+        # shift rows. `code_name` is this file's name for what the lemma calls
+        # `code`.
+        k = "((%s %d).toNat &&& 63)" % (code_name, addr + 3)
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$digit": str(digit),
+                      "$k": k}
     elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test", "alu_rr:and",
                 "alu_rr:or", "alu_rr:xor"):
         rex, modrm = raw[0], raw[2]
@@ -1907,41 +1949,94 @@ def _abs_step(prev, form, raw, addr, length):
     if form.startswith("shift_imm8:"):
         st.flag_regs = {src}
         a = st.get(src)
-        # The count is the byte at `m + 3`, which the model clamps at 64. A count
-        # this section will not reproduce exactly makes the DESTINATION unknown
-        # rather than a wrong number — the count is a byte of the image, not
-        # something to round.
-        n = raw[3]
-        if a is None or n > 31:
+        # `x86_shift_post`'s three facts, in the model's own spelling: the count
+        # is the byte at `m + 3` MASKED to six bits, `sar` is arithmetic across
+        # the WHOLE word, and all four flags are written.
+        #
+        # This row was the model as it stood before the fuzzer's census found
+        # the count clamped rather than masked, CF never set and `sar` reaching
+        # for `x86_sign_extend32` — the same three corrections the `_SUCCS`
+        # shift rows needed, because both are copies of one thing and a
+        # correction to the model is a correction to every copy of it.
+        #
+        # Masking rather than clamping is also what removed the `n > 31`
+        # refusal: the masked count is always in 0..63, every one of which this
+        # section can compute exactly, so a shift by 40 no longer makes the
+        # destination unknown. What remains unknown is an unknown OPERAND, and
+        # an unknown operand does not decide a branch — the tree walks both
+        # arms, which is B14's arrangement and not a loss.
+        n = raw[3] & 63
+        if a is None:
             st.put(src, None)
-            st.flags = dict(st.flags, zf=None, sf=None)
+            st.set_flags(None, None, None, None)
             return st
         op = form.split(":")[1]
+        if n == 0:
+            # A count of zero rewrites the destination with itself and moves no
+            # flag at all (`x86_shift_post`'s first arm), so this is not a
+            # flag-setting step however the encoding reads.
+            st.put(src, a)
+            return st
         if op == "shl":
             res = _u64(a << n)
         elif op == "shr":
             res = a >> n
         else:
-            # `x86_sign_extend32` first — bit 31 across the top word — and then
-            # the logical shift, so the two are one expression here and not two.
-            res = (_u64(0xFFFFFFFF00000000) if _msb(a & 0xFFFFFFFF) else a) >> n
+            # `x86_sar64`: the logical shift, then the top `n` bits forced to
+            # the SIGN bit — which is the same value as an arithmetic shift
+            # once the fill and the flag agree, and the only spelling that
+            # survives a negative operand.
+            res = _u64((a >> n)
+                       | (0xFFFFFFFFFFFFFFFF << (64 - n) if _msb(a) else 0))
         st.put(src, res)
-        # The shifts write ZF and SF and LEAVE CF and OF ALONE — the whole
-        # difference from every other flag-setting row, and the reason a `jcc`
-        # after a shift is decided from the flags the shift did NOT touch.
-        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res))
+        # CF is the LAST bit shifted out — bit `64 - k` going left, bit `k - 1`
+        # going right, and for `sar` too, since the bits that leave are the
+        # same bits. OF is defined only for a count of one, and `false` is the
+        # value that asserts least for any larger count.
+        cf = ((a >> (64 - n)) & 1 == 1) if op == "shl" else ((a >> (n - 1)) & 1 == 1)
+        of_ = (n == 1 and ((_msb(a) != _msb(res)) if op == "shl"
+                           else (_msb(a) if op == "shr" else False)))
+        st.set_flags(res == 0, _msb(res), cf, of_)
         return st
     if form == "imul_r64_r64":
+        # `imul` sets all FOUR flags, and this row said it set none — the third
+        # copy of that one staleness, and the one the `_SUCCS` fix cannot reach,
+        # because this walk is what DECIDES a `jcc` after a multiply and a
+        # decision made from flags the instruction overwrote is a decision
+        # about nothing. ZF and SF come from the product; CF and OF are both
+        # "the product is not its own sign extension", which is how a signed
+        # multiply's overflow is detected.
         a, b = st.get(dst), st.get(src)
-        st.put(dst, None if a is None or b is None else _u64(a * b))
-        return st                      # and no flags, which is the model's row
+        st.flag_regs = {dst, src}
+        if a is None or b is None:
+            st.put(dst, None)
+            st.set_flags(None, None, None, None)
+            return st
+        p = _u64(a * b)
+        st.put(dst, p)
+        # CF and OF are `p != x86_sign_extend64 p`, and that is "the product is
+        # neither 0 nor all ones" — NOT "the product is non-negative": a
+        # positive product with the sign bit set also fails to fit, which is
+        # exactly the case `movsx` produces by loading a byte.
+        fits = p in (0, 0xFFFFFFFFFFFFFFFF)
+        st.set_flags(p == 0, _msb(p), not fits, not fits)
+        return st
     if form == "setcc":
-        # `x86_set_reg` writes 1 or 0, zero-extended — the two values the model
-        # narrows to (`x86_trunc32_zero`, `x86_trunc32_one`). The destination is
-        # the bare `modrm & 7` and carries NO REX.B, which is `_resolve`'s own
-        # reading of this row and the one this follows.
+        # A `setcc` writes ONE byte and leaves the other 56 alone, so this is
+        # not `put(rm, 0 or 1)` — that would zero a destination whose upper
+        # bits the model keeps, and a later decision taken on this register
+        # would then be about a value the machine never had. `x86_set_reg_narrow`
+        # is the model's rule: replace the low byte, keep the rest.
+        #
+        # The destination is the bare `modrm & 7` and carries NO REX.B, which is
+        # `_resolve`'s own reading of this row and the one this follows.
         v = _abs_cond(raw[1] - 0x90, st)
-        st.put(rm, None if v is None else (1 if v else 0))
+        if v is None:
+            st.put(rm, None)
+        else:
+            old = st.get(rm)
+            st.put(rm, None if old is None
+                   else _u64((old & ~0xFF) | (1 if v else 0)))
         return st
     st.wipe()
     return st
@@ -2054,7 +2149,13 @@ _SIMP_FORMS = {
                        "x86_trunc32", "x86_sign_extend32"),
     "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
     "cqo": ("x86_cqo",),
-    "setcc": ("x86_get_reg", "x86_set_reg", "x86_trunc32"),
+    # `x86_set_reg_narrow` is here for the same reason the successor above names
+    # it: this tuple is the `simp` set a DECISION on this path is proved with,
+    # and a `simp` that cannot unfold the definition the successor is built
+    # from cannot reduce the state it compares. `x86_trunc32` stays because the
+    # narrow write's mask arithmetic is in terms of `x86_mask`.
+    "setcc": ("x86_get_reg", "x86_set_reg", "x86_set_reg_narrow",
+              "x86_trunc32"),
     "call_rel32": ("UInt64.ofNat", "mem_write_bytes"),
     "ret": ("mem_read_bytes",),
     "leave": ("mem_read_bytes",),
@@ -2808,8 +2909,17 @@ def _byte_list(insns, code, base):
 #: alone, named here because this is the one consumer that needs them.  See the
 #: section "A register write does not change memory" in that file for why they
 #: exist at all and why they are not `@[simp]`.
+#: `x86_set_reg_narrow_mem`, `x86_set_flag4_mem` and `x86_shift_post_mem` are
+#: here because the successor table now quotes those three wrappers — `setcc` is
+#: a NARROW register write, `imul` writes its flags through `x86_set_flag4`, and
+#: every shift goes through `x86_shift_post`. Each is the same claim as the five
+#: above, and the reason it is needed is the same: a `.mem` projection through a
+#: wrapper that does not have one stops at the first register write instead of
+#: passing it, which is what makes the closing read computable at all.
 _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
-               "x86_flags_add_mem", "x86_flags_sub_mem")
+               "x86_flags_add_mem", "x86_flags_sub_mem",
+               "x86_set_reg_narrow_mem", "x86_set_flag4_mem",
+               "x86_shift_post_mem")
 
 #: The five state-valued wrappers' DEFINITIONS, which the same file needs
 #: unfolded for a different projection.  `_MEM_LEMMAS` gets `.mem` through a
@@ -2827,8 +2937,14 @@ _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
 #: full `simp`, which also ran the default set over every register's arithmetic,
 #: and that is the 1190 s the bug doc measured. Nothing here decides an
 #: inequality or folds a literal.
+#: `x86_set_reg_narrow`, `x86_set_flag4` and `x86_shift_post` are here for the
+#: reason `_MEM_LEMMAS` grew: they are the DEFINITIONS of the three wrappers
+#: above, and a REGISTER read out of a shift's successor is a projection the
+#: simplifier can only reduce once the wrapper is unfolded.
 _WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
-                 "x86_flags_logic", "x86_flags_add", "x86_flags_sub")
+                 "x86_flags_logic", "x86_flags_add", "x86_flags_sub",
+                 "x86_set_reg_narrow", "x86_set_flag4", "x86_shift_post",
+                 "x86_mask", "x86_sign_extend64")
 
 
 def _rex_byte_lemmas(shapes):

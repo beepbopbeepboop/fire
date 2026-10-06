@@ -2964,6 +2964,67 @@ class TestX86EndToEndTables(unittest.TestCase):
                 % (form, len(self.ET._FORMS[form][2]), lemma, len(hyps),
                    ", ".join(hyps)))
 
+    def test_every_row_applies_the_state_wrappers_its_lemma_concludes(self):
+        """**A successor table is a copy of the model, so it goes stale when the
+        model is corrected.** Three of this file's rows did, and each one cost a
+        `Type mismatch` on every generated proof:
+
+        | form | the row said | `lib/X86.lean` says | why the model changed |
+        |---|---|---|---|
+        | `setcc` | `x86_set_reg` | `x86_set_reg_narrow s rmv 1` | a one-byte write leaves the other 56 alone; `formal/x86_64_model_fuzz.py --census` measured `setne al` on RAX = 0xdeadbeefcafebabe |
+        | `shift_imm8:*` | `x86_set_reg` + `x86_flags_logic` | `x86_shift_post` | the count was clamped not masked, CF was never set, and `sar` reached for `x86_sign_extend32` |
+        | `imul_r64_r64` | `x86_set_reg`, no flags | `x86_set_flag4 …` | a signed multiply's overflow lands in ZF/SF/CF/OF |
+
+        Nothing caught any of them. The step application elaborates — a wrong
+        successor and a right one are both `Option`-valued terms — so the
+        failure only appears as `Type mismatch` with both 22-field records
+        printed and neither of the two fields that differ named, and no bucket
+        ran the file, so 26 of 26 `terminates` cases were red and nothing said
+        so.
+
+        The invariant is narrow and derivable rather than a list: **a
+        state-valued wrapper in a successor row must be one the lemma's own
+        conclusion applies, and every one the conclusion applies must be in the
+        row.** Which names are state-valued is read off `lib/X86.lean` by the
+        `_mem` lemma convention above them — a wrapper with a `_mem` lemma is
+        one the closing read has to be able to see through — so adding a wrapper
+        to either side without the other fails here, and adding the `_mem` lemma
+        is what makes it visible at all.
+
+        Lean-free, and the whole point: each of the three discoveries cost a
+        100-second proof and most of them cost a corpus sweep to notice at all.
+        """
+        import re as _re
+        wrappers = {m.group(1) for m in
+                    _re.finditer(r"theorem (x86_[A-Za-z_0-9]+)_mem\b", self.src)}
+        self.assertTrue(wrappers,
+                        "no `_mem` lemma found in lib/X86.lean: the convention "
+                        "this reads the state-valued wrappers off is the one "
+                        "that makes them visible")
+        used = lambda t: {n for n in _re.findall(r"x86_[A-Za-z_0-9]+", t)
+                          if n in wrappers}
+        for form in sorted(self.ET._FORMS):
+            lemma = self.ET._FORMS[form][0]
+            i = self.src.index("theorem %s " % lemma)
+            # The statement is everything from `theorem` to its `:= by`, so a
+            # proof's own `have` cannot leak into the comparison.
+            stated = self.src[i:self.src.index(":=", self.src.index(
+                "x86_step", i))]
+            row, model = used(self.ET._SUCCS[form]), used(stated)
+            self.assertEqual(
+                row - model, set(),
+                "%s's successor applies %s and %s concludes with %s: the row "
+                "is a second, stale statement of the model's semantics, and "
+                "the mismatch is a `Type mismatch` printing both whole "
+                "records" % (form, sorted(row - model), lemma,
+                             sorted(model or ["the state itself"])))
+            self.assertEqual(
+                model - row, set(),
+                "%s concludes with %s and its successor applies %s: the row is "
+                "missing what the instruction DOES, which for `imul_r64_r64` "
+                "was its four flags" % (form, sorted(model - row),
+                                        sorted(row or ["nothing"])))
+
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
         either of them fails here rather than in every generated proof.

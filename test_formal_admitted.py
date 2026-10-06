@@ -1348,7 +1348,15 @@ AXIOM_CLOSURE = {
     # somebody typed.
     "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    "X86": (144, 2, 141, 0, 1, 0),
+    # +3 asked and +3 clean, and nothing else moves. The three are the `_mem`
+    # lemmas `formal/x86_64_endtoend_test.py`'s successor table now needs
+    # (`x86_set_reg_narrow_mem`, `x86_set_flag4_mem`, `x86_shift_post_mem`): a
+    # `.mem` projection through a wrapper the table quotes and the library has
+    # no lemma for stops there and drags the program's input into the term the
+    # closing read has to evaluate. `clean` moves with `asked` because each is
+    # an `rfl`/`split`-level proof that reaches no decide axiom — which is the
+    # point of them.
+    "X86": (147, 2, 144, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and

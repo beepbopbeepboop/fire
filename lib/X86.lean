@@ -399,6 +399,25 @@ theorem x86_flags_add_mem (s : X86State) (a b res : UInt64) :
 theorem x86_flags_sub_mem (s : X86State) (a b res : UInt64) :
     (x86_flags_sub s a b res).mem = s.mem := rfl
 
+/-! `x86_set_reg_narrow_mem` below is the same claim about one more
+    state-valued function, and it is here because
+    `formal/x86_64_endtoend_test.py`'s successor table now applies it: a `setcc`
+    is a NARROW register write. The emitter's closing read gets a state out of a
+    chain of successor equations by projecting `.mem` through every wrapper in
+    it, and a `.mem` projection through a `match` or an opaque `def` stops
+    there and drags the whole register file — `rdi`, and so the program's input
+    — into a term `native_decide` refuses. So each wrapper needs one of these,
+    and the emitter's
+    `test_every_state_wrapper_the_successor_table_quotes_is_unfoldable` reads
+    `_SUCCS` and fails if a wrapper is added without one. The two flag wrappers,
+    `x86_set_flag4_mem` and `x86_shift_post_mem`, are with their definitions
+    further down. -/
+
+theorem x86_set_reg_narrow_mem (s : X86State) (i sz : Nat) (v : UInt64) :
+    (x86_set_reg_narrow s i sz v).mem = s.mem := by
+  unfold x86_set_reg_narrow x86_set_reg
+  split <;> rfl
+
 /-- ZF and SF from `res`, and CF and OF given outright: the shape every
     shift shares, and the shape `x86_flags_logic` cannot express because it
     CLEARS CF where a shift SETS it.
@@ -619,6 +638,25 @@ def x86_shift_post (s : X86State) (i digit : Nat) (a : UInt64) (k : Nat) :
       else if digit = 5 then x86_msb a
       else false
     x86_set_flag4 (x86_set_reg s i res) res bitOut ofBit
+
+/-- …and so is its memory, which is the same claim the five other wrappers'
+    `_mem` lemmas make.  Both of these exist because
+    `formal/x86_64_endtoend_test.py`'s successor table now quotes
+    `x86_shift_post` and `x86_set_flag4`: an `imul` writes its four flags
+    through the latter, and every shift goes through the former, so a
+    generated proof's closing read projects `.mem` through both.  Without
+    these that projection stops at the shift and drags the whole register file
+    into a term `native_decide` refuses. -/
+theorem x86_set_flag4_mem (s : X86State) (res : UInt64) (cf ofBit : Bool) :
+    (x86_set_flag4 s res cf ofBit).mem = s.mem := rfl
+
+theorem x86_shift_post_mem (s : X86State) (i digit : Nat) (a : UInt64)
+    (k : Nat) :
+    (x86_shift_post s i digit a k).mem = s.mem := by
+  simp only [x86_shift_post]
+  split
+  · exact x86_set_reg_mem s i a
+  · simp only [x86_set_flag4, x86_set_reg_mem]
 
 /-- A signed number as the 64-bit PATTERN the machine keeps: two's complement,
     truncated to 64 bits.
