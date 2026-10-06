@@ -6,55 +6,6 @@ step" has LANDED.** Found on `construct:sweep5:hostmods-core` (2026-10-02), whos
 brief was to add `functools` to `formal/hostmods/` alongside `collections`,
 `enum` and `contextlib`. `enum` and `contextlib` landed; this is the other two.
 
-**Status 2026-10-05 (`work/formal23-4`): `reduce` is WRITABLE and the module is
-blocked by ONE thing that is not a `functools` capability at all — the module was
-WRITTEN, measured on both architectures, and not landed, and the reason is
-the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`).** Read
-this before §"The exact next step", which is now two steps out of date.
-
-    $ printf 'import functools\n\ndef add2(a, b):\n    return a + b\n\ndef main() -> int:\n    printf("r=%d\\n", functools.reduce(add2, [1, 2, 3, 4], 0))\n    return 0\n' > .tmp/ft/fmod.mojo
-
-With a `formal/hostmods/functools.mojo` exporting `reduce` and `functools`
-removed from `formal/imports.py`'s host-module set:
-
-| shape | this tree | CPython |
-|---|---|---|
-| `reduce(add2, [1,2,3,4], 0)` | `r=10` arm64, `r=10` x86-64 | 10 |
-| `reduce(mul2, [1,2,3,4], 1)` (non-commutative) | `m=24` arm64, `m=24` x86-64 | 24 |
-| `reduce(add2, [7], 100)` (one element) | `o=107` | 107 |
-| `reduce(add2, [], 5)` (empty) | `e=5` | 5 |
-| `reduce(add2, [1,2,3,4])` (CPython's 2-arg form) | refused: `missing required argument 'initial'` | 10 |
-| `@functools.lru_cache(maxsize=1)` on a function | **BUILDS, exit 0, prints 89** | memoised |
-
-So every capability §"The exact next step" lists as missing is now present —
-a first-class CALLABLE (step 1, 2026-10-04) and `len()` of a list PARAMETER
-(this tree, `model.parameter_kinds_by_call_site`) — and one refusal has MOVED
-rather than gone: CPython's two-argument `reduce` cannot be a defaulted
-`initial`, because a default is not materialised across a dylib boundary
-(`FORMAL_default_argument_not_applied_across_a_dylib`) and a probe module with
-`initial = 0` answers **0** to `reduce(mul2, [1,2,3,4])` where CPython answers
-24. A required `initial` turns that into a refusal, which is the safe direction.
-
-**What stops the module, then, is the last row, and it is a different bug from
-anything in this document.** A decorator on this path is parsed and dropped, so
-the module's ABSENCE is the only thing refusing `@functools.lru_cache`; publish
-a `functools` and that program builds and runs and does not memoise. The bare
-attribute read `functools.lru_cache` refuses correctly and well (naming the
-module, the missing name and what the module publishes), so the refusal
-machinery is there — it is only the DECORATOR spelling that never asks. That is
-the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`), and its
-§"The exact next step" also carries the row that constrains the fix
-(`test_dataclasses_formal.py`'s `@dataclasses.dataclass` passes for the SAME
-reason and must keep passing).
-
-**What this session did NOT do, deliberately:** land the module. Writing one
-whose 19 absent names are honestly refused and whose 1 present name is checked
-against CPython is a day's transcription, and it would have turned a green
-`functools-absent` group red — a REGRESSION, because the group's own comment
-says the decorator spelling is the one program that would build and skip the
-work it asked for. A missing capability that refuses is better than a present
-one that lies, and this is the case where that ordering is the whole decision.
-
 **Status 2026-10-04 (`work/formal29-3`): step 1 is DONE — a first-class function
 value is a CODE ADDRESS on this path — so §"What I saw" §2's headline measurement
 is inverted, and the blocker `reduce` hits is a different one entirely.** Read this
@@ -88,22 +39,13 @@ build: len(xs) is len() of a value classified as 'int', and an integer has no
 ```
 
 A LIST PARAMETER, on both architectures, with `xs[i]` on the same parameter
-answering correctly. Filed as its own document, and **that document is now
-DELETED — the reader it names is fixed** (`parameter_kinds_by_call_site`
-claims a counted blob from a parameter's CALL SITES, so `len(xs)` is the count
-field where it already was for the subscript; measured on both architectures,
-`reduce(add2, [1, 2, 3, 4], 0)` builds, runs and answers CPython's `10`).
-One correction to the filed doc's table, which is why it is worth repeating
-here: its ANNOTATED rows (`List[Int]`, `List[Cell]`) had already been answered
-by `ValueKinds.kind_of`'s `declared_param_kind` fallback when it was filed, so
-only the UNANNOTATED spelling was ever live. Both are pinned now, side by side,
-in `test_formal_run.py`'s `both_arch_len_of_a_container_annotated_parameter`
-(the guard) and `both_arch_len_of_an_unannotated_parameter_every_call_site_
-passes_a_list` (the fix).
-
-**So `reduce` is WRITABLE as of this commit**, measured end to end on both
-architectatures, and what stands between it and a `formal/hostmods/functools.mojo`
-is step 2 alone.
+answering correctly. Filed as
+`bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+subscripts.md`, which measures the whole shape (annotation included: neither
+`List[Int]` nor `List[Cell]` helps, and a literal loop bound answers CPython's
+`10`, so the count field is reachable and one reader is asking the wrong
+question). **`reduce` is therefore two small steps from writable where §"The exact
+next step" says it is one big one.**
 
 **What has NOT moved, and is the rest of this document.** Step 2 — DECORATOR
 application — is unchanged and is `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s
@@ -318,18 +260,6 @@ the target as a gap in the backend.
 
 ## The exact next step
 
-**SUPERSEDED by the Status at the top — read that first.** What is below is the
-plan as written on 2026-10-02 and it is wrong about two of its three steps.
-Step 1 LANDED on 2026-10-04 (a function value is a code address) and the
-`len()`-of-a-list-parameter step it did not know about landed on 2026-10-05, so
-the list below is one step long and its order is stale. What survives, and is
-now the whole of the remaining work, is step 2 — with the addition the 2026-10-05
-Status measured: step 2 alone is not enough, because "a decorator is parsed and
-never applied" is only safe while every decorator a caller can spell is ALREADY a
-refusal. The next step is therefore
-the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`)'s, whose
-§"The exact next step" carries the check and the pinned row that constrains it.
-
 Not a module. The root capability is **a first-class function value**, and it is
 the same one `collections` needs for a different reason and that
 `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §2 already
@@ -340,70 +270,16 @@ and not a design.
 
 Order of work, if it is picked up:
 
-1. ~~A function value as a parameter and as a return — a lowering in both
-   backends plus a representation rule, since a callee and a caller must agree
-   on what a function IS (a code address; `formal/model.py`'s
-   `pointer_value_model` already says what a word can and cannot denote).~~
-   **DONE, 2026-10-04.** See the 2026-10-04 Status at the top.
+1. A function value as a parameter and as a return — a lowering in both backends
+   plus a representation rule, since a callee and a caller must agree on what a
+   function IS (a code address; `formal/model.py`'s `pointer_value_model` already
+   says what a word can and cannot denote).
 2. Decorator application — separately, and before any decorator is exported by a
    hostmod. The two are related (a decorator IS a function value) but a
    half-working version of this that unblocks `reduce` and leaves `@wraps`
-   silently dropped is worse than neither. **AND, measured 2026-10-05: a
-   decorator whose name does not resolve must be REFUSED rather than ignored, or
-   publishing any `functools` name turns `@functools.lru_cache` into a program
-   that runs and skips the memoisation it asked for** — that is
-   the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`), and it
-   is the actual gate on step 3.
+   silently dropped is worse than neither.
 3. `functools` then follows, and `test_formal_core_hostmods.py` grows a group
-   for it the way `enum` and `contextlib` grew theirs — with `reduce` removed
-   from its `absent` list and a `functools` group beside `ctx` that compares
-   `reduce` against CPython's own over the four shapes the 2026-10-05 Status
-   measured, including the empty sequence and the one-element one.
+   for it the way `enum` and `contextlib` grew theirs.
 
 Until step 2, no `functools` name may be exported, and the test's
 `functools`-shaped absence group is what keeps that true.
-
-## Update 2026-10-05 (`formal37-2`): the corpus needed exactly NONE of the above,
-## and that is the finding this document now has to carry
-
-**Every one of `version.py`'s and this tree's `functools` uses turned out to be
-spellable without a decorator and without a function value**, so none of steps 1-3
-moved a file, and the module is now not needed by this tree at all.
-
-`version.py`'s was the only `functools` reach in the corpus — the `alone 1` row
-of `tools/formal_host_import_wall.py` over 751 files, and §"§2 The three
-0-terminal rows" of
-the thirteen-row host-import doc (deleted in 12774624) had it as "NOT
-WORK: every name is a decorator or a function value". It was
-`@functools.lru_cache(maxsize=1)` on a **zero-argument** function, and that is
-the whole of what `lru_cache(maxsize=1)` does there: compute once. Two module
-globals are that. `functools` is now **absent from the wall measurement's
-output** — not `alone 0`, absent, because `alone 1 / reach 1` was its whole
-column.
-
-**So the ordering above is right and the framing was wrong.** Steps 1 and 2 are
-still what a `functools.mojo` needs, and step 3 is still the module's
-precondition — but they are now needed by **no file in this tree**, and a
-document that says "until step 2, no `functools` name may be exported" without
-saying "and nothing here wants one any more" reads as a queue item when it is a
-closed capability question.
-
-**What did NOT come off with it, so the remaining three names in §"TYPE-OR-OBJECT"
-are untouched by this:** `wraps`, `reduce` and the rest are still refused, and
-still need steps 1-2. The `functools`-shaped absence group in
-`test_formal_core_hostmods.py` is still the safeguard, and it is still load-bearing
-for a module someone might write later.
-
-**And the closure this document's reasoning leaned on had a hole in it**, found
-while removing the row: `version.py` was cited by
-`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §4 as the
-worked example for `mojo/backend_gimple/device_select.py::_decorator_names`'s
-`CallExpr` branch — the TypeError this document's §"not hypothetical" describes —
-and it was the ONLY call-shaped decorator in `fire.py`'s 75-file import closure,
-with **no direct unit test** for that branch. So removing it did trade a file of
-the wall for a hole in a compiled-path test, exactly as that document said it
-would. The hole is closed by
-`test_metal_codegen.py::TestDeviceSelect::test_a_parameterized_decorator_is_its_callees_name`,
-which pins all four decorator shapes on source the test supplies; deleting the
-`CallExpr` arm fails it. Both docstrings that cited `version.py` are updated to
-name the test instead of the file.

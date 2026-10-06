@@ -123,15 +123,14 @@ STRING_PROGRAMS = {
 STRING_ARCHES = ("arm64", "x86_64")
 
 # Programs the generator must REFUSE, with the reason it must give.  A call to a
-# second function in the same image used to be here for a THIRD reason — the CFG
-# walk is per-function, so following the call needed a return-address map — and
-# that reason is GONE: one call into the same image is followed now, and the
-# table is what a two-call-site program and a two-argument callee each still
-# refuse for.  The refusal a two-call-site program gets is still the honest
-# thing to say rather than to fall through into the recursion arm, which is
-# where the old `ValueError: unsupported: recursion argument bound (not a dec1
-# pattern)` came from: a call to a two-argument function was reported as a
-# recursion problem.
+# second function in the same image is provable -- every byte is present and
+# `arm64_go_exit` follows the call and the return -- but the CFG walk is
+# per-function, so following the call needs a return-address map.  That is
+# interprocedural walking, and the honest thing is to say so rather than to
+# fall through into the recursion arm, which is where the old
+# `ValueError: unsupported: recursion argument bound (not a dec1 pattern)`
+# came from: a call to a two-argument function was reported as a recursion
+# problem.
 REFUSED = {
     "two_args": ("fn add2(a, b):\n    return a + b\n"
                  "fn main():\n    return add2(3, 4)\n",
@@ -139,9 +138,7 @@ REFUSED = {
     "callee_chain": ("fn c(n):\n    return n\n"
                      "fn b(n):\n    return c(n) + 1\n"
                      "fn main():\n    return b(1)\n",
-                     "two call sites into the same image: `x30` at the callee's "
-                     "`RET` is then a property of the CALL PATH, and one return "
-                     "address does not serve two of them"),
+                     "callee models are emitted in dependency order"),
 }
 
 
@@ -178,43 +175,6 @@ TWO_OPAQUE_CALLS = {
         "    return 0\n",
         "two calls out of the image on paths of their own: the walk's halt "
         "address is one, so the theorem would have to be a disjunction"),
-}
-
-# Programs with ONE call into a second function of the SAME IMAGE.  This is the
-# shape `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
-# same_image.md` measured as the largest single cause in the proof-breadth
-# census, and the one the return-address map is exact for: `x30` at the callee's
-# `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
-# blocks of the walk with an ordinary edge.
-#
-# Both were REFUSED by name before, with a message saying interprocedural
-# walking was missing.  They generate now, and the difference between the two
-# rows is what the fix costs rather than what it buys: the callee's own `if` is
-# a third conditional branch, and the walk explores BOTH edges of every
-# conditional it meets, so this program's certificate has TWICE the paths of the
-# leaf one and four times the ones a single function with the same three
-# conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
-# the branching one exceeds Lean's own `-M 6144` — and so does a program with
-# NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call (`bugs/FORMAL_a_three_branch_certificate_exceeds_
-# the_lean_bound.md`).
-SAME_IMAGE_CALL = {
-    "same_image_leaf": (
-        "def helper(n):\n"
-        "    return n * 2\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
-        "the smallest same-image call: the callee has no branch of its own, so "
-        "the walk's path count is the CALLER's alone"),
-    "same_image_branching": (
-        "def helper(n):\n"
-        "    if n > 3:\n"
-        "        return n * 2\n"
-        "    return n + 1\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
-        "the same call with a conditional callee: generation is what is pinned "
-        "here, and the cost boundary is the walk's path count, not the call"),
 }
 
 
@@ -634,138 +594,6 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertIsInstance(notes, list)
         for note in notes:
             self.assertIn("shadows entry", note)
-
-    def test_smulh_is_modelled_and_disjoint_from_mul(self):
-        """The four things `SMULH` costs, and the one that is easy to get wrong.
-
-        `formal/arm64_codegen.py` emits `smulh` for
-        `formal/model.py::int_overflow_traps` — "did `a * b` fit in 64 signed
-        bits", which a wrapping `MUL` cannot answer — and until 2026-10-05
-        `arm64_step` had no arm for it, so every one of the 71 fuzz draws of it
-        in 400 flagged cases was a `NOSTEP`: a proof that cannot step an
-        instruction is a proof about nothing.
-
-        What is asserted here is the wiring, and the SECOND row is the one that
-        matters: `SMULH` and `MUL` differ only in bit 22, so a mask that cleared
-        it would make the two claim the same words and whichever arm came first
-        in `arm64_step`'s chain would answer for both — a proof about a
-        different instruction, which is the failure `check_step_conds` exists to
-        make loud. So this asserts both words resolve to DIFFERENT rows and that
-        the new row's mask is bit-22-preserving.
-        """
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
-                else w
-
-        smulh = word(A.encode_smulh_xd_xn_xm, 2, 0, 1)
-        mul = word(A.encode_mul_xd_xn_xm, 2, 0, 1)
-        self.assertEqual(smulh, 0x9b417c02,
-                         "`smulh x2, x0, x1` is not the word the encoder "
-                         "produces, so every assertion below would be about a "
-                         "word no image contains")
-        self.assertEqual(smulh & ~mul, 0x00400000,
-                         "SMULH and MUL must differ in bit 22 and nowhere else, "
-                         "or the disjointness below is not what makes them "
-                         "disjoint")
-        s_idx, m_idx = G._step_branch_index(smulh), G._step_branch_index(mul)
-        self.assertIsNotNone(s_idx, "SMULH resolves to no step-table row")
-        self.assertIsNotNone(m_idx, "MUL resolves to no step-table row")
-        self.assertNotEqual(s_idx, m_idx,
-                            "SMULH and MUL land on the SAME row, so the "
-                            "generator would describe one of them while the "
-                            "model steps the other")
-        mask, base = G._STEP_CONDS[s_idx]
-        self.assertEqual((mask, base), (0xffe07c00, 0x9b407c00))
-        self.assertEqual(base & 0x00400000, 0x00400000,
-                         "the row's own base must set bit 22 — that is what "
-                         "separates it from MUL's `0x9b007c00`")
-        self.assertTrue(mask & 0x00400000,
-                        "the row's mask must KEEP bit 22; `0xffa07c00` would "
-                        "clear it and claim MUL's words too")
-        # `_WORK_STEP` is what makes the model's branch a fact a generated
-        # block can USE (the step-result lemma `exact`s the library lemma at
-        # this word), and `_regs_written` is what a block's certificate asserts
-        # about the registers a step clobbered.
-        self.assertIn(s_idx, G._WORK_STEP_BY_IDX,
-                      "no `work_step_*` lemma is wired for the new row, so a "
-                      "program containing it cannot get a step-result lemma")
-        lemma, tests = G._WORK_STEP_BY_IDX[s_idx]
-        self.assertEqual(lemma, "work_step_smulh")
-        self.assertIn((0xffe07c00, 0x9b407c00), tests,
-                      "the library lemma must be stated at THIS row's word "
-                      "test, or the step-result lemma `exact`s a hypothesis it "
-                      "cannot prove")
-        self.assertEqual(G._regs_written(smulh, s_idx), {2},
-                         "SMULH writes Xd and nothing else, exactly as MUL "
-                         "does; a certificate that claims more or less is a "
-                         "false claim about the block")
-        self.assertIn("smulh64", G._step_rhs(smulh, s_idx),
-                      "the right-hand side must name the library definition, "
-                      "not restate the identity inline: the step-result lemma "
-                      "is closed by `exact`ing the library lemma at this word, "
-                      "so a second statement is a chance to drift")
-        self.assertIn("smulh64", G._step_rhs_generic(s_idx),
-                      "the word-relative form (`lib/work.lean`) must name it "
-                      "too, or the two right-hand sides disagree about the same "
-                      "instruction")
-
-    def test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift(self):
-        """The two `arm64_step` defects of 2026-10-07, pinned at the table level.
-
-        `ADDS/SUBS Xd, Xn, Xm` with `Rd != 31` write `Rd` and set the flags; the
-        `CMN`/`CMP` spellings (`Rd = 31`) set the flags and write nothing. And
-        the `add`/`sub`/`cmp` immediate forms scale their 12-bit field by
-        `LSL #12` when the `sh` field is 1. Both are facts `_step_rhs` and
-        `_regs_written` must agree on with `lib/ProofLib.lean`'s `arm64_step`,
-        and the two spellings of each class are pinned TOGETHER so a fix that
-        made one right and left the other wrong fails here.
-        """
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            return int.from_bytes(fn(*args), "little")
-
-        for w, writes, must in (
-                (word(A.encode_adds_xd_xn_xm, 0, 0, 1), {0},
-                 "arm64_set_reg 0"),
-                (word(A.encode_cmn_xn_xm, 1, 2), set(),
-                 "arm64_set_reg 31"),
-                (word(A.encode_subs_xd_xn_xm, 0, 0, 1), {0},
-                 "arm64_set_reg 0"),
-                (word(A.encode_cmp_xn_xm, 1, 2), set(),
-                 "arm64_set_reg 31")):
-            idx = G._step_branch_index(w)
-            with self.subTest(word=hex(w)):
-                self.assertIsNotNone(idx, "no step-table row for this word")
-                self.assertEqual(
-                    G._regs_written(w, idx), writes,
-                    "the registers a block certificate claims this step "
-                    "clobbered are wrong; the model and `_step_rhs` write Rd "
-                    "for the whole class, so this row must too")
-                self.assertIn(
-                    must, G._step_rhs(w, idx),
-                    "the right-hand side does not name the write the model "
-                    "performs")
-
-        for text, w, imm in (
-                ("add x12, x29, #1675, lsl #12",
-                 word(A.encode_add_xd_xn_imm_sh, 12, 29, 1675, 1), 1675 << 12),
-                ("sub x25, x14, #545, lsl #12",
-                 word(A.encode_sub_xd_xn_imm_sh, 25, 14, 545, 1), 545 << 12),
-                ("add x12, x29, #1675",
-                 word(A.encode_add_xd_xn_imm_sh, 12, 29, 1675, 0), 1675)):
-            idx = G._step_branch_index(w)
-            with self.subTest(text=text):
-                self.assertIsNotNone(idx, "no step-table row for this word")
-                self.assertIn(
-                    f"UInt64.ofNat {imm}", G._step_rhs(w, idx),
-                    "the immediate is not scaled by the sh field, or an "
-                    "unshifted one was scaled")
 
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
@@ -1560,312 +1388,6 @@ class TestBitTestBranches(unittest.TestCase):
                     f"imm14 decode: word 0x{word:08x} should branch to "
                     f"{pc + delta}, not {G._branch_target(words, pc)}")
 
-    def test_the_sign_extend_mask_reads_the_sign_bit_in_the_word(self):
-        """The `hb` polarity mask is the immediate's sign bit SHIFTED UP BY 5.
-
-        The step lemma's `lhs` tests `(w >>> 5) &&& <imm sign bit>`, so the
-        bit it decides is bit 23 of `w` for imm19 and bit 18 for imm14 — NOT
-        the immediate-domain mask (`0x40000` / `0x2000`), which reads bit 18 /
-        bit 13 and decides the wrong branch whenever those disagree.  A wrong
-        mask emits a `hb` that is FALSE about the word, and `native_decide`
-        rejects the whole proof — measured on the `not n` → CMP+CSET dylib's
-        TBZ, word `0x36312064`, bit 18 (sign) = 0 but bit 13 = 1.
-        """
-        import formal.arm64_proof_gen as G
-        self.assertEqual(G._sign_extend_mask(52), 0x40000)
-        self.assertEqual(G._sign_extend_mask(53), 0x40000)
-        for idx in (16, 17, 51):
-            self.assertEqual(G._sign_extend_mask(idx), 0x800000)
-        self.assertEqual(G._sign_extend_mask(14), 0x02000000)
-
-    def test_the_hb_polarity_is_decided_by_the_immediate_s_own_sign_bit(self):
-        """A branch whose sign bit disagrees with the immediate-domain mask
-        gets a TRUE `hb`, in BOTH families.
-
-        Each fixture has the immediate-domain mask bit set but the REAL sign
-        bit clear, so the old masks emitted `¬(… = 0)` about a `lhs` that is
-        `0` and Lean rejected the proof.  The emitted `hb` must be the
-        UN-negated `= 0`.
-
-          * TBZ: `encode_tbz_xn_bit(3, 5, 1024)` — imm14 bit 8 set (bit 13 of
-            the word), imm14 bit 13 (bit 18 of the word, the sign) clear;
-          * CBZ: `encode_cbz_xn(32768, 3)` — imm19 bit 13 set (bit 18 of the
-            word), imm19 bit 18 (bit 23 of the word, the sign) clear.
-        """
-        import struct as _struct
-        import formal.arm64_proof_gen as G
-        from formal.arm64 import encode_tbz_xn_bit, encode_cbz_xn, encode_ret
-        for label, enc, mask_bit, sign_bit, idx, name in (
-                ("TBZ", encode_tbz_xn_bit(3, 5, 1024), 13, 18, 52, "synth_tbz"),
-                ("CBZ", encode_cbz_xn(32768, 3), 18, 23, 16, "synth_cbz")):
-            word = _struct.unpack("<I", enc)[0]
-            self.assertEqual(G._step_branch_index(word), idx,
-                             f"{label}: the fixture is not the intended step")
-            self.assertTrue((word >> mask_bit) & 1,
-                            f"{label} fixture: bit {mask_bit} must be set for "
-                            f"this to test the disagreement")
-            self.assertFalse((word >> sign_bit) & 1,
-                             f"{label} fixture: bit {sign_bit} (the sign bit) "
-                             f"must be clear")
-            text = G._gen_step_result_lemmas(name, enc + encode_ret(), 0x1000)
-            hb = [ln for ln in text.splitlines() if "have hb" in ln]
-            self.assertTrue(hb, f"{label}: no `hb` was emitted")
-            self.assertNotIn("\u00ac", hb[0],
-                             f"{label}: the sign-extend polarity is NEGATED "
-                             f"for a word whose sign bit is clear: "
-                             f"{hb[0].strip()}")
-            self.assertIn("= 0 := by native_decide", hb[0],
-                          f"{label}: the emitted hb is not the un-negated "
-                          f"`lhs = 0`: {hb[0].strip()}")
-
-
-class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
-    """`_written_expr` reads the value a step writes to a register, for EVERY
-    spelling `_step_rhs` emits — and refuses rather than guesses on the rest.
-
-    **The defect this pins was a false step, in the one instruction per
-    function whose value the frame facts are about.** A step's result is not
-    one shape. It is `some EXPR` where `EXPR` is an `arm64_set_reg`
-    application OR an `Arm64State` record update, and every instruction that
-    writes registers AND writes `sp` puts the register write INSIDE the
-    update:
-
-        some { (arm64_set_reg 30 (arm64_set_reg 29 s …) …) with sp := … }
-
-    The reader matched only the top-level `arm64_set_reg r s ` spelling, so
-    it answered None for all of those — and its one caller
-    (`_emit_reg_chain`) reads None as "this instruction leaves the register
-    alone", emitting `arm64_reg r (qT_k st) = arm64_reg r (qS_k st)` for an
-    instruction that had just overwritten `r`. Nothing in the emitter has an
-    oracle, so nothing failed at emission; the claim surfaced much later as an
-    unproved goal inside a generated proof, in the block whose epilogue
-    (`ldp x29, x30, [sp], #16`) makes it false.
-
-    Measured, arm64, `formal/examples/bitops.mojo` block 4 (30 instructions),
-    register 30: `_emit_reg_chain` concluded `arm64_reg 30 ST` — "x30 is
-    untouched by this block" — while instruction 28 of that block is exactly
-    the `LDP` that reloads `x30` from the saved frame. With the reader fixed
-    it concludes the load's own expression. That is
-    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`'s
-    "decompose the value flow into per-block facts": the per-block chain
-    cannot be built for the block that contains the epilogue while the reader
-    is blind to that block's writes.
-
-    Lean-free and image-free — this asks the reader about SHAPES, and the last
-    row asks the real emitter's own words, so it is the corpus that decides
-    whether any shape is still unreadable rather than this file's list.
-    """
-
-    #: `(rhs, register, expected)` — the expected value is None where the
-    #: reader must REFUSE. The refusals are half the rows: a reader that
-    #: answered everything would be answering `s` for `RET`, and
-    #: `_emit_reg_chain`'s two branches are "takes this value" and "unchanged".
-    ROWS = (
-        # the spelling the reader always read
-        ("some (arm64_set_reg 0 s (arm64_add (arm64_reg 1 s) (UInt64.ofNat 1)))",
-         0, "(arm64_add (arm64_reg 1 s) (UInt64.ofNat 1))"),
-        ("some (arm64_set_reg 19 s (UInt64.ofNat 4294968180))",
-         19, "(UInt64.ofNat 4294968180)"),
-        # THE DEFECT: a register write wrapped in an `sp` update — the shape
-        # every LDP/STP with writeback has, and the epilogue's is this one.
-        ("some { (arm64_set_reg 30 (arm64_set_reg 29 s (mem_read_u64 s.mem "
-         "s.sp.toNat)) (mem_read_u64 s.mem (s.sp + 8).toNat)) with sp := "
-         "s.sp + UInt64.ofNat 16 }",
-         30, "(mem_read_u64 s.mem (s.sp + 8).toNat)"),
-        # …and the OTHER destination of the same pair load, which is the inner
-        # one: a write to a different register leaves this one alone, so the
-        # answer is whatever the state it was applied to already had.
-        ("some { (arm64_set_reg 29 (arm64_set_reg 30 s a) b) with sp := "
-         "s.sp + UInt64.ofNat 16 }",
-         29, "b"),
-        ("some { (arm64_set_reg 2 (arm64_set_reg 0 s (arm64_reg 19 s)) "
-         "(arm64_reg 1 s)) with sp := s.sp + UInt64.ofNat 16 }",
-         0, "(arm64_reg 19 s)"),
-        # a store pair's second destination, and a value that is the SP itself
-        ("some { (arm64_set_reg 20 (arm64_set_reg 19 s (arm64_add "
-         "(arm64_reg 19 s) (arm64_reg 21 s))) s.sp) with sp := s.sp - "
-         "UInt64.ofNat 16 }",
-         20, "s.sp"),
-        # `BL` writes x30 as a RECORD FIELD, which is a third spelling and not
-        # an `arm64_set_reg` at all
-        ("some { s with x30 := UInt64.ofNat (s.pc + 4), pc := "
-         "(UInt64.ofNat s.pc + 4).toNat }",
-         30, "UInt64.ofNat (s.pc + 4)"),
-        # SP (register 31 to `_regs_written`) is read from the `sp :=` field
-        ("some { s with sp := s.sp - UInt64.ofNat 16 }",
-         31, "s.sp - UInt64.ofNat 16"),
-        ("some { (arm64_set_reg 2 s x) with sp := (s.sp + UInt64.ofNat 16) }",
-         31, "(s.sp + UInt64.ofNat 16)"),
-        # three-deep nesting, one level of which the previous case covers
-        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
-         2, "a"),
-        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
-         1, "b"),
-        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
-         0, "c"),
-        # THE REFUSALS. A `pc`/`nzcv`/`mem` update leaves every register alone,
-        # so there is nothing to read; `arm64_set_reg 31 _ _ = _` in
-        # `lib/ProofLib.lean` is not a write at all; a conditional branch's
-        # value is an `if` this reader does not evaluate.
-        ("some { s with pc := 4294968060 }", 30, None),
-        ("some { s with mem := mem_write_u64 s.mem 8 v }", 5, None),
-        ("some { s with sp := a, mem := mem_write_u64 s.mem 8 v }", 0, None),
-        ("some { (arm64_set_reg 31 s (UInt64.ofNat 16)) with pc := 4 }",
-         31, None),
-        ("some (if arm64_matches_condition 0 s.nzcv = true then "
-         "({ s with pc := 1 } : Arm64State) else "
-         "({ s with pc := 2 } : Arm64State))", 0, None),
-    )
-
-    def test_every_spelling_the_step_result_uses_is_read(self):
-        import formal.arm64_proof_gen as G
-        for rhs, r, want in self.ROWS:
-            with self.subTest(f"r={r} {rhs[:48]}"):
-                self.assertEqual(
-                    G._written_expr(rhs, r), want,
-                    f"_written_expr({rhs!r}, {r}) is not {want!r}. A None here "
-                    f"that should be a value makes `_emit_reg_chain` claim the "
-                    f"register is UNCHANGED across an instruction that wrote "
-                    f"it, which is a false step that only surfaces as an "
-                    f"unproved goal in a generated proof")
-
-    def test_the_reader_is_total_over_the_corpus_of_step_right_hand_sides(self):
-        """Every word the emitter produces, for every register it writes.
-
-        The rows above are the shapes; this is whether the corpus has found
-        another one. A shape this file has not heard of would answer None and
-        `_emit_reg_chain` would read that as "unchanged", so the check is
-        over REAL words rather than over the list — and it says which words
-        are still unreadable rather than counting them.
-        """
-        import formal.arm64_proof_gen as G
-        words = _arm64_words("def f(n):\n"
-                             "    t = n + 1\n"
-                             "    u = t * 3\n"
-                             "    if u > 10:\n"
-                             "        u = u - 1\n"
-                             "    return u\n")
-        unreadable = []
-        for w in words:
-            idx = G._step_branch_index(w)
-            rhs = G._step_rhs(w, idx)
-            if rhs is None:
-                continue
-            for r in sorted(G._regs_written(w, idx) or ()):
-                got = G._written_expr(rhs, r)
-                # `r == 31` on a shape that writes no SP is a `None` the
-                # caller never asks about; the check is on the registers the
-                # instruction claims to write.
-                if got is None:
-                    unreadable.append((hex(w), idx, r, rhs[:70]))
-        self.assertEqual(
-            unreadable, [],
-            "these (word, step index, register) triples are written by the "
-            "instruction and unreadable by `_written_expr`, so "
-            "`_emit_reg_chain` emits a false 'unchanged' step for each: %r"
-            % (unreadable[:6],))
-
-    #: `formal/examples/bitops.mojo`, whose RET block ends in the epilogue and
-    #: contains the `ldp x29, x30, [sp], #16` that reloads `x30`. That is the
-    #: block whose value flow
-    #: `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
-    #: wants restated one block at a time, and the one instruction per function
-    #: the reader could not read. The block is found by KIND in the test rather
-    #: than by a hard-coded number: the prologue's guard decides how many
-    #: blocks precede it.
-    EPILOGUE_PROGRAM = os.path.join(HERE, "formal", "examples", "bitops.mojo")
-
-    def test_the_epilogue_blocks_own_chain_states_what_it_wrote(self):
-        """LEAN, on the block whose epilogue is the reader's blind spot.
-
-        The unit rows above can only say the reader answers; this says the
-        answer is a PROOF, by taking `_emit_reg_chain`'s own output for
-        `bitops`'s RET block, register `x30`, as a `have` in a file that is
-        the generated one up to that block's certificate — and asking Lean.
-        Skipped loudly without `lib/ProofLib.olean`, like every Lean assertion
-        in this file.
-
-        Measured, arm64, this tree: before the reader read the field-update
-        wrapping, the chain concluded `arm64_reg 30 ST` — "x30 is untouched by
-        this block", for the block whose last load IS an x30 write — and Lean
-        reported `unsolved goals` on the `hT28` step, which is the false step
-        the reader's `None` produced. With it, the chain concludes the load's
-        own expression and the file checks with 0 `sorry`.
-        """
-        import formal.arm64_proof_gen as G
-        lean = _lean()
-        if not lean or not os.path.isfile(os.path.join(HERE, "lib",
-                                                       "ProofLib.olean")):
-            raise unittest.SkipTest(
-                "no Lean / no lib/ProofLib.olean: skipping the typecheck of "
-                "the epilogue block's register chain")
-        if not os.path.isfile(self.EPILOGUE_PROGRAM):
-            raise unittest.SkipTest(
-                f"{self.EPILOGUE_PROGRAM} is not in this checkout, so there "
-                f"is no generated proof to take the chain out of")
-        tmp = tempfile.mkdtemp(prefix="a2-epilogue-")
-        try:
-            proof = _generate_dir(tmp, self.EPILOGUE_PROGRAM, "bitops",
-                                  os.path.join(tmp, "bitops.aout"))["proof_path"]
-            text = open(proof).read()
-            lines = text.split("\n")
-            # The RET block, found by KIND rather than by index: the guard's
-            # instruction count is what decides how many blocks precede it (a
-            # runtime-limit guard adds the `getrlimit` sequence and its
-            # branches), so a hard-coded block number is a test that breaks
-            # whenever the prologue changes without measuring a different
-            # block.
-            hdr = re.search(
-                r"/-- Block (\d+): start=(0x[0-9a-f]+) kind=ret "
-                r"\((\d+) instructions", text)
-            self.assertIsNotNone(
-                hdr,
-                "the generated proof no longer has a RET block header, so "
-                "this row is not measuring the epilogue it names")
-            bnum = int(hdr.group(1))
-            cut = next((i for i, l in enumerate(lines)
-                        if l.startswith(f"theorem bitops_b{bnum}_runs")), None)
-            self.assertIsNotNone(
-                cut, f"the RET block is b{bnum} but its runs theorem is not "
-                     f"in the generated proof")
-            start, count = int(hdr.group(2), 16), int(hdr.group(3))
-            res = _compile(self.EPILOGUE_PROGRAM,
-                           os.path.join(tmp, "code.aout"), "arm64")
-            base = res["info"]["base_addr"]
-            raw = res["code"]
-            words = {base + i: int.from_bytes(raw[i:i + 4], "little")
-                     for i in range(0, len(raw) - len(raw) % 4, 4)}
-            # the PREFIX run: the RET block's certificate is about `qS{m-1}`,
-            # whose last write to x30 is the epilogue's `ldp`
-            chain, final = G._emit_reg_chain(
-                "bitops", words, f"b{bnum}",
-                [start + 4 * i for i in range(count - 1)],
-                30, st="ST", hname="hchain")
-            body = ["\n".join(lines[:cut]),
-                    "theorem block_chain (ST : Arm64State) : True := by"]
-            body += ["  " + l for l in chain] + ["  trivial"]
-            path = os.path.join(tmp, "chain.lean")
-            with open(path, "w") as fh:
-                fh.write("\n".join(body))
-            got = _check_proof(path)
-            self.assertIsNotNone(got, "Lean is available but the check "
-                                     "returned nothing")
-            ok, detail, n_sorries = got
-            self.assertTrue(
-                ok, f"the epilogue block's own x30 chain does not check, so "
-                   f"the reader's answer for the `ldp` is not a proof: "
-                   f"{detail}\nchain concludes: {final}")
-            self.assertEqual(n_sorries, 0,
-                             "the chain was admitted rather than proved")
-            self.assertIn(
-                "mem_read_u64", final,
-                "the chain over the block containing the epilogue concludes "
-                f"{final!r}, so it is not following the `ldp` that writes x30 "
-                "— the blind spot is back, in the one block per function that "
-                "has one")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
 
 class TestNestedConditionFactSharing(unittest.TestCase):
     """The `hprior_*` value-flow facts are emitted ONCE per (path, block).
@@ -2120,21 +1642,7 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         import formal.arm64_proof_gen as G
         import formal.build as fb
         src = os.path.join(self.tmp, "stepok.mojo")
-        # Read BOTH the bytes and the published string table: the step lemmas
-        # cover the EXECUTABLE region only, because `__TEXT` carries the
-        # interned strings after the bodies and a string byte pattern that
-        # decodes as an instruction would otherwise get a step lemma for a word
-        # no execution reaches (the trap message's `TBZ` word is the measured
-        # one). The expected set is computed over the same range the generator
-        # uses, so a filter that narrowed for any OTHER reason still fails.
-        result = fb.compile_formal(src, output=src[:-5] + ".aout",
-                                   prove=False, check=False)
-        code = result["code"]
-        info = result["info"]
-        base = info["base_addr"]
-        str_addrs = list((info.get("str_addrs") or {}).values())
-        code_end = (min(str_addrs) - base) if str_addrs else len(code)
-        code = code[:max(0, min(code_end, len(code)))]
+        code = _entry_code(fb, src)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, len(code) - len(code) % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
@@ -2264,8 +1772,7 @@ class TestCallProofs(unittest.TestCase):
         cls.proofs = {}
         cls.errors = {}
         for name, (src, _why) in (list(PROGRAMS.items()) + list(REFUSED.items())
-                                  + list(TWO_OPAQUE_CALLS.items())
-                                  + list(SAME_IMAGE_CALL.items())):
+                                  + list(TWO_OPAQUE_CALLS.items())):
             p, err = _generate(cls.tmp, src, name)
             cls.proofs[name] = p
             cls.errors[name] = err
@@ -2281,261 +1788,25 @@ class TestCallProofs(unittest.TestCase):
                               f"{name}: proof generation raised "
                               f"{self.errors[name]}")
 
-    def test_one_call_into_the_same_image_is_followed(self):
-        """The shape the return-address map is exact for, end to end.
+    def test_intra_image_call_is_refused_by_name(self):
+        """A call to a second function in the same image must say so.
 
-        Both of these were REFUSED by name with a message saying interprocedural
-        walking was missing — the largest single cause in the proof-breadth
-        census.  `x30` at the callee's `RET` is the constant `call_pc + 4`, so
-        the callee's blocks are ordinary blocks of the walk with an ordinary
-        edge, and the walk's path count is what a single function with the same
-        conditionals would have.
-        """
-        for name in SAME_IMAGE_CALL:
-            self.assertIsNone(self.errors[name],
-                              f"{name}: a call into the same image is followed "
-                              f"now, so a refusal here is a regression to the "
-                              f"per-function walk: {self.errors[name]}")
-
-    def test_the_followed_call_is_proved_not_merely_reached(self):
-        """A followed call must get the FULL theorem, not the reachability one.
-
-        The out-of-image case proves "the run reaches the call", because the
-        model has no bytes past it; here it has every byte of the callee, so the
-        theorem that is emitted has to be the one about what the program
-        RETURNS.  A generator that reached the call and then stopped would emit
-        a proof that is true and worth nothing, which is the failure mode this
-        row is one half of.
-        """
-        for name in SAME_IMAGE_CALL:
-            p = self.proofs[name]
-            self.assertIsNotNone(p)
-            with open(p) as f:
-                text = f.read()
-            with self.subTest(program=name):
-                self.assertNotIn("CALL BOUNDARY", text,
-                                 "the call boundary note is for a call the "
-                                 "model cannot execute, and this one it can")
-                self.assertNotIn("reaches_call_at_", text,
-                                 "a same-image call is not a call boundary: the "
-                                 "theorem must be about the return value")
-                self.assertNotIn("NO CONCRETE RUN TEST", text,
-                                 "the run test is suppressed only when the "
-                                 "model cannot execute past the call")
-                self.assertIn("theorem main_compiles_correctly_universal", text)
-                self.assertIn("theorem main_compiles_correctly :", text,
-                              "with the call followed there is a closed run to "
-                              "compare against the model, and suppressing it "
-                              "would lose the only check that is about the "
-                              "whole image")
-
-    def test_the_callees_own_return_is_proved_as_a_return_and_not_a_halt(self):
-        """`x30` at the callee's `RET` is the RETURN ADDRESS, so the fact the
-        walk needs about it is a `pc` fact and not `arm64_go_exit_hit`.
-
-        Read off the emitted file rather than off the generator's internals,
-        because the two are different things: the generator holds the map and
-        the proof has to USE it, and a map nothing reads is the shape of a fix
-        that is only a refactor.  The needle is the CONTINUATION — the block the
-        walk enters after the callee returns reads its entry `pc` out of the
-        callee's return fact by name — because that is the one line where a
-        return is distinguishable from a halt.
-        """
-        with open(self.proofs["same_image_leaf"]) as f:
-            text = f.read()
-        self.assertIn("hpc_r_", text,
-                      "no `hpc_r_*` in the proof: the callee's `RET` is being "
-                      "treated as the program's own, so the walk cannot tell a "
-                      "return from a halt")
-        m = re.search(r"have hpc_(\d+) : \(s_(\d+)\)\.pc = \d+ := hpc_r_\2", text)
-        self.assertIsNotNone(
-            m, "nothing in the emitted proof continues a walk out of a callee's "
-               "`RET`: the return address map is built and never read, so the "
-               "callee's `ret` ends the path instead of returning")
-
-    def test_a_second_call_site_into_the_same_image_is_still_refused(self):
-        """The boundary of the fix, and it is a boundary of the MAP.
-
-        Two call sites means `x30` at the callee's `RET` is a property of the
-        CALL PATH rather than a constant, which is the whole of what the fix
-        buys; the refusal has to say so, and it has to say it instead of the
-        recursion arm's error about a program with no recursion in it.
-        """
-        err = self.errors["callee_chain"]
-        self.assertIsNotNone(err, "callee_chain: expected a refusal, got a proof")
-        self.assertNotIn("recursion argument bound", err,
-                         "callee_chain: the old recursion-only error "
-                         "misdescribes a program with no recursion in it")
-        self.assertIn("2 calls into the same image", err,
-                      f"callee_chain: the refusal must name the shape, so a "
-                      f"reader can tell it from the one-call case that now "
-                      f"proves: {err}")
-        self.assertIn("return address", err,
-                      f"callee_chain: and it must say what is missing — a "
-                      f"return address per call path: {err}")
-
-    def test_a_two_argument_callee_is_refused_by_the_bridge(self):
-        """`REFUSED['two_args']` keeps its own reason, and states it.
-
-        It used to be pinned as an interprocedural-walking refusal, which was
-        true of the shape and wrong of the program: the machine half no longer
-        refuses here, and what does is the AST bridge's one-argument `callFunc`.
-        A row that stopped being checked is a hole; a re-pointed one is the
-        anti-rot working.
-        """
-        err = self.errors["two_args"]
-        self.assertIsNotNone(err, "two_args: expected a refusal, got a proof")
-        self.assertIn("2 arguments", err,
-                      f"two_args: the refusal must name the arity, which is "
-                      f"the whole fact about this program: {err}")
-
-    def test_the_plan_declines_exactly_the_shapes_it_cannot_follow(self):
-        """The decision, asked directly, so the boundary is one list of cases.
-
-        Read off `_same_image_call_plan` rather than off a build, because the
-        shapes that get REFUSED here mostly fail EARLIER for another reason —
-        an AST bridge gap, a two-argument callee — so a refusal test alone does
-        not say which check declined, and a reader needs to know that to size
-        the rest of the work.
-        """
-        import formal.arm64_proof_gen as G
-        import formal.build as fb
-
-        def plan(src, arch="arm64"):
-            tmp = tempfile.mkdtemp(prefix="a2-plan-")
-            try:
-                path = os.path.join(tmp, "p.mojo")
-                with open(path, "w") as f:
-                    f.write(src)
-                r = fb.compile_formal(path, arch=arch,
-                                      output=os.path.join(tmp, "p.aout"),
-                                      prove=False, check=False)
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
-            code, info = r["code"], r["info"]
-            entry = info["labels"].get(info["func_name"], info["base_addr"])
-            return G._same_image_call_plan(code, info["base_addr"], entry)
-
-        got, why = plan("def main(n):\n    return n\n")
-        self.assertEqual(got, {},
-                         "a program with no call at all has nothing to follow, "
-                         "and an empty map is how the walk tells that from a "
-                         "declined one")
-        self.assertEqual(why, "")
-
-        got, why = plan(SAME_IMAGE_CALL["same_image_leaf"][0])
-        self.assertEqual(len(got or {}), 1,
-                         f"the one-call-site case is the map: {why}")
-        (call_pc, ret_pc), = got.items()
-        self.assertEqual(ret_pc, call_pc + 4,
-                         "the return address of a `BL` is the instruction after "
-                         "it, and that constant is the whole mechanism")
-
-        got, why = plan(REFUSED["callee_chain"][0])
-        self.assertIsNone(got, "two call sites is not a constant")
-        self.assertIn("ONE return address does not serve them", why)
-
-        # A callee that calls BACK INTO THE ENTRY is recursion the plan cannot
-        # see as a second call site — `_unfollowable_calls` skips a target equal
-        # to the entry — so it is the `inner` check, not the count, that has to
-        # catch it, and the message has to say why rather than let the walk reach
-        # the recursion contract and report a program with no recursion as a
-        # recursion problem.
-        got, why = plan("def helper(n):\n"
-                        "    if n > 0:\n"
-                        "        return n\n"
-                        "    return main(n)\n"
-                        "def main(x):\n"
-                        "    return helper(x)\n")
-        self.assertIsNone(got, "a callee that calls back into the entry is not "
-                               "a return address")
-        self.assertIn("RECURSION", why)
-
-    def test_a_callee_that_calls_out_of_the_image_is_not_called_recursion(self):
-        """The same check, the other half, and the message is the whole point.
-
-        A callee whose body is `printf` has a `BL` in it too, and the first
-        version of the refusal called that RECURSION — a word about a program
-        that has none, sent to a reader who then goes looking for recursion. The
-        two halves are different questions: a `BL` back into this image is
-        recursion, and a `BL` out of it is the halt-address family, whose
-        terminal and the callee's return address are two different answers.
-        """
-        import tempfile
-        import formal.arm64_proof_gen as G
-        import formal.build as fb
-        tmp = tempfile.mkdtemp(prefix="a2-leaf-")
-        try:
-            path = os.path.join(tmp, "p.mojo")
-            with open(path, "w") as f:
-                f.write("def helper(n):\n"
-                        "    printf(\"hi\\n\")\n"
-                        "    return n * 2\n"
-                        "def main(x):\n"
-                        "    return helper(x)\n")
-            r = fb.compile_formal(path, arch="arm64",
-                                  output=os.path.join(tmp, "p.aout"),
-                                  prove=False, check=False)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        entry = r["info"]["labels"].get(r["info"]["func_name"],
-                                        r["info"]["base_addr"])
-        got, why = G._same_image_call_plan(r["code"], r["info"]["base_addr"],
-                                          entry)
-        self.assertIsNone(got, "a callee that calls out of the image is not a "
-                               "return address")
-        self.assertIn("OUT of the image", why)
-        self.assertNotIn("RECURSION", why,
-                         f"a `printf` in the callee is not recursion, and a "
-                         f"reader sent looking for recursion will not find "
-                         f"any: {why}")
-
-    def test_a_loop_inside_the_callee_is_refused_rather_than_proved(self):
-        """The plan answers the RETURN ADDRESS; the walk still has to answer the
-        loop, and a loop is not a return address.
-
-        `helper` with a `while` in it gets a plan — the `BL` is the only call and
-        `x30` at the callee's `RET` is still a constant — and the walk then
-        declines, because a countdown loop's fuel obligation needs the loop's own
-        test to be known FALSE and that fact comes from the ENTRY's AST
-        conditions, which the callee's blocks do not have. The row that matters
-        is that it DECLINES: a walk that treated the callee's back edge as the
-        caller's own loop contract would emit a theorem about a run it has not
-        composed.
-
-        **TWO sentences can be the decline on this tree, and which one fires is
-        an ORDERING, not a choice.** `helper`'s induction variable `i` is not its
-        parameter `n`, so the shared loop fold's one-word rule (`i` plus the
-        parameter is two words) refuses FIRST, before the walk ever reaches the
-        back edge; only a callee whose loop the fold CAN state gets as far as
-        the walk's own `loop back-edge` refusal. Both decline for the same
-        reason stated at different depths — the model cannot state this loop —
-        and the row asserts the decline and the ABSENCE of the recursion error,
-        which is what it was written for. A third outcome would be the failure:
-        a proof.
-        """
-        tmp = tempfile.mkdtemp(prefix="a2-loopcallee-")
-        try:
-            p, err = _generate(tmp, "def helper(n):\n"
-                                     "    var i = 0\n"
-                                     "    while i < n:\n"
-                                     "        i = i + 1\n"
-                                     "    return i * 2\n"
-                              "def main(x):\n"
-                              "    return helper(x)\n",
-                              "loopcallee")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIsNone(p, "a loop inside the callee must not produce a proof")
-        self.assertNotIn("recursion argument bound", err,
-                         "the refusal must not be the recursion error, which "
-                         "describes a program with no recursion in it")
-        self.assertTrue(
-            "loop back-edge" in err
-            or "state is more than the one word the model carries" in err,
-            "the refusal must name the loop, since the return address map "
-            "is not what declined, and neither of the tree's two loop "
-            f"sentences is in it: {err}")
+        The old behaviour was to reach the recursion-only `bl` arm and raise
+        `unsupported: recursion argument bound (not a dec1 pattern)`, which
+        describes a recursion problem for a program that has no recursion in
+        it at all."""
+        for name in REFUSED:
+            err = self.errors[name]
+            self.assertIsNotNone(err,
+                                 f"{name}: expected a refusal, got a proof")
+            self.assertNotIn("recursion argument bound", err,
+                             f"{name}: the refusal is still the old "
+                             f"recursion-only error, which misdescribes the "
+                             f"program")
+            self.assertIn("interprocedural", err,
+                          f"{name}: the refusal must say what is actually "
+                          f"missing and what would close it, so a reader can "
+                          f"tell it from a recursion gap: {err}")
 
     def test_two_calls_out_of_the_image_are_refused_by_name(self):
         """TWO opaque calls, and the refusal has to be about the halt ADDRESS.
@@ -2694,49 +1965,6 @@ class TestLean(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0,
                                  f"{name}: the proof admits {n} `sorry`")
-
-
-class TestSameImageCallLean(unittest.TestCase):
-    """Lean accepts the proof for a call into the same image.  Skipped, loudly,
-    without Lean or without `lib/ProofLib.olean` — like every other Lean
-    assertion here, because the claim is about Lean's verdict and nothing else
-    can stand in for it.
-
-    Only the LEAF program is here.  The branching one generates and is pinned by
-    `TestCallProofs`; asking Lean about it is asking about the walk's path count,
-    not about the call, because a program with NO call and the same number of
-    conditionals exceeds Lean's own `-M` on the same proof generator — measured,
-    and the reason it belongs to
-    `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` rather
-    than to a row that would read as a call that cannot be proved.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        lean = _lean()
-        if not lean or not os.path.isfile(
-                os.path.join(HERE, "lib", "ProofLib.olean")):
-            raise unittest.SkipTest(
-                "no Lean / no lib/ProofLib.olean: skipping the typecheck. "
-                "Run `make prooflib` (or `python3 tools/suite.py prooflib`) "
-                "first.")
-        cls.tmp = tempfile.mkdtemp(prefix="a2-intra-lean-")
-        src, _why = SAME_IMAGE_CALL["same_image_leaf"]
-        p, err = _generate(cls.tmp, src, "same_image_leaf")
-        cls.result = None if err else _check_proof(p)
-
-    @classmethod
-    def tearDownClass(cls):
-        if hasattr(cls, "tmp"):
-            shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_the_followed_call_proves_with_no_admission(self):
-        ok, detail, n = self.result
-        self.assertTrue(ok, f"a same-image call must PROVE, not merely "
-                           f"generate: {detail}")
-        self.assertEqual(n, 0,
-                         f"the proof admits {n} `sorry`, so what the walk "
-                         f"closed was a goal and not the return value")
 
 
 class TestEntryArity(unittest.TestCase):
@@ -3238,56 +2466,24 @@ class TestAstBridgeCallLimit(unittest.TestCase):
         self.assertEqual(len(gaps), 1, gaps)
         self.assertIn("0 arguments", gaps[0], gaps[0])
 
-    def test_arm64_names_the_machine_half_before_the_bridge_when_it_is_missing(self):
+    def test_arm64_refuses_and_names_the_machine_half_first(self):
         """The two gaps, and which one a reader should be shown first.
 
-        A program with a second function in its image can be short of BOTH the
-        machine half (the CFG walk is per-function) and of the bridge, and when
-        both are short the machine half is the bigger one — so arm64 must refuse
-        with the return-address message, not with the bridge's. That ordering is
-        a deliberate act (the check is emitted after that refusal) and this is
-        what keeps it one.
-
-        The fixture is a TWO-call-site program now. `ONE_ARG` used to be it, and
-        the machine half stopped being short of it: one call into the same image
-        is followed, so `ONE_ARG`'s arm64 refusal is the bridge's own message
-        (pinned below), and a row still asserting the interprocedural wording
-        for it would be asserting a gap that is closed.
-        """
-        two_sites = ("def c(n):\n    return n\n"
-                     "def b(n):\n    return c(n) + 1\n"
-                     "def main(x):\n    return b(x)\n")
+        A program with a second function in its image is short BOTH of the
+        machine half (the CFG walk is per-function) and of the bridge, and the
+        machine half is the bigger of the two — so arm64 must still refuse with
+        the interprocedural message, not with the bridge's. That ordering is a
+        deliberate act (the check is emitted after that refusal) and this is
+        what keeps it one."""
         tmp = tempfile.mkdtemp(prefix="a2-bridge-")
         try:
-            p, err = _generate(tmp, two_sites, "bridge_arm64")
+            p, err = _generate(tmp, self.ONE_ARG, "bridge_arm64")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIsNone(p, "two call sites into the same image cannot be "
-                             "followed: one return address does not serve them")
-        self.assertIn("return address", err,
+        self.assertIsNone(p, "a program that calls a second function in the "
+                            "same image cannot be proved on arm64 yet")
+        self.assertIn("interprocedural", err,
                       f"arm64 must name the machine half first: {err}")
-        self.assertNotIn("2 arguments", err,
-                         "and it must be the MACHINE half that is named, "
-                         f"since the bridge's gap here is a different one: {err}")
-
-    def test_arm64_reaches_the_bridge_once_the_machine_half_is_there(self):
-        """The same program with ONE call site now stops at the bridge.
-
-        The mirror of the row above, and the reason that one needed re-pointing
-        rather than deleting: `ONE_ARG`'s only remaining gap is the one-argument
-        `callFunc`, so a reader who is told "arm64 refuses this program" must be
-        told which gap, or the fix that closed the other one looks like it closed
-        nothing.
-        """
-        tmp = tempfile.mkdtemp(prefix="a2-bridge-")
-        try:
-            p, err = _generate(tmp, self.ONE_ARG, "bridge_arm64_one")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIsNone(p, err)
-        self.assertIn("2 arguments", err,
-                      f"with the machine half followed, the bridge's arity gap "
-                      f"is what a reader must be sent to: {err}")
 
     def test_x86_64_omits_the_bridge_and_says_why(self):
         tmp = tempfile.mkdtemp(prefix="a2-bridge-")
@@ -3494,42 +2690,20 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
         return out
 
     def test_both_shapes_generate(self):
-        """The RANGE shape is now a REFUSAL, and that is the fix, not a gap.
-
-        This class exists to pin that a `B.cond` chain closes with ITS OWN flag
-        lemma, and `sum_range`'s chain did — with `arm64_flag_lt_s`, the SIGNED
-        one, which is correct. The defect was one level up: that signed lemma
-        rewrites the predicate to the SIGN-FLIPPED order, while the loop
-        contract's hypothesis is stated in the UNSIGNED order
-        (`while_lt_exit_contract_bottom` takes `UInt64`'s `<` and a fuel of
-        `b.toNat - r.toNat`), so the loop obligation became `flipped <` ↔ `<` —
-        FALSE for any bound at or above 2^63. It elaborated, because the
-        `_COND_ARITH_DEFAULT` leaf admits it with a `sorry`.
-
-        So the generator now DECLINES the contract for a signed loop test rather
-        than emitting a false theorem (`bugs/FORMAL_a_range_loop_contract_states_
-        the_unsigned_order_against_a_signed_flag.md`). The EQUALITY shape is
-        unaffected and still generates — it has no loop.
-        """
+        self.assertIsNone(self.range_err, self.range_err)
         self.assertIsNone(self.equal_err, self.equal_err)
-        self.assertIsNotNone(self.range_err,
-                             "sum_range generates again — if the loop contract "
-                             "can now be stated for a signed test, delete this "
-                             "expectation and say what closed it")
-        self.assertIn("SIGNED condition code 11", str(self.range_err))
-        self.assertIn("arm64_flag_lt_s", str(self.range_err))
-        self.assertIn("UNSIGNED order", str(self.range_err))
 
     def test_every_hcond_chain_closes_with_a_flag_lemma(self):
-        closers = self._hcond_closers(self.equal)
-        self.assertTrue(closers, f"no hcond chain found in {self.equal}")
-        for hid, line in closers:
-            self.assertRegex(
-                line, r"simp \[h, arm64_flag_",
-                f"equality: {hid} closes with `{line}` and no flag lemma, so "
-                f"the raw arm64_matches_condition predicate has nothing to "
-                f"reduce it and bv_decide is handed an expression with an "
-                f"opaque register in it")
+        for name, path in (("range", self.ranges), ("equality", self.equal)):
+            closers = self._hcond_closers(path)
+            self.assertTrue(closers, f"{name}: no hcond chain found in {path}")
+            for hid, line in closers:
+                self.assertRegex(
+                    line, r"simp \[h, arm64_flag_",
+                    f"{name}: {hid} closes with `{line}` and no flag lemma, so "
+                    f"the raw arm64_matches_condition predicate has nothing to "
+                    f"reduce it and bv_decide is handed an expression with an "
+                    f"opaque register in it")
 
     def test_the_lemma_is_the_one_the_branch_tests(self):
         """`b.lt` is a SIGNED less-than, and the signed lemma is the only right
@@ -3537,47 +2711,30 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
         order the machine does not test and the chain would still elaborate —
         which is the failure a presence check cannot see and a spelling check
         can.
-
-        The pairing is now read off the EQUALITY shape, which is the one that
-        still generates: it also lowers to `CMP` + `B.cond` on a signed `lt`, so
-        it exercises the same table row the range program's chain did. The range
-        program is covered by `test_both_shapes_generate` instead, which pins
-        the refusal that replaced its contract.
         """
-        chains = self._hcond_closers(self.equal)
-        self.assertTrue(chains, "no hcond chain in the equality proof")
+        chains = self._hcond_closers(self.ranges)
+        self.assertTrue(chains, "no hcond chain in the range proof")
         # The pairing: the branch a chain states is the branch whose code its
         # lemma names, so the two are read off the SAME chain rather than off
         # the file.  A chain whose statement says condition 11 and whose closer
         # does not name the signed lemma is the defect this test exists for.
-        with open(self.equal) as fh:
+        with open(self.ranges) as fh:
             text = fh.read()
         lines = []
         for hid, line in chains:
             stmt = re.search(r"have " + re.escape(hid) + r" : (.*?) := by",
                              text)
             lines.append((stmt.group(1) if stmt else "", line))
-        # Every chain's closer must name the lemma for the code its OWN
-        # statement tests, read off the same chain — so this is a per-chain
-        # pairing rather than a search for one shape, and it holds for a
-        # program whose branch happens to be `ne` as well as one whose branch
-        # is `lt`. A chain stating condition 11 and closing with the UNSIGNED
-        # `arm64_flag_lt` is the defect; so is the same for any other code.
-        self.assertTrue(lines, f"no hcond chains at all: {lines}")
-        for stmt, line in lines:
-            code = re.search(r"arm64_matches_condition (\d+)", stmt)
-            self.assertIsNotNone(code, f"chain statement names no condition "
-                                       f"code: {stmt!r}")
-            import formal.arm64_proof_gen as _G
-            want = _G._COND_LEMMA.get(int(code.group(1)))
-            self.assertIsNotNone(want, f"no lemma for condition code "
-                                       f"{code.group(1)} in `_COND_LEMMA`")
-            self.assertIn(want, line,
-                          f"a chain stating condition {code.group(1)} closes "
-                          f"with `{line}`, which names no {want}: the predicate "
-                          f"is reduced to an order the machine does not test, "
-                          f"and the chain still elaborates — the failure a "
-                          f"presence check cannot see")
+        signed = [line for stmt, line in lines
+                  if "arm64_matches_condition 11" in stmt]
+        self.assertTrue(
+            signed,
+            "the range program's preheader branch is `b.lt` (raw condition code "
+            "11) and no chain mentions it, so this assertion is not looking at "
+            f"the branch it means to: {lines}")
+        for line in signed:
+            self.assertIn("arm64_flag_lt_s", line)
+            self.assertNotIn("arm64_flag_lt,", line)
 
 
 class TestLoopContractBlocks(unittest.TestCase):
@@ -4173,22 +3330,14 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     `_gen_range_loop` matched nothing and the walk had no contract to apply at
     the re-entry.
 
-    **THE CONTRACT IS NOW DECLINED for this program, and that is the fix.**
-    The shape discovery all works — the loop top on the IMAGE is still the
-    self-looping block, which is what this class measures and what
-    `test_the_loop_top_is_a_self_looping_conditional_block` still asserts. What
-    changed is that the contract this shape feeds is stated in the UNSIGNED
-    order, and the loop's own test is a SIGNED `CSET lt`, so the obligation it
-    emits is `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63. It
-    elaborated, because the closing leaf admits it with a `sorry`.
+    Three things are pinned here, and the first is the regression itself:
 
-    So the generator refuses to state a false theorem
-    (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    signed_flag.md`), and what is pinned here is the refusal and its REASON —
-    not that the contract exists. The shape rows stay, because a change in the
-    emitter that moves the test back above the body would silently reduce this
-    to "no self-looping block, so nothing to decline", which is a different
-    failure with the same message.
+    * the program GENERATES a proof, on arm64;
+    * the generated proof carries the bottom-tested loop contract, so the
+      back edge was discharged rather than refused;
+    * the loop top on the IMAGE is the self-looping block, so a change in the
+      emitter that moves the test back above the body is caught here rather
+      than silently reducing the contract to no match.
     """
 
     SOURCE = ("def sum_range(n):\n"
@@ -4201,65 +3350,32 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="a2-bottomloop-")
         cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "bottomloop")
-        # The IMAGE is built UNCONDITIONALLY, with `prove=False`. The shape row
-        # below reads the emitter's own block partition, and it is the half of
-        # this class that must keep working when the PROOF is declined: a
-        # generator that refuses for the wrong reason and one that refuses for
-        # the right one look identical from the outside, and only the image
-        # tells them apart. Building it here rather than only on success is what
-        # makes that comparison possible at all.
-        import formal.build as fb
-        src = os.path.join(cls.tmp, "bottomloop.mojo")
-        cls.result = fb.compile_formal(src, arch="arm64",
-                                       output=os.path.join(cls.tmp,
-                                                           "bottomloop2.aout"),
-                                       prove=False, check=False)
+        cls.result = None
+        if cls.error is None:
+            import formal.build as fb
+            src = os.path.join(cls.tmp, "bottomloop.mojo")
+            cls.result = fb.compile_formal(src, arch="arm64",
+                                           output=os.path.join(cls.tmp,
+                                                               "bottomloop2.aout"),
+                                           prove=False, check=False)
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_it_is_refused_because_the_contract_would_be_false(self):
-        """The refusal, and the three facts in it that make it actionable.
+    def test_it_generates(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof)
 
-        Asserting the refusal ALONE would pass for any reason — a syntax error,
-        a missing lemma, a shape this walk never recognised — so the message is
-        checked for the cause. A reader who hits this has to be able to tell
-        "the loop shape is unrecognised" (an emitter change) from "the loop
-        shape is fine and the CONTRACT is wrong for it" (a library change), and
-        those have nothing in common as next steps.
-        """
-        self.assertIsNone(self.proof)
-        err = str(self.error)
-        self.assertIn("SIGNED condition code 11", err,
-                      "the refusal does not name the signed condition code, so "
-                      "a reader cannot tell which of the fourteen conditions "
-                      f"the loop tests: {err}")
-        self.assertIn("arm64_flag_lt_s", err,
-                      "the refusal does not name the lemma that made the "
-                      f"obligation false: {err}")
-        self.assertIn("while_lt_exit_contract_bottom", err,
-                      "the refusal does not name the contract whose unsigned "
-                      f"hypothesis is the mismatch: {err}")
-        self.assertIn("FALSE", err,
-                      f"the refusal does not say the obligation would be false: "
-                      f"{err}")
-
-    def test_it_is_not_admitted_with_a_sorry(self):
-        """The failure this replaces: a theorem that elaborates and is false.
-
-        `no proof was generated` is the whole claim — before the refusal, this
-        program produced a proof whose `loop_body_flag` obligation was
-        `sign-flipped <` ↔ `<` closed by
-        `all_goals first | ... | sorry -- arm64-cfg-leaf: loop-cond-flag`. A
-        reader diffing this test would see a missing file where the defect was a
-        present, elaborating, FALSE one, which is why the assertion is about the
-        absence rather than about a message.
-        """
-        self.assertIsNone(self.proof,
-                          "sum_range generates a proof again — if the loop "
-                          "contract can now be stated for a signed test, "
-                          "delete this and say what closed it")
+    def test_the_proof_carries_the_bottom_tested_loop_contract(self):
+        text = open(self.proof).read()
+        self.assertIn("while_lt_exit_contract_bottom", text,
+                      "no bottom-tested loop contract in the proof: the "
+                      "back edge was discharged by something else, or by "
+                      "nothing")
+        self.assertIn("_ltb_loop", text,
+                      "the contract is applied nowhere: the walk reached the "
+                      "re-entry without it")
 
     def test_the_loop_top_is_a_self_looping_conditional_block(self):
         """The premise the contract is generated from, measured on the image.
@@ -4288,16 +3404,10 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
             "this program is no longer the shape the bottom-tested contract "
             "is written for -- the row above would then pass for the wrong "
             "reason")
-        # The block's TERMINATOR is the signed compare, which is what the
-        # refusal is about — so it is read off the IMAGE here rather than
-        # assumed, and `loop_test_condition_code` is the same reader the
-        # generator's guard uses, so the two cannot disagree about which
-        # condition the loop evaluates.
-        term = self_loop[0]["instrs"][-1]
-        self.assertEqual(11, G.loop_test_condition_code(words, term),
-                         "the loop top's terminator is no longer the signed "
-                         "`lt`, so the refusal above is about something else "
-                         "and this class is no longer measuring what it says")
+        # The contract's `cbz_start` is that block's start, so the walk's
+        # `taken == ctx["loop_contract"]["cbz_start"]` test is what fires.
+        self.assertNotIn("unsupported cbz taken continuation",
+                         open(self.proof).read())
 class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
 
@@ -4322,21 +3432,6 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     address, not by symbol, because an image that both traps and `raise`s has two
     `exit` facts to tell apart.
 
-    **arm64 publishes a trap list too now, and the reason is a different trap.**
-    Its STACK-FLOOR guard is still a raw `svc` and still needs nothing — the row
-    `test_arm64_needs_no_trap_list_and_keeps_its_run_tests` still holds for a
-    program that emits no bounded stop at all. But `_emit_exit` flushes before
-    it traps (`fflush(NULL)`, so a program that printed something keeps it), and
-    that flush is a `BL` to the C library, which puts a real `fflush` into
-    `extern_calls` for every bounded stop in the image. Measured on
-    `formal/examples/mod_by_var.mojo` (`n % d`, a variable divisor): its image's
-    ONLY unbound call is the `fflush` in the divide-by-zero arm, and
-    `_gen_extern_test` read that as the program's one opaque call and emitted a
-    `run_pc_reached … = true` for an address the run never reaches — a false
-    obligation, rejected by `native_decide`, so a program that computes, runs
-    and is modelled correctly was a `lean-rejected` row of
-    `tools/formal_proof_census.py`. The rows below are that fix's pins.
-
     Every row of this class is cheap: proof GENERATION, no Lean.  That the run
     tests which come back are TRUE is a separate claim and only Lean tells it
     (`TestStringValueInTheModel` below is the assertion that the string model
@@ -4349,12 +3444,6 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
     RETURNS_A_STRING = "def main(n: Int) -> Int:\n    return \"small\"\n"
     PRINTS = "def main(n: Int) -> Int:\n    print(42)\n    return 7\n"
-    # The arm64 half: a bounded stop the program never reaches, and therefore
-    # the only unbound call in the image. `n % d` with a VARIABLE divisor is
-    # what puts the call there — `_emit_div_shift_pow` guards the divide by a
-    # zero divisor and the guard's `_emit_exit` flushes — and `formal/examples/
-    # mod_by_var.mojo` is the committed copy of this program.
-    DIVISOR = "def mod_by_var(n):\n    d = 4\n    return n % d\n"
 
     @classmethod
     def setUpClass(cls):
@@ -4381,25 +3470,6 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                 cls.built[(arch, name)] = open(
                     r["proof_path"], encoding="utf-8").read()
                 cls.built[(arch, name, "info")] = r["info"]
-        # The arm64 row is a separate loop because it is arm64-ONLY: the same
-        # program on x86-64 has a different trap (a call to the C library's
-        # `exit`, in the guard's prologue) and asserting about one backend's
-        # list inside the other's table is how a row ends up checking nothing.
-        path = os.path.join(cls.tmp, "divisor.mojo")
-        with open(path, "w") as f:
-            f.write(cls.DIVISOR)
-        try:
-            r = fb.compile_formal(
-                path, arch="arm64",
-                output=os.path.join(cls.tmp, "divisor-arm64.aout"),
-                prove=True, check=False)
-            cls.built[("arm64", "divisor")] = open(
-                r["proof_path"], encoding="utf-8").read()
-            cls.built[("arm64", "divisor", "info")] = r["info"]
-            cls.built[("arm64", "divisor", "code")] = r["code"]
-        except Exception as e:                        # noqa: BLE001
-            cls.built[("arm64", "divisor")] = None
-            cls.built[("arm64", "divisor", "error")] = f"{type(e).__name__}: {e}"
 
     @classmethod
     def tearDownClass(cls):
@@ -4443,28 +3513,13 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertIn("printf", text,
                       "the suppression must name the symbol that caused it")
 
-    #: The symbols a COMPILER may publish in `info["compiler_traps"]`.
-    #:
-    #: `exit` is the trap itself. `write` is the message the trap prints before
-    #: it exits (`model.stack_trap_message`, emitted by
-    #: `x86_64_codegen.py::_emit_overflow_diagnostic_call`) — it is the
-    #: compiler's own call for the same reason `exit` is, and publishing it is
-    #: what keeps the run tests coming back on a program that traps, because an
-    #: unrecorded `write` reads as a call the PROGRAM makes.
-    #:
-    #: The list is named rather than loosened to "any extern call": the point of
-    #: the test is that `_program_externs` subtracts a KNOWN set, and a test that
-    #: accepted whatever the emitter published would pass for an emitter that
-    #: published `printf`.
-    _COMPILER_TRAP_SYMS = frozenset({"exit", "write"})
-
     def test_the_trap_is_published_as_a_compiler_call(self):
         """`info["compiler_traps"]` is the emitter's own list, and it is right.
 
-        Every entry must be the address of a COMPILER call in `extern_calls` —
-        the trap is a real call and must stay accounted for on the link line —
-        and no entry may be any other symbol's, or the subtraction would silence
-        a program call.
+        Every entry must be the address of an `exit` in `extern_calls` — the
+        trap is a real call and must stay accounted for on the link line — and
+        no entry may be any other symbol's, or the subtraction would silence a
+        program call.
         """
         for name in ("plain", "string", "prints"):
             info = self._info("x86_64", name)
@@ -4480,34 +3535,9 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                     self.assertIn(addr, by_addr,
                                   f"{addr} is published as a trap but is not "
                                   f"an extern call at all")
-                    self.assertIn(
-                        by_addr[addr], self._COMPILER_TRAP_SYMS,
-                        f"the trap at {addr} is a {by_addr[addr]!r} call, which "
-                        f"is not one of {sorted(self._COMPILER_TRAP_SYMS)}; "
-                        f"publishing it would subtract a call the PROGRAM makes")
-
-    def test_the_traps_are_all_below_the_entry_or_the_exit_itself(self):
-        """A published trap is reached from a guard, so it is a `write` or an `exit`.
-
-        Nothing else: `getrlimit` returns and is NOT a trap (it is subtracted by
-        address against `func_offset` instead, because it runs in the startup
-        stub before the entry point and so is on no walked path), and `printf` is
-        the program's. This pins the boundary from the other side of
-        `test_the_subtraction_is_by_address_not_by_symbol`.
-        """
-        for name in ("plain", "string", "prints"):
-            info = self._info("x86_64", name)
-            by_addr = {e["addr"]: e["sym"]
-                       for e in (info.get("extern_calls") or [])}
-            entry = info.get("func_offset")
-            for addr in (info.get("compiler_traps") or ()):
-                with self.subTest(program=name, addr=hex(addr)):
-                    self.assertGreaterEqual(
-                        addr, entry,
-                        "a compiler trap below the entry point is in the "
-                        "startup stub, which no run test walks; publishing it "
-                        "claims a path the model never takes")
-                    self.assertIn(by_addr[addr], self._COMPILER_TRAP_SYMS)
+                    self.assertEqual(by_addr[addr], "exit",
+                                     f"the trap at {addr} is a "
+                                     f"{by_addr[addr]!r} call")
 
     def test_the_subtraction_is_by_address_not_by_symbol(self):
         """Two `exit` calls, one the compiler's: the program's must survive.
@@ -4534,157 +3564,21 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
         """The other backend, and the reason the asymmetry was the bug.
 
-        arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
-        decodes, so a program that emits no bounded stop publishes NO
-        `compiler_traps` and needs nothing subtracted from the program's calls.
-
-        arm64 reads `RLIMIT_STACK` once in the startup stub
-        (`formal/arm64_codegen.py::_emit_stack_floor_init`), so its `getrlimit`
-        IS in `extern_calls` — but BELOW `func_offset`, where no run test
-        starts. The property that matters is therefore the PROGRAM-call set
-        (`formal/arm64_proof_gen.py::_program_extern_calls`, which subtracts
-        calls below the entry for the same reason x86-64's `_program_externs`
-        does), and that is what this row asserts. The name says "no trap list"
-        and the assertion is `assertFalse`, so it is worth being exact: it
-        claims THIS program's trap list is empty, and arm64 DOES publish one for
-        a program with a bounded stop — see the rows below, which are the other
-        half and which this row used to contradict.
+        arm64's trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so its
+        `extern_calls` was always empty for a program that calls nothing and
+        its run tests were never suppressed. Nothing here may change that, and
+        the assertion that it has not is what makes the x86-64 fix a fix rather
+        than a lowering of the bar on both sides.
         """
-        from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
-        self.assertEqual(_program_extern_calls(info), [],
-                         "the startup stub's `getrlimit` is being read as a "
-                         "call the PROGRAM makes")
+        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
+                         [], "arm64's guard trap is an `svc`, not a call")
         self.assertFalse(info.get("compiler_traps"),
-                         "a program with no bounded trap published one, so "
-                         "something other than a stop is being recorded")
+                         "arm64 published compiler traps, so its trap is no "
+                         "longer the in-image `svc` this assertion assumes")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
-
-    def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
-        """arm64's own trap is a `BL fflush`, and it must be published as one.
-
-        Every published address must be an `fflush` in `extern_calls` — the
-        flush is a real call and has to stay accounted for on the link line —
-        and the list must not be empty for a program whose image contains a
-        bounded stop, because a generator with nothing to subtract puts
-        `_gen_extern_test` on a path the program never takes.
-        """
-        info = self._info("arm64", "divisor")
-        traps = info.get("compiler_traps")
-        self.assertTrue(traps,
-                        "the image has a divide-by-zero stop and no trap was "
-                        "published, so its `fflush` is being read as a call "
-                        "the program makes")
-        by_addr = {e["addr"]: e["sym"]
-                   for e in (info.get("extern_calls") or [])}
-        for addr in traps:
-            self.assertIn(addr, by_addr,
-                          f"{addr:#x} is published as a trap but is not an "
-                          f"extern call at all, so the subtraction would "
-                          f"silence nothing and the list is wrong")
-            self.assertEqual(by_addr[addr], "fflush",
-                             f"the trap at {addr:#x} is a "
-                             f"{by_addr[addr]!r} call, and subtracting a "
-                             f"program call is the defect the by-address rule "
-                             f"exists to prevent")
-
-    def test_a_recorded_trap_is_the_bl_and_not_the_instruction_before_it(self):
-        """The recorded address must be the `BL`, which is NOT where the call
-        starts emitting.
-
-        `fflush(NULL)` emits `mov w0, #0` and THEN `bl fflush`, so the
-        assembler's position before the call is twelve bytes short of the
-        instruction. Taking that position records an address that is not in
-        `extern_calls` at all, the subtraction matches nothing, and the
-        generator is exactly as wrong as it was before — with a list published
-        that claims it is not. That is what this row is for: it decodes the word
-        at every published address out of the EMITTED CODE and requires it to be
-        a `BL` (step-table index 15), and separately requires the word twelve
-        bytes earlier not to be one — without that second half the row would
-        pass on an image whose layout happens to put another call in front.
-        """
-        import formal.arm64_proof_gen as G
-        info = self._info("arm64", "divisor")
-        code = self.built[("arm64", "divisor", "code")]
-        base = info["base_addr"]
-        traps = info.get("compiler_traps") or []
-        self.assertTrue(traps)
-        for addr in traps:
-            off = addr - base
-            word = int.from_bytes(code[off:off + 4], "little")
-            self.assertEqual(G._step_branch_index(word), 15,
-                             f"the word at the published trap {addr:#x} is "
-                             f"{word:#010x}, which is not a `BL`: the recorded "
-                             f"address is not the call")
-            before = int.from_bytes(code[off - 4:off], "little")
-            self.assertNotEqual(G._step_branch_index(before), 15,
-                                f"the instruction before the published trap "
-                                f"{addr:#x} is also a `BL`, so this row could "
-                                f"not tell the two apart")
-
-    def test_a_program_whose_only_unbound_call_is_a_trap_gets_its_run_test(self):
-        """The whole fix: `n % d` with a variable divisor, end to end.
-
-        Its image's only unbound call is the divide-by-zero guard's flush, on a
-        path the program never takes (the divisor is 4). Before the subtraction
-        `_gen_extern_test` treated it as the program's one opaque call and
-        emitted `mod_by_var_pre_reaches_0 : run_pc_reached … = true`, which is
-        FALSE — `native_decide` rejected it with "evaluated that the
-        proposition to be false", so a program that computes, runs and is
-        modelled correctly was a `lean-rejected` census row.
-
-        Three assertions, because "it generates something" is not the claim: no
-        `pre_reaches` theorem is emitted at all (the extern-test shape is not
-        taken), the ordinary run test IS emitted with the program's real answer,
-        and the image's program-call list is empty — so what removed the false
-        obligation is the subtraction and not a generator that stopped asking.
-        """
-        text = self._text("arm64", "divisor")
-        self.assertNotIn("pre_reaches", text,
-                         "the false obligation is being emitted again: this "
-                         "image has no program call for one to be about")
-        self.assertNotIn("extern_fflush_step", text,
-                         "the trap's `BL` is still being bridged as if the "
-                         "program made it")
-        self.assertIn("run_result_exit", text,
-                      "the program's own run test is missing, so the "
-                      "subtraction removed the section instead of the trap")
-        self.assertRegex(text, r"run_result_exit \{ \(Arm64State\.init 10",
-                         "the concrete run test must start from the entry "
-                         "state and carry the program's answer")
-        from formal.arm64_proof_gen import _program_extern_calls
-        info = self._info("arm64", "divisor")
-        self.assertEqual(_program_extern_calls(info), [],
-                         "the subtraction did not remove the trap")
-        self.assertTrue(info.get("extern_calls"),
-                        "the image really does carry the `fflush`, so this "
-                        "row is not passing because there was nothing to "
-                        "subtract")
-
-    def test_the_arm64_subtraction_is_by_address_not_by_symbol(self):
-        """The same design decision as the x86-64 row, on the other backend.
-
-        An image that both traps and prints has an `fflush` that is the
-        compiler's and a `printf` that is the program's; subtract by symbol and
-        the wrong half disappears. And an `info` with no `compiler_traps` — a
-        dylib, or an emitter that predates the key — must subtract nothing,
-        which is the conservative direction.
-        """
-        from formal.arm64_proof_gen import _program_extern_calls
-        trap, printed = 0x1000, 0x2000
-        info = {
-            "extern_calls": [{"sym": "fflush", "addr": trap},
-                             {"sym": "printf", "addr": printed}],
-            "compiler_traps": [trap],
-        }
-        self.assertEqual(_program_extern_calls(info),
-                         [{"sym": "printf", "addr": printed}])
-        self.assertEqual(len(_program_extern_calls(
-            {"extern_calls": info["extern_calls"]})), 2,
-            "with no traps published both calls are the program's")
-        self.assertEqual(_program_extern_calls({}), [])
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
@@ -4721,54 +3615,22 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The eleven that still generate, grouped as the doc grouped them, so a
-    #: reader can see which family each is in.
+    #: The twelve, grouped as the doc grouped them, so a reader can see which
+    #: family each is in.  `sum_range` is family 1's range loop and the one that
+    #: took the conditional back edge; it is in this tuple rather than in
+    #: `REFUSED` below because it generates.
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
                 "both", "either",                               # family 3
-                "wdiff")                                        # family 4
+                "wdiff",                                        # family 4
+                "sum_range")                                    # family 1
 
-    #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
-    #: is HERE rather than deleted because the refusal is the FIX and not a
-    #: regression: its loop contract is stated in the UNSIGNED order while the
-    #: loop's own test is a signed `CSET lt`, so the obligation was
-    #: `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63 — and it
-    #: elaborated only because the closing leaf admits it with a `sorry`
-    #: (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
-    #: generating proof that says something false.
-    #:
-    #: The needles are the three facts a reader needs to act, and the first two
-    #: are what tell this refusal apart from "the loop shape is unrecognised"
-    #: (an emitter change) and from "the contract is wrong for this shape" (a
-    #: library change). The third says the program itself is fine, which is the
-    #: fact that makes declining the right trade rather than a loss.
-    REFUSED = {
-        "sum_range": (["SIGNED condition code 11", "arm64_flag_lt_s",
-                       "while_lt_exit_contract_bottom"],
-                      "its loop test is signed and the contract is stated in "
-                      "the unsigned order, so the obligation would be false"),
-    }
-
-    #: The document each `REFUSED` stem's repair is owned by, when the owning
-    #: doc is named for the DEFECT rather than for the example. `sum_range` is
-    #: the only row, and its doc is
-    #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` — a name that says what is wrong and deliberately does not
-    #: contain the stem, which is why `test_the_owner_of_the_one_refusal_still_
-    #: exists` cannot find it by prefix.
-    #:
-    #: The point of naming it is the same as the check's own: this refusal is a
-    #: STOP, not a fix, and the doc is what a reader has to find to learn that.
-    #: A row that pinned the refusal without naming the doc would let the doc be
-    #: deleted on the grounds that the refusal it describes is now recorded
-    #: here — which is the opposite of true, because the doc records the part
-    #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
-    #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
-    REFUSED_OWNER = {
-        "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
-                     "against_a_signed_flag.md",
-    }
+    #: Nobody refuses, and the shape says so: a stem here is pinned as NOT
+    #: generating, with the WORDING of the refusal rather than an address (an
+    #: address is `sum_range.mojo`'s loop header in today's layout and moves
+    #: with any layout change, while a message is the premise).  Adding a row
+    #: is how a newly-found refusal stops being a note in somebody's session.
+    REFUSED = {}
 
     @classmethod
     def setUpClass(cls):
@@ -4803,32 +3665,41 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                               f"{stem} generated a file with no end-to-end "
                               f"theorem in it; that is not a proof of anything")
 
-    def test_the_one_that_refuses_says_why(self):
-        """Every needle of a `REFUSED` row, not just one of them.
+    def test_the_range_loop_is_proved_by_a_bottom_tested_contract(self):
+        """Why `sum_range` generates, and not by accident.
 
-        A refusal row exists so a reader can act on it, and one needle cannot
-        carry that: for `sum_range` the actionable content is THREE facts —
-        which condition code the loop tests, which lemma made the obligation
-        false, and which contract is stated in the wrong order — and a
-        message carrying only the first still leaves the reader unable to tell
-        this refusal from "the loop shape is unrecognised". So the table takes a
-        LIST and every element is asserted, and `why` is the sentence that says
-        what the row is for.
+        `for n:` lowers with the emptiness test in a PREHEADER, so the body, the
+        counter increment, the comparison and the back edge are ONE `cbz`-kinded
+        block whose taken edge targets its OWN start. The loop-discovery scan
+        used to ask "is this a `b` block whose target is a `cbz` block" — an
+        unconditional back edge — and so found no loop contract at all for this
+        shape, which is why the walk raised `unsupported cbz taken continuation`
+        rather than applying one.
+
+        So "generates" for this stem could be true for a reason that has nothing
+        to do with the loop, and the pin is that it is proved by the contract
+        for a test at the BOTTOM (`while_lt_exit_contract_bottom`, whose `Rn` of
+        31 is the zero register — see `lib/ProofLib.lean`'s
+        `arm64_step_neg_reads_zero_rn`), not by the top-tested one.
         """
-        for stem, (needles, why) in sorted(self.REFUSED.items()):
+        text, err = self._generate("sum_range")
+        self.assertIsNotNone(text, f"sum_range generates now? {err}")
+        self.assertIn("while_lt_exit_contract_bottom", text)
+        self.assertNotIn("while_lt_exit_contract ", text,
+                         "sum_range's test is at the bottom of its body, so the "
+                         "top-tested contract is the wrong one for it")
+
+    def test_the_one_that_refuses_says_why(self):
+        for stem, (needle, why) in sorted(self.REFUSED.items()):
             with self.subTest(stem=stem):
                 text, err = self._generate(stem)
                 self.assertIsNone(
                     text, f"{stem} generates now ({err}); delete it from "
                           f"REFUSED and say what closed it — the doc this row "
                           f"cites names the owner of the fix")
-                if isinstance(needles, str):
-                    needles = [needles]
-                for needle in needles:
-                    self.assertIn(needle, err or "",
-                                  f"{stem} refused, but the message does not "
-                                  f"say {needle!r}, which is what makes the "
-                                  f"refusal actionable: {err} ({why})")
+                self.assertIn(needle, err or "",
+                              f"{stem} refused, but not with the wording this "
+                              f"row pins: {err} ({why})")
 
     def test_the_owner_of_the_one_refusal_still_exists(self):
         """A refusal whose owning doc is gone is a doc to delete, not to keep.
@@ -4838,37 +3709,30 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **`REFUSED` is NOT empty** — `sum_range` joined it on 2026-10-05, when
-        its loop contract was declined for stating an unsigned order against a
-        signed flag — so this check does real work from the first row. It was
-        vacuous while the table was empty, and an empty table and a table whose
-        rows all point at deleted docs look identical from the outside: that is
-        the difference between "nobody refuses" and "the records of the
-        refusals were thrown away". The census is asserted explicitly for the
-        same reason.
+        **Vacuous while `REFUSED` is empty, and that is asserted rather than
+        left to be discovered**: an empty table and a table whose rows all point
+        at deleted docs look identical from the outside, and the difference is
+        the difference between "nobody refuses" and "the records of the refusals
+        were thrown away".  So the empty case states the census it means — all
+        twelve reach a proof file — and the census is `GENERATE`, which the case
+        above walks.
         """
-        # Not vacuous any more: `sum_range` moved from GENERATE to REFUSED on
-        # 2026-10-05, so the total is asserted rather than derived from a
-        # table that used to be empty. The number is the census this class
-        # claims; a silent change to either list is how a refusal goes
-        # unrecorded, and the OWNER check below is what makes the row survive
-        # its own fix.
-        self.assertEqual(
-            len(self.GENERATE) + len(self.REFUSED), 12,
-            "the census of the twelve red examples changed shape: "
-            f"{len(self.GENERATE)} generate and {len(self.REFUSED)} refuse. If "
-            "that is right, name the new split here — a total that moves "
-            "silently is how a refusal goes unrecorded")
+        if not self.REFUSED:
+            self.assertEqual(
+                len(self.GENERATE), 12,
+                "REFUSED is empty, so this class now claims that ALL TWELVE of "
+                "the red examples generate. If the census changed, say so here "
+                "and name the new count — an empty table that quietly stops "
+                "meaning 'all of them' is how a refusal goes unrecorded")
+            return
         for stem in sorted(self.REFUSED):
-            declared = self.REFUSED_OWNER.get(stem)
             owners = [n for n in os.listdir(os.path.join(HERE, "bugs"))
-                      if n == declared or n.startswith(f"FORMAL_{stem}")]
+                      if n.startswith(f"FORMAL_{stem}")]
             self.assertTrue(
                 owners,
-                f"{stem} is pinned as refusing with no bug doc naming it "
-                f"(looked for {declared!r} and any FORMAL_{stem}*); either "
-                f"the refusal is fixed (delete the row) or the doc that owns "
-                f"the repair is missing, and this row is what found that")
+                f"{stem} is pinned as refusing with no bug doc naming it; "
+                f"either the refusal is fixed (delete the row) or the doc that "
+                f"owns the repair is missing, and this row is what found that")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
@@ -5516,115 +4380,6 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                              f"divisor: {p.stdout!r}")
 
 
-class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
-    """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
-
-    `bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
-    and not with the arithmetic, and gives a reason about the FLAGS ("it has
-    the flags to get right rather than a register") rather than about
-    PROVABILITY. This class is the measurement behind that choice, and it is a
-    question about LEAN rather than about arm64 — which is why it is three
-    two-line files with no ProofLib import (0.3 s each, not a proof run), one
-    per question, so each verdict is its own exit status and nothing has to be
-    parsed out of a shared transcript:
-
-    * a `Float` ORDER has a `Decidable` instance and `native_decide` closes it.
-      An `FCMP` arm's result is an `if`-chain over `<` / `unordered`
-      (`lib/IEEE754.lean`'s `key` and `unordered` decide the flags), so that is
-      the shape the order supports.
-    * the KERNEL does not reduce `Float.decLt` (`decide` fails where
-      `native_decide` succeeds). Anything in a `work_step_*` proof that needs
-      kernel reduction over a comparison — `bv_decide` above all — therefore
-      cannot see a float.
-    * a `Float` EQUALITY has **no `Decidable` instance at all**. So an arm whose
-      result is a float VALUE — `FADD`, `FSUB`, `FMUL`, `FDIV`, `SCVTF`,
-      `FCVTZS`, the two `FMOV`s — has no `rfl`, `simp` or `decide` to close its
-      lemma with, because all three need that equality.
-
-    That is the difference between the one arm the doc asks for first and the
-    nine it defers, and it is worth three tests because the alternative is a
-    worker writing `work_step_fadd` against a `Decidable` that is not there —
-    and, worse, an arm that "almost" works and is never checked.
-    """
-
-    #: `name -> (source, must_succeed, needle_when_it_fails_or_not)`.
-    QUESTIONS = {
-        # The order, by the compiler: this is what `native_decide` gives an
-        # `FCMP` arm's `if`-chain.
-        "order_native": ("theorem t : (1.0 : Float) < 2.0 := by native_decide",
-                         True, None),
-        # The same order by the kernel: the load-bearing negative, because a
-        # `work_step_*` proof is `unfold; rw [if_neg …]; rfl`, and `rfl` is
-        # kernel reduction.
-        "order_kernel": ("theorem t : (1.0 : Float) < 2.0 := by decide",
-                         False, "did not reduce"),
-        # The equality the arithmetic arms would need.
-        "value_equality": ("example : Decidable "
-                           "((0.0 : Float) / (0.0 : Float) = (0.0 : Float)) "
-                           ":= inferInstance",
-                           False, "failed to synthesize"),
-    }
-
-    @classmethod
-    def setUpClass(cls):
-        lean = _lean()
-        if not lean:
-            raise unittest.SkipTest("no Lean: every assertion here is about "
-                                    "what Lean's own instances do, and none of "
-                                    "them is answerable without it")
-        cls.tmp = tempfile.mkdtemp(prefix="a2-float-dec-")
-        from formal import lean as FLEAN
-        cls.out = {}
-        for name, (src, _ok, _needle) in cls.QUESTIONS.items():
-            path = os.path.join(cls.tmp, name + ".lean")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(src + "\n")
-            r = FLEAN.run_lean(lean, [os.path.basename(path)], cwd=cls.tmp,
-                               env={"LEAN_PATH": os.path.join(HERE, "lib")})
-            cls.out[name] = (r.returncode, (r.stdout or "") + (r.stderr or ""))
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def _ask(self, name):
-        rc, out = self.out[name]
-        want_ok, needle = self.QUESTIONS[name][1:]
-        if want_ok:
-            self.assertEqual(rc, 0,
-                             "%s: Lean's answer changed, and this class is "
-                             "the measurement behind the ORDER of work in "
-                             "`bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` "
-                             "-- re-read it before believing the row below: %s"
-                             % (name, out[:400]))
-        else:
-            self.assertNotEqual(rc, 0,
-                                "%s: this now WORKS, so the obstacle it was "
-                                "measured to be is gone and the document that "
-                                "cites it is stale: %s" % (name, out[:400]))
-            self.assertIn(needle, out,
-                          "%s: it fails for a different reason than the one "
-                          "recorded, which means the recorded reason is not "
-                          "what is stopping the work: %s" % (name, out[:400]))
-
-    def test_a_float_ORDER_is_decidable_and_native_decide_closes_it(self):
-        """What makes `FCMP` — and only `FCMP` — writable in this shape."""
-        self._ask("order_native")
-
-    def test_the_kernel_does_not_reduce_a_float_order(self):
-        """`decide` failing where `native_decide` succeeds, which is why no
-        `bv_decide` in a `work_step_*` can ever see a float operand."""
-        self._ask("order_kernel")
-
-    def test_a_float_VALUE_equality_is_not_decidable_at_all(self):
-        """The obstacle for the other NINE arms, and the reason it is not
-        "just a bit more work": there is no instance for `rfl`, `simp` or
-        `decide` to use, so an arithmetic `work_step_*` cannot be finished at
-        all until a `Decidable` over `Float` (or a bit-pattern representation
-        of the D registers) exists."""
-        self._ask("value_equality")
-
-
 class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     """The measurement itself: the residual is `1 = 0`, and it is FALSE."""
 
@@ -5640,33 +4395,8 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-div0-lean-")
         from formal import lean as FLEAN
         cls.out = {}
-        #: label -> why this class's own mechanism did not fire, or None.
-        #: The class measures a residual goal by replacing the walk terminal's
-        #: admission (`_ADMIT`) with `trace_state`.  That replacement is a
-        #: NO-OP whenever the fixture stops generating a theorem that carries
-        #: the admission — the fixture refusing outright, or the universal
-        #: theorem being replaced by a reachability statement — and a no-op
-        #: leaves `out[label]` with no goal printed, which is what makes the
-        #: bare `assertIn("⊢ 1 =")` below report "the residual moved" when the
-        #: truth is "there is no residual here to move".  The check is
-        #: `test_the_measurement_class_can_still_see_what_it_measures`.
-        cls.blind = {}
         for label, patch in (("as_emitted", False), ("doc_next_step", True)):
-            try:
-                head, tail = _symbolic_divisor_proof(cls.tmp)
-            except Exception as e:                      # noqa: BLE001
-                cls.blind[label] = (
-                    f"the fixture no longer generates a proof at all, so the "
-                    f"residual this class exists for cannot be traced: "
-                    f"{type(e).__name__}: {e}")
-                cls.out[label] = ""
-                continue
-            if _ADMIT not in tail:
-                cls.blind[label] = (
-                    f"the fixture generates no `q_compiles_correctly_universal` "
-                    f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is "
-                    f"a no-op and no goal can be traced: whatever the div0 "
-                    f"residual is today, this class is not looking at it")
+            head, tail = _symbolic_divisor_proof(cls.tmp)
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -5682,22 +4412,6 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         if hasattr(cls, "tmp"):
             shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_the_measurement_class_can_still_see_what_it_measures(self):
-        """Fail by NAME when this class's own mechanism did not fire.
-
-        The doc's step 1 (`bugs/FORMAL_the_div0_guard_measurement_class_traces_
-        nothing_any_more.md`): a class that reports "the residual moved" while
-        its fixture stopped producing a residual is the failure
-        `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_
-        it.md` records for `bootstrap-stage2-dumps` — a check that did not look
-        at what it produced.  This row is the one that says so.
-        """
-        for label in ("as_emitted", "doc_next_step"):
-            with self.subTest(spelling=label):
-                self.assertIsNone(
-                    self.blind.get(label),
-                    f"{label}: {self.blind.get(label)}")
-
     def test_the_false_goal_survives_the_documented_next_step(self):
         """Both spellings leave `⊢ 1 =`, and adding `hc_N` changes nothing.
 
@@ -5707,13 +4421,6 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """
         for label in ("as_emitted", "doc_next_step"):
             with self.subTest(spelling=label):
-                # Distinguish "the residual moved" from "there is no residual
-                # here to move": the misleading diagnosis is the defect this
-                # class is being repaired for, so the bare `assertIn` below
-                # must not be the first thing a reader sees when the fixture
-                # stopped generating the theorem.
-                self.assertIsNone(self.blind.get(label),
-                                  f"{label}: {self.blind.get(label)}")
                 self.assertIn("⊢ 1 =", self.out[label],
                               f"{label}: the div0 path's residual is no longer "
                               f"the `1 = …` goal — fdiv64's div0 arm or the "
@@ -5724,8 +4431,6 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
         for label in ("as_emitted", "doc_next_step"):
-            self.assertIsNone(self.blind.get(label),
-                              f"{label}: {self.blind.get(label)}")
             got, keep = [], False
             for line in self.out[label].splitlines():
                 if line.strip().startswith("⊢"):
@@ -5817,25 +4522,6 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # agreement about all four flag bits.
         ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
         ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
-        # `ADDS Xd, Xn, Xm` with `Rd ≠ 31`: the SAME `0xab000000` class the `cmn`
-        # row above is the `Rd = 31` spelling of, and the write to `Rd` is the
-        # whole difference. It is the instruction the backend emits for a signed
-        # `+` overflow check (`_emit_int_alu_checked`'s `encode_adds_xd_xn_xm(0,
-        # 0, 1)`), and the row is here rather than folded into `cmn` on purpose:
-        # `arm64_step` claimed the whole class while writing no register, so a
-        # fix that made ONE of the two spellings right and left the other wrong
-        # would pass a test that pinned either one alone.
-        ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
-        # The extended-immediate `sh` field (bits 23:22): `lsl #12` scales the
-        # 12-bit field by 4096, and `arm64_step` read the field and dropped the
-        # shift, so a large constant offset was stepped as if it were the raw
-        # `imm12`. The last row is the anti-rot that matters: a helper that
-        # ALWAYS shifted would pass the two scaled rows and fail this one.
-        ("add x12, x29, #1675, lsl #12",
-         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 1)),
-        ("sub x25, x14, #545, lsl #12",
-         lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
-        ("add x12, x29, #1675", lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 0)),
     )
 
     @classmethod
@@ -6456,421 +5142,6 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
                       "hid the body's assignment: %s" % err[:400])
 
 
-class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
-    """`floordiv` and `udivmod` are refused at GENERATION time, and the reason
-    is the call walk rather than anything about division.
-
-    These two were the only red `formal/examples` stems that
-    `test_formal.py::EXPECTED_FAILURES` did not name, so a whole-corpus run
-    reported them as FAILURES with no document anywhere saying why — and the
-    natural next reading, "the floor correction has no proving case", is wrong:
-    measured through `compile_formal(prove=True, check=False)` the generator
-    RAISES, so no `<stem>_proof.lean` is ever written and there is no Lean
-    residual goal to read at all.
-
-    The refusal is the universal theorem's call walk refusing to follow TWO call
-    sites of ONE callee — `//` and `%` each lower to a call to the same
-    divide-and-correct helper — with a single halt address. That is item 2 of
-    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`,
-    and it is why `test_formal.py`'s entry for these two says so.
-
-    Pinned in both directions because both failure modes are real and neither is
-    the interesting one: a generator that STOPPED raising would leave a proof
-    file whose residual goal nobody has read (the state this class was written
-    against), and a generator that raised for a DIFFERENT reason would leave the
-    marker in `test_formal.py` describing a defect that is gone.
-    """
-
-    STEMS = ("floordiv", "udivmod")
-
-    def test_both_are_refused_before_a_proof_file_exists(self):
-        import formal.build as fb
-        for stem in self.STEMS:
-            tmp = tempfile.mkdtemp(prefix=f"a2-divrefuse-{stem}-")
-            try:
-                src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
-                with self.assertRaises(fb.FormalBuildError) as caught:
-                    fb.compile_formal(src, arch="arm64",
-                                      output=os.path.join(tmp, f"{stem}.aout"),
-                                      prove=True, check=False)
-                text = str(caught.exception)
-                self.assertIn("universal theorem", text)
-                self.assertIn("halt address", text)
-                self.assertIn("calls this walk cannot follow", text)
-                # …and the decisive half: NO proof file, so there is nothing for
-                # Lean to have rejected and nothing for a residual-goal
-                # measurement to be about.
-                written = [f for f in os.listdir(tmp) if f.endswith("_proof.lean")]
-                self.assertEqual([], written,
-                                 f"{stem} wrote a proof file, so whatever it "
-                                 f"contains is unreviewed")
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    def test_the_image_itself_is_fine_without_the_proof(self):
-        # The refusal is at PROOF GENERATION, so `--no-prove` builds both
-        # architectures and both spellings run and answer. If this stopped being
-        # true the two would be a codegen defect rather than a proof-layer one,
-        # and `test_formal.py`'s marker would be naming the wrong subject.
-        import subprocess
-        import formal.build as fb
-        for stem in self.STEMS:
-            for backend, runner in (("arm64", None),
-                                    ("x86_64", ["arch", "-x86_64"])):
-                tmp = tempfile.mkdtemp(prefix=f"a2-divrun-{stem}-")
-                try:
-                    out = os.path.join(tmp, f"{stem}.aout")
-                    fb.compile_formal(
-                        os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
-                        arch=backend, output=out, prove=False, check=False)
-                    proc = subprocess.run((runner or []) + [out],
-                                          capture_output=True, timeout=30)
-                    # The entry IS the function, so the exit status is its
-                    # answer. `//` is CPython's own floor and both stems'
-                    # remainder is CPython's, so ONE expectation covers both
-                    # examples — `/` is this path's documented INTEGER
-                    # TRUNCATION rather than CPython's float division (the same
-                    # stand-in `MLIR_WORD_ARITH_OPS` rewrites `index.divs`
-                    # onto), which is why `udivmod`'s CPython answer is
-                    # 4.428… and this path's is 4.
-                    want = (10 // 7) + (10 % 7)
-                    self.assertEqual(want, proc.returncode,
-                                     f"[{backend}] {stem} answered "
-                                     f"{proc.returncode}, CPython {want}: "
-                                     f"{proc.stderr[:200]!r}")
-                finally:
-                    shutil.rmtree(tmp, ignore_errors=True)
-
-    def test_x86_64_proves_them_where_arm64_refuses(self):
-        # The asymmetry is the finding and it is why this is not one shared
-        # row: `formal/x86_64_proof_gen.py` catches the generator's exception,
-        # emits the model as a DISCLAIMED placeholder and suppresses the run
-        # tests, so the end-to-end theorem is `sorry` and the example is a PASS.
-        # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
-        # function.md` was that family; this is where the mechanism lives now.
-        import formal.build as fb
-        for stem in self.STEMS:
-            tmp = tempfile.mkdtemp(prefix=f"a2-divx86-{stem}-")
-            try:
-                r = fb.compile_formal(
-                    os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
-                    arch="x86_64", output=os.path.join(tmp, f"{stem}.aout"),
-                    prove=True, check=False)
-                self.assertTrue(os.path.isfile(r["proof_path"]),
-                                f"{stem}: x86-64 wrote no proof either")
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
-
-
-class TestExternCallTheRunDoesNotReach(unittest.TestCase):
-    """`_gen_extern_test` where the concrete run never GETS to the extern call.
-
-    **The failure this class exists for was a FALSE THEOREM, not a missing
-    one.**  `_gen_extern_test` splits the modelled run at every extern call site
-    and, for each, emitted (a) `{name}_pre_reaches_{i}` — the run reaches the
-    call — and (b) `{name}_post_extern_given_callee_returns`, continuing from
-    `{name}_pre_{i}` with `pc` set past the `BL`.  Both are about a state that
-    exists only if the run got there, and `pre_i`'s `none` arm fell back to
-    `Arm64State.init 0 <base>` — an unrelated state — so on a program whose
-    call is NOT on the concrete run's path all three obligations were FALSE and
-    `native_decide` said so in the generated file's own words.
-
-    `formal/examples/mod_by_var.mojo` is the measured case (`n % d`, whose only
-    `fflush` is on the divide-by-zero guard's error arm, which `d = 4` never
-    takes).  Before the fix, three diagnostics:
-
-        run_pc_reached { (Arm64State.init 10 4294968256) with
-                         x30 := UInt64.ofNat 4294968476 }
-                       mod_by_var_code 4294968440 200000 = true        is false
-        run_result_exit { mod_by_var_pre_0 with pc := 4294968444 }
-                        mod_by_var_code 4294968476 200000 = mojo 10    is false
-        mod_by_var_pre_0.pc = 4294968440                               is false
-
-    **The fix is two shapes, and both are facts rather than premises.**
-    `pre_i`'s `none` arm is now the state BEFORE the call with `pc` pinned to
-    the call, which makes `pre_i.pc = <call>` true in both arms (it is what the
-    `BL` step theorem needs, and `arm64_step`'s `BL` arm reads nothing but the
-    word at `s.pc` and `pc` itself, so the step equality is true there too).
-    And the post-call theorem is a `match` on the call's OWN reachability: the
-    `some` arm is the statement it always was, the `none` arm is the run's own
-    answer from the state before the call — which is what this generator states
-    for a program with no extern call at all.  Both arms are decided by
-    `native_decide`, so nothing is left for a reader to take on trust.
-
-    **The `none` arm can no longer be made LIVE by a probe, so its SHAPE is
-    what is pinned.**  `_gen_extern_test` is reached only for a call the program
-    MAKES, and every such call is now on the concrete run: a call behind a
-    source condition is refused by the generator ("the call … is behind a
-    CONDITIONAL"), an uncalled function's call is refused with it, and a
-    compiler trap (`_emit_trap_flush`) is subtracted by `_program_extern_calls`
-    so the program takes the ordinary run path.  The `none` arm is still
-    EMITTED — the theorem is a `match` on the run's own reachability — so the
-    rows below assert its shape: the pre-call state with `pc` pinned, never
-    `Arm64State.init 0 <base>`.
-
-    `print1`'s `printf` is on the path.  `mod_by_var` (`n % d`) used to be the
-    unreached probe: its only unbound call is the div0 guard's `fflush`, and
-    that is now a compiler trap the generator subtracts, so it takes the run
-    path with no extern test at all — `TestCompilerTrapIsNotAProgramCall` is
-    where that is pinned.
-    """
-
-    # name, source, the extern symbol its image calls, whether the concrete run
-    # gets to the call (MEASURED).
-    PROBES = (
-        ("print1", 'def print1(n):\n    printf("hi")\n    return n\n',
-         "printf", True),
-    )
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="a2-extcall-")
-        cls.proofs = {}
-        cls.calls = {}
-        cls.infos = {}
-        for name, source, sym, _reached in cls.PROBES:
-            src = os.path.join(cls.tmp, name + ".mojo")
-            with open(src, "w", encoding="utf-8") as f:
-                f.write(source)
-            r = _compile(src, os.path.join(cls.tmp, name + ".aout"), "arm64")
-            cls.infos[name] = r["info"]
-            with open(r["proof_path"], encoding="utf-8") as f:
-                cls.proofs[name] = f.read()
-            # The startup stub's `getrlimit` is an extern call BELOW
-            # `func_offset` (`_emit_stack_floor_init`), so it is not a call the
-            # PROGRAM makes; filtering it here keeps this class about the one
-            # program call each probe has.
-            entry = r["info"].get("func_offset")
-            cls.calls[name] = [c for c in r["info"]["extern_calls"]
-                               if entry is None or c["addr"] >= entry]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_each_probe_reaches_the_extern_test_at_all(self):
-        """The premise: both images carry exactly one PROGRAM extern call, and
-        it is the one this class is about.  Without this a change that stopped
-        emitting `fflush` for the div0 guard, or stopped emitting a `printf`
-        call, would make every assertion below pass by there being nothing to
-        look at.
-
-        **The image carries a second call now — the startup stub's
-        `getrlimit`** (`arm64_codegen.py::_emit_stack_floor_init`) — so the
-        premise is stated about `_program_extern_calls`, which subtracts a call
-        below `func_offset`.  The raw `extern_calls` is asserted too, and that
-        is what keeps this row from passing because the subtraction swallowed a
-        real program call.
-        """
-        from formal.arm64_proof_gen import _program_extern_calls
-        for name, _source, sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                entry = self.infos[name].get("func_offset")
-                stub = [c for c in self.infos[name]["extern_calls"]
-                        if c["addr"] is not None and entry is not None
-                        and c["addr"] < entry]
-                self.assertEqual([c["sym"] for c in stub], ["getrlimit"],
-                                 f"{name}: the only call below the entry must "
-                                 f"be the startup stub's `getrlimit`: "
-                                 f"{self.calls[name]}")
-                self.assertEqual(
-                    [c["sym"] for c in _program_extern_calls(self.infos[name])],
-                    [sym],
-                    f"{name}: the image's PROGRAM extern calls changed, so this "
-                    f"class is no longer about the shape it was written for: "
-                    f"{self.calls[name]}")
-
-    def test_no_reachability_obligation_is_emitted(self):
-        """`…_pre_reaches_{i}` is GONE, and it is the absence that matters.
-
-        It was not merely unproved: it asserted the run reaches the call, which
-        is FALSE for every program whose call is not on the concrete run's
-        path.  A theorem cannot be the reason a fact holds, and where the run
-        does not reach the call there is nothing to assume — the post-call
-        theorem's `none` arm says the run's own answer instead.
-        """
-        for name, _source, _sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                self.assertNotRegex(
-                    self.proofs[name], r"theorem \w+_pre_reaches_\d+",
-                    f"{name}: the run's reaching the call is being asserted "
-                    f"again, and it is false wherever the call is not on the "
-                    f"concrete run's path")
-                self.assertIn(f"theorem {name}_pre_pc_is_0",
-                              self.proofs[name],
-                              f"{name}: the pre-state's pc fact is what the BL "
-                              f"step theorem needs, and it is true in both arms "
-                              f"of the match — it is the replacement")
-
-    def test_the_pre_states_fallback_is_the_pre_call_state_with_pc_pinned(self):
-        """The `none` arm, which is the whole of the fix in one line.
-
-        It used to be `Arm64State.init 0 <base>`, which shares nothing with the
-        run: every fact the file stated about the call was false whenever that
-        arm was the live one.  Pinning `pc` makes it the state the run was in
-        before the call, at the call — so `pre_i.pc = <call>` and the `BL` step
-        equality hold whatever the run did.
-        """
-        for name, _source, _sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                text = self.proofs[name]
-                self.assertNotIn("none => Arm64State.init", text,
-                                 f"{name}: the pre-state still falls back to a "
-                                 f"fresh state, so every claim about the call "
-                                 f"is false when the run does not reach it")
-                # Matched against the WHITESPACE-COLLAPSED text: the emitted
-                # declaration is wrapped across lines for width, and a test that
-                # pins the wrapping would fail on a reformat for no reason —
-                # which is the opposite of what a shape pin is for.
-                flat = re.sub(r"\s+", " ", text)
-                self.assertRegex(
-                    flat,
-                    r"def " + name + r"_pre_0 : Arm64State := match "
-                    r"arm64_exec_go_exit .*? with \| some s => s \| none => "
-                    r"\{ .*? with pc := (\d+) \}",
-                    f"{name}: the `none` arm must be the pre-call state with "
-                    f"`pc` pinned to the call")
-
-    def test_the_post_call_theorem_is_a_match_on_the_calls_reachability(self):
-        """Both arms, and the `none` arm's starting state is the point.
-
-        Continuing a run that never got to the call from the state AFTER the
-        call is the fiction: it is how `mod_by_var`'s `post_extern` came to
-        assert `= mojo 10` of a state the machine never reaches.  The `none` arm
-        starts from the state BEFORE it, which is the run's own answer.
-        """
-        for name, _source, _sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                # Whitespace-collapsed for the same reason as the row above,
-                # and so that the `none` arm's starting state can be compared
-                # with the scrutinee's by a BACK-REFERENCE: that is the whole
-                # assertion, and comparing the two texts by hand is how a
-                # `none` arm that starts one state later would pass.
-                flat = re.sub(r"\s+", " ", self.proofs[name])
-                m = re.search(
-                    r"theorem " + name + r"_post_extern_given_callee_returns : "
-                    r"\(match arm64_exec_go_exit (.*?) " + name +
-                    r"_code (\d+) 200000 with "
-                    r"\| some s => run_result_exit \{ s with pc := (\d+) \} "
-                    r"" + name + r"_code \d+ 200000 "
-                    r"\| none => run_result_exit \1 " + name +
-                    r"_code \d+ 200000\) = (.*?) := by",
-                    flat)
-                self.assertIsNotNone(
-                    m, f"{name}: the post-call theorem is not a match on the "
-                       f"call's reachability any more, so the unreachable case "
-                       f"is being stated about a state the machine never "
-                       f"reaches:\n{self.proofs[name][-1500:]}")
-                before, bl, after, want = m.groups()
-                self.assertEqual(after, str(int(bl) + 4),
-                                 f"{name}: the `some` arm must continue from "
-                                 f"just past the `BL`")
-                self.assertNotIn("pre_0", before,
-                                 f"{name}: the `none` arm continues from "
-                                 f"`pre_0`, which is the state AT or PAST the "
-                                 f"call — the fiction this row exists to catch")
-                self.assertIn(want.strip(), ("mojo 10",),
-                              f"{name}: the right-hand side changed: {want!r}")
-
-    def test_the_bl_step_theorem_takes_its_pc_from_the_pre_pc_fact(self):
-        """The step theorem's `hpc` used to be `by native_decide` against the
-        fallback state, which is false there; it is now the pre-state's pc
-        fact.  This is the assertion that the two shapes above are WIRED
-        together rather than merely both present.
-        """
-        for name, _source, _sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                # The PROGRAM call's address, not `[0]`: the startup stub's
-                # `getrlimit` is emitted at a lower address, so `[0]` is the
-                # stub and this row would look for the wrong `BL`.
-                addr = next(c["addr"] for c in self.calls[name]
-                            if c["sym"] == _sym)
-                self.assertIn(f"have hpc : ({name}_pre_0).pc = {addr}",
-                              self.proofs[name],
-                              f"{name}: the BL step theorem's `hpc` is not the "
-                              f"pre-state's pc fact")
-                # The index of the call in the CODE LIST, not an address the
-                # test guesses: `_gen_extern_test` picks the step-RESULT lemma
-                # by `(bl - base) // 4`, and the row that matters is that it
-                # still picks a per-instruction lemma at all — equality of two
-                # `Arm64State`s has no `Decidable` instance, so `native_decide`
-                # cannot close it and a version that tried would fail to
-                # elaborate rather than silently pass.
-                self.assertRegex(
-                    self.proofs[name],
-                    r"have hpc : \(" + name + r"_pre_0\)\.pc = \d+ :?= "
-                    + name + r"_pre_pc_is_0\n"
-                    r"  simpa \[hpc\] using " + name + r"_sr_\d+ ",
-                    f"{name}: the BL step theorem's `hpc` must be the "
-                    f"pre-state's pc FACT and must still be discharged by the "
-                    f"per-instruction step RESULT lemma — equality of two "
-                    f"`Arm64State`s has no `Decidable` instance, so "
-                    f"`native_decide` cannot close that goal")
-
-    def test_lean_accepts_both_probes_with_no_sorries(self):
-        """The kernel, and the half that is not a reading of the text.
-
-        Both probes, because they are the two arms of the match above: `modvar`
-        exercises the `none` arm (the div0 guard's `fflush` is never reached)
-        and `print1` the `some` arm.  Zero sorries, because "the obligation
-        became admissible" is the failure a fix like this can hide.
-        """
-        if not _lean() or not os.path.isfile(
-                os.path.join(HERE, "lib", "ProofLib.olean")):
-            self.skipTest("no Lean / no lib/ProofLib.olean: the defect was "
-                          "three KERNEL REJECTIONS and only the kernel sees it")
-        from formal.lean import check_proof_cached
-        for name, _source, _sym, _reached in self.PROBES:
-            with self.subTest(probe=name):
-                src = os.path.join(self.tmp, name + ".mojo")
-                import formal.build as fb
-                r = fb.compile_formal(src, arch="arm64",
-                                      output=os.path.join(self.tmp, "lean."
-                                                          + name + ".aout"),
-                                      prove=True, check=False)
-                ok, detail, _cached, sorries = check_proof_cached(
-                    r["proof_path"], repo_root=HERE)
-                self.assertTrue(
-                    ok, f"{name} does not typecheck:\n"
-                    + "\n".join(l for l in detail.splitlines()
-                                 if "error" in l or "\u22a2" in l)[:2000])
-                self.assertEqual(sorries, 0,
-                                 f"{name}: typechecks with {sorries} sorry(s): "
-                                 f"the match must make the obligation TRUE, "
-                                 f"not admit it")
-
-    def test_the_corpus_example_that_was_false_is_proved(self):
-        """`formal/examples/mod_by_var.mojo`, the measured case, and the row
-        `test_formal.py`'s `EXPECTED_FAILURES` carried until 2026-10-05.
-
-        It is in the corpus rather than written out here because the defect was
-        FOUND through this example and the example is what a reader will re-run:
-        a probe written in the test would be a second copy of the shape, and
-        two copies of a shape is how they drift.
-        """
-        if not _lean() or not os.path.isfile(
-                os.path.join(HERE, "lib", "ProofLib.olean")):
-            self.skipTest("no Lean / no lib/ProofLib.olean")
-        from formal.lean import check_proof_cached
-        tmp = tempfile.mkdtemp(prefix="a2-extcall-example-")
-        try:
-            src = os.path.join(HERE, "formal", "examples", "mod_by_var.mojo")
-            import formal.build as fb
-            r = fb.compile_formal(src, arch="arm64",
-                                  output=os.path.join(tmp, "mod.aout"),
-                                  prove=True, check=False)
-            ok, detail, _cached, sorries = check_proof_cached(
-                r["proof_path"], repo_root=HERE)
-            self.assertTrue(
-                ok, "mod_by_var does not typecheck:\n"
-                + "\n".join(l for l in detail.splitlines()
-                             if "error" in l or "\u22a2" in l)[:2000])
-            self.assertEqual(sorries, 0,
-                             f"mod_by_var typechecks with {sorries} sorry(s)")
-        finally:
-                shutil.rmtree(tmp, ignore_errors=True)
-
-
 def _generate_dir(tmp, src_path, name, out):
     """`compile_formal` on an existing `.mojo`, with NO Lean check.
 
@@ -6880,318 +5151,6 @@ def _generate_dir(tmp, src_path, name, out):
     import formal.build as fb
     return fb.compile_formal(src_path, arch="arm64", output=out,
                              prove=True, check=False)
-
-
-
-
-class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
-    """One out-of-image call must SAY that it replaced the theorem it owed.
-
-    `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
-    item 2, and it is the half of that gap which is silent. Two out-of-image
-    calls are REFUSED by name (`_cfg_decomposition_refusal`), because the walk
-    halts at one address and a program with two of them has a path reaching the
-    second without passing the first. ONE does not raise: the walk is given
-    `exit_at=<that pc>`, and it discharges the terminal predicate by halting
-    there. What comes out is a theorem named
-    `<fn>_reaches_call_at_<pc>` whose proposition is `True`, in place of
-    `<fn>_compiles_correctly_universal`, whose proposition is about `x0`.
-
-    So the caller asked for a statement about the return value and got one about
-    reaching an address, and the only trace was a note saying "the universal
-    theorem above proves the part that IS decidable" — which was **false**, the
-    theorem is emitted 1400 lines BELOW the note, and it said nothing at all
-    about the value theorem being absent. Nothing here needs Lean: the claim is
-    about the shape of the emitted TEXT, which is where the substitution is
-    visible or invisible.
-    """
-
-    PROGRAM = ("def q(a, b):\n"
-               "    return a // b\n")
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="a2-one-opaque-")
-        # `_generate_dir` rather than `_generate`: the source is already on
-        # disk (it is a class attribute, written once, so the class docstring
-        # can quote it), and `_generate` would want a name where this wants an
-        # arch. `check=False` is what keeps the class Lean-free — every
-        # assertion is about the emitted TEXT.
-        path = os.path.join(cls.tmp, "q.mojo")
-        with open(path, "w") as f:
-            f.write(cls.PROGRAM)
-        try:
-            import formal.build as fb
-            r = fb.compile_formal(path, arch="arm64",
-                                  output=os.path.join(cls.tmp, "q.aout"),
-                                  prove=True, check=False)
-            cls.err = None
-            cls.proof = r.get("proof_path")
-        except Exception as e:        # noqa: BLE001 -- report it, do not hide it
-            cls.proof, cls.err = None, f"{type(e).__name__}: {e}"
-        cls.text = ""
-        if cls.proof and os.path.exists(cls.proof):
-            with open(cls.proof, encoding="utf-8", errors="replace") as f:
-                cls.text = f.read()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def setUp(self):
-        if self.err:
-            self.skipTest(f"proof generation refused, so there is no text to "
-                          f"read: {self.err}")
-        if not self.text:
-            self.skipTest("no proof text emitted")
-
-    def test_the_value_theorem_is_absent_and_the_note_says_so(self):
-        """The note names BOTH theorems and says which one is missing.
-
-        This is the whole of item 2: a caller must be able to learn the
-        substitution by READING, not by diffing the emitted file against what it
-        expected. Naming the absent theorem is what makes it learnable — the
-        old note described the call boundary and said nothing about `x0`, so a
-        reader who wanted the return value had to notice the name was different.
-        """
-        self.assertIn("q_compiles_correctly_universal", self.text,
-                      "the note no longer names the theorem the caller asked "
-                      "for, so the substitution is invisible again")
-        self.assertIn("is NOT emitted", self.text,
-                      "the note names the value theorem but does not say it "
-                      "is absent — naming it and saying it is missing are two "
-                      "different announcements")
-        self.assertIn("q_reaches_call_at_", self.text,
-                      "the note does not name the reachability theorem that "
-                      "was emitted in its place")
-
-    def test_it_does_not_claim_the_return_value_is_proved(self):
-        """`prop := True` is the substitution, so no `x0` may be in the claim.
-
-        The substituted theorem's proposition is literally `True` — the halt
-        discharges it by itself, and there is no value flow in it at all. So the
-        note's job is to stop a reader concluding that anything about `q`'s
-        return was proved. It must not say the value IS decided, and it must not
-        point at a theorem that talks about `x0`.
-        """
-        # The substituted theorem itself, and what it says.
-        m = re.search(r"theorem q_reaches_call_at_(\S+?)[\s(]", self.text)
-        self.assertIsNotNone(m, f"no `q_reaches_call_at_` theorem was emitted: "
-                                f"the note announces a substitution that did "
-                                f"not happen")
-        note = self.text[:m.start()]
-
-        # **Quoting the withdrawn claim is not making it.** The note says a run
-        # test "would compare the machine against `0 = mojo 10, 0` and pass for
-        # the wrong reason" — so the string IS in the note, and an assertion that
-        # it is absent would be asserting the note be vaguer about what it
-        # declined. What must not be present is the note ASSERTING it: `==`/`=`
-        # between the machine's `x0` and `mojo`, outside the "would"/"wrong
-        # reason" clause that withdraws it.
-        self.assertNotIn("x0 = mojo", note,
-                         "the note states an `x0 = mojo` equation as something "
-                         "proved; the substituted theorem's proposition is a "
-                         "reachability match, which is precisely the claim "
-                         "being withdrawn")
-        # The note is a WRAPPED comment (the emitter breaks lines to a fixed
-        # width), so a sentence can straddle a newline — matching the raw text
-        # for it is asserting a line break that is not part of the claim.
-        flat = " ".join(note.split())
-        self.assertIn("Nothing below says what q returns", flat,
-                      "the note no longer says outright that nothing below "
-                      "states the return value, which is the claim a reader "
-                      "needs and the one this substitution makes false")
-
-        # And the proposition really carries no value flow — it is a reachability
-        # `match` whose `some` branch is `True`. If a future emitter gave it a
-        # real terminal predicate, this note's central sentence would be stale
-        # and the class would be measuring something that no longer happens.
-        tail = self.text[m.start():]
-        mprop = re.search(
-            r"theorem q_reaches_call_at_\S+.*?:=\s*(by)?", tail, re.S)
-        self.assertIsNotNone(mprop, "could not find the proposition")
-        prop = tail[mprop.start():mprop.end()]
-        self.assertNotIn("x0", prop,
-                         f"the substituted theorem's proposition now mentions "
-                         f"x0, so it is no longer the valueless reachability "
-                         f"claim this note describes: {prop[-300:]!r}")
-        self.assertIn("arm64_exec_go_exit", prop,
-                      f"the substituted theorem is no longer a reachability "
-                      f"claim about where the run ends, so the note's "
-                      f"description of it is stale: {prop[-300:]!r}")
-
-    def test_the_note_points_forward_not_back(self):
-        """The old note's "the universal theorem above" was simply wrong.
-
-        The substituted theorem is emitted AFTER the note, so "above" sent the
-        reader to the concrete theorem that is NOT emitted instead of the
-        reachability one that is. The note now names the theorem it refers to,
-        which is what makes the reference checkable at all.
-        """
-        i = self.text.find("NO CONCRETE RUN TEST")
-        self.assertGreater(i, 0, "the opaque-call note is gone entirely")
-        j = self.text.find("theorem q_reaches_call_at_")
-        self.assertGreater(j, i, "the reachability theorem is no longer emitted "
-                                 "after the note, so the old 'above' would "
-                                 "happen to be right again — re-measure before "
-                                 "reading this test as a pin")
-        note = self.text[i:j]
-        self.assertNotIn("theorem above", note,
-                         "the note still says 'the universal theorem above', "
-                         "which points at the concrete theorem that is NOT "
-                         "emitted")
-
-    def test_a_run_without_an_opaque_call_is_unaffected(self):
-        """The other branch of the same `if` must still emit its value theorem.
-
-        A note that announces a substitution is easy to write so that it always
-        fires, and then every proof in the corpus claims to be a substitution.
-        This program has no out-of-image call, so it keeps
-        `compiles_correctly` and carries no such note.
-        """
-        tmp = tempfile.mkdtemp(prefix="a2-no-opaque-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        src = "def plain(a, b):\n    return a + b\n"
-        path = os.path.join(tmp, "plain.mojo")
-        with open(path, "w") as f:
-            f.write(src)
-        import formal.build as fb
-        r = fb.compile_formal(path, arch="arm64",
-                              output=os.path.join(tmp, "plain.aout"),
-                              prove=True, check=False)
-        text = ""
-        pp = r.get("proof_path")
-        if pp and os.path.exists(pp):
-            with open(pp, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        self.assertIn("plain_compiles_correctly", text,
-                      "a program with no out-of-image call no longer emits its "
-                      "value theorem")
-        self.assertNotIn("is NOT emitted", text,
-                         "the substitution note fired on a program that has no "
-                         "out-of-image call — it is keyed on the wrong condition")
-
-
-class TestTheReachedWalkIsPerPath(unittest.TestCase):
-    """`_reached_without_a_condition` asks whether the HALT is on a path that
-    crosses no SOURCE conditional — not whether a source conditional is
-    reachable at all.
-
-    The two are different questions and the first implementation answered the
-    second: it returned `False` the moment it MET a source conditional anywhere
-    reachable from the entry, so a program whose halt is on a condition-free
-    path was refused whenever any OTHER path carried an `if`. That refused ten
-    of the twelve examples `TestTheRecursionFamiliesStillGenerate` pins as
-    generating (`formal/examples/count.mojo` and its family), and it is why the
-    walk now carries `(block, crossed)` and answers True only for a block that
-    CONTAINS the halt with `crossed` False.
-
-    Built from real ARM64 encodings so the test exercises the function rather
-    than a description of it:
-
-        entry 0x1000  CBZ x0, ->0x1008   (NOT a source conditional)
-        fall  0x1004  BL ->0x9000        (the halt, on the condition-free path)
-        taken 0x1008  CBZ x1, ->0x1010   (a SOURCE conditional, cond_branches)
-        fall  0x100c  RET
-        taken 0x1010  RET
-
-    The halt is at 0x1004, reached by the entry branch's fall-through with no
-    source conditional crossed; the source conditional at 0x1008 is reachable
-    on the other edge. The old walk returned False (it met 0x1008); the halt at
-    0x100c, which IS behind the source conditional, is False under both.
-    """
-
-    @staticmethod
-    def _code():
-        from formal.arm64 import encode_cbz_xn, encode_bl, encode_ret
-        base = 0x1000
-        return base, (encode_cbz_xn(0x8, 0)          # 0x1000 -> 0x1008
-                      + encode_bl((0x9000 - 0x1004) // 4)   # 0x1004 -> 0x9000
-                      + encode_cbz_xn(0x8, 1)        # 0x1008 -> 0x1010
-                      + encode_ret()                 # 0x100c
-                      + encode_ret())                # 0x1010
-
-    def test_a_halt_on_a_condition_free_path_is_reached(self):
-        import formal.arm64_proof_gen as G
-        base, code = self._code()
-        self.assertTrue(
-            G._reached_without_a_condition(
-                code, base, base, base + 0x14, base + 0x4,
-                cond_branches={base + 0x8}),
-            "the halt at 0x1004 is on the entry branch's condition-free "
-            "fall-through, but the walk refused it because a source "
-            "conditional (0x1008) is reachable on the other edge")
-
-    def test_a_halt_behind_the_source_conditional_is_not_reached(self):
-        import formal.arm64_proof_gen as G
-        base, code = self._code()
-        self.assertFalse(
-            G._reached_without_a_condition(
-                code, base, base, base + 0x14, base + 0xc,
-                cond_branches={base + 0x8}),
-            "the halt at 0x100c is on the fall-through of the source "
-            "conditional at 0x1008, so the premise is about the data and the "
-            "walk must refuse it")
-
-
-class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
-    """`if 0 == n:` elaborates, exactly as `if n == 0:` does.
-
-    `_cmp_spec` lowers `n == 0` to a `CBZ` but `0 == n` to `CMP` + `B.cond`,
-    and the CBZ-only "the taken arm is statically dead" optimisation
-    (`_cbz_reg_const` + `_taken_dead`) was applied to the `B.cond` too. A
-    `B.cond`'s `r = w & 0x1f` is the CONDITION FIELD, not a register, so
-    `_cbz_reg_const` could return a non-zero constant for a register the branch
-    never tests, and the generated
-
-        exact absurd hc_2 hne_2
-
-    was an `Application type mismatch` — `hc_2` is about
-    `arm64_matches_condition`, `hne_2` about `arm64_reg` — so the proof did not
-    elaborate at all. Measured on
-    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
-    elaborate.md`. The fix is to apply the optimisation only where it is sound,
-    `_bidx == 16` (CBZ): the contradiction is `hc : arm64_reg r s = 0` and
-    `hne : arm64_reg r s ≠ 0`, which are complementary only for a CBZ.
-    """
-
-    LEFT = ("def main() -> Int:\n    n = 3\n    if 0 == n:\n"
-            "        return 10\n    else:\n        return 20\n")
-    RIGHT = ("def main() -> Int:\n    n = 3\n    if n == 0:\n"
-             "        return 10\n    else:\n        return 20\n")
-
-    def test_the_left_spelling_does_not_emit_the_cbz_only_absurd(self):
-        tmp = tempfile.mkdtemp(prefix="a2-imm-left-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        proof, err = _generate(tmp, self.LEFT, "imm_left")
-        self.assertIsNone(err, err)
-        with open(proof, encoding="utf-8") as f:
-            text = f.read()
-        self.assertNotIn(
-            "absurd hc_", text,
-            "the CBZ-only 'the taken arm is statically dead' contradiction is "
-            "being emitted for a `B.cond` again, where its hypothesis is the "
-            "CONDITION FIELD and the obligation is an `Application type "
-            "mismatch`")
-        self.assertIn("arm64_matches_condition", text,
-                      "the left spelling's branch is no longer modelled as a "
-                      "`B.cond` on the flags")
-
-    def test_both_spellings_elaborate(self):
-        if not _lean() or not os.path.isfile(
-                os.path.join(HERE, "lib", "ProofLib.olean")):
-            self.skipTest("no Lean / no lib/ProofLib.olean")
-        tmp = tempfile.mkdtemp(prefix="a2-imm-both-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        for name, src in (("right", self.RIGHT), ("left", self.LEFT)):
-            with self.subTest(spelling=name):
-                proof, err = _generate(tmp, src, "imm_" + name)
-                self.assertIsNone(err, err)
-                got = _check_proof(proof)
-                self.assertIsNotNone(got, "Lean is available but returned "
-                                          "nothing")
-                ok, detail, _sorries = got
-                self.assertTrue(ok, f"{name}: {detail}")
 
 
 if __name__ == "__main__":

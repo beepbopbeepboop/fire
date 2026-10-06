@@ -10,9 +10,8 @@
 Lean, which is why it is registered `mem='tiny'` with no `prooflib` dep and runs
 in ten seconds.  This one needs the built library — 30 MB of `.olean` — so it
 belongs in the `proofs` bucket beside the other Lean-checking tests.  It is the
-measurement that file's own header says it cannot make, and this file is that
-measurement: `test_formal_admitted.py::AXIOM_CLOSURE` is the per-closure half and
-`test_formal_axioms.py` is the per-declaration arithmetic.
+measurement that file's own header says it cannot make, and
+`bugs/FORMAL_native_decide_axiom.md` step 1 is this file.
 
 ## What it measures, and the two things only Lean can decide
 
@@ -32,7 +31,7 @@ pins.  Two things it cannot decide, and this file is both of them:
 
 ## The name is not `Lean.ofReduceBool`
 
-The prediction this file exists to refute was that `#print axioms` reports
+`bugs/FORMAL_native_decide_axiom.md` predicted that `#print axioms` would report
 `Lean.ofReduceBool`, and on the pinned toolchain (leanprover/lean4:v4.32.2) it
 does NOT.  `ofReduceBool` is deprecated there — "in-kernel native reduction is
 deprecated; assert native evaluations with axioms instead" — and each USE of a
