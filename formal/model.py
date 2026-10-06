@@ -23529,7 +23529,8 @@ def _parameter_argument_shape(arg, rets=None):
 
     The ELEMENT kind comes from `_list_literal_elem_kind`, so `[1, 2, 3, 4]`
     gives `list:int` rather than a bare `list` — which is what lets `xs[i]` be
-    an integer and not merely a blob.
+    an integer and not merely a blob. A COMPREHENSION is the one container row
+    that claims the blob and not the elements, and its own comment gives why.
 
     None is the answer for everything else, and it is what keeps the table's
     unanimity rule meaningful: a call site that says nothing is a claim of
@@ -23546,6 +23547,22 @@ def _parameter_argument_shape(arg, rets=None):
         # for a dict's element word (a key the literal never wrote is a slot
         # nothing initialised).
         return list_kind(container_literal_elem_kind(arg))
+    if isinstance(arg, F.Comprehension) and getattr(arg, "kind", "list") != "dict":
+        # The comprehension half of `is_dict_expr`, because a dict comprehension
+        # parses as a `Comprehension` with `kind == "dict"` and not as a
+        # `DictExpr` — and a dict IS a counted blob on this path, so claiming
+        # nothing for it would be safe but claiming a LIST for it would not.
+        #
+        # The BARE kind, and deliberately so where the literal rows above name
+        # their element: the element of a comprehension is an expression over its
+        # own generator scope (`[k for k in d]`'s element is the loop target),
+        # and this function is a module-level shape reader with no `ValueKinds` to
+        # ask that scope with. `list_elem_kind` of the bare prefix is `None`, so
+        # `subscript_element_kind` still declines to name an element kind and
+        # every consumer that reads one keeps the answer it had — while `len`,
+        # truthiness and `printf`'s operand reader, which want only "this is a
+        # `[count][e…]` blob", are answered by it.
+        return list_kind(None)
     if isinstance(arg, F.CallExpr) and isinstance(arg.func, F.IdentExpr):
         name = arg.func.name
         ann = (rets or {}).get(name)
@@ -23587,6 +23604,23 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
     and keeping two functions would have meant two copies of the unanimity walk
     over call sites — the shape two disagreeing copies produce everywhere else in
     this file.
+
+    **What it can return is the set of rows `_parameter_argument_shape` has, and
+    it used to be the STRING one that mattered:** a `char *` arriving from a
+    caller is a pointer, and the "a word is an integer" default read it as a
+    number (`def f(s): if s:` called `f("")` printed 1 where CPython prints 0). A
+    counted BLOB arriving from a caller has the same problem for the same reason
+    and the answer is the same shape of evidence — the callers agree — so the
+    container row is here rather than in a second table beside this one. That
+    row's ANNOTATED half (`def total(xs: List[Int])`) was already answered
+    without this table — `ValueKinds.kind_of` asks `declared_param_kind` for an
+    `INT_KIND` parameter, and an annotation naming a container maps to a counted
+    blob — so only the unannotated spelling was ever live here, and the two are
+    pinned together in `test_formal_run.py`'s
+    `both_arch_len_of_a_container_annotated_parameter` (the guard) and
+    `both_arch_len_of_an_unannotated_parameter_every_call_site_passes_a_list`
+    (the fix), with `len_of_a_list_parameter_needs_every_site_to_agree` pinning
+    the unanimity rule from the other direction.
     """
     by_name: dict = {}
     for fn in functions or ():

@@ -8294,6 +8294,71 @@ BOTH_ARCH_CASES = [
      "        if second == 43:\n"
      "            return 7\n"
      "    return 3\n", 7, "annotated=42 untyped=43"),
+    # ── `len()` of a CONTAINER PARAMETER, on both architectures ──────────────
+    #
+    # One declaration, two readers, and the reader that was wrong is the whole of
+    # this section: `xs[i]` asks `subscript_base_lowering`, and `len(xs)` asked
+    # `ValueKinds`' "a word is an integer" default for a parameter.  The
+    # refusal's own sentence was FALSE of the program — the reader is sent
+    # looking for an integer that is not there — while `xs[i]` on the SAME
+    # parameter answered CPython.
+    #
+    # The fix is `parameter_kinds_by_call_site` claiming a counted blob from the
+    # CALL SITES, which is the evidence an UNANNOTATED parameter has.  The two
+    # rows below are its GUARDS rather than its tests: the ANNOTATED spelling
+    # already answered, through `ValueKinds.kind_of`'s `_declared_kind`
+    # fallback, and they are here so a change to the fallback cannot turn one
+    # reader into a guess the way the other one was.  `List[Cell]` is the second
+    # spelling because it is the one a host-module function uses for a container
+    # of one-word elements.
+    ("both_arch_len_of_a_container_annotated_parameter",
+     "def total(xs: List[Int]) -> int:\n"
+     "    var acc = 0\n"
+     "    var i = 0\n"
+     "    while i < len(xs):\n"
+     "        acc = acc + xs[i]\n"
+     "        i = i + 1\n"
+     "    return acc\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
+     "    return 0\n", 0, "t=10"),
+    ("both_arch_len_of_a_container_annotated_parameter_of_cells",
+     "struct Cell:\n"
+     "    var v: Int\n"
+     "def count(xs: List[Cell]) -> int:\n"
+     "    var n = 0\n"
+     "    var i = 0\n"
+     "    while i < len(xs):\n"
+     "        n = n + xs[i].v\n"
+     "        i = i + 1\n"
+     "    return n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c0 = Cell()\n"
+     "    c0.v = 3\n"
+     "    var c1 = Cell()\n"
+     "    c1.v = 4\n"
+     "    var a = [c0, c1]\n"
+     "    printf(\"n=%d\", count(a))\n"
+     "    return 0\n", 0, "n=7"),
+    # The row the fix is about, and its evidence is the CALL SITES rather than
+    # the declaration: `parameter_kinds_by_call_site` already had the rule for a
+    # `char *` (a name whose callers pass a string literal in EVERY call, so
+    # `def f(s): if s:` called `f("")` stopped printing 1 where CPython prints
+    # 0) and a counted blob has the same shape of evidence — the callers agree.
+    # Before this the count field was reachable through the parameter and only
+    # the READER was missing: the same body with a LITERAL loop bound answered
+    # CPython's `10`, so nothing about the representation was unavailable.
+    ("both_arch_len_of_an_unannotated_parameter_every_call_site_passes_a_list",
+     "def total(xs) -> int:\n"
+     "    var acc = 0\n"
+     "    var i = 0\n"
+     "    while i < len(xs):\n"
+     "        acc = acc + xs[i]\n"
+     "        i = i + 1\n"
+     "    return acc\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
+     "    return 0\n", 0, "t=10"),
     # ── the FLOOR table, both architectures, every row compared with CPython ──
     #
     # The eight-row table this change was measured against had four of its eight
@@ -13711,6 +13776,39 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    var s = \"abc\"\n"
      "    printf(\"[%d]\", len(s[0]))\n"
+     "    return 0\n",
+     "refuse:an integer has no length", None),
+    # The GUARD for the three container-parameter rows in `BOTH_ARCH_CASES`, and
+    # the reason they mean something: unanimity is the rule
+    # (`parameter_kinds_by_call_site`), so a parameter whose call sites
+    # DISAGREE is claimed by nobody and `len` over it is refused by name rather
+    # than read at offset 0.  Without this row the widening would be
+    # indistinguishable from "every parameter is a container" — which is the
+    # shape that made `len("hello")` return the first eight CHARACTERS of the
+    # string, 1819043176.  It lives here and not in `BOTH_ARCH_CASES` because a
+    # `refuse:` row there is routed to the runner that requires a build to
+    # SUCCEED; `REFUSAL_CASES` is the group whose runner requires both
+    # architectures to refuse with the SAME WORDS, which is the assertion this
+    # row is actually about.
+    ("len_of_a_parameter_its_call_sites_disagree_about_is_refused",
+     "def n_of(xs) -> int:\n"
+     "    return len(xs)\n"
+     "def main(n: Int) -> Int:\n"
+     "    if n > 0:\n"
+     "        printf(\"l=%d\", n_of([1, 2, 3]))\n"
+     "    else:\n"
+     "        printf(\"l=%d\", n_of(5))\n"
+     "    return 0\n",
+     "refuse:an integer has no length", None),
+    # …and the annotated parameter's GUARD is `declared_type_kind`'s own
+    # `None`: an annotation naming something this path has no representation for
+    # claims nothing and lands on the integer default, so the widening above is
+    # "a container annotation is read", not "an annotation is believed".
+    ("len_of_a_parameter_annotated_a_non_container_is_still_refused",
+     "def width(w: Int64) -> int:\n"
+     "    return len(w)\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"w=%d\", width(7))\n"
      "    return 0\n",
      "refuse:an integer has no length", None),
 ]
