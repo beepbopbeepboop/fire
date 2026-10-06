@@ -1,5 +1,60 @@
 # FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it: `os.environ` is modelled, and what the 4-file sweep row is actually worth
 
+**Status 2026-10-05 (`work/formal28-4`): `popitem` is DONE and this file's §3
+pointer to it — "see the Status at the head" — pointed at NOTHING, so the one
+thing §4 said was left that was actually finished was undocumented. It is now
+measured rather than asserted, and it is the row that retired this doc's own
+"a genuine two-word limit".**
+
+`popitem` was recorded here as WRONG (`2026-10-04`, `work/formal19-4`) and the
+Status recording it was never written, so §4's list of what is left still named
+it. It is not left. `formal/hostmods/os/__init__.mojo:805`'s `environ_popitem`
+lands, and the doc's reasoning about why it COULD not land was wrong in an
+instructive way: §4 called it *"a genuine two-word limit (it must hand back a
+key AND a value, and this path returns one thing per call)"*, and that is true
+of a RETURN VALUE and false of a return BLOB. A blob is one `malloc`'d block
+whose address is one word, it crosses a dylib boundary, and it reads by
+subscript on both architectures — which is `environ_update`'s own stated rule:
+**the limit is one word of ANSWER, not one field of it.** That is why
+`setdefault` is genuinely two calls (its answer is the view, not a pair) and
+`popitem` is one.
+
+Measured, both architectures, `test_formal_os_backing.py::environ_view`, 88
+answers each against CPython in this process:
+
+```
+PASS    environ_view [arm64]      88 answers correct
+PASS    environ_view [x86_64]     88 answers correct
+PASS    environ_view_empty [arm64] / [x86_64]
+test_formal_os_backing.py        70/70
+test_formal_os.py blob dirs      2/2 groups
+```
+
+Four things that block says at once, and the first is the reason the function
+exists: the answer is **one word** — a blob's address — carrying both halves of
+the pair; the count word says how many elements it has, so a caller reads it by
+subscript rather than trusting a convention; **the removal happened**, so the
+view is one pair shorter and `getenv` no longer sees the variable, because
+CPython's `popitem` unsets it; and the pair **outlives the view entry it came
+from** — a copy, not the alias `environ_pop`'s own docstring shows it must not
+be — and is released by `environ_pair_free` and NOT by `environ_free`.
+
+`environ_copy` + `environ_clear` + three `environ_set` calls is how the row gets
+a decidable ORDER, and that is worth keeping in mind before writing another
+`popitem` row: "which pair" is only decidable if the view's order is known, and a
+fresh `environ()` is a snapshot of a process environment the harness composed,
+while a view the program edited has had `environ_del` shift the LAST pair into
+the hole (`environ_pop`'s recorded divergence).
+
+**What is left in §4 is therefore `environb`, the EXPORTED SLOT and the bare
+value read** — and the first is deliberately not built (*"no file in this
+repository spells `os.environb` at all"*, measured: zero hits over every
+`.py`/`.mojo`), while the other two are `FORMAL_module_state_no_storage.md` §(2)
+and §(4), which are an ABI change and an entry-stub change respectively. **And
+the row's own verdict still does not move: 4 files off the `os.environ` refusal
+and 0 to `pass`**, which is the sentence §2 exists to explain and the reason a
+reader should not spend a day here expecting a sweep number.
+
 **Status (2026-10-03, `work/formal15-os-environ`): the MODEL LANDED and the row is
 re-measured. `formal/hostmods/os` has a real `os.environ` — a snapshot of the
 process environment in `malloc`'d memory, with `count`/`key`/`value`/`find`/
