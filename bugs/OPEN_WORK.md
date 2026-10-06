@@ -60,7 +60,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal40-6` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 | `FORMAL_arm64_instruction_coverage.md` | **unclaimed** | the arm64 encoder survey, and what wiring the new instructions actually bought |
 
-### `formal/arm64_codegen` — 9 documents, 4 claimed
+### `formal/arm64_codegen` — 8 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -69,7 +69,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | `formal37-2` | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` | `formal40-5` | CLOSED for programs — every prologue of an image that has an entry carries the guard |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
-| `FORMAL_an_out_of_range_subscript_exits_1_with_no_message.md` | **unclaimed** | FORMAL_an_out_of_range_subscript_exits_1_with_no_message |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_arm64_smulh_has_no_model_arm.md` | **unclaimed** | the high half of a multiply is emitted and modelled nowhere |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |

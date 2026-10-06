@@ -5688,53 +5688,75 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                                            width))
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             return
+        obj_kind = self._expr_str_kind(e.obj)
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))    # count
-        self._emit_bounds_check(Reg.RAX, Reg.R11)
+        # The base's KIND is read ONCE and both readers below take it from this
+        # local — the stride and the word the diagnostic calls the container —
+        # so a diagnostic cannot name a different container than the one whose
+        # element width was emitted.  The message is handed to the check rather
+        # than emitted beside it, because `bad_label` is inside the check: the
+        # arm that stops is the check's, and a diagnostic emitted after the fact
+        # would have to reproduce the branch to reach it.
+        self._emit_bounds_check(
+            Reg.RAX, Reg.R11,
+            M.subscript_out_of_range_message(
+                M.spelled(e), M.subscript_container_name(e.obj, obj_kind)))
         # The blob's OWN element stride, and `_sub_width` from the same number:
         # a byte blob steps one byte per element and loads a byte, and a
         # right address with a word load would read seven bytes of whatever
         # follows — a wrong answer rather than a crash, which is why the two
         # come from one line rather than from two decisions.
-        stride = M.blob_elem_stride(self._expr_str_kind(e.obj))
+        stride = M.blob_elem_stride(obj_kind)
         self._sub_width = stride
         self._emit_elem_addr(Reg.R10, Reg.RAX, Reg.RAX,
                              header=M.BLOB_HEADER_BYTES,
                              scale=M.walk_shift(False, stride))
 
-    def _emit_bounds_check(self, index_reg: Reg, count_reg):
-        """Exit(1) unless `index_reg` is a valid element index.
+    def _emit_bounds_check(self, index_reg: Reg, count_reg: Reg, message: str):
+        """Stop with `message` unless `index_reg` is a valid element index.
 
-        A negative index counts from the end, Python-style: it is negated and
-        `count` added, and only then range-checked, so an index below `-count`
-        stays negative and is rejected by the same unsigned comparison. The
-        count register is left intact — the caller needs it for the address
-        arithmetic that follows.
+        A negative index counts from the end, Python-style: it is added to
+        `count`, and only then range-checked, so an index below `-count` stays
+        negative and is rejected by the same unsigned comparison. The count
+        register is left intact — the caller needs it for the address arithmetic
+        that follows.
 
-        `count_reg` None means a string, which has no count header: its
-        elements run to a NUL, so there is nothing to check the index against
-        and the read stops at the terminator."""
+        **`message` is required and is the reason the stop is not silent.** This
+        arm used to be a bare `exit(1)`: `a[3]` on a three-element list printed
+        its two in-range lines and then stopped with nothing on stdout or stderr,
+        which is the worst of the three answers this backend can give and the
+        one thing every other bounded stop here (`_emit_blob_growth_guard`'s, the
+        dict store's, `int()`'s) does not do. It is also invisible to a
+        stdout/exit-status oracle by construction, so the memcheck sweep reported
+        the row `MATCH` and the silence survived. The text comes from
+        `model.subscript_out_of_range_message` so this architecture and arm64's
+        say the same sentence about the same limit.
+
+        **A string has no count header and no check**, so the caller does not
+        reach here for one: reading to the NUL terminator is the answer a
+        NUL-terminated read gives, and `_emit_subscript_addr` returns above the
+        check for that case. That is why `count_reg` is a register and not an
+        optional."""
         self._if_counter += 1
         bid = self._if_counter
         fn = self.func_name
         ok_label = f"{fn}_bnds{bid}_ok"
         bad_label = f"{fn}_bnds{bid}_bad"
         wrapped_label = f"{fn}_bnds{bid}_wrapped"
-        if count_reg is None:
-            return
-        if True:
-            self.asm.emit(encode_cmp_r64_imm8(index_reg, 0))
-            self._emit_jcc(COND_GE, wrapped_label)
-            # Python: a negative index counts from the end, i.e. it is ADDED
-            # to the count (-1 + 3 == 2), not subtracted from it as an
-            # absolute value (3 - 1 == 2 coincides, 3 - |−1| == 4 does not).
-            # An index below -count stays negative and fails the check below.
-            self.asm.emit(encode_add_r64_r64(index_reg, count_reg))
-            self.asm.label(wrapped_label)
-            self.asm.emit(encode_cmp_r64_r64(index_reg, count_reg))
+        self.asm.emit(encode_cmp_r64_imm8(index_reg, 0))
+        self._emit_jcc(COND_GE, wrapped_label)
+        # Python: a negative index counts from the end, i.e. it is ADDED
+        # to the count (-1 + 3 == 2), not subtracted from it as an
+        # absolute value (3 - 1 == 2 coincides, 3 - |−1| == 4 does not).
+        # An index below -count stays negative and fails the check below.
+        self.asm.emit(encode_add_r64_r64(index_reg, count_reg))
+        self.asm.label(wrapped_label)
+        self.asm.emit(encode_cmp_r64_r64(index_reg, count_reg))
         self._emit_jcc(COND_AE, bad_label)     # index >= count
         self._emit_jmp(ok_label)
         self.asm.label(bad_label)
+        self._emit_overflow_diagnostic(message)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
 

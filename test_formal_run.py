@@ -13001,11 +13001,43 @@ SUBSCRIPT_CASES = [
     # reading past the end of the frame. It is here because the multi-index
     # refusal was added at the same place this check lives, and a check added
     # next to a bounds check is a check that can be lost.
+    #
+    # **It asserts the exit status and NOTHING ELSE, which is exactly how the
+    # silence survived**: it passes on a bare `exit(1)` with 0 bytes on stderr,
+    # which is what this program used to do on both architectures. The message is
+    # asserted by `subscript_out_of_range_is_loud` in `STDERR_CASES`, and this row
+    # stays because the exit status is a different fact from the text.
     ("sub_out_of_range_exits",
      "def main(n):\n"
      "    a = [10, 20, 30]\n"
      "    i = 7\n"
      "    return a[i]\n", 1, None),
+    # **THE REPAIR THE OUT-OF-RANGE MESSAGE NAMES, MEASURED**, and the reason the
+    # message can say it: `len(a)` is the count word the check itself compares
+    # against, so a guard built on it is the check written out in the source. The
+    # entry argument is 10 by default (`fire.py build -n` supplies it), so this
+    # program IS measured with an index that is out of range — and it answers 7
+    # instead of stopping. Both a stop here and a wrong answer here would be
+    # defects in the advice; a reader who follows the sentence and gets either
+    # one has been sent down a dead end, which is the failure
+    # `list_append_overflow_message`'s docstring records at length.
+    ("subscript_guarded_by_len_answers_instead_of_stopping",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    if n >= 0 and n < len(a):\n"
+     "        return a[n]\n"
+     "    return 7\n", 7, None),
+    # The second repair the same message names, and the reason it is a real one:
+    # a walk over a blob is bounded by that blob's count word, so it cannot go
+    # out of range at all. Without a row, "or read the element with a `for … in`
+    # walk" would be a claim about a path nothing here measures.
+    ("subscript_walk_reads_every_element_without_an_index",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    var s = 0\n"
+     "    for x in a:\n"
+     "        s = s + x\n"
+     "    return s\n", 60, None),
     # The store path, for the same reason and for wave 1's B3: `_emit_sub-
     # script_store_reg` used to build the ADDRESS in X0 and then store X0, so
     # `a[i] = 9` wrote a pointer. 9 + 1 = 10, and a pointer is not 9.
@@ -14697,6 +14729,94 @@ STDERR_CASES = [
      "    return 0\n",
      1, ["a list concatenation overflowed its reservation", "reserved room for",
          "ESTIMATE"]),
+    # ── THE SUBSCRIPT, and the row that is the reason this group exists twice
+    # over: it was the LAST bounded stop on this path with nothing in it. Every
+    # case above it stops through `_emit_overflow_diagnostic` and names the bound
+    # it hit; `a[7]` on a three-element list stopped with a bare `exit(1)` —
+    # measured on both architectures, identical: 0 bytes on stdout, 0 bytes on
+    # stderr, exit 1. That is invisible to a stdout/exit-status oracle BY
+    # CONSTRUCTION, which is how the memcheck sweep came to report the row
+    # `MATCH` (`formal/memcheck/list_subscript_past_end.mojo` is a standing row)
+    # and why the silence survived: the memcheck corpus only compares stdout and
+    # the exit status, so a check that stops the program is indistinguishable from
+    # a correct one.
+    #
+    # The CHECK was never missing — both emitters load the blob's own count, add
+    # it to a negative index (Python's rule) and stop unless `count > index`
+    # UNSIGNED — so the needles are about the MESSAGE and not about a stop. The
+    # first says WHICH subscript, and it says it AS THE SOURCE SPELLED IT, which
+    # here is `a[i]` and not `a[7]`: the index is a run-time value, so the
+    # emitter cannot name the number and quoting one would be a claim about a
+    # value it never read. `subscript_store_out_of_range_is_loud` below is the
+    # literal spelling, and its needle is `a[9]`. The second needle is the
+    # container, and the third is CPython's own sentence, which is the
+    # word-for-word thing a reader compares against. The last two are the
+    # REPAIRS, and they are needles rather than a claim because a message naming a
+    # repair that does not work is the defect `list_append_overflow_message`'s own
+    # docstring records at length (its advice used to say "move the appends into a
+    # function of their own", which moves the overflow along with them). Both are
+    # measured rather than reasoned about, and the rows that measure them are
+    # `subscript_guarded_by_len_answers_instead_of_stopping` and
+    # `subscript_walk_reads_every_element_without_an_index` in `SUBSCRIPT_CASES`:
+    # the entry argument is 10 by default (`fire.py build -n`), so the guarded
+    # program is measured with an index that IS out of range, and it answers 7
+    # rather than stopping.
+    #
+    # `sub_out_of_range_exits` in `SUBSCRIPT_CASES` is the same program asserting
+    # the EXIT STATUS alone, and it is what let this through: it passes on a
+    # silent stop.
+    ("subscript_out_of_range_is_loud",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 7\n"
+     "    return a[i]\n",
+     1, ["`a[i]`", "is out of range for this list",
+         "IndexError: list index out of range",
+         "guard the index against `len(...)`", "`for … in` walk"]),
+    # The STORE arm of the same check, because `_emit_subscript_addr` is the one
+    # place a read, a store and an augmented assignment all pass through and a
+    # message added to the read alone would leave `a[i] = v` silent. The needle is
+    # the LITERAL spelling this time — `a[9]`, with the number — which is what the
+    # first row could not assert for itself.
+    ("subscript_store_out_of_range_is_loud",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    a[9] = 99\n"
+     "    return a[0]\n",
+     1, ["`a[9]`", "is out of range for this list",
+         "IndexError: list index out of range"]),
+    # A NEGATIVE index past the end, which is the arm a reader is most likely to
+    # think is missing: `-4` on three elements is out of range in Python and this
+    # is the same check (the index is folded by adding the count first and then
+    # compared UNSIGNED, so "still negative after the fold" is rejected). The
+    # needle is `a[-4]` with the sign, because a message that printed the folded
+    # value would name `a[-1]` — an index that is IN range — and send the reader
+    # looking for the wrong subscript.
+    ("subscript_out_of_range_negative_is_loud",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    return a[-4]\n",
+     1, ["`a[-4]`", "is out of range for this list"]),
+    # The container is named by its KIND, and the three words are CPython's own
+    # (`IndexError: tuple index out of range`,
+    # `IndexError: bytearray index out of range`) rather than this file's, because
+    # the comparison a reader makes is against CPython's message. A byte blob is
+    # `bytearray` because `is_byte_blob_kind` says so; a tuple LITERAL is `tuple`
+    # because nothing in its KIND does — a tuple is a `list`-prefixed blob on this
+    # path — and the source is the only thing left that can tell them apart. This
+    # is `model.subscript_container_name`'s whole decision, so the two shapes are
+    # both rows rather than one.
+    ("subscript_out_of_range_of_a_tuple_says_tuple",
+     "def main(n):\n"
+     "    return (10, 20)[5]\n",
+     1, ["`(10, 20)[5]`", "is out of range for this tuple",
+         "IndexError: tuple index out of range"]),
+    ("subscript_out_of_range_of_a_bytearray_says_bytearray",
+     "def main(n):\n"
+     "    var b = bytearray(3)\n"
+     "    return b[7]\n",
+1, ["`b[7]`", "is out of range for this bytearray",
+         "IndexError: bytearray index out of range"]),
     # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
     # limitation worth stating rather than a gap. `run_stderr_case` requires the
     # program to build on BOTH architectures, and x86-64 refuses `a | b` by name

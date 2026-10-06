@@ -5530,7 +5530,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         # is the whole of the byte blob: a right address with a word load would
         # read seven bytes of whatever follows, which is the wrong answer rather
         # than a crash.
-        stride = M.blob_elem_stride(self._expr_str_kind(e.obj))
+        #
+        # The base's KIND is read ONCE, here, and both readers take it from this
+        # local: the stride above and, below, the word the out-of-range message
+        # calls the container.  Two calls to `_expr_str_kind` were two walks of
+        # the same declarations, and the diagnostic must not be able to name a
+        # different container than the one whose stride was emitted.
+        obj_kind = self._expr_str_kind(e.obj)
+        stride = M.blob_elem_stride(obj_kind)
         self._sub_width = stride
         self.asm.emit(encode_add_xd_xn_imm(4, 9, M.BLOB_HEADER_BYTES))
         if stride == 1:
@@ -5542,6 +5549,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
         self.asm.label(oob_label)
+        # The check above is CORRECT and was always here; what this arm did not
+        # do was SAY SO, and it was the only bounded stop on this path that did
+        # not — every other one calls `_emit_overflow_diagnostic` first and names
+        # the bound it hit.  Measured before the message, both architectures
+        # identical: two in-range lines, then exit 1 with 0 bytes on stderr.
+        self._emit_overflow_diagnostic(
+            M.subscript_out_of_range_message(
+                M.spelled(e), M.subscript_container_name(e.obj, obj_kind)))
         self._emit_exit(1)
         self.asm.label(end_label)
 

@@ -313,10 +313,15 @@ def test_heap():
             "NONDETERMINISTIC, and that is how it was found"),
         "list_subscript_past_end.mojo": (
             "MATCH",
-            "`a[3]` on a three-element list is an out-of-range read with no "
-            "bound to check; it is deterministic on both architectures today, "
-            "so the row pins THAT and any change to it is a change to the "
-            "lowering"),
+            "`a[3]` on a three-element list does NOT read past the end: both "
+            "emitters load the blob's own count, apply Python's negative-index "
+            "rule and stop unless `count > index` unsigned, so the answer is "
+            "stable and the row pins THAT. The message is asserted by "
+            "test_formal_run.py's STDERR_CASES instead, and it cannot be "
+            "asserted here: this sweep compares stdout and the exit status, "
+            "which is exactly why the stop's silence went unnoticed -- it was "
+            "a bare exit(1) on both architectures until 2026-10-05 and this "
+            "row still reported MATCH throughout"),
         "stack_deep_recursion.mojo": (
             "MATCH",
             "40 frames of recursion, which arm64's 128 KB container budget per "

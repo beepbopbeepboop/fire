@@ -17069,6 +17069,95 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
     return ("blob", 8, False, None)
 
 
+def subscript_container_name(obj, kind) -> str:
+    """The word a diagnostic calls the container a subscript went out of range on.
+
+    One reader for both backends and for the one message they share, because a
+    subscript that says `list` on one architecture and `bytearray` on the other
+    is two sentences for one limit — the reason `dict_store_overflow_message`
+    and `list_append_overflow_message` live here rather than in either emitter.
+
+    It answers from the KIND where the kind says, and from the NODE where it
+    does not. A byte blob is a `bytearray` and `is_byte_blob_kind` is the one
+    thing that says so; a tuple LITERAL is a `list`-prefixed blob on this path,
+    so nothing in its kind distinguishes it from a list and the source is the
+    only thing left that does. Everything else is a `list`, which is the word
+    CPython uses for a blob of that shape and the word this file already uses
+    for one (`subscript_base_lowering`'s "list/tuple/dict base").
+    """
+    if is_byte_blob_kind(kind):
+        return "bytearray"
+    if isinstance(obj, F.TupleExpr):
+        return "tuple"
+    return "list"
+
+
+def subscript_out_of_range_message(sub: str, container: str) -> str:
+    """The ONE text an out-of-range `obj[i]` writes to fd 2 before it stops the
+    program — for BOTH backends, because two architectures printing two
+    different sentences for one limit is how a reader ends up looking for a
+    construct one of them invented.
+
+    **What is missing here was never the CHECK.** Both emitters load the blob's
+    own count word, add it to a negative index (Python's rule, so `-1` is the
+    last element), and stop unless `count > index` UNSIGNED — which is what
+    covers "still negative after the fold". Measured on both architectures with
+    `formal/memcheck/list_subscript_past_end.mojo`:
+
+        ./a.arm64 ; echo $?          10 / 30 / exit 1
+        2>&1 1>/dev/null | wc -c    0
+
+    Two in-range lines, then exit 1 with **nothing on either stream**. That is
+    the worst of the three answers this path can give: not a wrong number a
+    reader can compare, not a named refusal they can act on, but silence — and
+    it is invisible to a stdout/exit-status oracle by construction, which is why
+    the memcheck sweep reports the row `MATCH`. Every other bounded stop on this
+    path (`list.append`'s capacity, a dict store's, a blob growth guard's, an
+    `int()` parse, an arithmetic overflow) goes through `_emit_overflow_diagnostic`
+    and says which bound it hit; the subscript's `oob_label` was the one that
+    did not.
+
+    **Why a message and not a compile-time refusal**, which is the question
+    `list_append_overflow_message` answers for the append case and the same
+    answer: the index is a run-time value. The bound is too — it is the
+    container's element count, read from its header word — so no pass over the
+    source can say the subscript is in range. `a[i]` where `i` is 1 on a
+    three-element list is fine and `a[i]` where `i` is 9 is not, and they are the
+    same line.
+
+    **The index and the count are NOT spelled into the text**, and the reason is
+    the one `_emit_overflow_diagnostic`'s own docstring records: it takes a
+    CONSTANT, because a libc call is an unfollowable call and a proved function
+    may contain at most one of those (`arm64_proof_gen.py::_unfollowable_calls`).
+    Formatting a number at run time would spend that budget on a trap block — and
+    it would spend it asymmetrically, since the x86-64 emitter's copy of the
+    helper calls the C library's `write` and the arm64 one is a raw `SYS_write`
+    for exactly this reason. So the message names the SUBSCRIPT as the source
+    spelled it and the container as a word, and the reader is told the two facts
+    that decide it: the negative-index rule, and where the bound lives.
+
+    Both repairs in the text are measured, not reasoned about: `len(a)` is the
+    count word and reads it, so a guard is a real bound; and a `for … in` walk
+    over a blob is bounded by the same count, so it cannot go out of range at
+    all. Neither changes the program's answer for the indices that were already
+    in range, which is why adding the diagnostic cannot move a verdict.
+    """
+    return (f"formal: `{sub}` is out of range for this {container}: the "
+            f"subscript asked for an element at or past the end of what the "
+            f"{container} holds, or below `-len(...)`, and the bounds check "
+            f"fired. A negative index is counted from the end first (`-1` is "
+            f"the last element), and the bound that rejected the index is the "
+            f"{container}'s own element count, read from its header word at RUN "
+            f"time — which is why this is a message and not a refusal: no pass "
+            f"over the source can decide an index it cannot read. CPython "
+            f"answers the same program with `IndexError: {container} index out "
+            f"of range` on stderr and stops there. Two spellings compute the "
+            f"same program and cannot go out of range: guard the index against "
+            f"`len(...)` before the subscript, or read the element with a "
+            f"`for … in` walk, which is bounded by the count rather than by the "
+            f"index.")
+
+
 def dereference_refusal(method: str, why: str, is_pointer_receiver) -> str:
     """The refusal text for a receiver `dereference_lowering` would not answer.
 
