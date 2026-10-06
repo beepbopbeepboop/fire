@@ -2,31 +2,6 @@
 
 ## Status
 
-**RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
-claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
-produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
-its own document now:**
-
-| defect | document |
-|---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
-
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
-which is the generalisable half: this file's §5 is right that "the gap is the
-model is silent", and the two new defects are the OTHER failure — the model is
-*loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
-see. Re-read §6 before using this file's tooling as a coverage claim.
-
-**The CMN one is this file's own doing**, and that is worth stating rather than
-burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so
-all three are one-line changes to an existing arm's shape"*, the arm that
-prescription produced took the entire `0xffe00000` class, and `Rd` is bits 4:0
-and is not in that mask. A one-line change to an existing arm's SHAPE is a
-statement about the instruction, and this one was a statement about one spelling
-of it.
-
 **`CMN` and `TST` are WIRED as of 2026-10-05, so this file's own reachability
 correction is now stale in the one direction that mattered.** `encode_cmn_xn_xm`
 and `encode_tst_xn_xm` are no longer in
@@ -153,52 +128,6 @@ disabled.
 Every case below is `NOSTEP`: `arm64_step` answered `none`, the CPU ran the
 instruction, and the two disagreed in the only way a step function can disagree
 with a machine that has an instruction.
-
-## RE-MEASURED 2026-10-05 (`work/formal42-2`): the build wall is CONFIRMED at
-## the tree's own `-j 4`, and it is `ProofLib` and nothing else
-
-The paragraph above measured the `ProofLib.olean` build at `-j 1`. **The default
-is `-j 4`** (`formal/lean.py`'s `LEAN_THREADS`, which is what `ensure_library`
-passes), so the measurement that decides whether a bounded worker can land any
-arm here is the `-j 4` one. Measured on this tree at `5e547907`, with a
-comment-only change to a COPY of `lib/ProofLib.lean` under `.tmp/libcopy/` (so
-`lib/` itself was never touched and the CAS key was a genuine miss):
-
-```
-$ python3 tools/memslot.py --gb 8 --label prooflib -- python3 .tmp/buildlib_probe.py
-memcap: prooflib -- ceiling 8.0 GB across the process tree
-memcap: BREACH  8.0 GB > 8.0 GB ceiling (100%), 3 procs -- killing prooflib
-memcap: peak observed before the kill: 8.0 GB
-```
-
-**Same wall, so this file's blocker is not a `-j` choice and not the worker
-policy: `lib/ProofLib.lean` alone costs more than a light worker has.**  The
-control is what makes that a fact about the MODULE rather than about the build:
-
-```
-$ … the same probe against lib/Refine.lean (comment-only change, same tree)
-built in 2.8 s
-  Refine.olean  1.2 MB
-memcap: done, peak 1.2 GB across up to 2 procs (ceiling 8.0 GB)
-```
-
-1.2 GB against 8.0, from the same `ensure_library` on the same box in the same
-minute. **So the dividing line is per-module, and it is worth knowing which
-side of it a piece of work is on before anyone prices it:** a hypothesis or a
-peel in `lib/Refine.lean` is affordable to a bounded worker and something in
-`lib/ProofLib.lean` is not — every arm in this file, and every row of
-`FORMAL_arm64_smulh_has_no_model_arm.md`, `FORMAL_arm64_ieee754_has_no_step_
-arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
-`ProofLib`.  `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_
-false_claim.md` and `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` are
-on the cheap side of the line and are gated on a design decision rather than on
-memory.
-
-The probe is verified to be a real elaboration and not a cache replay: the same
-script with `this_is_not_a_definition : Nonexistent.Nope := 1` added to the
-copied `Refine.lean` raises
-`Refine.lean:3:0: error: unexpected identifier; expected command`.
 
 ## 1. What was run, and what it printed
 

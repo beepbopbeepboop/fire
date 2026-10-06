@@ -930,8 +930,8 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
               f'class_shortfalls on a synthetic 9.9 GB modcache: '
               f'{suite.class_shortfalls({"modcache": 9.9})}')
         check('peak log: a peak the class covers produces no shortfall',
-              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 5.5}),
-              f'{suite.class_shortfalls({"modcache": 0.3, "selfhost": 5.5})}')
+              not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
+              f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
     else:
         print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
               'skipped (every class is the override)')
@@ -980,8 +980,8 @@ def test_over_provisioned_classes_are_reported_not_silently_kept():
           f'and the same numbers DO trip it with a lower floor')
     check('over-provisioned: the registry itself has no over-provisioned job',
           not suite.over_provisioned(),
-          '; '.join(f'{n} {f:.0f}x in {c} ({p:g} GB peak)'
-                    for n, p, c, f in suite.over_provisioned()))
+          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
+                    for n, _p, c, g in suite.over_provisioned()))
     check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
           len(suite.at_floor()) >= 3,
           f'{len(suite.at_floor())} at the floor class: a list that can only be '
@@ -1201,7 +1201,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'coro-detached-async': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1228,31 +1228,23 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # states a removed marker fails on the registry's own state.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
+                     'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
-                     'formal-x86-endtoend': 1,
-                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
-                     # parity differential was registered in a bucket and given
-                     # a count-checked `expect=`; a census that did not state
-                     # the new marker would fail on the registry's own state,
-                     # which is this check working.
-                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
           f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
           f'(40 of its 46 items exit non-zero), and it is checked against the '
           f'per-item verdicts rather than against a summary line \u2014 see '
-          f'`observed_fanout_failures`. `gimplerunner` is NOT here and that is the '
-          f'mechanism working: its `expect=` was removed when the last of the '
-          f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
-            f'entry that is a Lean proof sweep rather than a compiled or '
-            f'interpreted one, and the count is checkable at all only because '
-            f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
-            f'line: its previous summary (`failing    : N`) is none of '
-            f'`_SUMMARY_FAILURES`\'s three shapes, so a marker claiming a '
-            f'count against it was reported UNCHECKED, which this file '
-            f'treats as a failure. `formal-toplevel`, '
+          f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
+          f'4 of 380 \u2014 the '
+          f'compile-and-execute rows that are interactions between the ten '
+          f'branches rather than a bug in any one of them; the count was 4 '
+          f'until 2026-10-04, when the dict-value-kind row it named was '
+          f'fixed (the census had to '
+          f'learn it here too: adding a marker without adding its entry is '
+          f'exactly the drift this check names). `formal-toplevel`, '
           f'`formal-module-attr` and '
           f'`formal-external-call` are NOT here and that is the mechanism '
           f'working: each `expect=` was removed when the rows it described '
@@ -2047,20 +2039,12 @@ STALE_PER_CHILD_BUDGETS = {
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
-    # +1 on 2026-10-05: `work/formal40-4-r2`'s
-    # `TestTheDivisionExamplesHaveNoProofToCheck::test_the_image_itself_is_fine_`
-    # `without_the_prove` — a `subprocess.run` of the `floordiv`/`udivmod`
-    # image on both architectures, so the 30 s there is a RUN of a two-instruction
-    # program and the row below's 60 s is the same kind of thing for the div0
-    # image. Both are per-child walls on an image the case built itself, which is
-    # what a residue row is for; neither is the SUBJECT of its test, so neither
-    # moves to `BUDGET_IS_THE_SUBJECT`.
-    'test_formal_call_proof_gen.py': 2,
+    'test_formal_call_proof_gen.py': 1,
     'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
+    'test_formal_link_accounting.py': 2,
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,
@@ -3878,26 +3862,26 @@ UNREGISTERED = {
     #    reading of a bug doc.
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
-    # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
-    # needs a check even though the sweep it feeds does not, so this file checks
-    # it. It is unregistered for the reason its own docstring gives: the text
-    # cases are Lean-free and cheap, but one compiles the harness
-    # `clang -arch x86_64` and runs it `arch -x86_64`, and it SKIPS where that is
-    # unavailable — so on a host that cannot run x86-64 code the row that matters
-    # most reports nothing, which is the shape `formal-receiver-position` was
-    # moved out of `proofs` for.
+    # `formal/x86_64_model_fuzz.py` is a TOOL and its two `HARNESS` verdict rows
+    # are the ones a reader must not go looking for in `lib/X86.lean`, so the
+    # harness's own entry path needs a check even though the sweep it feeds does
+    # not. This file is that check, and it is unregistered for the reason its own
+    # docstring gives: three of its four cases are Lean-free and cheap, but the
+    # fourth compiles the harness `clang -arch x86_64` and runs it `arch -x86_64`,
+    # and it SKIPS where that is unavailable — so on a host that cannot run
+    # x86-64 code the row that matters most reports nothing, which is the shape
+    # `formal-receiver-position` was moved out of `proofs` for.
     'test_x86_64_model_fuzz.py':
         'The model-fuzz harness\'s two unread steps: its ENTRY register file, '
         'read back through `--entry-probe` (if the stub\'s real `mov` loads did '
         'not land, every field of every program the harness compares is a false '
         'disagreement), and its VERDICT rules, which decide `WRONG` (a model '
-        'bug) from the program\'s bytes and the differing fields alone — with a '
-        'value the architecture leaves UNDEFINED (a flag after a multiply, and '
-        'everything a `setcc` computes from one) skipped rather than compared. '
-        'The text cases are Lean-free; one builds and runs the harness under '
-        '`arch -x86_64` and SKIPS where that is not available, which is why this '
-        'is listed rather than registered — a registered job that skips its only '
-        'substantive case is a green line that says nothing.',
+        'bug) against `HARNESS` (a disagreement no x86-64 CPU can produce) from '
+        'the program\'s bytes and the differing fields alone. The text cases are '
+        'Lean-free; one builds and runs the harness under `arch -x86_64` and '
+        'SKIPS where that is not available, which is why this is listed rather '
+        'than registered — a registered job that skips its only substantive '
+        'case is a green line that says nothing.',
 
     # A DOCUMENT check, and the cheapest file in this list by a wide margin:
     # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
@@ -4058,31 +4042,6 @@ UNREGISTERED = {
     # not quietly omitted. `tools/formal_fuzz.py` is the tool and this file is
     # its regression suite; the bug docs it found are named in the tool's
     # `KNOWN_DIVERGENCES`.
-    # The METAMORPHIC tool's regression suite, and the sibling of the row above:
-    # `tools/formal_metamorph.py` builds a program and a semantics-preserving
-    # transformation of it on both architectures and requires the two answers to
-    # be equal, which is the check that reaches a miscompile in a frame slot the
-    # program never prints. What this FILE protects is the HARNESS: it runs every
-    # transformation over a hand-written corpus, every generator mix and every
-    # drivable example and requires CPython to answer the original and the twin
-    # identically — the gate that makes the word "semantics-preserving" mean
-    # something. Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two
-    # builds on the host. Declared rather than registered for the reason the
-    # differential fuzzer's suite above is: its heavier settings (thousands of
-    # pairs across every mix, and the whole of `formal/examples`) are a sweep,
-    # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/FORMAL_metamorphic_ledger.md` records the
-    # sweeps; this file is what a change to the ten transformations must run.
-    'test_formal_metamorph.py':
-        'Checks that each of tools/formal_metamorph.py\'s ten transformations '
-        'preserves meaning, on a hand-written corpus, every generator mix and '
-        'every drivable example — a metamorphic harness\'s own regression '
-        'suite, so it protects the measurement rather than a construct. '
-        'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
-        'the host. Declared rather than registered because its heavier '
-        'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it. bugs/FORMAL_metamorphic_ledger.md records the '
-        'sweeps.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
         'each against CPython on the same text — a differential fuzzer\'s own '
@@ -4442,15 +4401,6 @@ UNREGISTERED = {
     'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
         'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
         '§3: a green exit that reports a failure in its own text.',
-    'test_closure_capture_shadows_function.py': 'The scoping rule behind a '
-        'closure capture: a free name the ENCLOSING function also binds is a '
-        'capture even when another module of the same compile defines a '
-        'function of that name — the rule, plus the four cases that must keep '
-        'behaving (a statement-level local, an enclosing parameter, a genuine '
-        'global that must NOT be captured, and an inner-declared name). Pure '
-        'AST analysis through Parser + discover_closures, no compile and no '
-        'gcc, so it costs about a tenth of a second; it wants a `check`-bucket '
-        'entry with `extra` naming this file.',
     'test_async_execution.py': 'Interpreter async/await execution, milestone '
         '3b. The compiled half of async is the `coro` bucket; this is the half '
         'that decides what the compiled half should agree with.',
@@ -5388,35 +5338,12 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'what catches a brand-new file citing a deleted doc')
     check('dangling refs: a ledger entry the corpus has outgrown is visible, '
           'which a ceiling cannot report',
-          dangling_doc_refs.stale_baseline_entries(synth, led)
-          == {'c.py': (0, 2), 'd.py': (1, 4)},
+          dangling_doc_refs.stale_baseline_entries(synth, led) == {'d.py': (1, 4)},
           f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
           f'ledger is a CEILING, so a file that fixed its citations needs no '
           f'entry change to stay green and an entry left behind by a fix is '
           f'indistinguishable from one still needed — a worker who fixes a '
           f'citation should drop the entry rather than leave it')
-    # …and `c.py` in that same synthetic corpus is the half that was INVISIBLE
-    # until 2026-10-05, and it is a different mechanism from `d.py`'s, so it
-    # cannot be covered by the assertion above passing: `find()` gives a file a
-    # key in `by_file` only once something cites into it, so a file whose
-    # citations were ALL fixed is absent from the corpus entirely. Reading the
-    # ledger through `ledger_verdicts` (a join over `by_file`) therefore could
-    # not report it at any number — not here, not in the ratchet, not in
-    # `sanctioned`. Measured on this tree: the ledger carried
-    # `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1` for a citation
-    # that had since been rewritten, and nothing could see it — the gap
-    # `stale_baseline_entries` closes.
-    check('dangling refs: an entry for a file that cites NOTHING is stale too, '
-          'which the corpus join cannot see',
-          dangling_doc_refs.stale_baseline_entries(synth, led).get('c.py')
-          == (0, 2)
-          and 'c.py' not in synth
-          and 'c.py' not in dangling_doc_refs.ledger_verdicts(synth, led),
-          f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}, '
-          f'verdicts {dangling_doc_refs.ledger_verdicts(synth, led)}, '
-          f'corpus keys {sorted(synth)}; "fixed every citation in this file" '
-          f'and "the ledger never mentioned this file" were the same '
-          f'observation, so the join has to be over the LEDGER')
 
 
 def test_the_formal_doc_index_is_current():
@@ -5443,23 +5370,11 @@ def test_the_formal_doc_index_is_current():
     regression — so the tree's facts (the document list, the areas, the titles)
     are compared and the machine's are reported as a number.
 
-    Excluding a COLUMN is not the same as excluding everything it decides, and
-    that is the fourth check: `formal_doc_index.render()` sorts each area by
-    `(not claimed_by, name)`, so which documents are live decides the ORDER, and
-    blanking the cell does not put the order back. Measured 2026-10-05: the
-    block was regenerated, and within the hour `--check` was red again with no
-    edit to `bugs/` at all — only workers finishing. So the reduction also puts
-    the rows back in name order, and the check below is what stops that from
-    being deleted as unnecessary: it requires the ON-DISK order to differ from
-    name order (or there is nothing for the sort to undo) AND the reduced order
-    to be name order (or the sort is not there).
-
-    Four checks, each shown to fail on a planted defect:
+    Three checks, each shown to fail on a planted defect:
       - the block in OPEN_WORK.md is current;
       - `--check` is not vacuous: adding a document makes it fail;
       - it is not blind either: rewriting every claim in the file leaves it
-        green (and `--strict`, which is the full comparison, red);
-      - and the reduction undoes the CLAIM-dependent ORDER, in both directions.
+        green (and `--strict`, which is the full comparison, red).
     """
     import shutil
     sys.path.insert(0, os.path.join(HERE, 'tools'))
@@ -5553,56 +5468,6 @@ def test_the_formal_doc_index_is_current():
           'the planted-document probe must put the file back exactly, or this '
           'check has a side effect on the tree it is checking')
 
-    # The CLAIM-dependent ORDER, asserted from both ends so neither half can be
-    # deleted alone. `render()` sorts each area by `(not claimed_by, name)`, so
-    # the ON-DISK order is name order only where no area happens to mix claimed
-    # and unclaimed documents; requiring the two to DIFFER is what stops this
-    # from passing vacuously on a tree where they happen to agree, and
-    # requiring the reduced order to BE name order is what stops the sort being
-    # dropped as dead code.
-    #
-    # The mixed block is BUILT, not read from the file. The first version read
-    # `block` and so asserted that some worker held a claim on the machine at the
-    # moment the suite ran: with every task finished it failed ("nothing to
-    # undo"), which is the machine-state dependence this whole check exists to
-    # keep out of the tree's verdict. So claim the last document (by name) of an
-    # area that has two or more, render, and put `live_claims` back.
-    by_area = {}
-    for r in F.rows():
-        by_area.setdefault(r[1], []).append(r[0])
-    crowded = sorted(g for g in by_area.values() if len(g) >= 2)
-    planted_claim = ({sorted(crowded[0])[-1]: ['planted-worker']}
-                     if crowded else {})
-    real_live_claims = F.live_claims
-    F.live_claims = lambda: planted_claim
-    try:
-        mixed_block = F.render()
-    finally:
-        F.live_claims = real_live_claims
-
-    def row_order(block):
-        return [[ln for ln in part.splitlines() if F._is_row(ln)]
-                for part in re.split(r'^### ', block, flags=re.M)]
-
-    on_disk = row_order(mixed_block)
-    after = row_order(F.without_claims(mixed_block))
-    mixed = [grp for grp in on_disk
-             if any('**unclaimed**' in ln for ln in grp)
-             and any('**unclaimed**' not in ln for ln in grp)]
-    check('formal doc index: the reduction puts the CLAIM-dependent ORDER back, '
-          'and the sort it undoes is really there',
-          bool(mixed)
-          and any(grp != sorted(grp) for grp in on_disk)
-          and all(grp == sorted(grp) for grp in after)
-          and F.without_claims(rendered).strip() == reduced.strip(),
-          'a check that excludes the claim COLUMN still sees what the claim '
-          'DECIDES, because `render()` sorts by `(not claimed_by, name)`: a '
-          'worker starting then reorders the table and `--check` goes red with '
-          'no edit to `bugs/` at all. `without_claims` must therefore restore '
-          'name order within each area, and this check is asymmetric on '
-          'purpose — it fails both if the sort is missing and if there was '
-          'nothing to undo')
-
 
 def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     """Twenty per-round work maps became one, and the two halves of that are
@@ -5685,120 +5550,6 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
           f'walk found {len(cited)} distinct cited tag(s), and fewer than 5 '
           f'means it is not seeing the rewritten spelling and would pass '
           f'vacuously')
-
-
-def test_a_verdict_the_ledger_no_longer_agrees_with_is_reported():
-    """A citation that RESOLVES and is still FALSE about the tree.
-
-    `test_a_deleted_bug_doc_is_not_still_cited` above covers the citation of a
-    document that is GONE, which is the half CLAUDE.md's delete-a-fixed-doc rule
-    manufactures. The other half is a document that names something that still
-    exists and is no longer true of it, and nothing in the tree checks that:
-    three rows of one verdict table said a proof was `lean-rejected` months
-    after it started passing, in the same direction, beside a document that had
-    already been corrected. Both sides were committed records and a reader
-    could not tell which to believe.
-
-    So `tools/dangling_doc_refs.py::stale_verdicts` compares a `bugs/`
-    document's verdict TABLE against the committed ledger of those verdicts
-    (`tools/formal_proof_census_baseline.json`) and reports the rows that
-    disagree. It reports rather than fails, for the reason `BARE_REF` gives: a
-    verdict table is prose-adjacent, either side can be the stale one, and this
-    tool does not get to decide which.
-
-    **The negative control is the substance of this test.** Every case below is
-    a fixture table, because the only thing that proves the reader can fail is a
-    table whose verdict is wrong on purpose; a check asserted only against the
-    live corpus passes just as happily against a corpus it cannot read, which is
-    the shape of the `walk is not vacuous` failure above and the reason it is
-    spelled the way it is.
-    """
-    sys.path.insert(0, os.path.join(HERE, 'tools'))
-    try:
-        import dangling_doc_refs
-    except ImportError as e:
-        check('stale verdicts: the reader is importable', False, repr(e))
-        return
-
-    LEDGER = {'sgt8': ('lean-rejected', None, True),
-              'fact': ('lean-rejected', '2026-10-05', False),
-              'n8': ('proved', '2026-10-04', False)}
-
-    def rows(text):
-        """The DISAGREEING rows of one fixture document, as (line, stem, said).
-
-        Built from the two halves of the reader rather than from `stale_verdicts`
-        itself, so a fixture exercises the parsing and the comparison separately
-        and a change to either half is visible as a change to this test rather
-        than as a fixture that quietly stopped being read.
-        """
-        return [(n, s, said) for n, s, said
-                in dangling_doc_refs.verdict_claims(text, LEDGER)
-                if said != LEDGER[s][0]]
-
-    check('stale verdicts: a wrong verdict IS reported (the negative control)',
-          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` |\n')
-          == [(1, 'sgt8', 'proved')],
-          'a row whose verdict cell disagrees with the ledger must be '
-          'reported; a reader that cannot fail is not a reader, and the whole '
-          'defect class is rows nothing reported')
-
-    check('stale verdicts: a verdict that agrees is NOT reported',
-          not rows('| 3 | `fact` | `lean-rejected` | the same goal |\n')
-          and not rows('| 4 | `n8` | `proved` | — |\n'),
-          'a check that reported every row it read would be the '
-          'instrument-gap bug with a second name: the value is in naming the '
-          'rows that disagree')
-
-    # The spellings a real table is written in. Each of these is a case the
-    # reader missed at some point while it was being written, and each is the
-    # shape the corpus actually uses — `**PASS (2026-10-05)**` is what
-    # `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
-    # says, and `refused` (generate) is what the same table says for a proof
-    # that never reached Lean.
-    check('stale verdicts: emphasis, backticks and a date qualifier are one '
-          'claim, not three',
-          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` |\n')
-          and rows('| 4 | sgt8 | proved | — |\n')
-          and rows('| 4 | `sgt8` | `proved` | — |\n'),
-          'the markdown around a verdict must not change whether it is read; a '
-          'strip that runs once instead of to a fixpoint finds no verdict at '
-          'all in the ONE spelling that dates its claim')
-
-    check('stale verdicts: a former verdict inside a sentence is not the claim',
-          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on '
-              '`sgt8_proof.lean:2332:41` |\n') == [(1, 'sgt8', 'proved')],
-          'these tables are written chronologically — "was X, now Y" — so a '
-          'reader that took the last status word on the line would read every '
-          'corrected row backwards and report the opposite disagreement')
-
-    # A row that names a stem the ledger has no row for is not a verdict about
-    # anything measurable, and a row whose verdict cell says something else
-    # entirely (`lean-rejected`, **2 holes**) is not a verdict this reader owns:
-    # it states more than a status and the extra half is the reader's problem,
-    # not a disagreement.
-    check('stale verdicts: it reads verdicts, not prose, and not a stem it '
-          'cannot resolve',
-          not rows('| 5 | `countdown` | `lean-rejected`, **2 holes** | — |\n')
-          and not rows('| 9 | `sum_range` | **unsolved goals s : Arm64State** | '
-                       '— |\n'),
-          'a substring reader would match every prose cell in `bugs/` that '
-          'mentions a stem and the word PASS somewhere')
-
-    check('stale verdicts: the live corpus is reported, not asserted empty',
-          callable(dangling_doc_refs.stale_verdicts),
-          'the reader must be callable over the tracked corpus; a test that '
-          'only ever ran fixtures would not notice it stopped walking')
-
-    ledger = dangling_doc_refs.load_verdict_ledger()
-    check('stale verdicts: the ledger it compares against is really there',
-          len(ledger) > 40 and all(
-              v[0] in dangling_doc_refs.SAID_TO_STATUS.values()
-              for v in ledger.values()),
-          f'{len(ledger)} rows from '
-          f'tools/formal_proof_census_baseline.json; a reader pointed at a '
-          f'ledger it cannot read reports green because it read nothing, '
-          f'which is the one thing this whole tool must not be able to do')
 
 
 def _module_const_paths(src, tree):
@@ -5992,93 +5743,6 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
           not offenders, '; '.join(sorted(set(offenders))))
 
 
-def test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs():
-    """`--apply-peaks`: the log's peaks into MEASURED_PEAK_GB, minus the liars.
-
-    The table went 22x stale (`native-dumpfull`: 31.3 GB recorded, 1.4 GB in
-    the log of a run where it died early) because the drift report was a line
-    in a log and fixing it was an afternoon of reading. These checks pin the
-    tool's judgement on synthetic logs built by the runner's own line
-    formatter: a job that FAILED, or ran under the poll's resolution, is not a
-    measurement; a derived row yields to a direct one; a difference the log
-    cannot resolve is not a change.
-    """
-    def line(key, status, secs, peak):
-        job = suite.Job(suite.REGISTRY[key.split(':')[0]])
-        res = suite.Result(status, secs, peak_gb=peak)
-        return suite._line(job, res, 1, 5, 0)
-    synth = os.path.join(HERE, 'build', 'test-suite-applypeaks.log')
-    os.makedirs(os.path.dirname(synth), exist_ok=True)
-    with open(synth, 'w') as f:
-        f.write(line('gimple', suite.PASS, 30.0, 0.4) + '\n')
-        f.write(line('native-dumpfull', suite.FAIL, 178.0, 1.4) + '\n')
-        f.write(line('modcache', suite.PASS, 0.3, 9.0) + '\n')       # a replay
-        f.write(line('coro', suite.PASS, 5.0, 0.2) + '\n')
-        f.write(line('coro', suite.PASS, 6.0, 0.7) + '\n')           # worst wins
-        f.write(line('coro', suite.FAIL, 7.0, 3.0) + '\n')           # not believed
-    meas = suite.log_measurements(synth)
-    trusted = suite.trusted_peaks(meas)
-    check('apply-peaks: only passing, long-enough jobs are trusted, worst first',
-          trusted == {'gimple': 0.4, 'coro': 0.7}, f'{trusted}')
-    check('apply-peaks: peaks_from_log still reports the failed job (a class '
-          'must cover it)',
-          suite.peaks_from_log(synth).get('native-dumpfull') == 1.4,
-          f'{suite.peaks_from_log(synth)}')
-
-    rec = {'a': (3.7, 'measured'), 'b': (1.2, 'derived'),
-           'c': (0.04, 'measured'), 'd': (31.3, 'measured')}
-    saved = dict(suite.REGISTRY)
-    try:
-        for n in 'abcdn':
-            suite.REGISTRY[n] = suite.REGISTRY['gimple']
-        got = {n: (o, p) for n, o, p in suite.peak_changes(
-            {'a': 4.4, 'b': 0.1, 'c': 0.1, 'd': 1.4, 'n': 0.2,
-             'unregistered-zz': 5.0}, rec)}
-    finally:
-        suite.REGISTRY.clear()
-        suite.REGISTRY.update(saved)
-    check('apply-peaks: moved, derived-replaced and new rows change; a '
-          'sub-resolution difference and an unregistered name do not',
-          set(got) == {'a', 'b', 'd', 'n'}
-          and got['n'] == (None, 0.2) and got['b'] == ((1.2, 'derived'), 0.1),
-          f'{got}')
-
-    src = ("MEASURED_RUN = ('old run')\n\nMEASURED_PEAK_GB = {\n"
-           "    'a':   (3.7,  'measured'),   # keeps this comment\n"
-           "    'b':   (1.2, 'derived'),\n"
-           "}\n")
-    out = suite.apply_peaks_to_source(
-        src, [('a', (3.7, 'measured'), 4.4), ('b', (1.2, 'derived'), 0.1),
-              ('zz', None, 0.6)], 'a long run label ' * 6)
-    ns = {}
-    exec(out, ns)
-    check('apply-peaks: the rewritten table parses and holds the new numbers',
-          ns['MEASURED_PEAK_GB'] == {'a': (4.4, 'measured'),
-                                     'b': (0.1, 'measured'),
-                                     'zz': (0.6, 'measured')}, f'{ns}')
-    check('apply-peaks: ...MEASURED_RUN names the new run and comments survive',
-          ns['MEASURED_RUN'].startswith('a long run label')
-          and '# keeps this comment' in out and 'old run' not in out, out)
-
-    # The negative control: a job the ratchet would move IS named. 'gimple' is
-    # `tiny`, so a 30 GB peak for it must produce advice and 0.4 must not.
-    advice = {n: (c, w) for n, c, w in suite.reclass_advice(
-        [('gimple', None, 30.0), ('coro', None, 0.2)])}
-    check('apply-peaks: a class the ratchet would change is named, a correct '
-          'one is not',
-          advice == {'gimple': ('tiny', 'program')}, f'{advice}')
-
-    check('gate-end warning: silent when the table is current...',
-          suite.peak_warning_lines([], [], 'x.log') == [], '')
-    warn = suite.peak_warning_lines(
-        [('native-dumpfull', 1.4, 31.3)],
-        [('some-job', 0.5, 'module', 48.0)], 'build/suite.log')
-    text = '\n'.join(warn)
-    check('gate-end warning: ...and names drift, over-provisioning and the fix',
-          'native-dumpfull' in text and 'some-job 48x' in text
-          and '--apply-peaks build/suite.log' in text, text)
-
-
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
@@ -6109,10 +5773,9 @@ def main():
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-                test_a_deleted_bug_doc_is_not_still_cited,
-                test_the_formal_doc_index_is_current,
-                test_a_verdict_the_ledger_no_longer_agrees_with_is_reported,
-                test_no_test_preflights_on_an_unbuildable_artifact,
+               test_a_deleted_bug_doc_is_not_still_cited,
+               test_the_formal_doc_index_is_current,
+               test_no_test_preflights_on_an_unbuildable_artifact,
                # A missing DELEGATE is the same class of defect and the same
                # escape: `'GimpleGen' object has no attribute
                # '_emit_dict_int_value_store'` is an AttributeError raised
@@ -6144,7 +5807,6 @@ def main():
                test_a_job_class_covers_its_measured_peak,
                test_a_job_class_covers_the_peak_the_last_run_recorded,
                test_over_provisioned_classes_are_reported_not_silently_kept,
-               test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,

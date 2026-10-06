@@ -537,19 +537,6 @@ _SELFHOST_SIGS = {
     # declarations of one symbol in one translation unit).
     '_compute_exc_descendants': (
         'MojoDict *', ['MojoList *'], None),
-    # The two helpers THIS file defines and its extracted siblings call back
-    # through `gimple_codegen.<name>(...)` (`funcs_shared`,
-    # `module_shared`, `module_gen`): the root module is the outermost of the
-    # compiler's import cycle, so while those siblings are lowered its
-    # functions have no registered signature and a qualified call to one was
-    # emitted as a weak "unavailable in compiled mode" stub that returned 0 --
-    # the self-hosted binary then saw an empty list of implementation files
-    # and an empty `_SELFHOST_SIGS`. Pinned the way `_merge_struct_inheritance`
-    # is (and for the same reason), with a bare C name via `_NO_OVERLOAD_MANGLE`.
-    '_selfhost_syms': (
-        'MojoList *', [], None),
-    '_selfhost_impl_py_files': (
-        'MojoList *', ['char *'], None),
     # Interpreter (myinterpreter.py)
     'Interpreter___init__': (
         'void', ['Interpreter *', 'char *', 'MojoList *'], 'myinterpreter'),
@@ -1975,15 +1962,6 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
-        # Which per-translation-unit device-introspection definitions have been
-        # emitted ('definitions' once the empty or full sidecar is out) -- shared
-        # by reference with every nested temp_gen (emit_resolve), exactly like
-        # `_emitted_ptr_helpers` just above. A declared field, NOT created on
-        # demand through `self.__dict__.setdefault(...)`: a compiled struct has no
-        # `__dict__`, so the self-hosted binary never saw the set, never emitted
-        # the four weak `_mojo_gpu_*` entry points, and every `.ci` it wrote lost
-        # its tail.
-        self._mg_introspection_emitted: set = set()
         # Same, for the device-side pack/unpack pairs. Initialised HERE, not
         # lazily, because `emit_resolve` reads it off the parent gen to share
         # it with each temp_gen -- a lazily-created attribute does not exist on
@@ -2291,12 +2269,6 @@ class GimpleGen:
         # are lowered, read after, so it is complete by the time the preamble
         # is built.
         self._elem_repr_needed: set = set()
-        # True on a unit compiled with `emit_struct_defs=False` whose output is
-        # spliced into a root translation unit that DOES emit the reflection
-        # preamble, and which therefore shares that root's `_elem_repr_needed`
-        # (see emit_resolve). Without it such a unit would have to refuse to
-        # name a shim at all, which is the wrong answer for an inline import.
-        self._elem_repr_hosted: bool = False
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
@@ -3068,22 +3040,6 @@ class GimpleGen:
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_is_bound_method':     ('int', ['void *']),
-        # Arity 5..8 of THIS family, which the variadic-callable widening
-        # commit missed: it added 5..8 for `mojo_fnptr_call_N`,
-        # `mojo_fnptr_call_kw_N`, `mojo_maybe_bound_call_N` and
-        # `mojo_maybe_bound_call_kw_N` and left this one behind. Benign
-        # today only by luck -- `_lower_bound_method_call_value` pre-widens
-        # every argument to int64_t before building the pair list, so an
-        # absent row makes `ptype = atype = int64_t` and nothing needs
-        # coercing. It is still a hole in the table whose entire job is to
-        # guarantee GIMPLE-valid argument types for a caller that does NOT
-        # pre-widen, and it is the one family a reader comparing this dict
-        # with fire_runtime.h would find short. Pinned by
-        # test_runtime_header_scan.py's arity-family completeness check.
-        'mojo_bound_method_call_5': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 5),
-        'mojo_bound_method_call_6': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 6),
-        'mojo_bound_method_call_7': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 7),
-        'mojo_bound_method_call_8': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 8),
         # Variadic callables (see runtime/fire_runtime.h's "Variadic
         # callables" comment): a value whose real callee wants its
         # arguments packed into a MojoList/MojoDict rather than passed
@@ -3108,21 +3064,6 @@ class GimpleGen:
         'mojo_maybe_bound_call_kw_3': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_kw_4': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_vararg_call_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
-        # Arity 0..4 of `mojo_fnptr_call_N`, missing since the family was
-        # first written: the variadic widening added 5..8 and 0..4 were
-        # never here. Same failure mode as the bound-method gap below — an
-        # absent row means `_emit_call` finds no `param_types` and falls
-        # through to `ptype = atype` — but here the caller
-        # (`_lower_fnptr_call_value`) DOES pre-widen, which is why it has
-        # been harmless. The family is now whole; both gaps are pinned by
-        # test_runtime_header_scan.py's completeness check rather than by
-        # four more pinned names, so a sixth family cannot be missed the
-        # same way.
-        'mojo_fnptr_call_0':  ('int64_t', ['void *']),
-        'mojo_fnptr_call_1':  ('int64_t', ['void *', 'int64_t']),
-        'mojo_fnptr_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),
-        'mojo_fnptr_call_3':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t']),
-        'mojo_fnptr_call_4':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_fnptr_call_5':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_fnptr_call_kw_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_5': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
@@ -4082,7 +4023,6 @@ class GimpleGen:
         # gen_module's `_is_selfhost_file` block) makes call and definition
         # agree without any cross-module signature negotiation.
         '_merge_struct_inheritance', '_compute_exc_descendants',
-        '_selfhost_syms', '_selfhost_impl_py_files',
     })
 
     # ── Struct method generation ──────────────────────────────────────────
@@ -5206,51 +5146,6 @@ class GimpleGen:
                                      value_node=None) -> None:
         return ginf.note_container_callable_ret(self, container_val, value_text,
                                                 value_ctype, value_node)
-    # THIN DELEGATES for the backend functions that two sibling modules call
-    # on each other across the compiler's own import cycle
-    # (`emit_methods` -> `emit_infra` -> ... -> `emit_funcs` -> `emit_infra`).
-    # A `ginf.begin_function(gen, node)` written in `emit_funcs.py` is lowered
-    # while `emit_infra`'s statements are not yet part of the closure, so the
-    # self-hosted compile re-dispatches it on its bare name, finds no
-    # registered signature and emits a weak "unavailable in compiled mode"
-    # stub that prints and returns 0 -- the compiled binary silently lost the
-    # call (here: the whole per-function ownership/cleanup state machine, which
-    # then freed pointers it never owned). A method of `GimpleGen` is resolved
-    # through the frozen method-signature table instead, which does not depend
-    # on the order the cycle was entered, and these have always been the
-    # architecture's answer to exactly this (see `_reset_func` above).
-    def _kwarg_param_names(self, fname_raw: str, fname: str, n_expected: int,
-                           kwarg_dict: dict) -> list:
-        return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
-    def _begin_function(self, fn) -> None:
-        return ginf.begin_function(self, fn)
-    def _emit_fallthrough_frees(self, fn) -> None:
-        return ginf.emit_fallthrough_frees(self, fn)
-    def _reset_no_candidates(self) -> None:
-        return ginf.reset_no_candidates(self)
-    def _register_nested_env_free(self, def_name: str, env_var: str,
-                                  owner_body) -> None:
-        return ginf.register_nested_env_free(self, def_name, env_var, owner_body)
-    def _callable_param_generator_apis_of(self, fn_node) -> dict:
-        return ggc._callable_param_generator_apis(self, fn_node)
-    def _callable_param_ret_types_of(self, fn_node) -> dict:
-        return ggc._callable_param_ret_types(self, fn_node)
-    def _build_sort_keys(self, av: str, elem: str, key_expr) -> str:
-        return ggc._build_sort_keys(self, av, elem, key_expr)
-    def _copy_dict_metadata(self, dst: str, src: str) -> None:
-        return ginf._copy_dict_metadata(self, dst, src)
-    def _future_done_callback_kind_tag(self, cb_ctype: str) -> int:
-        return ggc._future_done_callback_kind_tag(cb_ctype)
-    def _lower_generator_next(self, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_next(self, av, api)
-    def _lower_generator_send(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_send(self, node, av, api)
-    def _lower_generator_throw(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_throw(self, node, av, api)
-    def _lower_generator_close(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_close(self, node, av, api)
-    def _lower_next_iter_cursor(self, node, rec, args) -> tuple[str, str]:
-        return ggc._lower_next_iter_cursor(self, node, rec, args)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:
@@ -5980,17 +5875,8 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
     if not names:
         return
     cpp = getattr(gen, 'generated_cpp', '') or ''
-    # An explicit loop through `_as_str`, not a comprehension over the raw
-    # element: `names` comes back from `desugar_genexps` as a list of erased
-    # words on the self-hosted path, and the f-string below stringified the
-    # POINTER as a decimal -- `__mgco_93825122318464_` is in no output, so every
-    # generator expression was reported "could not be compiled" and the whole
-    # dump failed.
-    missing = []
-    for _vn in names:
-        _vname = _as_str(_vn)
-        if f'__mgco_{_vname}_' not in code and f'__mojogen_{_vname}_' not in cpp:
-            missing.append(_vname)
+    missing = [n for n in names
+               if f'__mgco_{n}_' not in code and f'__mojogen_{n}_' not in cpp]
     if missing:
         raise RuntimeError(
             f"generator expression could not be compiled into a generator: "

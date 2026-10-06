@@ -48,7 +48,6 @@ fire on a sound image (an audit that fires on everything is an audit people
 learn to ignore).
 """
 import os
-import re
 import sys
 import tempfile
 
@@ -65,19 +64,6 @@ import formal.imports as I
 import formal.model as M
 
 RESULTS = []
-
-# The shapes a `formal/hostmods/` docstring uses to point at ANOTHER FILE: a
-# `bugs/` writeup, a `test_*.py`, a `formal/` or `tools/` source path, a
-# `doc/` file, and a bare top-level `.md`. The trailing `(?![\w])` on every
-# alternative is load-bearing rather than decoration — without it
-# `hashlib.md5(data)` matches the `.md` shape and this becomes an assertion
-# about a hash function. `(?<![\w/.-])` stops a match inside a longer path, so
-# `os/path/__init__.mojo` is read as one relative path and not as a bare
-# `__init__.mojo`.
-_CROSS_REF_RE = re.compile(
-    r'(?<![\w/.-])((?:bugs/[\w./-]+\.md)|(?:test_[\w]+\.py)'
-    r'|(?:formal/[\w./-]+\.(?:mojo|py))|(?:tools/[\w./-]+\.py)'
-    r'|(?:doc/[\w./-]+\.(?:md|html))|(?:[\w-]+\.md))(?![\w])')
 
 
 def check(ok, what, detail=''):
@@ -405,13 +391,6 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     # module, is that `wrap`, `fill` and `shorten` are absent — a rendering WIDTH is
     # the subject and no file in this repository asks for one.
     "textwrap": "test_formal_textwrap.py",
-    # `random` was already in `PRE_SPLIT_HOST_MODULES`, so what it needed here
-    # was the TEST and not a tier move.  Its row is the one where the module
-    # moves HALF the files and the other half stop one level out — a
-    # `random.Random(n)` instance is an object with 624 words behind a pointer
-    # — so its test pins both halves: the three names that build, against
-    # CPython's own `random`, and the absent ones refused naming themselves.
-    "random": "test_formal_random.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot
@@ -647,19 +626,6 @@ HOST_SET_ADDED_TIERS = {
     "genericpath": "modelled",
     "ntpath": "modelled",
     "nturl2path": "modelled",
-    # ── and the five CPython `find_spec` decides of the unclassified set, added
-    # 2026-10-07 by the worker holding `FORMAL_stdlib_module_names_are_not_
-    # classified.md`.  Same measurement, same rule and the same direction as the
-    # four above: `find_spec` returns NO SPEC for each on this host, so the
-    # object (the gdbm library, Tcl/Tk, and the Windows overlapped-I/O, Win32 API
-    # and WMI objects) is missing from the target rather than the module being
-    # unwritten.  §0.5 named these as the entries with a measurement behind them;
-    # all five are private, so the public count is unchanged.
-    "_gdbm": "unreachable",
-    "_overlapped": "unreachable",
-    "_tkinter": "unreachable",
-    "_winapi": "unreachable",
-    "_wmi": "unreachable",
 }
 
 
@@ -1110,58 +1076,6 @@ def test_audit_fires_on_a_real_build():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_raise_flushes_stdout():
-    """A `raise` must not throw away what the program already printed.
-
-    This is the gate-resident half of the class `test_formal_x86_64_parity.py`'s
-    `FAILING_CASES` also carries (that file is in no bucket, so its rows run in
-    no gate): the arm64 backend used to lower a `raise` to the raw Darwin `exit`
-    SYSCALL emitted inline, which enters the kernel directly and runs none of
-    libc's user-space `exit` — so a block-buffered stdout (every pipe and every
-    `subprocess.run(capture_output=True)`) lost every byte the program had
-    written. x86-64 was already right, because its `_emit_call_exit` is a CALL
-    to libc's `exit(3)`, so the same source printed `before` on one machine and
-    NOTHING on the other. `formal/arm64_codegen.py::_emit_exit` now emits
-    `fflush(NULL)` before the trap and all of its call sites share it.
-
-    Both backends, because the defect WAS the divergence between them: a
-    one-sided assertion stays green through the whole class. The control is the
-    same source with `return 1`, which reaches the same exit through libc's
-    `__main` and always flushed.
-    """
-    import subprocess
-    import shutil
-    d = tempfile.mkdtemp(prefix='raiseflush_')
-    try:
-        src = os.path.join(d, 'raise.mojo')
-        open(src, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    raise 7\n')
-        ctl = os.path.join(d, 'return.mojo')
-        open(ctl, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    return 1\n')
-        for backend in ('arm64', 'x86_64'):
-            for path, what in ((src, 'a raise'), (ctl, 'a return')):
-                out = os.path.join(d, f'{what.split()[-1]}.{backend}')
-                r = subprocess.run(
-                    [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
-                     '--formal', '--no-prove', f'--backend={backend}', '-o', out,
-                     path],
-                    capture_output=True, text=True, timeout=600, cwd=REPO)
-                if not check(r.returncode == 0,
-                             f'{what} builds on {backend}',
-                             (r.stdout + r.stderr)[-300:]):
-                    continue
-                run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=120)
-                check('before@@' in run.stdout,
-                      f'stdout survives {what} on {backend} (the exit flushes)',
-                      f'stdout={run.stdout[:80]!r} exit={run.returncode}')
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
 def test_sorry_note():
     """The census has to be READ to be worth computing.
 
@@ -1371,66 +1285,14 @@ def test_hostmods_are_invisible_to_every_other_resolver():
                   f'it resolved to {_short_repr(got)}')
 
 
-# And the negative direction, which is the one a new module gets wrong:
-def test_hostmod_cross_references():
-    """Every file a host module's prose NAMES exists.
-
-    The other two halves of this file ask whether the thing a module is claimed
-    to be is really there — a source, a test. This asks the same question about
-    the module's own sentences, and it is here because four of them were not.
-
-    `bugs/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
-    and `test_formal_io.py` / `test_formal_typing.py` were cited by the two
-    modules whose real test is `test_formal_small_hosts.py` — four readers sent
-    to a file that is not there. That is the `coro` failure mode CLAUDE.md
-    records: a claim with no evidence behind it reads as coverage, and nobody
-    notices until someone goes looking for the evidence.
-
-    Asserted over EVERY `.mojo` under `formal/hostmods/`, so the next module
-    written is covered by this loop rather than by a later session noticing.
-    """
-    hostmods = os.path.join(REPO, 'formal', 'hostmods')
-    mods = []
-    for dirpath, dirnames, filenames in os.walk(hostmods):
-        dirnames[:] = [d for d in dirnames if d != '__pycache__']
-        mods += [os.path.join(dirpath, f) for f in sorted(filenames)
-                 if f.endswith('.mojo')]
-    check(len(mods) >= 8, 'the walk found the host modules at all',
-          f'found {len(mods)} under {hostmods}')
-    dangling = []
-    scanned = 0
-    for path in mods:
-        rel = os.path.relpath(path, REPO)
-        with open(path, errors='replace') as fh:
-            for lineno, line in enumerate(fh, 1):
-                for ref in _CROSS_REF_RE.findall(line):
-                    scanned += 1
-                    # Repo root first, then the module's own directory, so a
-                    # reference to a sibling (`_syscalls.mojo`) resolves the
-                    # way a reader standing in that directory would resolve it.
-                    if not (os.path.exists(os.path.join(REPO, ref))
-                            or os.path.exists(os.path.join(
-                                os.path.dirname(path), ref))):
-                        dangling.append(f'{rel}:{lineno} -> {ref}')
-    check(scanned >= 100, 'the walk actually read cross-references',
-          f'{scanned} references in {len(mods)} modules; a regex that '
-          f'matched nothing would pass vacuously')
-    check(not dangling,
-          'every file a host module names exists: a docstring pointing at a '
-          'test or a bug doc that is not there is a claim with nothing '
-          'behind it', '; '.join(dangling[:8]))
-
-
 def main():
     test_relative_imports()
     test_host_tiers()
     test_libsystem_provider()
     test_bind_audit()
     test_audit_fires_on_a_real_build()
-    test_raise_flushes_stdout()
     test_sorry_note()
     test_hostmods_are_invisible_to_every_other_resolver()
-    test_hostmod_cross_references()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")
