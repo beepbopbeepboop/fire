@@ -3549,7 +3549,14 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     #: The guard this class makes unsatisfiable. Pinned to a line the emitter
     #: really writes, with the message the case below carries, because a fixture
     #: that silently stops matching is a fixture that stops testing.
-    _GUARD = "try (simp [hs7, hdec6])"
+    # The state wrappers are in it because the emitter now puts the epilogue's
+    # per-step `rip` condition through `_state_wrapper_names` (`imul`'s successor
+    # is the model's `x86_set_flag4 (… with rip := …)`, which projects through
+    # the wrapper rather than by `rfl`), and this string is matched literally —
+    # so it moves with the emission, which is the point of pinning it to a line
+    # the emitter really writes.
+    _GUARD = ("try (simp [hs7, hdec6, x86_flags_logic, x86_flags_sub, "
+              "x86_set_reg])")
 
     def _patched_const2(self):
         """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.
@@ -3885,9 +3892,9 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         digits — so a hole in an imported `.olean` arrived as a bare line number
         in a file it had never seen, and `hole_at` resolved it against the
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:503:8` position came back as `"hstep11's side condition, line
-        503"`, which is confident, specific and completely wrong, because 503 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
+        `«lib».X86:525:8` position came back as `"hstep11's side condition, line
+        525"`, which is confident, specific and completely wrong, because 525 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 525 of the
         generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
 
@@ -3911,11 +3918,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:503:8`\n", module),
-            "hstep11's side condition, line 503",
-            "the control: OUR hole at 503 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 503")
-        for label, pos in (("«lib».X86", 503), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:525:8`\n", module),
+            "hstep11's side condition, line 525",
+            "the control: OUR hole at 525 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 525")
+        for label, pos in (("«lib».X86", 525), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -3928,8 +3935,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:503:8`\n"),
-            "hstep11's side condition, line 503",
+                "`«lib».X86:525:8`\n"),
+            "hstep11's side condition, line 525",
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
@@ -4104,18 +4111,35 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         program whose path reaches a call out of the image for some OTHER
         reason — `subscript_var`'s subscript reaches the allocator. `SOURCE`
         crosses a frame but no such call, and the case below asserts that too, so
-        a fixture change cannot quietly stop testing the trap."""
-        text = self._emitted_path("subscript_var")
+        a fixture change cannot quietly stop testing the trap.
+
+        **AND the premise of that paragraph was itself a BUG, which is why the
+        fixture is now `a[n]` rather than `a[1]`.** `subscript_var` reaches the
+        allocator only because the tree followed a `jmp rel32` to `addr + off`
+        instead of `addr + len + off`, so it walked the instruction five bytes
+        before the one the machine runs — and that instruction happened to be the
+        allocator's `call`. Fix the branch target (B13, in the one arm its own
+        comment above it warned about) and the path takes a `jmp` into the
+        helper's body and ends at the helper's `ret` instead, which is a
+        TAIL CALL and is its own leaf kind. So the fixture is now
+        `i = n`: the index is not a literal, the compiler emits the `call`, and
+        the leaf really is a call out of the image.
+
+        `test_a_tail_call_return_is_not_the_end_of_the_run` covers the other
+        leaf kind on `subscript_var` itself, so neither arm of this is untested
+        by moving the fixture.
+        """
+        text = self._emitted(
+            "def main(n) -> Int:\n"
+            "    a = [10, 20, 30]\n"
+            "    i = n\n"
+            "    return a[i]\n")
         found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
                                  r"[ ]*simp only \[(hs\d+)\]", text))
-        self.assertEqual(len(found), 1,
-                         "this program's one path ends at the allocator, which "
-                         "is out of the image, so it has exactly one trap leaf: "
-                         f"{len(found)}")
+        self.assertTrue(found,
+                        "a path that reaches the allocator, which is out of the "
+                        "image, has a trap leaf of its own: 0 found")
         for m in found:
-            self.assertNotEqual(m.group(2), "s0",
-                                "the halt state is the one the walk reached the "
-                                "call in, not the initial state")
             self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
                              "the halt fact is proved from the successor "
                              f"equation that defines {m.group(2)}")
@@ -4126,6 +4150,38 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                              text,
                              "the trap arm is a HALT and not a step: the runner "
                              "stops at `st.rip = exit` before it steps")
+
+    def test_a_tail_call_return_is_not_the_end_of_the_run(self):
+        """A `ret` in a frame a `jmp` entered is a HALT, not the exit sentinel.
+
+        `formal/examples/subscript_var.mojo` with a LITERAL index compiles to a
+        `jmp rel32` into the helper's body rather than a `call`, and the `ret`
+        it reaches has no return address on any stack — the machine pops
+        whatever the frame holds, which is a local. So the closing fact
+        `s_N.rip = 0` is FALSE there, and it is a `sorry` inside that fact's
+        guard, so nothing would report it. B25's failure mode exactly.
+
+        This is the same answer the tree already gives a call out of the image —
+        name the `ret`'s own address as the halt address, so
+        `x86_exec_go_exit` stops one instruction earlier and the claim becomes
+        the one the model supports. So all three properties are checked: the
+        halt is the `ret`'s address and NOT zero, there is NO `x86_step_ret` for
+        it, and the theorem names the `ret` as the address it stops at.
+        """
+        text = self._emitted_path("subscript_var")
+        halt = re.search(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by", text)
+        self.assertIsNotNone(halt, "a tail-called `ret` is a leaf with a halt "
+                         "fact of its own:\n" + text[-2000:])
+        state, addr = halt.group(2), halt.group(3)
+        self.assertNotEqual(addr, "0",
+                            "the popped word is a local in the jumped-into "
+                            "frame, not the zero the exit sentinel is")
+        self.assertNotIn("x86_step_ret", text,
+                         "the tail-call arm is a HALT and not a step: the "
+                         "runner stops at `st.rip = exit` before it steps")
+        self.assertIn("rc %s 100000).isSome = true" % addr, text,
+                      "…and the statement names the `ret`'s own address, which "
+                      "is what makes the claim true rather than stronger")
 
     def test_the_guards_branches_are_settled_and_not_walked(self):
         """What replaced the doubling, on the fixture that used to show it.
@@ -4451,8 +4507,25 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
     #: examples that were already here still produce what they produced.
-    TOTAL = (105, 4232)
-    TOTAL_PRE_MERGE52 = (69, 2718)
+    #:
+    #: **Re-pinned 2026-10-05 from 105/4 232 to 105/4 297, and the cause is the
+    #: `jmp` branch TARGET, with the leaves unchanged.** `_tree` followed a
+    #: `jmp rel32` to `addr + off` where the machine goes to `addr + len + off`
+    #: (B13, in the one arm its own `jcc_rel32` comment above it warned about),
+    #: so it walked an instruction five bytes earlier than the machine does. In
+    #: `formal/examples/subscript_var.mojo` and
+    #: `formal/examples/list_literal_index.mojo` that earlier instruction is the
+    #: one the machine never runs there, so the walk gained the five bytes of
+    #: the helper's prologue that the real target starts after — 65 steps over
+    #: the two, and no leaf either way, because both paths end at a `ret`. The
+    #: leaf count being unmoved is the load-bearing half: it says the fix changed
+    #: which instructions are walked and not how many paths there are.
+    TOTAL = (105, 4297)
+    #: …and the same correction applied to the 52 examples that predate the
+    #: corpus growth: 69/2 718 -> 69/2 727, the same nine steps and the same
+    #: reason. Pinning only the big total would leave this row asserting the
+    #: pre-fix walk for the subset it exists to protect.
+    TOTAL_PRE_MERGE52 = (69, 2727)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
