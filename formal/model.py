@@ -15325,6 +15325,19 @@ POINTEE_WIDTHS = {
     "UInt": (4, False),
     "Int64": (8, True), "UInt64": (8, False), "c_long": (8, True),
     "c_ulong": (8, False), "NoneType": (8, False),
+    # IEEE binary64 is EIGHT BYTES and the load is bit-exact — one `LDR` of the
+    # bit pattern, the same instruction an `Int64` pointee uses — so the width
+    # was never the question. It is in this table rather than in
+    # `POINTEES_REFUSED` because the refusal that was there was about the
+    # CONTEXT (nothing carried the pointee's KIND out of the dereference, so
+    # `Int(p.value())` read the exponent field) and that hole is closed:
+    # `pointee_kind` below is the channel, `ValueKinds.kind_of`'s dereference
+    # arm is where it is asked, and the two consumers a `Float64` could reach —
+    # a call argument and a `return` under an integer annotation — are refused
+    # by name. The signedness is `True` and is not consulted for an eight-byte
+    # load (nothing narrows it); it is written down rather than left as a
+    # default so a reader does not have to infer it.
+    "Float64": (8, True),
     # A pointer-to-pointer is a load of an ADDRESS, so the pointee here is
     # another pointer and the width is the pointer's own.  This is the one
     # recursive entry, and it terminates because a pointer to a pointer to a
@@ -15332,6 +15345,39 @@ POINTEE_WIDTHS = {
     # once it is a pointer, only whether the value is itself dereferenceable.
     "Pointer": (8, False), "UnsafePointer": (8, False), "_CPointer": (8, False),
 }
+
+
+def pointee_kind(pointee) -> str | None:
+    """The KIND a load of this pointee produces, or None when it is not stated.
+
+    **The channel `POINTEES_REFUSED`'s `Float64` row was standing in front of.**
+    That row said the load "yields a word whose KIND is decided by the context
+    it lands in", which was true of the tree it was written on and stopped being
+    true the moment a KIND could flow: a `Pointer[Float64]` load is one word
+    holding the bit pattern, and the question is no longer what the word IS but
+    what each consumer is told it is. This function is the answer to the first
+    question, and `ValueKinds.kind_of`'s dereference arm is where it is asked,
+    so every consumer of a kind — the `printf` conversion check, the
+    call-argument check, the return-annotation check, `Int(…)`'s own
+    `FLOAT_TO_INT` arm — inherits it rather than each emitter re-deriving it.
+
+    **One row, and `None` is the answer for everything else, which is the
+    permissive direction and not an omission.** Every other pointee in
+    `POINTEE_WIDTHS` is a one-word INTEGER, and `INT_KIND` is what this model
+    already answers for a word, so a row saying `int` would change nothing; the
+    other pointees in `POINTEES_REFUSED` (a `Float32`, a wide `SIMD`, a blob, a
+    struct) have no kind on this path at all and never reach a load. Writing the
+    integer rows out would be a second table to keep in step with
+    `POINTEE_WIDTHS` for a claim that changes no answer.
+
+    `Float64` and NOT `Float32` is not a preference: a `Float32` is four bytes
+    of IEEE binary32 and this path has no kind that holds one, so its load is
+    still refused by `POINTEES_REFUSED` and this function is never asked about
+    it. A `BFloat16` is the same answer for the same reason.
+    """
+    if pointee == "Float64":
+        return FLOAT_KIND
+    return None
 
 # The reverse of `POINTEE_WIDTHS` for the four widths it establishes: the pointee
 # that IS that width, so a refusal can NAME the declaration which would answer it
@@ -15356,27 +15402,27 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
-    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
-    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
-    # is bit-exact — one word holding the bit pattern, loaded with the same
-    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
-    # for a reason that is about the CALL SITE rather than about the value: what
-    # a pointer dereference yields here is a word, and whether that word is an
-    # integer or a double is decided by the CONTEXT it lands in, and a context
-    # that has established neither answers `int` — so `Int(p.value())` on a
-    # double would read the exponent field.  Answering it means making the
-    # pointee's kind flow into the dereference and every context around it,
-    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
-    # work and this row is its starting state.  A row whose stated reason is
+    # **CORRECTED 2026-10-04, and the `Float64` row DELETED 2026-10-05.** This
+    # row said "this path has no float kind distinct from an int", which was
+    # true and is not any more: `FLOAT_KIND` landed with the binary64
+    # arithmetic, a `Pointer[Float64]` dereference is bit-exact — one word
+    # holding the bit pattern, loaded with the same `LDR` an integer pointee
+    # uses — and the KIND now flows out of the dereference through
+    # `pointee_kind`, which is the channel this row's own text asked for ("the
+    # pointee's kind must flow into the dereference and every context around
+    # it"). `Float64` is in `POINTEE_WIDTHS` instead, and the two consumers a
+    # double could have reached — a call argument and a `return` under an
+    # integer annotation — are refused by name
+    # (`model.call_argument_kind_refusal`,
+    # `model.return_annotation_kind_refusal`), which is what closed the last
+    # hole this row was standing in front of. A row whose stated reason is
     # FALSE is worse than an absent one, because the reader who finds it cannot
     # tell which half of it still holds.
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
-               "bit-exact — one word holding the bit pattern — but this "
-               "dereference path yields a word whose KIND is decided by the "
-               "context it lands in, and a context that has established none "
-               "answers `int`, so `Int(p.value())` would read the exponent "
-               "field; see bugs/FORMAL_float_pointer_pointee.md",
+    #
+    # `Float16` and `Float32` are why `pointee_kind` has one row and not four:
+    # a `Float32` is four bytes of IEEE binary32 and this path has no kind that
+    # holds one, so its load is still refused HERE and `pointee_kind` is never
+    # asked about it.
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -17711,7 +17757,8 @@ def pointer_store_receiver(target):
 
 
 def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
-                           structs_by_name: dict = None):
+                           structs_by_name: dict = None, value=None,
+                           class_of=None):
     """`("store", width, signed)` | `None` — with a refusal.  The store mirror
     of `dereference_lowering`, and asked for the same reason.
 
@@ -17720,11 +17767,37 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     and the shape is what tells a store from an identity.  `signed` is the
     POINTEE's declared signedness and is carried for that symmetry only — a
     store has no result to sign-extend, and the width is what it truncates to.
+
+    **`value` and `class_of` are the KIND CHECK, and they are the third consumer
+    that `POINTEES_REFUSED`'s `Float64` row was standing in front of.** The row
+    was deleted when the pointee's kind started flowing out of a dereference
+    (`pointee_kind`), and deleting it opened a hole the document that asked for
+    the deletion did not name: with a `Float64` pointee no longer refused here,
+    `p.value() = 1` stores the INTEGER 1 into a slot a double is read back from
+    (measured, both architectures, green build, exit 0 — reading it back gives
+    4.9e-324), and `p.value() = 2.5` into a `Pointer[Int64]` stores the double's
+    BIT PATTERN as an integer. Both are silent wrong answers and both were
+    refusals a moment before.
+
+    So the rule is the same one `call_argument_kind_refusal` and
+    `printf_kind_conversion_refusal` state at the other two boundaries — the
+    stored value's KIND must agree with the pointee's — asked with the SAME
+    three-way evidence (`printf_arg_float_evidence`, which each backend already
+    hands its `printf` refusal) and with the SAME permissive direction: **None
+    never refuses**, so an unannotated parameter, a name bound from a call this
+    build cannot classify, and a value of a kind it has no spelling for are all
+    stored as before. Only a stated disagreement is reported, and it can only be
+    stated where the source says one thing and the declaration says another.
     """
     obj = pointer_store_receiver(target)
     inner, why = pointer_pointee(fn, obj, decls, functions)
     if inner is None:
         return (None, why)
+    if class_of is not None and value is not None:
+        disagreement = pointer_store_kind_disagreement(
+            inner, value, class_of)
+        if disagreement is not None:
+            return (None, disagreement)
     if inner in POINTEES_REFUSED:
         # The table's own words, not a second copy of them.  They are written
         # for the LOAD — "the load would put float bits in a register" — and
@@ -17754,6 +17827,67 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
                   f"1-byte pointee overwrites seven bytes the program never "
                   f"wrote, and that is silent corruption rather than a fault. "
                   f"{_declared_note(why)}")
+
+
+def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
+    """Why this stored VALUE's kind contradicts the pointee's, or None.
+
+    One rule at one boundary, and it is the third boundary: a `printf`
+    conversion says how C will READ the word it is handed
+    (`printf_kind_conversion_refusal`), a parameter annotation says how the
+    CALLEE will (`call_argument_kind_refusal`), and a pointee says how a
+    dereference's STORE will be read back. All three are the same claim about
+    one word, and until this one existed a `Pointer[Float64]` was a boundary
+    with no rule on it.
+
+    **Both directions, because one direction is just as wrong as the other.**
+    An integer into a double slot reads back as 4.9e-324 for the integer 1; a
+    double into an integer slot reads back as the bit pattern, which is a
+    plausible large number. Measured on BOTH architectures from green builds
+    with this rule lifted, both exit 0.
+
+    `class_of` is `printf_arg_float_evidence` and its answer is THREE-WAY for
+    the reason every other consumer of it is: a `"float"` into an integer
+    pointee and an `"int"` into a double pointee are both disagreements, and
+    `None` — which is what an unannotated parameter, a name bound from an
+    unclassified call and a kind this model has no spelling for all answer —
+    is silence. The permissive direction is what makes the rule safe to add
+    beside 664 stdlib files: it can only fire where the source contradicts
+    itself.
+
+    The advice is the source's own decision in both directions, and it is the
+    conversion this path already has: `float(x)` is `SCVTF` and `Int(x)` is
+    `FCVTZS`, so a reader told to write one of them is being told to write a
+    construct that answers rather than to annotate their way out of it.
+    """
+    pointee_is_float = pointee_kind(pointee) == FLOAT_KIND
+    got = class_of(value)
+    if got is None:
+        return None
+    if pointee_is_float and got == "float":
+        return None
+    if not pointee_is_float and got == "int":
+        return None
+    where = ("into a `Float64` pointee, and the value is an IEEE double" if
+             pointee_is_float else
+             f"into a `{pointee}` pointee, and the value is a number this "
+             f"function bound to an integer")
+    want = ("a double is what that slot is read back as" if pointee_is_float
+            else "an integer is what that slot is read back as")
+    return (
+        f"the pointee is `{pointee}` and this store writes {where}. "
+        f"{spelled(value)} is a different kind of word from the one the "
+        f"declaration says is there, and a store has no way to say so: it moves "
+        f"one 64-bit word, so {want} and the number that comes back is the "
+        f"other kind's bits. Measured on BOTH architectures from a green build "
+        f"with this check lifted: `p.value() = 1` into a `Pointer[Float64]` "
+        f"reads back as 4.9e-324 rather than 1.0, and `p.value() = 2.5` into a "
+        f"`Pointer[Int64]` reads back as 4612811918334230528 — the double's "
+        f"BIT PATTERN, a plausible large integer. Refused rather than "
+        f"converted, because the conversion is the source's decision and this "
+        f"path already has both of them: write `float(x)` for a double into an "
+        f"integer pointee and `Int(x)` for an integer into a `Float64` one"
+    )
 
 
 def pointer_store_refusal(method: str, why: str) -> str:
@@ -23507,6 +23641,40 @@ class ValueKinds:
                 ek = _unify(ek, self.kind_of(e.key, scopes))
             return list_kind(ek)
         if isinstance(e, F.CallExpr):
+            # A DEREFERENCE carries its pointee's KIND, and this is the one arm
+            # that says so. It is here rather than in a new `ValueKinds` hook
+            # for the reason `kind_of` exists at all: the two backends ask this
+            # one function, so a kind that reached the emitters through two
+            # private copies of a pointer question would be two answers to one
+            # question — the exact failure `x86_64_model_test.py` exists to
+            # catch for the load's WIDTH, which is the same decision one axis
+            # over.
+            #
+            # What it closes, measured on BOTH architectures before this arm:
+            # `printf("%.1f", p.value())` over a `Pointer[Float64]` classified
+            # as NOTHING, so every consumer of the operand's kind fell to "a
+            # word is an integer" — and a `%f` placement then reads a register
+            # the emission never moved. `Int(p.value())` did convert, but only
+            # because `Int(…)` asks the RECEIVER's declared type rather than
+            # the expression's kind, so that conversion was reached by a
+            # different question than every other conversion on this path. One
+            # channel, one answer: `pointer_pointee` for what is at the address
+            # and `pointee_kind` for what KIND it is.
+            #
+            # `deref_receiver` is the recogniser rather than a spelling test,
+            # because it is the one both backends already ask before emitting a
+            # load or a store — a second "is this `value()`" here would be a
+            # second answer to that question, and `value()` on an enum, an
+            # iterator and a `SIMD` all reach this arm with the SAME spelling
+            # and none of them is a pointer. `pointer_pointee` answers None for
+            # a receiver it cannot establish to be a pointer, which is the
+            # permissive direction: nothing changes for those three receivers.
+            recv = deref_receiver(e)
+            if recv is not None:
+                pointee, _why = pointer_pointee(self._fn, recv, {}, None)
+                kind = pointee_kind(pointee)
+                if kind is not None:
+                    return kind
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
             # `List[Int]()` are the same construction and must be the same

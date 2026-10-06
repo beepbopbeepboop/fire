@@ -42,8 +42,11 @@ VALUE is on this path, so a tag for a format this path cannot HOLD is not a lie.
 and this path has no float kind distinct from an int"* — is TRUE and only true of
 binary32, and `test_formal_run.py`'s `deref_refuse_float_pointee` pins it as such.
 Its `Float64` sibling was CORRECTED in the same change, because that half of the
-sentence had become false: a `Float64` load IS bit-exact now. The corrected text
-and the reason are in `bugs/FORMAL_float_pointer_pointee.md`.
+sentence had become false: a `Float64` load IS bit-exact now. That row was then
+DELETED (2026-10-05) when the pointee's kind started flowing out of a
+dereference — `model.pointee_kind` — and `Float64` moved to `POINTEE_WIDTHS`
+with `test_formal_run.py`'s `deref_a_binary64_pointee_loads_the_bit_pattern`
+pinning the answer.
 
 ## What the next slice would be
 
@@ -132,11 +135,12 @@ still pass the three refusals). `FLOAT_CASES` is 21/21 and the new group 5/5.
 **What this does NOT close.** It is a hole in the boundary of the scope, not a
 change to it: the scope is still binary64, `Float32` is still refused by name for
 the reason §"What is NOT" gives, and the SECOND slice is still a second kind. It
-also removes one hazard from
-`bugs/FORMAL_float_pointer_pointee.md`'s remaining work rather than doing any of
-it: letting a `Pointer[Float64]` load through without a kind would have made
-`printf("%d", p.value())` print a bit pattern, so the rule above is a
-PREREQUISITE for that change and not an alternative to it.
+also removed one hazard from the work that let a `Pointer[Float64]` load through
+rather than doing any of it: letting the load through without a kind would have
+made `printf("%d", p.value())` print a bit pattern, so the rule above was a
+PREREQUISITE for that change and not an alternative to it — and the change landed
+on 2026-10-05 with the kind flowing (`model.pointee_kind`) and every consumer of
+it refusing the three shapes a double must not reach.
 
 ## Status, 2026-10-05 (`formal28-3`): §"What is NOT"'s second sentence was
 ## FALSE about the CONSTRUCTOR, and that is now the refusal the doc always said

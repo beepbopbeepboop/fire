@@ -1,11 +1,11 @@
 # `printf("%s", <a container>)` prints the blob's COUNT byte, where CPython prints the container
 
 **Area:** FORMAL, both backends — `formal/model.py`'s `printf` conversion
-table. **Status: NOT FIXED**, and it is NOT the same defect as the `%d` one it
-was found next to (`bugs/FORMAL_printf_d_of_a_container_prints_its_address.md`,
-fixed and deleted 2026-10-05): that one is a program whose own source is WRONG,
-so a refusal is the right answer, and this one is a program whose source is
-RIGHT and the backend is short a capability.
+table. **Status: NOT FIXED**, and it is NOT the same defect as the `%d` one that
+was beside it — a `%d` of a container printed the blob's heap ADDRESS where
+CPython raises, and that was fixed and its document deleted on 2026-10-05 by
+`model.printf_container_conversion_refusal`. This one is a program whose source
+is RIGHT and the backend is short a capability.
 
 ## What I ran, what I saw, what I expected
 
