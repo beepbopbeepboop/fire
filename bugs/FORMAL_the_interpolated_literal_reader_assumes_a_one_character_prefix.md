@@ -56,8 +56,10 @@ width. So every f-string whose prefix is **two** characters — `rf`, `fr`, `Rb`
 names a missing quote that is not missing.
 
 **The lexer above it already knows better.** `fire_compiler.py` grew
-`_prefix_is_interpolated` on 2026-10-05 (`bugs/FORMAL_sweep_work_map_2026-10-05_b13.md`
-§5) and `replace_multiline_strings` computes a prefix boundary in
+`_prefix_is_interpolated` on 2026-10-05 (`bugs/FORMAL_sweep_work_map_2026-10-05_b14.md`
+§4.2 — the round that measured it; the `-b13` map that said so first was deleted
+when `-b14` replaced it, and this citation is the `doc-refs` ratchet's one
+actionable finding) and `replace_multiline_strings` computes a prefix boundary in
 `_string_prefix_start`. **This reader is one layer down and did not follow**, so the
 two disagree about what a prefix is in the same tree — which is the shape of
 defect `string_operand_is_string`'s docstring calls *"two answers that can drift"*.
