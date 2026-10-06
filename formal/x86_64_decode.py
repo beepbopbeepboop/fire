@@ -176,17 +176,6 @@ def decode_one(code: bytes, off: int) -> Insn:
         if byte(p) & 0xF0 == REX:
             rex = byte(p)
             p += 1
-    # The `0xF2` SIMD prefix, read the same way and for the same reason as
-    # `0x66`: it is not a REX byte (its high nibble is `F`, not `4`), so the
-    # optional REX of `cvtsi2sd`/`cvttsd2si` sits behind it and has to be read
-    # here or the operand bytes are one position off. Two prefixes rather than a
-    # loop, because `formal/x86_64.py` emits at most one of them.
-    op_f2 = byte(0) == 0xF2
-    if op_f2:
-        p += 1
-        if byte(p) & 0xF0 == REX:
-            rex = byte(p)
-            p += 1
     op = byte(p)
     w = bool(rex & W)
 
@@ -247,67 +236,6 @@ def decode_one(code: bytes, off: int) -> Insn:
         return insn(length, "movq_xmm_rm64", mod=mod,
                     xmm=(byte(p + 2) >> 3) & 7, reg=(byte(p + 2) >> 3) & 7,
                     rm=rm)
-    if op66 and op == 0x0F and byte(p + 1) == 0x7E and w:
-        # `66 REX.W 0F 7E /r` — `movq r64, xmm`, the SSE-to-GPR move
-        # (`encode_movq_r64_xmm`). The ModRM halves are the REVERSE of `0F 6E`'s
-        # and it is the instruction that decides it: `0F 7E` is `MOVQ r/m64,
-        # xmm`, so the XMM is `reg` (raw, no REX.R) and the GPR is `rm` (REX.B).
-        mod, _reg, rm, extra, _b, _d, length = modrm_at(2)
-        if mod != 3:
-            raise DecodeError("movq r64, m64 with a memory operand is not emitted")
-        return insn(length, "movq_r64_xmm", mod=mod,
-                    xmm=(byte(p + 2) >> 3) & 7, reg=(byte(p + 2) >> 3) & 7,
-                    rm=rm)
-    if op66 and op == 0x0F and byte(p + 1) in (0x57, 0x2E):
-        # The two other `66 0F` forms this backend emits, and they differ only
-        # in the meaning of the result:
-        #   * `0x57` — `xorpd xmm, xmm` (`encode_xorpd_xmm`), the constant `0.0`;
-        #   * `0x2E` — `ucomisd dst, src` (`encode_ucomisd_xmm`), flags only.
-        # Neither carries a REX byte, so `p` is 1 and the ModRM is at `p + 2`.
-        op2 = byte(p + 1)
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
-        if mod != 3:
-            raise DecodeError("the scalar-double compare/xor form with a memory "
-                              "operand is not emitted")
-        if op2 == 0x57:
-            return insn(length, "xorpd_xmm", mod=mod, xmm=reg & 7, reg=reg & 7,
-                        rm=rm)
-        return insn(length, "ucomisd_xmm", mod=mod, xmm=reg & 7, reg=reg & 7,
-                    rm=rm)
-
-    # ── `F2`-prefixed scalar-double forms ─────────────────────────
-    if op_f2 and op == 0x0F and byte(p + 1) in (0x58, 0x5C, 0x59, 0x5E):
-        # `F2 0F 58/5C/59/5E /r` — `addsd`/`subsd`/`mulsd`/`divsd dst, src`,
-        # both operands XMM, `dst` in ModRM.reg and `src` in ModRM.rm, no REX.
-        name = {0x58: "addsd", 0x5C: "subsd", 0x59: "mulsd",
-                0x5E: "divsd"}[byte(p + 1)]
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
-        if mod != 3:
-            raise DecodeError("a scalar-double arithmetic form with a memory "
-                              "operand is not emitted")
-        return insn(length, "sse_fp:" + name, mod=mod, xmm=reg & 7, reg=reg & 7,
-                    rm=rm)
-    if op_f2 and op == 0x0F and byte(p + 1) == 0x2A and w:
-        # `F2 REX.W 0F 2A /r` — `cvtsi2sd xmm, r/m64`
-        # (`encode_cvtsi2sd_xmm_r64`). The XMM is `reg` with NO REX.R — there is
-        # no XMM8 — and the GPR is `rm` with REX.B.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
-        if mod != 3:
-            raise DecodeError("cvtsi2sd with a memory operand is not emitted")
-        return insn(length, "cvtsi2sd_xmm_r64", mod=mod, xmm=reg & 7,
-                    reg=reg & 7, rm=rm)
-    if op_f2 and op == 0x0F and byte(p + 1) == 0x2C and w:
-        # `F2 REX.W 0F 2C /r` — `cvttsd2si r64, xmm`
-        # (`encode_cvttsd2si_r64_xmm`), the `double` truncated toward zero.
-        # The ModRM halves are the REVERSE of `cvtsi2sd`'s: the GPR is `reg`
-        # with REX.R and the XMM is `rm` with NO REX.B (there is no XMM8).  A
-        # decoder that shared `cvtsi2sd`'s reading would convert the XMM's
-        # number as if it were the GPR's.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
-        if mod != 3:
-            raise DecodeError("cvttsd2si with a memory operand is not emitted")
-        return insn(length, "cvttsd2si_r64_xmm", mod=mod, xmm=rm & 7,
-                    reg=reg, rm=rm & 7)
 
     # ── REX-less forms the backend emits ──────────────────────────
     if op == 0x31 and not w:
@@ -316,24 +244,6 @@ def decode_one(code: bytes, off: int) -> Insn:
         if mod != 3:
             raise DecodeError("REX-less xor with a memory operand is not emitted")
         return insn(length, "alu_rr32:xor", mod=mod, reg=reg, rm=rm)
-    if op in (0x20, 0x08) and not w:
-        # `20 /r` / `08 /r` — the BYTE-WISE `and`/`or` the floating compare
-        # needs, and the reason they exist at all: `UCOMISD` reports an ORDERED
-        # equality as `ZF=1 and PF=0`, no single SETcc reads the conjunction, and
-        # a 64-bit AND would read the seven bytes a `SETcc` left in the register
-        # beside the value.
-        #
-        # **A separate name from `alu_rr:and`, and the WIDTH is the whole
-        # difference**: `alu_rr` is this decoder's REX.W arm and is a 64-bit
-        # write, while this is a one-byte write that leaves the rest of the
-        # register alone.  A form name that cannot carry the width is the
-        # `mov_rm32_r32` / `mov_rm32_r32_mem` split above, one level up.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(1)
-        if mod != 3:
-            raise DecodeError("the byte-wise ALU form with a memory operand "
-                              "is not emitted")
-        return insn(length, "alu_rr8:%s" % ("and" if op == 0x20 else "or"),
-                    mod=mod, reg=reg, rm=rm)
     if 0x70 <= op <= 0x7F:
         return insn(2, "jcc_rel8", cc=op - 0x70, imm=_s8(byte(1)))
     if op == 0xEB:
@@ -343,25 +253,9 @@ def decode_one(code: bytes, off: int) -> Insn:
     if op == 0xE8:
         return insn(5, "call_rel32", imm=_i32(code, off + 1))
     if op == 0xFF:
-        modrm = byte(p + 1)
-        if modrm & 0xC0 == 0xC0 and (modrm >> 3) & 7 == 2:
-            # `FF /2` with mod=11 — `call r64`, the call through a function
-            # VALUE.  It is the same opcode as the `FF 15` RIP-relative call
-            # below and a DIFFERENT instruction: two bytes rather than six, and
-            # the target is a register's contents rather than a displacement's
-            # address.  Both halves matter to a caller, and this decoder's
-            # `call_rm64` row names neither -- the successor a proof generator
-            # writes for one is not the successor for the other.
-            #
-            # No REX.W is needed and none is emitted: `call r/m64` is `FF /2`
-            # with no operand-size prefix (the 16-bit spelling is the operand-
-            # size `0x66` form, which this backend does not emit).  REX.B still
-            # extends `rm` to r8-r15, which `_modrm_fields` applies.
-            mod, _reg, rm, _extra, _b, _d, length = modrm_at(1)
-            return insn(length, "call_r64", mod=mod, digit=2, rm=rm)
-        form = {0x15: "call_rm64", 0x25: "jmp_rm64"}.get(modrm)
+        form = {0x15: "call_rm64", 0x25: "jmp_rm64"}.get(byte(p + 1))
         if form is None:
-            raise DecodeError(f"unsupported 0xFF /{modrm & 7} at {off}")
+            raise DecodeError(f"unsupported 0xFF /{byte(p + 1) & 7} at {off}")
         return insn(p + 6, form, digit=2, rip_rel=_i32(code, off + p + 2))
 
     # ── REX.W forms ────────────────────────────────────────────────
@@ -481,60 +375,12 @@ def decode_one(code: bytes, off: int) -> Insn:
             return insn(length, form, mod=mod, reg=reg, rm=rm,
                         mem_base=base, mem_disp=disp)
         if op2 == 0xAF and w:
-            mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+            mod, reg, rm, extra, base, disp, length = modrm_at(2)
             if mod != 3:
                 raise DecodeError("imul with a memory operand is not emitted")
             return insn(length, "imul_r64_r64", mod=mod, reg=reg, rm=rm)
-        # CMOVcc r64, r/m64, `0F 40..4F`. `reg` is the DESTINATION and `rm` the
-        # source — the opposite of the `_ALU_RR` / `alu_rr` direction above,
-        # because `0F 40 /r` is `CMOVcc r, r/m` and not `opcode r/m, reg`. The
-        # stack floor's budget clamp is the only emitter of these, and it was
-        # written before this case existed, so the walker's first sight of a
-        # guarded function was `undecodable byte 0x0f`.
-        #
-        # Recorded the same way the sibling forms are: `mod`, `reg` and `rm`,
-        # which is all `_shapes` needs to name the step lemma. `w` is required
-        # because the encoder only ever emits the REX.W 64-bit form.
-        if 0x40 <= op2 <= 0x4F and w:
-            mod, reg, rm, extra, base, disp, length = modrm_at(2)
-            if mod != 3:
-                raise DecodeError("cmov with a memory operand is not emitted")
-            return insn(length, "cmov_r64_r64", mod=mod, reg=reg, rm=rm,
-                        cc=op2 - 0x40)
 
     # ── ALU and shifts, REX.W ──────────────────────────────────────
-    if op == 0x6B and w:
-        # `REX.W 6B /r ib` — `imul dst, src, imm8`, the THREE-operand form
-        # with a one-byte immediate.  It is emitted by
-        # `encode_imul_r64_r64_imm`, which is a pointer subscript's element
-        # scale (`p[i]` on a `Pointer[Int32]` is `p + i*4`) and needs the
-        # immediate to be SIGNED because a C subscript moves the address
-        # backwards for a negative index.
-        #
-        # **`6B` and not `69`, and the difference is four more bytes of
-        # image.**  `69` is the imm32 spelling; using it with a one-byte
-        # scale reads the following three instructions as the immediate,
-        # which is not a theoretical mistake — it is what
-        # `encode_imul_r64_r64_imm` emitted first, and `p[0]` then
-        # multiplied the index by `0xD8014C04` (the imm32 `04` plus the next
-        # twelve bytes of the function) and dereferenced the result.
-        #
-        # Its own name and not `imul_r64_r64`'s: the destination is the reg
-        # field in both, but this one reads an immediate out of the stream
-        # and that changes its LENGTH, which is the field every caller of
-        # this decoder uses to find the next instruction.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(1)
-        if mod != 3:
-            raise DecodeError("imul with a memory operand is not emitted")
-        # `+ 1` for the immediate byte itself, which is what separates this
-        # instruction's length from `imul_r64_r64`'s -- the same arithmetic
-        # `alu_ri32:add` does with `p + 3` against `modrm_at(1)`'s `p + 2`.
-        # `byte(p + 2)`: the ModRM is at `p + 1` and the immediate at `p + 2`,
-        # and `p` is 1 when the REX byte is present -- which it always is here,
-        # since `encode_imul_r64_r64_imm` sets REX.W unconditionally.  A literal
-        # `byte(2)` would read the MODRM as the scale.
-        return insn(length + 1, "imul_r64_r64_imm", mod=mod, reg=reg, rm=rm,
-                    imm=_s8(byte(p + 2)))
     if w and (alu := _ALU_RR.get(op)) is not None:
         mod, reg, rm, extra, base, disp, length = modrm_at(1)
         if mod != 3:

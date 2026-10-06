@@ -5,99 +5,16 @@ run). Found 2026-10-03 on `work/formal16-7`, while landing a change to
 `formal/arm64_proof_gen.py` and running `test_formal_short_circuit_cond.py` as
 one of the narrow files that cover it.
 
-**Status: the CAUSE is measured AGAIN on today's tree and §3's answer is now
-REFUTED. NOT FIXED. The cost is the SUM of the walk theorem's 237 proof terms;
-there is no hot spot, the twelve branch-condition facts are 12 of 237, and
-removing every one of them leaves the ceiling error exactly where it was.** The
-2026-10-03 diagnosis below was right about the record and wrong about the
-branch-condition facts, and §0b is the measurement that says so — which moves
-the next step to `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`'s
-HOIST and away from the short-circuit lemma §3 asks for. §0b is the part to read
-first. **§6 is new (2026-10-05) and it is the narrowest statement of the fix that
-has been measured: the per-block fact the fix needs is one block WIDE, and the
-reason it cannot be made that narrow is a specific register class that `hprior_*`
-does not cover.**
+**Status: the CAUSE is now measured and it is none of the three things this
+doc listed; NOT FIXED. The cost is `native_decide`/`bv_decide` in the
+per-block BRANCH-CONDITION facts, and what is missing is a lemma for a
+short-circuit condition's value flow, not a smaller record and not a larger
+ceiling.** §2 is the bisection; §3 is the fix direction; §4 is what was
+already tried and measured against.
 **§5 — the census half of this doc, the half that made the regression above
 invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
 ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
 as coverage again.**
-
-## 0b. Re-measured 2026-10-06 (`work/formal40-2`): §3's branch-condition lemma is
-## the WRONG next step, and there is no hot spot to aim a lemma at
-
-**The failure still reproduces, and it is the walk theorem's header:**
-
-```
-$ python3 tools/memslot.py --gb 8 --label lean -- python3 .tmp/checklean.py \
-      .tmp/scc/either_proof.lean
-rc=1 wall=173.9s cpu=183.7s peak=7.49GB
-either_proof.lean:2684:8: error: (kernel) excessive memory consumption detected
-```
-
-**Five bisections, all on the same generated file with one edit each, all through
-`formal/lean.py::run_lean`.** `checklean.py` is `run_lean` with `LEAN_PATH` =
-this worktree's `lib/` and `wall_s=1500 cpu_s=5400`; the run-certs library is
-already built by any `formal-proof-census` run, and no number below needed a
-rebuild. `either_proof.lean` is 4306 lines today (the doc records 7259 for a
-2026-10-03 build — the generator has moved, which is the first reason to
-re-measure rather than re-read).
-
-| the file | wall | peak | verdict |
-|---|---|---|---|
-| as emitted | 173.9 s | **7.49 GB** | the ceiling error at `:2684` |
-| **the twelve `hcond_*` goals replaced by `sorry`** | 183.2 s | **7.02 GB** | **the SAME error at the SAME line** |
-| cheap tactics tried BEFORE the decision procedures, everywhere (`first \| decide \| omega \| (simp (disch := decide)) \| rfl \| bv_decide`) | 167.1 s | **7.47 GB** | unchanged — nothing was being skipped |
-| the 15 `hprior_*` bodies `sorry` | 201.5 s | 7.34 GB | the same error |
-| the 16 `hx30_*`/`hjump_*` bodies `sorry` | 151.9 s | 6.82 GB | the same error |
-| the 38 `h_adv_*` bodies `sorry` | 214.9 s | 7.28 GB | the same error |
-| **all 237 `have` bodies `sorry`** | 8.5 s | **1.77 GB** | no error (the statement is not yet proved) |
-| …the FIRST 115 of them `sorry` | 8.3 s | **1.77 GB** | no error |
-| …the LAST 114 of them `sorry` | 81.6 s | **3.73 GB** | no error |
-| …every OTHER one `sorry` (115 of 237) | 174.5 s | **7.18 GB** | **the same error** |
-| control: the file up to `theorem either_compiles_correctly_universal` | 5.2 s | 1.65 GB | **rc=0** |
-
-**Three things follow, and the first two refute this document.**
-
-1. **§2's finding 3 and §3's fix direction are refuted on this tree.** §2 row 6
-   measured "`native_decide`/`bv_decide` (44 sites) replaced, body otherwise
-   untouched → 2.82 GB, the ceiling error is GONE". On today's file the twelve
-   branch-condition goals — the ones §3 asks for a value-flow lemma about — are
-   `sorry`-ed away and the ceiling error is **still there at the same line, with
-   94 % of the memory still in use**. The doc's 44 sites are 76 in the theorem
-   today (48 `native_decide`, 28 `bv_decide`, 16 `grind`), and none of the three
-   families is load-bearing on its own: `hprior_*` 15 facts, `hx30_*`/`hjump_*`
-   16, `h_adv_*` 38, `hcond_*` 12, out of **237**.
-2. **The fallback chain is not skipping a cheaper tactic.** Putting `decide`,
-   `omega`, `simp (disch := decide)` and `rfl` in front of every `bv_decide`
-   and `native_decide` in the theorem moves the peak by 0.02 GB. So §3's
-   premise — that the branch-condition leaves need a lemma *because* a decision
-   procedure is reached for — is right about the tactic and wrong about the
-   cause: `bv_decide` is reached for because it is the only one that works, and
-   what it is working on is the whole term.
-3. **There is no hot spot; the peak tracks the SUM.** `sorry`-ing the first
-   half of the walk's proof terms is free (1.77 GB) and `sorry`-ing the second
-   half is nearly free (3.73 GB), but `sorry`-ing every other one — a half by
-   COUNT — is 7.18 GB and still over the ceiling. Peak elaboration memory is not
-   one expensive moment here; it is what 237 moderately large proof terms cost
-   to hold at once. **That is `bugs/FORMAL_a_three_branch_certificate_exceeds_
-   the_lean_bound.md`'s growth finding, measured here on a program whose blowup
-   has a different supposed cause**, and it is why the next step below is that
-   document's HOIST and not a lemma.
-
-**What the branch-condition goal actually looks like, traced rather than
-described** — `trace_state` in place of one `hcond`'s chain, and the residual
-after the preceding `simp only`/`try rw` is `arm64_matches_condition` unfolded
-into a `decide (…)` tree over `(Arm64State.init n 4294967968).x0` with no
-`mem_read` left in it (the spill `rw` did its work). So the value flow is
-*already* resolved and the cost is the SIZE of the unfolded flag chain, which is
-a statement about emission rather than about a missing lemma.
-
-**What this does NOT do:** it does not fix anything, and it does not make
-`either` or `both` check. It relocates the work, and the relocation is measured
-rather than argued: a reader who takes §3 next will spend a day on a lemma for
-12 of 237 facts. **Reproduce with `.tmp/checklean.py` (see "Reproducing"),
-`--gb 8`, and one edit per row; every row above is the same file with one
-change.**
 
 ## What was run, and what it showed
 
@@ -223,16 +140,6 @@ these four do not.
 
 ## 3. The fix direction
 
-> **SUPERSEDED by §0b (2026-10-06).** The premise below is right and the
-> conclusion is refuted: the branch-condition leaves are 12 of the walk theorem's
-> 237 proof terms, `sorry`-ing all twelve leaves the ceiling error unchanged at
-> 94 % of its memory, and the peak tracks the SUM rather than any one family. The
-> lemma is a real gap — the merge block's register does need a value-flow fact
-> §0b's `trace_state` confirms the goal is about SIZE, not flow — and it is worth
-> 5 % of what §3 believes. **The next step is `bugs/FORMAL_a_three_branch_
-> certificate_exceeds_the_lean_bound.md` §5's HOIST**, which §0b measures on this
-> program too. Read §0b before starting anything below.
-
 **A lemma for a short-circuit condition's value flow, not a cheaper decision
 procedure.** The generator already knows the shape — `_sc_by_merge` in
 `_gen_universal_e2e_cfg` records, per merge block, the chain's kind (`and` /
@@ -299,92 +206,6 @@ chains already folded.**
   with it, and `omega` does not unfold a reducible constant either, so the
   fuel obligations fail.
 * `blocks := []` in the record: the error is unchanged, at the same line.
-
-## 6. §3's lemma, built and measured: the per-block fact is one block WIDE, and
-## `hprior_*` cannot be widened to cover what is missing (2026-10-05)
-
-§3 says the missing thing is "a lemma for a short-circuit condition's value
-flow … for each of the two edges into the merge block, *which* operand's truth
-value the merge register holds". **The closest existing machinery is
-`hprior_*`** — a fact per (path, prior block, variable) that
-`(s_{pb}).x<reg> = <variable>`, proved by unfolding that ONE block's chain and
-referencing the previous block's fact. So the experiment was: **give `hcond` the
-same treatment** — for a merge block whose cset is in a PRIOR block, unfold only
-that block's chain plus the `hprior_*` names, instead of the whole path prefix.
-That is `_cs_defs` in `formal/arm64_proof_gen.py`'s `hcond` emitter, and it was
-changed and measured and then **withdrawn**, for the reason below.
-
-| the emitted `either` proof, arm64 | wall | peak RSS | verdict |
-|---|---|---|---|
-| as emitted (`_cs_defs` = the whole `flow_hsid` prefix) | 304 s | **6.10 GB** | `rc=0` through `run_lean`; `(kernel) excessive memory consumption detected` run twice by invoking `lean` directly on the same bytes — **the file is over `-M 6144` and the verdict is a coin flip** |
-| `_cs_defs` = `hsid_{cset_bi}` + that block's `qS`/`qT` + `hprior_*` | 239 s | **3.52 GB** | **`rc=1`: 12 `bv_decide` counterexamples, one per `_cset_bi != bi` goal** |
-
-**The narrowing is worth 2.6 GB and does not close, and the reason is a
-specific register class.** All twelve failures are the same shape and the
-message names the expressions `bv_decide` could not see:
-
-```
-- It abstracted the following unsupported expressions as opaque variables:
-  [arm64_reg 0 {…}, arm64_reg 16 {…},
-   mem_read_u64 (mem_write_u64 (mem_write_u64 mem✝² (sp✝² - 16).toNat n) …),
-   arm64_matches_condition 2 nzcv✝²]
-```
-
-`arm64_reg 16` is the register the **literal `10`** was materialised into
-(`mov x16, #10`, in the block before the one holding the cset), and
-`nzcv✝²` is the flags the cset's own `subs`/`cmp` read. **Neither is a named
-VARIABLE, so `hprior_*` reaches neither** — that table's loop is
-`for _v in _vars if re.search(rf"\b{_v}\b", _src)`, i.e. it is keyed on the
-variable names that appear in the SOURCE CONDITION, and a comparison operand
-that has been lowered to a register, and a flag field, are not among them. With
-the prefix unfolded, both reduce (`arm64_reg 16 s_0` becomes `10` by
-`Arm64State.init`); with only `_cset_bi` unfolded, `s_0` is an opaque local and
-they do not.
-
-### The exact next step, and it is one predicate
-
-**Extend the per-block fact from "a variable's register" to "every register and
-flag the block's OWN chain reads".** The emitter has both halves:
-
-* the chain's read set — `_cset_registers` is already the write-set reader for
-  one instruction, and the operand registers of a `cmp`/`subs` are decodable
-  from the same word;
-* the value — for a register whose last writer on this path is an immediate
-  store, the value is a literal, and `(s_{pb}).x<r> = K` is provable by
-  unfolding that one block. That is the base case the induction needs, and
-  `nzcv` is the same fact for the flag field.
-
-Then `hcond`'s prefix disappears and §2's memory measurement has nothing left to
-carry. **What this does NOT do:** it is a backward slice, so its size is a
-function of how far the operand's chain reaches back — on a program whose
-condition reads a value a CALL produced, the slice is the call, and the flag
-this doc's §2 measured (`native_decide` over a symbolic `n`) is still there.
-That is the same wall `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
-owns, and this section does not claim to clear it.
-
-**Not landed, and the reason is verification rather than the change.** The
-narrowing above was written and measured and withdrawn because it does not close;
-the predicate that would make it close is a dataflow addition to a 12 000-line
-emitter, and each iteration of it costs a 4–5 minute `run_lean` per program
-(`formal/lean.py`'s own bounds) plus the same on the x86-64 side, which has no
-`_sc_by_merge` at all and therefore has no shared code to fix. That is not a
-light worker's change.
-
-```console
-$ export PATH=/opt/homebrew/bin:$PATH
-$ python3 -c "import sys; sys.path.insert(0,'.'); from formal import monomorph" #noop
-$ python3 tools/memslot.py --gb 8 --label t -- python3 .tmp/pg/emit.py \
-      formal/examples/either.mojo .tmp/pg/either.aout arm64   # proof text, no Lean
-$ python3 tools/memslot.py --gb 8 --label pg -- python3 -c "
-import sys,os; sys.path.insert(0,'.')
-from formal import lean as L
-env=dict(os.environ); env['LEAN_PATH']=os.path.join(os.getcwd(),'lib')
-r=L.run_lean(L.find_lean(), ['.tmp/pg/either_proof.lean'], env=env)
-print('rc',r.returncode,'wall',round(r.wall_s,1),'peak',round(r.peak_rss/2**30,2))"
-rc 0 wall 304.0 peak 6.1
-$ grep -n "_cs_defs = " formal/arm64_proof_gen.py          # the line to narrow
-$ grep -n "for _v in _vars" formal/arm64_proof_gen.py       # the table to widen
-```
 
 ## 5. A thing the census got wrong: FIXED 2026-10-04, and it is in this doc
 ## because it is how the regression above stayed invisible
@@ -462,53 +283,3 @@ EOF
 
 `formal/examples/both.mojo`, `short_and.mojo` and `short_or.mojo` are the
 other three, and every number above holds for the one that was measured.
-
-### §0b's bisection, which is the one to redo (2026-10-06)
-
-**Three steps, and the second is the only thing that needs a scratch script.**
-Never launch `lean` directly: `formal/lean.py::run_lean` is the only launcher,
-and it is what applies the wall/CPU/heartbeat bounds.
-
-```sh
-export PATH=/opt/homebrew/bin:$PATH
-mkdir -p .tmp/scc && cat > .tmp/scc/either.mojo <<'EOF'
-def either(n):
-    if n > 10 or n == 0:
-        return 1
-    else:
-        return 0
-EOF
-
-# 1. the file, with the proof CHECK stubbed so no Lean runs while generating
-python3 tools/memslot.py --gb 8 --label gen -- python3 - <<'PY'
-import formal.lean as L
-L.check_proof_cached = lambda *a, **k: (True, "gen only", False, 0)
-import sys, fire
-sys.argv = ['fire', 'build', '--formal', '-o', '.tmp/scc/either.out',
-            '--backend=arm64', '.tmp/scc/either.mojo']
-fire.main()
-PY
-
-# 2. .tmp/checklean.py: run_lean(lean, [src]) with LEAN_PATH=lib, printing
-#    rc / wall / cpu / peak and the FIRST error lines (never the last 1200).
-#    `LeanRun`'s memory field is `peak_rss`, not `peak` — a name that cost this
-#    pass one run.  `lib/*.olean` must already exist; any `formal-proof-census`
-#    run builds them, and building them by hand peaks near 8 GB.
-python3 tools/memslot.py --gb 8 --label lean -- \
-  python3 .tmp/checklean.py .tmp/scc/either_proof.lean      # 7.49 GB, `:2684`
-
-# 3. one edit per §0b row, each its own file.  The families:
-#    hcond_* 12 · hprior_* 15 · hx30_*/hjump_* 16 · h_adv_* 38 — of 237 `have`s.
-#    Replace a family's PROOF BODIES (keeping every STATEMENT, which later
-#    `simp only` lists name) with a single `sorry`.  A `have` whose statement
-#    spans lines ends at the line ending `:= by`; the body is everything more
-#    indented than the `have`.
-```
-
-**Two traps, both of which make a row look like a fix.** Replacing a family with
-`sorry` but dropping a STATEMENT turns the experiment into a parse error, and an
-edit that introduces a syntax error makes the file look CHEAP because
-elaboration aborts at the error — §2 says this and it cost that pass an hour
-before it was noticed. And `maxHeartbeats` accumulates over the whole
-declaration, so lowering it names a tactic that merely ran out of budget on a
-cumulative count, not the one that is expensive.

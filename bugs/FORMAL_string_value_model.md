@@ -586,6 +586,33 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   whose positionals bind parameters this does not enumerate. `*args` / `**kwargs`
   at the call site.
 
+  **The first of those is CLOSED (2026-10-05, `work/formal29-4`), and the
+  mechanism is the one this paragraph named as the wrong one.** The reader is
+  still `parameter_kinds_by_call_site` (it was renamed when it grew the container
+  row, as the bullet above records), but a bare-name argument is now a REFERENCE
+  to that name in the caller, resolved by a MEMOISED FIXPOINT over the image's
+  `(function, name)` pairs — the caller's own call sites, its declared annotation,
+  or the statements that bind it (`_binding_values`), agreed by the same
+  unanimity rule and with the same veto. Two consequences, and both are the
+  reasons this is the same fix rather than a new one:
+
+    * **It is not the per-caller `ValueKinds` this paragraph ruled out**, and the
+      difference is the whole of it: a fixpoint over the image's names has no
+      order, so `printf("%s", s)` decides the same way whichever function the
+      emitter reached first. The recursion the paragraph feared is a cycle, and a
+      cycle is an answer (`active`), as it already is in `func_kind`.
+    * **The disagreement rule did not move.** One parameter handed a `char *` at
+      one call site and a word at another is still a word and still prints `1` for
+      `if s:` where CPython prints `0` — pinned as
+      `test_formal_run.py`'s `refuse_parameter_kind_where_two_call_sites_disagree`,
+      with `printf_percent_s_of_a_parameter_reached_through_a_name` pinning the
+      direction this paragraph said would be decided wrongly.
+
+  The other three rows are unchanged and are still decisions: a specialized call
+  shifts every position by the comptime parameters, a mixed call binds
+  positionals to parameters this does not enumerate, and `*args` has no shape to
+  read.
+
   Verified not to move anything: `test_formal_run.py` PASS=702 FAIL=0, and a
   252-file stdlib sweep on x86-64 reports "unchanged: 252" — 18 pass, 13 codegen,
   219 codegen/dependency, identical family counts. It is a wrong-answer fix with
@@ -677,24 +704,12 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   answers None there, so the overlay claims nothing and the name falls through
   to the function's own map, which is exactly what happened before.
 
-  **One thing found while looking: the `_ci1`/`_cb1` counter bug that was filed
-  here is FIXED, its doc is gone, and nested comprehensions are still refused
-  for a DIFFERENT reason.** This bullet used to cite
-  `FORMAL_nested_comprehension_generator_temps_are_not_collected` (a
-  comprehension inside a comprehension's ITERABLE had no `_ci1`/`_cb1` because
-  the collector and the emitter disagreed by one about the nesting counter).
-  That file is not in `bugs/` any more — this project deletes a doc when its bug
-  is fixed — and the old message does not reproduce. What reproduces, on both
-  machines, is the element-CONTAINER refusal, and it is not a counter off-by-one:
-
-      build: a comprehension in main: the element `[…] for …` opens a container,
-      and this path has one frame blob for it — 48 bytes reserved once, at the
-      element's own site — while the comprehension body runs up to 3 times. …
-
-  i.e. a list-comprehension whose element is itself a container can only be
-  represented as one frame blob shared by every iteration. That is the same
-  frame-lifetime subject as the rest of this document, and it belongs to whoever
-  takes the run-time sequence, not to a generator-temp counter.
+  **One thing found while looking, filed not fixed:**
+  `FORMAL_nested_comprehension_generator_temps_are_not_collected` — a
+  comprehension inside a comprehension's ITERABLE has no `_ci1`/`_cb1`, because
+  the collector and the emitter disagree by one about the nesting counter, and
+  every nested comprehension is refused on both machines today. Re-measured with
+  the patch above reverted, so it is not a regression from it.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String
