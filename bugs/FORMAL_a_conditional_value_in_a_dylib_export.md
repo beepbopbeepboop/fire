@@ -17,7 +17,7 @@ owned it, and a reader could not tell which half was settled:
 | the `CSEL` model row itself | **`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`** (live claim) |
 | the loop-fuel obligation (`OPUS-4`) | **`FORMAL_dylib_export_loops_and_frame_bounds.md`** (live claim) |
 
-The two documents it replaces were `FORMAL_dylib_block_layer_is_not_the_ceiling.md`
+The two documents it replaces were the dylib block-layer doc (deleted in f40f9eaf)
 and `FORMAL_csel_in_the_model_costs_a_ternary_export_its_whole_proof.md`, both
 deleted 2026-10-05. A third, `FORMAL_contract_work_handoff.md`, was a finished
 task's handoff whose §3 landed and whose §4 belongs to the loop-fuel document; it

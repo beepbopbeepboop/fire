@@ -23910,7 +23910,7 @@ def _every_type_tag_is_distinct_source(chunk: int = 26) -> str:
     resolves, so the sweep filed all 1043 rows of this suite under
     `not-answerable/host-import` — a class excluded from the coverage denominator
     — instead of showing a verdict about the file), and
-    `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` §2 prices
+    the thirteen-row host-import doc (deleted in 12774624) §2 prices
     modelling it as NOT WORK: the one name this corpus uses "answers a SEQUENCE",
     and a run-time-length sequence is `FORMAL_listdir_no_run_time_sequence.md`'s
     subject, not something to write a host module for.

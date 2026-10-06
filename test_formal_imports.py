@@ -4661,7 +4661,7 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     `tools/apply_extraction.py` imported `copy` and used it zero times, so it was
     the `alone` row of `tools/formal_host_import_wall.py`'s ranking — the file's
     ONLY unresolved name, and therefore the whole of what stood between it and a
-    build. `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`
+    build. the thirteen-row host-import doc (deleted in 12774624)
     recorded that row as "`copy`'s is `deepcopy` over objects this path has no
     heap for", which is false of this file: there is no `deepcopy` in it, and no
     reference to the module at all. The honest reading is that the import is
@@ -4750,7 +4750,7 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
 def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
     """`version.py`'s `functools.lru_cache` was a row, and the row closed.
 
-    `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` recorded
+    the thirteen-row host-import doc (deleted in 12774624) recorded
     `functools` as the last honest row on the host-import wall — "`functools`
     for `version.py`, one file ... which is a capability question and not a
     missing file" — and the document's OWN two closures say what the answer is

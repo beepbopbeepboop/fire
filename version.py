@@ -33,7 +33,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 #: decorator over a FUNCTION VALUE, which is a capability this path has no
 #: representation for (`formal/hostmods/functools.mojo`'s own refusal: "the
 #: higher-order functions are a callable this path has no representation for"),
-#: and `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` §4 named
+#: and the thirteen-row host-import doc (deleted in 12774624) §4 named
 #: this exact substitution — "a function this repository could spell as a plain
 #: cached call". It is the same shape as the two rows that closed the same way
 #: on 2026-10-05: `itertools` left `test_formal_run.py` and `copy` left

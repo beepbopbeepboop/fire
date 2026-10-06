@@ -373,7 +373,7 @@ moved a file, and the module is now not needed by this tree at all.
 `version.py`'s was the only `functools` reach in the corpus — the `alone 1` row
 of `tools/formal_host_import_wall.py` over 751 files, and §"§2 The three
 0-terminal rows" of
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` had it as "NOT
+the thirteen-row host-import doc (deleted in 12774624) had it as "NOT
 WORK: every name is a decorator or a function value". It was
 `@functools.lru_cache(maxsize=1)` on a **zero-argument** function, and that is
 the whole of what `lru_cache(maxsize=1)` does there: compute once. Two module

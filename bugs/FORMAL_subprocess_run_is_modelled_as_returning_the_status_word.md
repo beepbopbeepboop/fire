@@ -1,7 +1,7 @@
 # FORMAL_subprocess_run_is_modelled_as_returning_the_status_word: `.returncode` is a field access on an integer
 
 **Found 2026-10-05** (`formal37-2`) while closing the `functools` row in
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md` — removing that
+the thirteen-row host-import doc (deleted in 12774624) — removing that
 module from `version.py` moved the file two subjects further before it stopped,
 and this is where it stops. **NOT FIXED, and not fixable by the corpus**: it is a
 divergence between what the host module models and what the Python source means,

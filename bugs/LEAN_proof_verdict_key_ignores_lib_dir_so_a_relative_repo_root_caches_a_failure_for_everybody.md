@@ -154,7 +154,7 @@ five small edits to `formal/lean.py` and a test, and no red to aim at.
 
 ## The duplicate this replaced
 
-`FORMAL_the_proof_verdict_cache_key_cannot_see_the_proof_directory.md` —
+the proof-verdict-cache-key doc (deleted in 84767726) —
 deleted 2026-10-05 — was filed on 2026-10-04 for the same root cause, found the same way (`repo_root='.'` by
 hand, `cached=True` with a `detail` naming a path the caller never used) and
 reached the same conclusion about the cause. It was **deleted and folded in here

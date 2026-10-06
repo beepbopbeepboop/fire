@@ -199,7 +199,7 @@ Twenty-two rows. Against them:
   test. **Left, deliberately** — **and the trade has since been UNDONE, so this
   is no longer a reason to leave the row alone (2026-10-05, `formal37-2`)**:
   `version.py`'s decorator was its whole `functools` dependency (see
-  `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`), it was the
+  the thirteen-row host-import doc (deleted in 12774624)), it was the
   **only** call-shaped decorator in `fire.py`'s import closure — measured 0 after
   the removal, over the 75-file closure — and the `CallExpr` branch had **no
   direct unit test at all**. So the coverage was a real file's incidental shape

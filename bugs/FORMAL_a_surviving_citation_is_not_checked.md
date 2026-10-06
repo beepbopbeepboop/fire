@@ -44,7 +44,7 @@ started from. `tools/dangling_doc_refs.py --ratchet` is green and its count went
 and the ratchet agree agrees.
 
 **A fourth citation exists that this document did not list, and it is already
-honest.** `bugs/FORMAL_floordiv_and_udivmod_are_red.md:4` names the same
+honest.** the floordiv/udivmod-are-red doc (deleted in b4e67e1c):4` names the same
 deleted document, and its sentence is *"Found 2026-10-05 while fixing
 `…`"* — a statement about the history, which is what
 `BARE_REF`'s `deleted_convention` exists to skip. It is also **another worker's
@@ -211,9 +211,9 @@ $ grep -rn FORMAL_arm64_a_narrow_typed_parameter bugs/ --include=*.md
 
 Two hits remain, both honest: this document (which is ABOUT the deleted name and
 says so with the `deleted` convention `BARE_REF` skips on), and
-`bugs/FORMAL_floordiv_and_udivmod_are_red.md`, whose sentence is *"Found
+the floordiv/udivmod-are-red doc (deleted in b4e67e1c), whose sentence is *"Found
 2026-10-05 while fixing `…`"* — a statement about the history rather than a
 claim on it, and another worker's live claim (`formal40-5`) besides.
-`bugs/TEST_the_two_dangling_ref_mechanisms_disagree_and_suite_self_test_is_red.md`
+the two-dangling-ref-floors doc (deleted in 5bfbe2d1)
 names it in its own reproduction, which is the third and is that document's
 subject.

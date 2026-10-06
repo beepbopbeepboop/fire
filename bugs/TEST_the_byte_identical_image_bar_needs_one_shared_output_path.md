@@ -109,7 +109,7 @@ homes, and the choice is a judgement rather than a measurement:
 way to get the C out of `fire.py build --formal` (the `--dump` machinery is
 `mojoc`'s, not this path's), and the image is the artifact the two backends
 actually differ in — §OPUS-2's "`hreg` exhausts `maxHeartbeats`" and
-`bugs/FORMAL_dylib_block_layer_is_not_the_ceiling.md`'s "`csel x0, x0, x1, eq`
+the dylib block-layer doc (deleted in f40f9eaf)'s "`csel x0, x0, x1, eq`
 is the eighth instruction" are both statements about bytes inside it. Nothing in
 this project claims a difference in an image's embedded base name either, so
 writing both sides to one path removes no byte a claim could be resting on.

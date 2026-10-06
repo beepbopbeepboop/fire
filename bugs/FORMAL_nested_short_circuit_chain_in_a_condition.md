@@ -127,7 +127,7 @@ workaround is still to pass an ABSOLUTE `repo_root` (`os.path.abspath(".")`),
 and the poisoned CAS entry under the relative key had to be deleted by hand once
 more here. The doc is still right that the cache cannot see the directory; it is
 still an open defect, and
-`bugs/FORMAL_the_proof_verdict_cache_key_cannot_see_the_proof_directory.md`
+the proof-verdict-cache-key doc (deleted in 84767726)
 still owns it.
 
 **Status 2026-10-04 (`work/formal29-3`): NO FIX ATTEMPTED, and the reason is
