@@ -36228,23 +36228,45 @@ def _node_subtree_fields(node) -> tuple:
     return names
 
 
-def iter_nodes(node):
+def iter_nodes(node, skip=None):
     """Every dataclass node in a statement tree, parents before children.
 
     Shared because the frame layout (`struct_constructor_sites`), the
     frame-holder analysis (`formal/build.py`) and the constant-read census all
     have to walk the SAME tree the same way; three private copies of this loop
     are three chances for one of them to see a node the others do not, and a
-    node one of them missed is a frame nobody reserved."""
+    node one of them missed is a frame nobody reserved.
+
+    **`skip` is `(kind, field)` pairs NOT descended into**, and it defaults to
+    None — i.e. every field is descended, which is what every caller that
+    existed before 2026-10-05 got and still gets.  It exists for the one
+    question this walk cannot answer on its own: whether a binding made inside
+    a NESTED `def` is a binding of the enclosing function's name.
+    `formal/build.py`'s `_SKIP_DESCEND_FIELDS` is the set its own statement
+    rewrite already declines to cross for the same reason — a `with` inside a
+    nested `def` is rewritten when THAT function is prepared, not when the
+    enclosing one is — and passing the set in rather than hard-coding it here
+    keeps one list of "these are separate scopes" in the tree instead of two
+    that can come apart.
+
+    A closure capture is the case this does NOT decide, and it is deliberate: a
+    name the enclosing function reads because a nested `def` bound it is a
+    CAPTURE, and what a capture costs is `_flatten_closures`' question, not this
+    walk's.  A caller that must not see another scope's bindings asks with
+    `skip`; a caller that wants the whole subtree says nothing.
+    """
     if isinstance(node, (list, tuple)):
         for x in node:
-            yield from iter_nodes(x)
+            yield from iter_nodes(x, skip)
         return
     if not hasattr(node, "__dataclass_fields__"):
         return
     yield node
+    kind = type(node).__name__
     for name in _node_field_names(node):
-        yield from iter_nodes(getattr(node, name))
+        if skip is not None and (kind, name) in skip:
+            continue
+        yield from iter_nodes(getattr(node, name), skip)
 
 
 def iter_nodes_with_parent(node, parent=None):
@@ -45050,35 +45072,56 @@ def with_alias_bare_name(item):
     return name
 
 
-def with_expr_struct(expr, structs_by_name: dict, functions: dict = None):
-    """The struct a `with` item's EXPRESSION constructs, or None if undecidable.
+def with_expr_struct(expr, structs_by_name: dict, functions: dict = None,
+                     bound: dict = None):
+    """The struct a `with` item's EXPRESSION holds, or None if undecidable.
 
-    Deliberately narrow: the expression must be a CONSTRUCTION, spelled
-    `S(...)` or `mod.S(...)`, and `S` must be a struct this image knows.  Every
-    other spelling answers None, which the caller turns into the refusal below.
+    Two sources, and both are the SAME evidence read twice rather than two
+    guesses: the expression CONSTRUCTS a struct spelled `S(...)` or `mod.S(...)`,
+    or it is a bare NAME whose only binding in this function is such a
+    construction (`bound`, which is `build.py`'s `_bound_receiver_structs` —
+    the table that already decides `o.get()` lifts to `Outer_get`).  Every other
+    spelling answers None, which the caller turns into the refusal below.
 
-    The narrowness is the point.  A context manager is entered through its
-    type, so the question "what type is this value" has to have an answer that
-    is a fact rather than a guess, and on this path the only fact available is
-    the constructor the source itself wrote.  A name, a field read, a call to
-    some other function: each would need a return-type table this image does not
-    have for values that cross a dylib boundary, and each guess is a program
-    that enters the wrong `__enter__`.
+    **The NAME arm is the natural spelling and it was missing.**  `mgr = Ctx()`
+    on one line and `with mgr as v:` two lines later is how a reader writes it
+    when the manager is built from arguments, and it was refused with "this
+    build cannot answer what type it is" — a sentence that is false about the
+    build, which knows exactly what it holds: the same binding fact
+    `receiver_struct`'s bare-NAME row already reads for a field access.
 
-    `mod.S(...)` resolves through the same table as `S(...)` on purpose: a
-    context manager published by a host module (`tempfile.TemporaryDirectory`) is
-    a struct of THIS image too, because `formal/build.py` compiles the imported
-    module's own declarations into `structs_by_name` before this runs.
+    The narrowness that remains is deliberate and is the part that matters.  A
+    context manager is entered through its type, so the question "what type is
+    this value" has to have an answer that is a fact rather than a guess, and
+    both sources here are facts about the SOURCE: a constructor the source wrote,
+    or a name the source bound from one and never rebound.  What is NOT here is
+    a call to another function, a field read (`with self.mgr as v:`), a
+    subscript, or a parameter: each would need a return-type table this image
+    does not have for values that cross a dylib boundary, and each guess is a
+    program that enters the wrong `__enter__`.
+
+    `bound` defaults to None, which means "no evidence in hand from the
+    caller" and not "no names are context managers" — a caller with nothing gets
+    the construction arm alone, which is the whole of what this function did
+    before 2026-10-05.
     """
     if isinstance(expr, tuple):        # a parenthesised expression
         expr = expr[0] if expr else None
+    if bound and isinstance(expr, F.IdentExpr):
+        st = bound.get(expr.name)
+        if st is not None:
+            return st
     callee = getattr(expr, "func", None)
     if callee is None:
         return None
     # `mod.S(...)` is a `MemberExpr`, whose `member` is a plain string — the
     # same two spellings `_with_item_alias_name` has to ask about, and read
     # here rather than through a helper so this function answers for the AST it
-    # is handed.
+    # is handed.  `mod.S(...)` resolves through the same table as `S(...)` on
+    # purpose: a context manager published by a host module
+    # (`tempfile.TemporaryDirectory`) is a struct of THIS image too, because
+    # `formal/build.py` compiles the imported module's own declarations into
+    # `structs_by_name` before this runs.
     name = getattr(callee, "name", None) or getattr(callee, "member", None)
     if not isinstance(name, str) or not name:
         return None

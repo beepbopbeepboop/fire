@@ -371,6 +371,50 @@ CASES = [
      "            print('i', i)\n"
      "    print('done')\n"
      "    return 0\n", 3),
+    # ── the context manager held in a NAME ────────────────────────────────
+    # `mgr = Ctx()` on one line and `with mgr as v:` two lines later is how a
+    # reader writes it once the manager is built from arguments, and it used to
+    # be REFUSED with "this build cannot answer what type it is" — a sentence
+    # false about the build, which knows exactly what it holds: the binding is
+    # right there in the function.  The evidence is the same one that already
+    # decides `o.get()` lifts to `Outer_get`, so this is the protocol catching
+    # up with the rest of the receiver machinery rather than a new inference.
+    ("a_name_bound_from_a_construction_is_the_protocol",
+     "    m = Ctx()\n"
+     "    with m as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the exit still runs on the way out of it, because the `finally` is
+    # the rewrite's and not the expression spelling's.  A NAME arm that emitted
+    # the two calls as statements after the body would pass the row above and
+    # fail this one.
+    ("return_out_of_a_named_context_runs_the_exit",
+     "    m = Ctx()\n"
+     "    with m as v:\n"
+     "        print('body')\n"
+     "        return 9\n"
+     "    return 0\n", 3),
+    # One statement mixing both spellings, so the NAME arm and the construction
+    # arm are two arms of ONE table rather than two rewrites that can disagree
+    # about the order.
+    ("a_name_and_a_construction_in_one_statement_enter_in_order",
+     "    m = Ctx()\n"
+     "    with m as a, Box() as b:\n"
+     "        print('body')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # The SAME struct bound on two paths is ONE candidate, not two, so the
+    # agreement test this reader depends on does not turn a redundant
+    # initialisation into a refusal.  `m = Ctx()` twice is the shape a reader
+    # writes when a branch may replace a manager with an equivalent one.
+    ("a_name_bound_from_the_same_struct_on_two_paths_still_enters",
+     "    m = Ctx()\n"
+     "    if n > 1:\n"
+     "        m = Ctx()\n"
+     "    with m as v:\n"
+     "        print('body', v)\n"
+     "    return 0\n", 3),
 ]
 
 
@@ -585,11 +629,50 @@ REFUSALS = [
      "    return 0\n",
      "CONTEXT-MANAGER PROTOCOL", "it declares no __enter__"),
     # ── a context this build cannot type ───────────────────────────────────
-    # A NAME, not a construction: the build has no return-type table to say what
-    # the local holds, and guessing would enter the wrong `__enter__`.
-    ("a_with_over_a_bare_name_is_refused_as_untyped",
+    # A name bound from a CALL to another function.  This is the limit the
+    # ANSWERED table's NAME rows stop at, and it is a return-type table this
+    # image does not have for values that cross a dylib boundary: naming the
+    # struct `mk()` returns would be a guess, and a guess here is a program that
+    # enters a `__enter__` the source never wrote.  `def make() -> Ctx:` would
+    # answer it (`model.receiver_struct`'s CALL row reads a declared return type)
+    # and that is the fix the message points at.
+    ("a_with_over_a_name_bound_from_a_call_is_refused_as_untyped",
+     CTX_MOJO + "def make():\n"
+     "    return Ctx()\n"
+     "\n"
+     "def main(n):\n"
+     "    m = make()\n"
+     "    with m as v:\n"
+     "        print('body')\n"
+     "    return 0\n",
+     "this build cannot answer what type it is",
+     "names somewhere this path cannot put the word"),
+    # A name bound to TWO DIFFERENT structs on two paths.  CPython runs one of
+    # them and enters the right `__enter__`; this path refuses, because the word
+    # is one address and there is no tag on it to say which frame it is — the
+    # same limit `struct_frame_slot_candidates` refuses a field read on, and the
+    # reason the ANSWERED table has a row for the same struct bound twice.
+    ("a_name_bound_to_two_structs_is_refused_rather_than_picking_one",
      CTX_MOJO + "def main(n):\n"
      "    m = Ctx()\n"
+     "    if n > 1:\n"
+     "        m = Box()\n"
+     "    with m as v:\n"
+     "        print('body', v)\n"
+     "    return 0\n",
+     "this build cannot answer what type it is",
+     "names somewhere this path cannot put the word"),
+    # A name bound ONLY inside a nested `def`.  The two scopes share the
+    # spelling and not the binding, so the enclosing `with m as v:` has nothing
+    # that says what its word holds — CPython raises `NameError` here, and the
+    # alternative this row rules out is entering whatever unrelated word the
+    # enclosing function's `m` held.  This is the row that says the NAME arm
+    # reads THIS function's own bindings, not the whole subtree.
+    ("a_name_bound_only_in_a_nested_def_is_refused_as_untyped",
+     CTX_MOJO + "def main(n):\n"
+     "    def inner():\n"
+     "        m = Ctx()\n"
+     "        print('inner')\n"
      "    with m as v:\n"
      "        print('body')\n"
      "    return 0\n",
@@ -622,6 +705,55 @@ REFUSALS = [
      "this build cannot answer what type it is",
      "names somewhere this path cannot put the word"),
 ]
+
+
+# ── the receiver table is asked at most once, and only where there is a `with` ─
+#
+# The `with` NAME arm reads `{local: struct}` for the enclosing function, which is
+# a walk of every binding in it.  Eagerly computed, that walk would run for every
+# function in the image to serve the few that contain a `with` — so the rewrite
+# is handed a THUNK and asks it at most once, and only when a `with` turns up
+# (`build.py::_rewrite_with_statements`'s `asked` list).  That is a cost
+# property, and a cost property nobody checks is a cost property the next
+# reader undoes, so it is checked here in-process: no build, no Lean, no memory.
+def check_receiver_table_is_asked_once(tmpdir):
+    """Two functions, one with two `with`s and one with none."""
+    import formal.build as B
+    from fire_compiler import py_tokenize, Parser
+
+    # A real context manager, because the rewrite refuses anything else and this
+    # is about WHEN the table is asked, not about what it answers.
+    head = ("struct C:\n"
+            "    var tag: Int\n"
+            "    var name: String\n"
+            "    fn __enter__(self) -> Int:\n        return self.tag\n"
+            "    fn __exit__(self):\n        pass\n\n")
+
+    def fn(body_src):
+        tree = Parser(list(py_tokenize(head + body_src))).parse_module()
+        by_name = {n.name: n for n in tree if isinstance(n, B.F.StructDef)}
+        fdef = [n for n in tree if isinstance(n, B.F.FunctionDef)][0]
+        return fdef, by_name
+
+    asks = []
+
+    def thunk():
+        asks.append(1)
+        return {}
+
+    two = fn("def two(n):\n"
+             "    with C() as a:\n        print(1)\n"
+             "    with C() as b:\n        print(2)\n")
+    none = fn("def none(n):\n"
+              "    x = 1\n    return x\n")
+    for (f, by_name), want, what in ((two, 1, "two `with`s"),
+                                     (none, 0, "no `with`")):
+        asks.clear()
+        B._rewrite_with_statements(f, by_name, thunk)
+        check(len(asks) == want,
+              f"the receiver table is asked {want} time(s) for a function with "
+              f"{what}",
+              f"it was asked {len(asks)} time(s)")
 
 
 def run_pair(name, source, cpython_source, arg, tmpdir, verbose):
@@ -743,6 +875,8 @@ def main():
                 os.path.join(tmpdir, f"{name}.want.a"),
                 os.path.join(tmpdir, f"{name}.want.b"),
             ), tmpdir, args.verbose)
+
+        check_receiver_table_is_asked_once(tmpdir)
 
         for name, source, needle, forbid in REFUSALS:
             if want and name not in want:
