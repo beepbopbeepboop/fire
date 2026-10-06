@@ -1,0 +1,63 @@
+{
+  "root": "/Users/mrs/net/Python-3.14.6",
+  "total_files": 2133,
+  "total_time": 1570.3,
+  "scanned": "2026-07-16",
+  "updated": "2026-07-25",
+  "counts_legacy": {
+    "PASS": 645,
+    "LEX_FAIL": 0,
+    "PARSE_FAIL": 0,
+    "COMPILE_FAIL": 1169,
+    "TIMEOUT": 113,
+    "ERROR": 0
+  },
+  "note": "All 200 PARSE_FAIL files from the original scan have been fully resolved.",
+  "invalid_source_skipped": 6,
+  "invalid_source_examples": [
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/encoded_modules/module_iso_8859_1.py",
+      "status": "INVALID_SOURCE",
+      "reason": "UNDECODABLE: 'utf-8' codec can't decode byte 0xe9 in position 87: invalid continuation byte"
+    },
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/encoded_modules/module_koi8_r.py",
+      "status": "INVALID_SOURCE",
+      "reason": "UNDECODABLE: 'utf-8' codec can't decode byte 0xf0 in position 59: invalid continuation byte"
+    },
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/tokenizedata/bad_coding.py",
+      "status": "INVALID_SOURCE",
+      "reason": "SyntaxError: unknown encoding: uft-8 (<unknown>, line 0)"
+    },
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/tokenizedata/bad_coding2.py",
+      "status": "INVALID_SOURCE",
+      "reason": "SyntaxError: encoding problem: utf8 with BOM (<unknown>, line 1)"
+    },
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/tokenizedata/badsyntax_3131.py",
+      "status": "INVALID_SOURCE",
+      "reason": "SyntaxError: invalid character '\u20ac' (U+20AC) (<unknown>, line 2)"
+    },
+    {
+      "file": "/Users/mrs/net/Python-3.14.6/Lib/test/tokenizedata/badsyntax_pep3120.py",
+      "status": "INVALID_SOURCE",
+      "reason": "UNDECODABLE: 'utf-8' codec can't decode byte 0xf6 in position 8: invalid start byte"
+    }
+  ],
+  "already_known_failures": 1472,
+  "new_bugs_filed": [
+    "Doc/includes/email-unpack.py",
+    "Doc/includes/email-headers.py",
+    "Doc/includes/email-mime.py",
+    "Doc/includes/email-read-alternative.py",
+    "Doc/includes/minidom-example.py",
+    "Doc/includes/diff.py",
+    "Doc/includes/email-dir.py",
+    "Doc/includes/newtypes/test.py",
+    "Doc/includes/email-simple.py",
+    "Lib/test/libregrtest/win_utils.py"
+  ],
+  "cache_hits": 49
+}

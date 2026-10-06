@@ -1,0 +1,121 @@
+{
+ "buckets": {
+  "compile-fail": 17,
+  "compile-ok": 11
+ },
+ "results": {
+  "bugs/CODEGEN_generator_function_Lib_codecs.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) iterdecode, iterencode (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-"
+  },
+  "bugs/CODEGEN_generator_function_Lib_dis.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) _get_instructions_bytes (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend"
+  },
+  "bugs/CODEGEN_generator_function_Lib_enum.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) _iter_member_, _iter_member_by_def_, _iter_member_by_value_ (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for gen"
+  },
+  "bugs/CODEGEN_generator_function_Lib_ftplib.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_gettext.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_glob.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) _iglob, _iterdir, select_recursive, select_recursive_step, select_wildcard (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine tr"
+  },
+  "bugs/CODEGEN_generator_function_Lib_imaplib.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) burst (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen fo"
+  },
+  "bugs/CODEGEN_generator_function_Lib_ipaddress.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) subnets, summarize_address_range (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop "
+  },
+  "bugs/CODEGEN_generator_function_Lib_mailbox.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: `Message[...] = ...` subscript store on user-defined struct 'Message' (no `__setitem__` method and no backing container field) \u2014 this codegen can't represent it as compiled C without silently dropping the store; falling back to interpreting this module from sourc"
+  },
+  "bugs/CODEGEN_generator_function_Lib_modulefinder.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) scan_opcodes (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume cod"
+  },
+  "bugs/CODEGEN_generator_function_Lib_pickletools.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) _genops (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen "
+  },
+  "bugs/CODEGEN_generator_function_Lib_pkgutil.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) iter_importers, iter_modules, walk_packages (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an "
+  },
+  "bugs/CODEGEN_generator_function_Lib_shelve.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_subprocess.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_symtable.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_tarfile.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_tempfile.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test__code_definitions.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) asyncgen_spam (async generator function(s), declared `async def` AND contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an"
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_libregrtest_save_env.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) resource_info (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume co"
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_ctypes_test_random_things.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_dbm.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) fake_pip (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen"
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_faulthandler.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_frame.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) g, gen (generator function(s), contain a `yield`/`yield from`); t3 (async function(s), declared `async def`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators"
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_string_test_string.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) parse (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen fo"
+  },
+  "bugs/CODEGEN_generator_function_Lib_tokenize.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) _generate_tokens_from_c_tokenizer, tokenize (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an "
+  },
+  "bugs/CODEGEN_generator_function_Lib_turtle.md": {
+   "bucket": "compile-ok",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_weakref.md": {
+   "bucket": "compile-fail",
+   "detail": "RuntimeError: cannot compile module: function(s) __iter__, __iter__, items, items, keys, keys, values, values (generator function(s), contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for ge"
+  }
+ },
+ "tag": "cpp"
+}

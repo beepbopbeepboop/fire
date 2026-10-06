@@ -1,0 +1,123 @@
+{
+ "buckets": {
+  "compile-fail": 3,
+  "refused-generator": 15,
+  "run-ok": 1,
+  "timeout": 9
+ },
+ "results": {
+  "bugs/CODEGEN_generator_function_Lib_codecs.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_dis.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_enum.md": {
+   "bucket": "compile-fail",
+   "detail": "a @classmethod generator that references `cls` in its body in an unsupported way is not supported (only a class-level-attribute read, or a call to a real compiled classmethod/static method of the enclosing class, are supported for `cls.<...>` access in a compiled generator); _iter_member_by_value_: _iter_member_by_value_: a @classmethod generator that references `cls` in its body in an unsupported way is not supported (only a class-level-attribute read, or a call to a real compiled classmethod/static method of the enclosing class, are supported for `cls.<...>` access in a compiled generator).\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_ftplib.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_gettext.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_glob.md": {
+   "bucket": "compile-fail",
+   "detail": "truct constructor, or a declared callable-value local); select_recursive_step: a call to unresolved callee 'select_next(...)' is not supported in a compiled generator/coroutine body (not a builtin this emitter supports, a known module-level/imported function, a same-module struct constructor, or a declared callable-value local); select_wildcard: a call to unresolved callee 'select_next(...)' is not supported in a compiled generator/coroutine body (not a builtin this emitter supports, a known module-level/imported function, a same-module struct constructor, or a declared callable-value local).\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_imaplib.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_ipaddress.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_mailbox.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_modulefinder.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_pickletools.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_pkgutil.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_shelve.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_subprocess.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_symtable.md": {
+   "bucket": "run-ok",
+   "detail": "globals: unavailable in compiled modeglobals: unavailable in compiled modeglobals: unavailable in compiled modeglobals: unavailable in compiled modeglobals: unavailable in compiled modeglobals: unavailable in compiled mode"
+  },
+  "bugs/CODEGEN_generator_function_Lib_tarfile.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_tempfile.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test__code_definitions.md": {
+   "bucket": "compile-fail",
+   "detail": "ction(s) asyncgen_spam (async generator function(s), declared `async def` AND contain a `yield`/`yield from`) \u2014 this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead Unsupported shape(s): asyncgen_spam: asyncgen_spam: *args/**kwargs parameters not supported for compiled async generators.\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_libregrtest_save_env.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_ctypes_test_random_things.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_dbm.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_faulthandler.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_frame.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_test_test_string_test_string.md": {
+   "bucket": "timeout",
+   "detail": ""
+  },
+  "bugs/CODEGEN_generator_function_Lib_tokenize.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_turtle.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  },
+  "bugs/CODEGEN_generator_function_Lib_weakref.md": {
+   "bucket": "refused-generator",
+   "detail": "nction]\n  613 | static int _mojo_vprintf(char *fmt, void *ap) {\n      |            ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:609:16: warning: '_mojo_getline' defined but not used [-Wunused-function]\n  609 | static ssize_t _mojo_getline(void *lp, void *n, void *f) {\n      |                ^~~~~~~~~~~~~\n/Users/mrs/net/chatgpt/claude/mojo-reference/runtime/mojo_runtime.h:606:16: warning: '_mojo_getdelim' defined but not used [-Wunused-function]\n  606 | static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {\n      |                ^~~~~~~~~~~~~~\n\n"
+  }
+ },
+ "tag": "stackswitch"
+}

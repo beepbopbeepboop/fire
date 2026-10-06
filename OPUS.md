@@ -1,0 +1,574 @@
+# OPUS.md — termination (`Total`) for dylib exports
+
+Agent [2]. Write set: `lib/ProofLib.lean`, `formal/arm64_proof_gen.py`.
+Shares with [3] (`lib/Refine.lean`, `lib/work.lean`, `lib/Contracts.lean`) — do
+not edit those.
+
+This is a hand-off document: what is proved, what is still open, and the
+route for the open part.
+
+---
+
+## 1. Status
+
+`{ident}_semantics_total` — `DylibExport.Total dylib_image {ident}`, i.e. "for
+every argument `n`, `runExport` returns `some`" — is now **proved, with no
+`sorry`**, for every export whose control flow is acyclic and has no calls.
+That covers the plain arithmetic exports (`triple`, `negate`, …). An export
+with a loop or a `bl` still gets one named `sorry` over `Total`. That
+statement is true (or at least not known to be false), which is more than
+could be said for what it replaced.
+
+**The emitter's own condition has four clauses, not two**, and the gap matters
+because two of them are silent. `_gen_universal_e2e_cfg` returns `None` — so
+the caller emits the named `sorry` — unless the walk is **not recursive**, is
+**acyclic** (every branch target after the branch), has **no `bl` block**, and
+is given a `fuel` at or above the instruction count. So "acyclic and has no
+calls" is two of four: a self-recursive export that is otherwise acyclic in its
+CFG, and an export offered less fuel than it has instructions, both fall back
+to the `sorry` without either condition being visible from this sentence.
+
+How: the generator's existing CFG walk (`_gen_universal_e2e_cfg`, halt-only
+mode) now proves `{ident}_halts`:
+
+```lean
+theorem {ident}_halts (n : UInt64) :
+    (match arm64_exec_go_exit { Arm64State.init n BASE with pc := ENTRY,
+         x30 := UInt64.ofNat EXIT } dylib_code EXIT (100000) with
+     | some s => True
+     | none => False)
+```
+
+and `DylibExport.total_of_halts` (ProofLib) turns that into `Total`. The walk's
+statement matches `runExport` up to unfolding, including the fuel.
+`_EXPORT_FUEL` in the generator mirrors `exportFuel`, and if the two ever
+differ the result is a type error, not a proof about some other run.
+
+`#print axioms` on the generated `_semantics_total` shows only
+`propext`/`Classical.choice`/`Quot.sound` plus the project's usual
+`native_decide`/`bv_decide` step-lemma axioms. There is no `sorryAx`.
+
+## 2. Why the plan in the previous version of this file could not work
+
+The previous version proposed to finish with a "straight-line table":
+`∀ st, st.pc < exit → st.pc % 4 = 0 → ∃ s', arm64_step st code = some s' ∧
+s'.pc = st.pc`, which needed only one more hypothesis (`hbase`). Its
+predecessor, the two emitted obligations `{ident}_halts` / `{ident}_nodrop`,
+had the same shape. **Both are false for every dylib the backend emits.** I
+measured this on a real two-export dylib (`triple`, `negate`):
+
+```
+0x1000001b0  a9bf7bfd  stp  x29, x30, [sp, #-16]!
+...
+0x1000001e4  a8c17bfd  ldp  x29, x30, [sp], #16
+0x1000001e8  d65f03c0  ret
+```
+
+- **Every export ends in `ret`.** `ret` writes `pc := x30`, so "the step
+  does not move the pc" fails at the last word of every export. Because the
+  hypotheses quantify over *all* states, `x30` is arbitrary, and so the pc
+  after `ret` can be anything, including an address back inside the image.
+  So `hnodrop` fails too.
+- **Pcs below `image.base`** are in range (`st.pc < exit`), `dylib_code`
+  returns `0` there, `0` decodes to nothing, and `arm64_step` is `none`. So
+  `hhalts` is false as well.
+
+So the census had been counting two holes that no proof could ever fill. This
+is the same problem as the old `∀ n s` form of `Total`, one level down. The
+real run terminates because of a fact about the states it actually visits:
+`stp x29, x30` saves the link register, `ldp x29, x30` restores it, and so the
+`ret` goes to the exit. A claim about all states cannot express that. A walk
+of the actual run can, and the CFG walk already follows `x30` through the
+stack (`hx30_*`, discharged with `mem_read_after_write_u64` and friends).
+
+Removed as a result, since nothing can use them: `effNext`,
+`arm64_go_exit_terminates{,_aux,_aligned}`, `arm64_nodrop_of_straight`,
+`dylibExport_total_of{,_straight}`, `arm64_branchy` (never checked against the
+decoder), and `arm64_set_reg_pc` (only needed by that route). All of them are
+in git history (`9c884c7`) if someone needs them back.
+
+The `Total` shape fix from the previous round still stands: `∀ n s, … = some
+s` was false and `∀ n, ∃ s, …` is correct. That history is kept in the
+`DylibExport.Total` docstring.
+
+## 3. What changed, concretely
+
+- `formal/arm64_proof_gen.py`
+  - `_gen_universal_e2e_cfg` takes a new `fuel=` argument. It states the
+    theorem at a constant fuel and for every `n`, with no `hn`/`FrameBound`
+    premise. It returns `None` unless the CFG is acyclic (every branch
+    target is after the branch), has no `bl`, is not recursive, and `fuel` is
+    at least the instruction count. Outside those conditions a constant budget
+    would be false, so the emitter declines rather than emit a theorem that
+    cannot check.
+  - Halt-only mode was missing its closer (`trivial`) on a `ret`-terminated
+    block. It only ever worked for a halt at a call boundary. This is fixed.
+  - `_dylib_total_proof` emits the walk plus the `total_of_halts` application,
+    or the named `sorry` fallback. It takes the export's extent from the next
+    export's entry.
+- `lib/ProofLib.lean`: `DylibExport.total_of_halts`, plus a section note
+  explaining why the proof is per export and not a general theorem. The dead
+  route listed in §2 is deleted.
+- `test_formal_dylib.py`: now requires that `triple`'s `_semantics_total` is
+  derived from `total_of_halts`, so falling back to the `sorry` counts as a
+  failure.
+
+## 4. Still open, in order of value
+
+### 4.1 `Total` for exports with loops
+
+> **This subsection and §4.1-MEASURED below are two halves of one change** —
+> mine (the option, and what it does not buy) and [3]'s (the threshold). Read
+> them together. The measured claim lives in §4.1-MEASURED; the walk breakage
+> the first attempt caused, and why, is in §5.7.
+
+A countdown or range loop needs fuel that grows with `n`, and `exportFuel` used
+to be the constant `100000`, which made the claim **false** — see 4.1a, and the
+measurement that settled it. **This option has now been taken:** `exportFuel` is
+`200000 + (image.codeSize / 4) * n.toNat`, mirroring the executable path's
+`200000 + PATH * n`, and the generator emits the walk at
+`DylibExport.exportFuel dylib_image n` rather than at a mirrored number, so the
+two cannot drift at all.
+
+**What that does and does not buy, because the difference is the whole point.**
+It makes `Total` **true** for a looping export. It does not make it **proved**.
+`total_of_halts` consumes a walk scoped to an acyclic, call-free body — which is
+precisely what a loop is not — so a looping export still has no termination
+proof. The fuel growing is a change to a *definition*, not the discharge of an
+obligation, and `exportFuel`'s own docstring now says so in those words. That
+distinction is worth stating out loud because this project has twice had a
+`sorry` sitting on something nobody had checked, and "true now" is exactly the
+kind of improvement that gets reported as "done".
+
+The original options, for the record:
+
+- make `runExport`'s fuel a function of `n` (as the executable path's
+  `200000 + PATH * n` is). This changes `runExport`, and so [3]'s
+  `export_result_spec`; coordinate first;
+- or state `Total` as `∃ fuel, …` per `n`. This is a weaker claim, but it is
+  honest about what a fixed budget cannot do.
+
+Until one of those happens, the named `sorry` over `Total` for a looping export
+sits on a statement that is false for large `n`. It is recorded here so it is
+not mistaken for a hard-but-true obligation.
+
+#### 4.1 MEASURED: the premise holds, the threshold is 5000-8000, and neither listed option closes the item
+
+[3], 2026-09-28. Checked rather than assumed, per §4.1a's own method note. A real
+generated dylib, `formal/examples/countdown.mojo` (25 instructions, a counted
+loop), `DylibExport.runExport … n` by `native_decide` at the constant
+`exportFuel = 100000`:
+
+| `n` | 0 | 10 | 1000 | 5000 | 8000 | 10000 |
+|---|---|---|---|---|---|---|
+| `runExport` | `some` | `some` | `some` | `some` | **`none`** | **`none`** |
+
+So §4.1 is right, and this is NOT §4.1a's backward-branch case: there the run
+died on step one, here it dies after thousands of steps, which is the fuel story
+§4.1 describes. Roughly 13-20 machine steps per iteration.
+
+**The structural finding, which makes option 1 cheaper than it looks.**
+`Refine.Prog.fuel` is ALREADY `UInt64 → Nat` and `runProg` already calls
+`p.fuel n`; `dylibExportProg` just filled it with `fun _ => 100000`, and
+`DylibExport.runExport` bypassed it with the bare constant. The n-dependence
+exists in the type and is unused. And option 1 does NOT touch
+`export_result_spec`, which quantifies over `runProg` — changing the fuel
+*function* leaves its statement identical. Only `Total`, stated over
+`runExport`, is affected.
+
+**But option 1 alone does not close this item, and that is the part worth
+recording.** Raising the fuel makes `Total` TRUE; it does not make it PROVED.
+`total_of_halts` is fed by a walk whose own comment scopes it to "an acyclic,
+call-free export each instruction runs at most once" — which is exactly what a
+loop is not. So option 1 lands a true statement with no proof, and option 2
+(`∃ fuel`) is honest but weaker. **The item closes on a loop-aware termination
+bound** — a ranking argument, e.g. a countdown strictly decreases its variable
+per iteration so it runs at most `n` times, needing `PATH * n` steps — which is
+the same "needs induction over the back edge" `bugs/OPEN_WORK.md` A4 names for
+the x86-64 side.
+
+**Implemented and measured, but NOT landed, and it is mid-flight.** Taken
+forward in a scratch tree, not committed:
+
+  * `exportFuel` becomes `image → n → Nat := 200000 + (image.codeSize / 4) * n.toNat`,
+    mirroring the executable path's `200000 + PATH * n` and for the same reason:
+    a loop running `k` iterations costs at most `k * PATH` steps, and a counter
+    falling by ≥1 per iteration has `k <= n`, so for a single counted loop this
+    is a BOUND, not merely a larger number. `dylibExportProg` is given the same
+    function so `Total` and a contract describe the same run.
+  * `countdown` then halts at `n = 8000, 10000, 20000` — the failing cases are
+    fixed. **`Total` is no longer false for a looping export.**
+  * `Contracts.runs_to_body` survives an n-dependent fuel at no cost: the body
+    needs its own LENGTH, a literal, and `exportFuel` is monotone, so the bound
+    supplied at `n = 0` is a bound at every `n`. That is a real result about the
+    contract path, and it is why the contract work was not disturbed.
+  * **The regression this introduced is FIXED.** The halt-only CFG walk states
+    its step-budget hypothesis against the fuel, so with the fuel as a function
+    its two `omega`s saw `exportFuel dylib_image n` as an opaque atom and
+    failed — which broke `fire dylib --formal` for ACYLIC exports. The fix is
+    to emit the fuel in its **arithmetic** form, `200000 + PATH * n`, which is
+    what the executable path already does and for the same reason. Drift is
+    still caught and caught LOUDLY: `total_of_halts` takes the walk's hypothesis
+    at `runExport`'s own type, so a `PATH` disagreeing with the library's
+    `image.codeSize / 4` makes the generated proof a statement about a different
+    run and Lean rejects it. The check moved from "the same number in two
+    places" — which rots silently — to "the typechecker agrees", which cannot.
+    `tw_extra` does *not* work for this; feeding the walk's simp set leaves both
+    goals unsolved.
+
+  * **Re-verified after the fix:** acyclic `triple`'s `Total` proof compiles
+    with 0 errors and 0 holes, and `countdown` halts at `n = 8000, 10000, 20000`.
+    Both the false-statement fix and the proof of the acyclic case stand
+    together. The remaining `fire dylib --formal` failure is the contract
+    emitter's `hreg`, which is a separate item and unrelated to the fuel.
+
+> **See also [2]'s §5.7**, which measures the same walk breakage from the
+> other side. Its problem statement is **resolved by `e0af987`**, which landed
+> the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
+> them when convenient. §4.1's remaining fuel obligation is `OPUS-4` below and in
+> `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`; §3's `hreg` landed with
+> `lib/Contracts.lean`, which compiles clean with 0 holes.
+
+#### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
+
+The paragraph above was an assertion, and it is worth checking rather than
+believing, because if it were wrong then 4.1 would not be a definitional
+question at all. It is right, and `lib/ProofLib.lean` now proves it:
+`DylibExport.total_refuted_backward_branch : ¬ Total …` for a concrete,
+**well-formed** image — `DylibExport.backward_branch_in_image` proves
+`InImage` for the same export, by `native_decide`. So `InImage` and `Total`
+are independent clauses, checkably (§4.4 below is thereby answered too).
+
+The image is one instruction: `0x143fffff`, which is `B . -4` (the 26-bit
+immediate `0x03ffffff` has its sign bit set, so the model sign-extends it to
+`-1` and the target is `pc - 4`). That lands below `image.base`, where
+`backward_branch_code` answers `0`, and `0` decodes to nothing.
+
+Two things about this that are worth more than the refutation itself:
+
+- **The failure is not fuel exhaustion.** The run leaves the image on the
+  *first* step and returns `none` immediately. So the framing "a loop needs
+  fuel proportional to `n`" is only half the story, and a fix that only made
+  the fuel grow would leave this image still failing. Worth knowing before
+  spending effort on option 1.
+- **A named `sorry` over a false statement looks exactly like a named `sorry`
+  over a true one.** The census counts holes; `vacuous_declarations` counts
+  vacuous bodies; nothing in the tree asks whether a statement is inhabited.
+  This is the second time in two rounds that a `sorry` has turned out to sit on
+  an impossibility (`Total`'s `∀ n s` was the first). The cheapest instrument
+  that catches the whole family is still the toy check: state the predicate at
+  a concrete instance and see whether it survives. That is all this took.
+
+Precisely what is proved, and no more: `runExport … 0 = none` and
+`¬ Total …`, both by `native_decide`. A refutation needs one argument, and the
+ground form is what lets `native_decide` work at all — it cannot decide with
+`n` free, and `generalize`-ing the initial state only moves the free variable
+rather than removing it. The claim "and likewise for every `n`" is *reasoning*
+from the structural argument above, and is deliberately not stated as a
+theorem.
+
+
+### 4.2 `Total` for exports that call
+
+A `bl` to a sibling export or helper *inside* the image can in principle be
+walked (the executable path handles `bl` with `FrameBound`). That needs the
+`hn` stack-bound premise, which `Total`'s `∀ n` does not have, so the same
+definitional question as 4.1 comes first. **Measured and analysed in §5.0 and
+§5.1** — including why a constant budget does *not* discharge `hn` for free,
+which is the part that is easy to assume and is not true. A `bl` *out of* the image (libSystem)
+is not executable in the model at all, so `Total` there has to be stated
+relative to a callee contract.
+
+### 4.3 x86
+
+The same per-run walk argument applies. The all-states route should not be
+revived there either: x86 `ret` pops the return address from memory, so the
+same "arbitrary state" failure applies.
+
+### 4.4 A sharper `Semantics_refutable` — DONE, as a by-product
+
+It still refutes with a zero-length image. A code image whose entry lies
+outside the code would show that `InImage` and `Total` are independent
+clauses. It is small.
+
+**Landed as a by-product of 4.1a.** `DylibExport.backward_branch_in_image`
+proves `InImage` for the very image that `total_refuted_backward_branch`
+refutes `Total` for, and both are `native_decide`. So the independence is now
+a checked pair of theorems rather than a note about what would be nice to show,
+and it is stronger than the version proposed here: the old suggestion used a
+*malformed* image (entry outside the code), which would have shown the two
+clauses can fail independently but only via the entry being nonsense. This one
+has a perfectly good entry and fails on control flow.
+
+
+## 5. Follow-on work, measured against the scheme in §3
+
+Everything here is framed as *widening the scheme in this document* — the CFG
+walk at constant fuel, discharged through `total_of_halts`. Nothing revives the
+all-states route; §2 is the reason it is gone and that reason has not changed.
+
+### 5.0 Measured: where the scheme's boundary actually falls
+
+A three-export dylib, built through the ordinary path
+(`fire.py dylib --formal`), one export per CFG shape:
+
+| export | shape | `_semantics_total` |
+|---|---|---|
+| `straight` | acyclic, no `bl` | **proved** — `total_of_halts … _halts` |
+| `uses_straight` | calls a sibling export (`bl`) | `sorry` |
+| `looper` | back edge | `sorry` |
+
+So the scheme is not partial in a diffuse way: on a plain arithmetic export it
+is total, and the two exclusions in `_gen_universal_e2e_cfg` are exactly the
+two that bite. `fuel < _TOTAL` never fires in practice — and this is the one
+sentence in this file that was stale for longer than it looks, because it said
+"`exportFuel` is 100000" when `exportFuel` has been
+`200000 + (image.codeSize / 4) * n` since §4.1's arithmetic-form fix landed.
+It is not a constraint worth thinking about at either size. **The binding
+constraints are `bl` and the back edge, one per §4.2 and §4.1.** (The third
+exclusion, `recursive`, is not exercised by this table and is not claimed to be
+subsumed by the other two; see §1.)
+
+This matters for sequencing: §4.1 and §4.2 are not two independent items of
+equal size. §4.1 (loops) is a *definitional* question — no amount of walking
+fixes a constant fuel against a fuel-proportional-to-`n` loop, and §4.1a has
+already shown the failure is not even fuel exhaustion. §4.2 (`bl`) is a
+*proof* question with a concrete obstacle, described next.
+
+### 5.1 `bl` (§4.2): why the constant budget does not discharge `hn` for free
+
+The tempting argument is that a constant fuel bounds the number of calls, hence
+the stack depth, hence `hn` is unnecessary. **That argument is right and it is
+also not enough**, which is worth recording because the gap is structural rather
+than a missing tactic.
+
+`FrameBound` is not a hypothesis the walk *checks* at the end; it is a premise
+**threaded through the recursion**. `hbnd` is an argument of the walk's own
+statement, `frameBound_descend` / `frameBound_descend_le` re-derive it per
+level as the proof descends, and `contract_sound_tree` takes it as a
+parameter. The callee's frame bound is therefore *consumed* on the way down,
+not discharged once at the top. Replacing "assume a frame bound for all `n`"
+with "the budget bounds the depth" therefore means proving, for every level of
+the walk, that the budget implies the bound at that level — which is a theorem
+about the walk, not an edit to its interface.
+
+So the concrete follow-on is: state and prove a *depth-indexed* frame bound
+(`∀ k ≤ depth, FrameBound … at level k`) discharged from the instruction
+count, and re-thread `hbnd` in terms of it. That is real work and I have not
+started it. It is the whole of §4.2.
+
+### 5.2 The last admitted hole in a generated proof is `_spec`, not `_semantics_total`
+
+Measured on the real `proved.dylib` (`def triple(n): return n * 3`): the census
+reports **exactly one** admitted `sorry`, and it is
+`dylib_export_0_triple_spec` — the per-export *spec* obligation.
+`_semantics_total` is derived. So on a plain arithmetic export, termination is
+hole-free and the only thing left is the spec.
+
+[3]'s `IR-3-to-2-dylib-contract-emitter.md` supplies a reference emitter that
+closes it (`Contracts.agrees_of_body`, `ExportBody`, `caller_uses_contract`),
+and §2 of that request contains the finding that matters most for budgeting:
+`bv_decide` discharges the value equation `arm64_reg 0 (bodyStep …) = spec` for
+**symbolic** `n` in one tactic, because every value is a `UInt64` and so the
+prologue/epilogue memory round trip is bitvector computation. Nobody should
+budget address arithmetic for that.
+
+**The blocker that was here is gone.** The emitter emits `import Contracts`;
+`formal/lean.py`'s `LIBRARY_MODULES` was
+`("ProofLib", "X86", "work", "Refine")`, so `lib/Contracts.lean` — tracked in
+git since `c967b5d` — was never built by the project, and nothing importing it
+could be checked. `LIBRARY_MODULES` now includes `Contracts` and
+`lib/Contracts.olean` builds. It was escalated rather than edited here because
+`formal/lean.py` was integrator-owned (FORMAL.md §11.3), in
+`IR-2-to-integrator-lib-registration-and-total-shape.md`; it was one line, it
+was mechanical, and it was blocking two agents.
+
+So §5.3 and §5.5 are unblocked by registration, and what is left in them is the
+emitter's own work. **Note the boundary this exposes**, because it is the same
+one §5.3 keeps running into: registering the module makes the proof *checkable*;
+it does not make the emitter *correct*. `lib/Contracts.lean` importing cleanly
+and `dylib_export_0_triple_spec` being discharged are independent facts, and
+only the second one is worth anything.
+
+One detail from that request that changes an emitted obligation, recorded here
+so it is not lost: `ExportBody.atExit` is stated **for the start state**, not
+for every state at the entry, because the general form is false — a body ends by
+returning, and a return jumps to whatever `x30` holds, so a state at the entry
+with `x30 := 0` returns to `0`. An emitter that emitted the general form would
+emit a false obligation, which is the same trap as §2 and as §4.1a.
+
+### 5.3 The spec from the source — ATTEMPTED, and it goes further than the plan
+
+`fun n => n * 3` used to be typed into the generator. There is now uncommitted
+work in `formal/arm64_proof_gen.py` that derives it from the export's **source
+AST** instead (`_dylib_spec_lean`, wired in from `formal/build.py` via
+`specs = {fn.name: spec}`), and an export whose body is not a single `return`
+of pure arithmetic over its parameter simply gets **no** spec and keeps its
+named `sorry`. That is the right shape, and it is better than the plan in §5.3
+was: a spec derived from the machine would be vacuous, and a spec derived from
+the source means a wrong spec is a **build failure** rather than a believed
+claim. So this item is no longer outstanding work — it is work in progress.
+
+Measured: the emitter produces a generated proof file with **0 `sorry`**, which
+is the first sorry-free dylib proof in the tree. It does not yet typecheck.
+See §5.5.
+
+### 5.4 x86 (§4.3)
+
+Unchanged and still unmeasured. [3]'s §5 notes they did not touch
+`formal/x86_proof_gen.py`, and the `fuel=` argument was added to the arm64
+walker only. The measurement in §5.0 has not been repeated for x86, so "the
+same argument applies" is a hypothesis, not a finding.
+
+### 5.5 The emitter's `hreg` did not typecheck — the unfold was right, but see 5.7
+
+The emitted proof failed at `hreg`:
+
+    error: The prover found a potentially spurious counterexample:
+    - It abstracted the following unsupported expressions as opaque
+      variables: [arm64_reg 0 (S14 (start n))]
+
+`bv_decide` was being handed `arm64_reg 0 (S14 (start n))` **opaque**, so it
+could not do bitvector computation and reported a counterexample. A second
+`omega` failure followed, in `noEarly`, with the same cause: each `S` step
+contains an `if` that reached `omega` unevaluated, so the counterexample
+carried a free metavariable.
+
+**The fix is one unfold set, applied at three sites** — `hreg`, `hx30`, and
+`noEarly`'s `omega` — built once and reused:
+
+    S15 … S1, st0 … st14, start, body, arm64_reg, arm64_set_reg, _VALUE_SIMP
+
+**This is not a new idea, and that is the point.** `arm64_proof_gen.py`
+already documents the trap and already answers it, at `_tw_defs`: *"unfolded
+before bv_decide in the branch-condition proofs, so the sign-extension of the
+free param is concrete rather than opaque (otherwise bv_decide reports spurious
+counterexamples)"*. Every other value site in the file uses the same
+`arm64_reg, arm64_set_reg, _VSP` idiom. The contract emitter was the single
+place that emitted a raw `intro n; bv_decide` and so missed it. So the fix is
+"apply the file's own lesson", not a new tactic.
+
+**MEASURED SINCE — and the verdict is "right idea, not the whole story."**
+The unfold does clear `bv_decide`'s opaque abstraction, which was the symptom
+described here. But the file still fails, for a *different* reason one level
+down, and it is not a budget problem. See **§5.7**, which supersedes the
+"try `+decide`, then suspect the memory round trip" advice this paragraph used
+to give — that guess was wrong, and the real cause is the `fuel_lean` change.
+
+**AND FINALLY, 2026-10-03: this thread is closed, and the unfold was a
+symptom.** The emitter also composed each step into itself (`st_i` substituted
+`st{i-1}` while `S_{i+1}` feeds it the running state), so every step ran once
+per earlier step again — `triple` multiplied by 3 five times, `n * 243` against
+a machine computing `n * 3` — and it wrapped the whole composed state in the
+runner's own `if pc = pc then .. else ..`, one per step, which is what
+`bv_decide` cannot be configured out of normalising. Fixed in
+`formal/arm64_proof_gen.py`; `formal-dylib` is green and the generated proof
+checks in 9 s. `FORMAL.md` §12 and
+`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 have the numbers and
+what is still open (`OPUS-4`, `OPUS-5`, `OPUS-6`).
+
+### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`
+
+[3]'s `IR-3-to-2-dylib-contract-emitter.md` reports three failures and says of
+`hreg`: *"First thing to try: raise `maxHeartbeats` and measure."* **I measured,
+and that is not where the time or the failure is.** Truncating the generated
+file just past `hx30` — so Lean checks the walk and `hreg` and nothing else —
+gives:
+
+    11.4s, and the error is at line 1806, which is INSIDE the walk.
+
+So `hreg` costs about eleven seconds, and raising the budget to 1e9 does not
+help: the whole file then runs past an hour without finishing. This is an
+arithmetic problem, not a budget one.
+
+**The cause is the `exportFuel` change, and it is a real interaction between
+two correct-looking edits.** `fuel_lean` replaced the emitted fuel *literal*
+`100000` with the library *function* `DylibExport.exportFuel dylib_image n` so
+the two could not drift. Good. But the walk's own step-accounting goals are
+`omega` calls, and `omega` cannot unfold a library function:
+
+    1806:  15 + (exportFuel dylib_image n - 15) = exportFuel dylib_image n
+
+which is true for any fuel `≥ 15` and provable the moment the definition is
+visible. Adding `simp [DylibExport.exportFuel]; omega` **fixes that line** —
+verified, the error moves on.
+
+The next one is the interesting one:
+
+    1809:  arm64_go_exit_hit … (exportFuel dylib_image n - 15) (by omega)
+
+which needs the fuel to be **large**, and no numeric lower bound is in scope —
+because the thing that used to *be* the number, and that the generator's
+`fuel < _TOTAL` guard checked on the python side, is now an opaque term in the
+Lean text. The guard still runs; its *result* is simply never emitted.
+
+**So the fix is two things, and neither is a heartbeat:**
+
+  1. Unfold `DylibExport.exportFuel` in the walk's fuel arithmetic — the same
+     "make it concrete rather than opaque" lesson as §5.5, one level down.
+  2. Emit the base bound the guard computed, as a Lean hypothesis:
+     `have : (200000 : Nat) ≤ DylibExport.exportFuel dylib_image n`. The
+     generator already knows the base; it checks it and then drops it.
+
+**RESOLVED, and the resolution is instructive.** `e0af987` fixed this instance
+by going back to LITERAL arithmetic: the emitted fuel is now
+`200000 + 15 * n.toNat`, and line 1806 reads
+`15 + ((200000 + 15 * n.toNat) - 15) = (200000 + 15 * n.toNat)`, which `omega`
+closes. So the fix for "omega cannot see through a function" was to stop hiding
+the number behind one — which also re-supplies the bound for free, so the
+`have` described above is no longer needed either.
+
+The deeper lesson is the one worth keeping, and it is now a hazard rather than
+a live bug: **replacing a literal with a function removes it from every tactic
+that could see its value.** `omega` and `native_decide` both work on literals. A
+no-drift property bought that way has to be paid for by re-supplying the bounds
+the literal used to carry, or it trades a silent-drift bug for an
+unsatisfiable-arithmetic one. This is live for any future swap of the same
+shape — x86 included.
+
+**Cross-reference, per [3]'s note that §4.1 and §5.7 are two accounts of one
+bug:** the premise here is §4.1/§4.1-MEASURED's, and what this section adds is
+*why* the first attempt at it broke the walk. Read them together; the
+measurement in §4.1-MEASURED (halts through `n = 5000`, `none` at `8000`) is
+[3]'s and is not repeated here.
+
+### 5.6 The golden file — RESOLVED, nothing to escalate
+
+`formal/golden/arm64_dylib_contract_triple.lean` (1963 lines) is gone from
+`HEAD`, the contract emitter is in the tree, and the pair is consistent. So the
+ordering hazard this section was written to flag no longer exists and there is
+nothing for the integrator to act on.
+
+The deletion was authorised by the file's own header, conditionally: *"once
+`formal/arm64_proof_gen.py` emits the contract, this file is redundant"*. [3]
+later retracted the golden as **invalid evidence** (it does not compile), so
+removing it was right on the merits as well as by its own rule.
+
+**I deleted it by accident, and the mechanism is the part worth keeping.** The
+deletion was already staged in the index by another agent, and I ran a bare
+`git commit`, which commits everything *staged* — not just what I had `git add`ed.
+My commit `818288e` therefore swept up 1963 lines I never intended to touch.
+Same family as `rm`-ing the shared `.olean` files: reach for the ordinary
+command, take more than you meant to. The file was recoverable throughout at
+`c967b5d`, and the only window of real risk was after `818288e` and before
+`d9443ed`, when the golden was gone and the emitter was still uncommitted.
+
+### 5.8 A process note, because it cost real work this session
+
+My 304-line generator edit was reverted out of the working tree by a
+concurrent agent between two commands, with no commit and no message. Nothing
+was lost, because it had never been checked in and it was someone else's
+in-progress work anyway — but it is a concrete demonstration of the rule:
+**an uncommitted working tree is not a stable place to hold work in a tree with
+concurrent agents.** Check in before it can be taken from you.
+
+## 6. Notes for [3]
+
+
+- `{ident}_semantics_total` keeps its name and its type
+  (`DylibExport.Total dylib_image {ident}`). Only its body changed. The names
+  `{ident}_halts` (now a proved theorem with a different statement) and
+  `{ident}_nodrop` (gone) were never consumed outside the generated file.
+- Nothing in your write set was touched.
+- If 4.1 is taken up by changing `runExport`'s fuel, that touches
+  `export_result_spec`'s meaning, so I'd rather agree the shape with you first.

@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Compiled-Path Memory Architecture — Allocation, Ownership, Stack Homing</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .2rem; }
+  h3 { margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; font-size: .92em; vertical-align: top; }
+  th { background: #f0f0f0; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .86em; }
+  .note { background: #fffbe6; border-left: 4px solid #f0c000; padding: .6rem 1rem; margin: 1rem 0; }
+  .danger { background: #ffecec; border-left: 4px solid #c00; padding: .6rem 1rem; margin: 1rem 0; }
+  .win { background: #eaffea; border-left: 4px solid #2c2; padding: .6rem 1rem; margin: 1rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .leak { color: #b00; font-weight: bold; }
+  .ok { color: #070; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Compiled-Path Memory Architecture — Allocation, Ownership, Stack Homing</h1>
+<p><strong>Scope:</strong> the GIMPLE/C path (<code>fire.py build</code>, <code>--jit</code>, the self-hosted
+<code>mojoc</code>) — <code>runtime/fire_runtime.c</code> plus what <code>mojo/backend_gimple/*</code>
+emits. <strong>Written:</strong> 2026-09-28, from a leak hunt that started at
+<code>mojo_cstr_or_int_str</code>. Every number in §5 was measured (recipe in §8), not inferred.
+Companion docs: <code>doc/OWNERSHIP_MODEL.md</code> (the language-level ownership design, Phases 0–6)
+and <code>ownership_destruct.py</code> (the analysis that is actually implemented).</p>
+
+<h2>1. Summary</h2>
+<ul>
+<li><strong>The reported leak was real and is fixed.</strong> <code>mojo_cstr_or_int_str(v)</code> returns
+  <code>v</code> itself when it is a boxed string and otherwise a fresh <code>malloc</code>'d decimal
+  (<code>mojo_str_from_int</code>). Every Int-keyed dict get/set/contains/pop, and every
+  string comparison against an int-typed operand, leaked one small string per call. Measured on a
+  4M-iteration <code>Dict[Int, Int]</code> loop: <strong>198 MB &rarr; 9.4 MB</strong>, output unchanged.</li>
+<li><strong>It was one instance of a general gap: heap strings have no owner.</strong> ~105 runtime
+  functions return freshly allocated memory; the codegen emits a <code>free</code> for none of the
+  string ones. Two classes of string are provably temporaries and are now released (§4); everything
+  else is still immortal.</li>
+<li><strong>Containers built from a constructor are now freed, including inside loops.</strong> A container local is freed
+  (and, for an empty literal, homed on the stack) when it is assigned once from a constructor and never escapes. Function-level
+  candidates must also be definitely assigned at function exit; a container declared <em>directly in a loop body</em> is now owned by
+  that body and freed at the end of each iteration and before every <code>break</code>/<code>continue</code>/<code>return</code> that
+  leaves it (§3.B, §7.1). Measured: loop-local dict/list/set went from 540/232/456 B per iteration to <span class="ok">flat</span>. What still
+  leaks is a container or string bound from a <em>call result</em>, a struct, and a string local (§5, §7.2&ndash;7.4).</li>
+<li><strong>Ownership now extends past constructors.</strong> A container bound from a slice, comprehension, <code>+</code> or call is owned when codegen proves the value fresh at the declaration; a user function that
+  provably returns a fresh container hands ownership to its caller; a temporary consumed once (<code>for</code> iterable, <code>extend</code> source, <code>+</code> operand, <code>len</code> argument) is freed by its consumer; a struct
+  instance is owned while nothing retains <code>self</code>. Each rule has a fail-closed default and a regression test that fails when the rule is disabled (§3.B/C, §5).</li>
+<li><strong>Speed:</strong> a short stack-homed list no longer calls <code>malloc</code>, the container registries are a dedicated pointer table, and the runtime is built at <code>-O2</code> (it was <code>-O0</code>). On five
+  micro-benchmarks we are at parity with or ahead of Rust on three, 2.6x behind on Int-keyed dicts and 1.7x behind on string building (§10). One loop each, one machine; not a general claim.</li>
+<li><strong>The rule that makes all of this tractable:</strong> data is homed on the stack when the
+  solver can prove it does not outlive the frame; otherwise it has exactly one named owner, and the owner
+  is the code that emits the free. Anything without an owner is a leak by definition (§3).</li>
+</ul>
+
+<h2>2. Who allocates — the inventory</h2>
+
+<h3>2.1 Runtime (<code>runtime/fire_runtime.c</code>)</h3>
+<p>Scripted scan of all 517 functions: <strong>150 allocate</strong> (<code>malloc</code>/<code>calloc</code>/
+<code>realloc</code>/<code>strdup</code>/<code>mojo_*_new</code>/<code>mojo_str_from_int</code>).
+105 return the allocation to the caller with no free in the same function; 13 free some paths; 32 are
+internal.</p>
+<table>
+<tr><th>Family</th><th>Allocator(s)</th><th>Freed by</th></tr>
+<tr><td>List / Dict / Set structs</td><td><code>mojo_{list,dict,set}_new</code>, plus <code>_init</code> for a caller-provided (stack) struct</td>
+    <td><code>mojo_*_free</code> / <code>mojo_*_destroy</code> — emitted by codegen only for Phase-3 candidates (§3.B); else never</td></tr>
+<tr><td>Container internals (<code>data</code>, slots)</td><td>grow via <code>realloc</code>; dict keys <code>strdup</code>'d on insert; set <code>str</code> elements <code>strdup</code>'d</td>
+    <td>the container's own <code>_destroy</code>. <strong>Dict/set copy their keys</strong> — this is what makes transient keys safe (§4.1)</td></tr>
+<tr><td>List of <code>str</code></td><td><code>mojo_list_append_str</code> stores the pointer <em>without copying</em></td>
+    <td>nobody — elements are borrowed-by-convention, so the strings they point to are immortal</td></tr>
+<tr><td>Dict <code>str</code> values</td><td>stored by pointer (kind 2)</td><td>nobody</td></tr>
+<tr><td>Strings: <code>mojo_str_cat</code>, <code>_from_int</code>, <code>_slice</code>, <code>upper/lower/strip/join/split/…</code>, repr family, <code>mojo_char_to_str</code></td>
+    <td><code>malloc</code>, always fresh</td><td>caller — today only the transient cases in §4</td></tr>
+<tr><td>Iterators</td><td><code>mojo_dict_iter_new</code>, <code>mojo_set_iter_new</code></td><td><span class="ok">freed by emitted <code>*_iter_free</code></span></td></tr>
+<tr><td>Bound methods</td><td><code>mojo_bound_method_new</code> (malloc + entry in <code>_mojo_bound_method_registry</code>)</td>
+    <td><code>mojo_bound_method_free</code> (a method value: the receiver is not ours) / <code>mojo_closure_free</code> (a capturing lambda, whose <code>self</code> is the env it was allocated with), plus the <code>mojo_cleanup_push_closure</code> unwind thunk — emitted for a closure local that provably cannot escape (§3.B). The registry entry is discarded, which is what makes freeing one safe at all: an address left in the table goes back to <code>malloc</code> and <code>mojo_is_bound_method</code> would then report whatever landed there as a bound method. A value that ESCAPES is still nobody's.</td></tr>
+<tr><td>Kind registries</td><td><code>_mojo_{list,dict,set,tuple}_registry</code> (global <code>MojoSet</code>s of every live container address)</td>
+    <td><code>_destroy</code> discards its own address (fixed 2026-09-24). A container that is never freed stays registered forever, so the registries grow with every leaked container</td></tr>
+<tr><td>Per-slot element KINDS side table</td><td><code>_reg_kinds</code>: one open-addressed row per live list that has been given per-slot kinds, plus its per-slot box cache</td>
+    <td><code>mojo_list_destroy</code> forgets the row, with BACKWARD-SHIFT deletion and the same one-multiply hash <code>_PtrReg</code> uses (2026-09-30). Both halves were needed and neither alone is enough: the home function was a bare <code>addr &amp; mask</code> and heap MojoLists are 64 bytes apart (<code>sizeof</code> is 56, malloc's size class rounds up), so every row shared one probe cluster; and clearing the slot on delete left a gap that made every LATER member of that cluster unfindable, which silently stripped the kinds off live lists — a heterogeneous list read with no kinds hands a double's IEEE-754 bit pattern to <code>strlen</code>. The BOXES are not freed (a boxed read is a value the program may still hold) and stay registered in <code>_reg_box</code>, so that table grows with every box ever created.</td></tr>
+<tr><td>Bytes / memoryview / struct / file / process helpers</td><td><code>malloc</code></td><td>mostly nobody (not measured; §7)</td></tr>
+</table>
+
+<h3>2.2 Emitted by the codegen</h3>
+<table>
+<tr><th>Site</th><th>What</th><th>Freed?</th></tr>
+<tr><td><code>module_gen._alloc_&lt;Struct&gt;</code></td><td><code>calloc(1, sizeof(S))</code> for every struct construction</td><td><span class="leak">never</span> (measured 28 B/iter for <code>Pt(i, 2)</code>)</td></tr>
+<tr><td>Closure env + its bound method (<code>emit_calls</code>, <code>module_gen</code>; the <code>sizeof</code> is supplied by a non-GIMPLE <code>_mojo_sizeof_*</code> accessor — see §9)</td><td><code>malloc(sizeof(env))</code> per closing lambda / nested def, plus a <code>malloc(sizeof MojoBoundMethod)</code> and a <code>_reg_bound_method</code> entry</td><td><span class="ok">freed</span> as ONE unit by <code>mojo_closure_free</code> when the closure is bound to a local that provably cannot escape (§3.B, 2026-09-30); a nested <code>def</code> that is created and called without being bound to one is <span class="leak">still never</span> (16 B/iter, §7)</td></tr>
+<tr><td>Boxed mutable captured locals (<code>emit_infra</code>)</td><td><code>malloc(8)</code> per variable, in the function prologue — <em>per call</em></td><td><span class="leak">never</span></td></tr>
+<tr><td><code>print()</code> of a non-string</td><td><code>malloc(256)</code> + <code>sprintf</code></td><td><span class="ok">freed</span> right after <code>mojo_print</code></td></tr>
+<tr><td><code>%</code>-format (<code>_sprintf_one</code>)</td><td><code>malloc(256)</code> + unbounded <code>sprintf</code>, buffer returned as the result string</td>
+    <td><span class="leak">never</span>. Also a latent overflow if a formatted value exceeds 255 bytes</td></tr>
+<tr><td>Generator state (<code>emit_loops</code>)</td><td><code>malloc(gsize)</code> start/end guards; coroutine frames</td><td><span class="ok">&lt;base&gt;_destroy</span> emitted at loop end</td></tr>
+<tr><td>Container local, empty literal, Phase-3 candidate</td><td>stack storage in the owning frame + <code>_init</code></td><td><span class="ok">no heap struct</span>; <code>_destroy</code> at exit (§3.A)</td></tr>
+<tr><td>Container local, any other</td><td><code>mojo_*_new()</code></td><td>freed at exit if Phase-3 candidate, else <span class="leak">never</span></td></tr>
+</table>
+
+<h2>3. Who frees — the ownership classes</h2>
+<p>Every allocation in the compiled path belongs to exactly one class. The class decides both
+<em>who frees</em> and <em>where the free is emitted</em>. A value that fits none is a bug.</p>
+
+<h3>A. Stack-homed (no free needed for the struct, <code>_destroy</code> for its buffers)</h3>
+<p>The default target. A local container that the solver proves is owned solely by one frame gets its
+struct in that frame's storage (<code>emit_infra.maybe_stack_alloc_owned_ctor</code>: a
+<code>decls</code> entry <code>MojoList _owned_storageN_x;</code> + <code>mojo_list_init(&amp;...)</code>).
+It cannot leak the struct and cannot dangle past the frame that owns it, because nothing else was
+allowed to hold it. Only the internal buffers (<code>data</code>, slots, key copies) remain on the heap and
+are released by <code>mojo_*_destroy</code>. Today this is restricted to an <em>empty</em> constructor;
+address-taking is legal only in non-<code>__GIMPLE</code> functions (struct methods and lifted loop bodies
+are <code>__GIMPLE</code>, so the optimisation cannot reach them — see the note in §6).</p>
+
+<h3>B. Owned heap containers (single owner, freed at every exit)</h3>
+<p>A Phase-3 candidate that is not eligible for stack homing. <code>ownership_destruct.py</code> admits a
+name only if it is assigned once from a constructor, never returned/moved/aliased/stored/captured, only
+passed to provably non-retaining callees, and definitely assigned at every function exit. The free is
+emitted at each <code>return</code> and at fall-through. <strong>Exception path:</strong> a
+<code>longjmp</code> skips those frees, so each candidate is also pushed on a cleanup stack
+(<code>mojo_cleanup_push_*</code>) that <code>mojo_raise</code> unwinds to the catching level's
+checkpoint; the inline free cancels its own entry.</p>
+
+<p><strong>Block-scoped owner (loop bodies).</strong> <code>ownership_destruct.analyze_scoped_locals</code> credits a name to the loop
+body that declares it when: it is a candidate by the rules above; its one assignment is a <em>direct child statement</em> of a
+<code>for</code>/<code>while</code> body without <code>else:</code>; and the name is mentioned nowhere outside that declaration and the rest of
+that body (so plain-Python source that reads a loop local after the loop is left alone). Straight-line order inside one block is the
+proof that every path to the end of the body, or to a <code>break</code>/<code>continue</code>/<code>return</code> after the declaration, executed
+it — no definite-assignment analysis is needed. Emission is in <code>emit_infra</code>'s block-scope section: <code>gen_loop_body</code> (the single
+place every loop lowering routes its body through) opens and closes the scope; <code>emit_loop_exit_frees</code> handles
+<code>break</code>/<code>continue</code>; <code>_emit_owned_local_frees</code> adds the live scoped names at each <code>return</code>. An empty-literal
+declaration is homed on the stack and re-<code>_init</code>'d each iteration; the exception path is the same cleanup-thunk stack (push at the
+declaration, cancel at the free).
+<strong>Fail-closed:</strong> a name is freed only if <code>gen_loop_body</code> armed it, so a loop lowering not routed through it (the regex-scan
+helpers, the compile-time-unrolled loop) keeps today's leak and can never double-free; <code>break</code>/<code>continue</code> free only entries
+whose recorded loop depth equals the current <code>len(gen.loop_stack)</code>, so a <code>break</code> in an unhooked inner loop cannot free an
+enclosing loop's locals; and the free function is recorded at the declaration (matching the pushed thunk), not re-derived at the exit.</p>
+
+<p><strong>Locals bound from a call result ("maybe fresh").</strong> A slice, a comprehension, a <code>+</code> or any call may build a new container or may return one somebody else
+owns (<code>x = h.get()</code> returning <code>self.items</code>). The analysis credits such a name as a candidate, and <strong>codegen decides at the declaration</strong>
+(<code>maybe_push_owned_local</code>): the name keeps ownership only if the lowered value is a temp a fresh-returning action created and nothing has claimed. Otherwise the name is dropped from the candidates
+right there and nothing about it is ever freed. Fresh-returning actions are (a) the runtime functions in <code>_FRESH_CONTAINER_RETURNS</code> (each checked against its source: every <code>return</code> yields a container
+created in the same function), (b) container displays, and (c) calls to a module function <code>ownership_destruct.analyze_returns_fresh</code> proves returns a fresh container: a plain function whose every path
+returns a value, and whose returned value is a display or a local (also <code>return l^</code>) assigned once from a display, definitely assigned at every exit, and escaping only through that return.</p>
+<p><strong>Callee information</strong> comes from the callee's own body (<code>_summarize_params</code>), never from a <code>read</code>/<code>mut</code> keyword: this compiler lowers a copy as the same pointer, so a keyword is not a guarantee. Async, generator,
+decorated, overloaded, imported-name and recursive callees are refused, and depth is bounded.</p>
+<p><strong>Struct instances</strong> are owned like containers (freed with <code>free</code>, cleanup kind <code>MOJO_CLEANUP_PTR</code>) when the name is bound to a constructor call of a struct in the vetted table
+(<code>_build_analysis_structs</code>: uniquely defined, no base class, no <code>__new__</code>) and every use is a field access, a method call whose <code>self</code> the method provably does not retain, or a function whose parameter is not kept;
+<code>__init__</code> must not retain <code>self</code>; a bound method taken as a value (<code>g = p.total</code>) captures <code>self</code> and is an escape. A struct-typed name is freed at an exit only if it also passed the declaration gate, never merely because it is a candidate.
+Bindings are pre-scanned so a use lexically before the binding (in a loop) is still judged as a struct use.</p>
+
+<p><strong>A list that owns its own string ELEMENTS.</strong> <code>mojo_list_append_str</code> stores the
+pointer it is given and never copies it, so <code>mojo_list_free</code> on a list built by a runtime function that
+allocated every element releases the container and leaves the strings behind: <code>String("a b c").split(" ")</code> was
+~48 B/iteration. Two runtime functions qualify — <code>mojo_str_split</code> and <code>mojo_str_splitlines</code>, each read to
+append nothing it did not allocate — and for those the owner emits <code>mojo_list_free_owned_strs</code> (elements, then the
+list) with the matching <code>mojo_cleanup_push_list_strs</code> unwind thunk. <code>mojo_str_rsplit</code> is deliberately
+NOT in the set: it hands its result the very same pointers its own scratch list holds. The list owning its elements is
+not the same as the PROGRAM being able to name one — <code>kept.append(parts[0])</code> stores a pointer the element free
+would dangle — so the free is gated on <code>ownership_destruct.list_elements_owned</code>, which asks the strictly
+narrower question "may any ELEMENT of this list be named at all?" and answers only for the binding itself,
+<code>len</code>/<code>repr</code>/<code>str</code>/<code>print</code>/<code>bool</code>/<code>hash</code>/<code>id</code>, a
+statement, a comparison operand, a condition and <code>not</code>. A subscript read, iteration, a comprehension, a copy, a
+slice, <code>+</code> and <code>extend</code> all keep the plain <code>mojo_list_free</code> and today's leak: the same trade §7
+records for nested list literals. A missed free leaks a few bytes; a wrong one frees a string literal.</p>
+
+<p><strong>Closure locals.</strong> A capturing lambda's value and the <code>malloc(sizeof env)</code> its constructor
+allocated with it are ONE allocation unit, freed together by <code>mojo_closure_free</code> (a <em>method</em> value is
+the other thing a bound method can be, and gets <code>mojo_bound_method_free</code>, which frees only the wrapper —
+<code>self</code> belongs to only one of the two). Ownership comes from
+<code>ownership_destruct.lambda_value_owned</code>: after the binding, the only acceptable mention of the name is as the
+CALLEE of a call, and a mention inside a nested <code>def</code>/<code>lambda</code> is rejected outright (a capture into
+an environment that can outlive the scope). It is deliberately NOT routed through <code>_is_free_eligible_function</code>,
+which refuses any function containing a lambda: the rule that guards is about CONTAINERS, and inside a closure the
+receiver rules that make <code>d[k]</code>/<code>d.x</code>/<code>d[a:b]</code>/<code>for x in d</code> safe are not safe, so
+lifting that exclusion is separate work (§7). A lambda declared inside a loop is owned by the loop BODY on
+<code>analyze_scoped_locals</code>'s terms, never by the function — it does not exist on the path to the fallthrough
+before the first iteration.</p>
+
+<p><strong>A callee that provably returns a fresh STRING</strong> hands it to the caller exactly as one returning a
+fresh container always has. <code>analyze_returns_fresh</code> accepts only a container display (or a local bound to
+one); <code>_is_fresh_string_expr</code> adds the three forms read off the lowering rather than inferred from a type — a
+<code>+</code> (<code>mojo_str_cat</code> always copies), an f-string, and a slice (<code>mojo_cstr_slice</code>) — and
+deliberately not <code>str(s)</code>/<code>String(s)</code> (the identity for a string), a bare string method call, or any
+other call, each of which can return its own argument.</p>
+
+<p><strong>String locals.</strong> A local bound to a provably <em>fresh</em> string is owned and freed with <code>free</code> (cleanup kind <code>MOJO_CLEANUP_PTR</code>). Freshness is <em>earned</em>, not assumed:
+<code>_FRESH_STRING_RETURNS</code> holds the 10 runtime functions (<code>mojo_str_cat</code>, <code>mojo_str_from_int</code>, <code>mojo_char_to_str</code>, <code>mojo_cstr_slice</code>/<code>repeat</code>/<code>reverse</code>, <code>mojo_repr_str</code>, <code>mojo_hex</code>/<code>oct</code>/<code>bin</code>) that a mechanical pass over
+all 92 <code>char *</code>-returning functions found to allocate on <em>every</em> return path; <code>upper</code>, <code>lower</code>, <code>strip</code>, <code>replace</code>, <code>join</code>, <code>expandtabs</code>, the padders and <code>repr_float</code> failed it (they return their own argument, or a static <code>""</code>/<code>"nan"</code>) and a
+<code>free</code> of either would crash. Strings needed three rules containers did not:
+(1) <code>str</code> is off the non-retaining builtin list (for a string it is the identity: <code>x = str(s)</code> lowers to <code>x = s</code>);
+(2) a method call on the string is allowed only where its result is consumed on the spot (<code>ownership_destruct.receiver_results_consumed</code>: a bare statement, a <code>len</code>/<code>print</code>/<code>bool</code> argument, a read-only operator operand, a condition), because many string methods return their receiver and <code>t = s.strip()</code> would alias it;
+(3) reads that only look at the value are not escapes for a non-struct name: the left operand of <code>+ * % == != &lt; &gt; &lt;= &gt;=</code>, a right operand after a string literal, <code>not s</code>, an <code>if</code>/<code>while</code>/ternary condition. Never <code>and</code>/<code>or</code> (the result <em>is</em> an operand), never a right operand after an identifier (the left one may be a user type whose <code>__add__</code> keeps it), never a struct.
+Both aliasing rules are mutation-tested: with either removed, the negative test's stored strings read as freed memory under <code>MallocScribble</code> and its comparisons fail.</p>
+
+<h3>C. Transient temporaries (owned by the expression that created them)</h3>
+<p>A heap value that one lowering creates, one runtime call consumes, and nothing else can name.
+The creator frees it immediately after the consumer. This is the class the leak belonged to; §4.</p>
+
+<p><strong>Container temporaries.</strong> A container built by an expression and consumed exactly once is freed by its consumer: the iterable of a <code>for</code>
+(freed when the loop <em>statement</em> ends, so <code>break</code>, <code>else</code> and an early <code>return</code> are all covered; registered at the outer loop depth so a <code>break</code> in the body never frees it), the source of
+<code>extend</code>, the operands of a list <code>+</code>, and the argument of <code>len(...)</code>. Freshness is decided <em>at the consuming site</em> from the operand's node kind
+(a display, call, slice or <code>+</code> — never an identifier) plus membership in a set of values a fresh-producing action created and no consumer has claimed. Only pure copy-consumers free; a pure query
+such as the <code>mojo_list_len</code> behind a truthiness test does not, because the caller may reuse the value. The f-string hole: a use inside an f-string is invisible to the analysis (its
+<code>{expr}</code> is parsed at codegen), so an occurrence count treats any string containing <code>{</code> and the name as a use.</p>
+
+<p><strong>String temporaries.</strong> The same bargain, and it needed
+<code>owned_free_fn_for</code> rather than the container table: <code>len(&lt;fresh string&gt;)</code> reads the length and
+nothing else, so it frees the operand <em>after</em> the read (emitting the call first — freeing before it is a
+use-after-free, which is what the first version of that did). Every producer that puts a <code>char *</code> in the fresh
+set allocates it, so a <code>free</code> cannot hit a string literal: a literal is not the lowered value of a call.</p>
+
+<h3>D. Borrowed (never freed)</h3>
+<p>String literals (<code>_slit_N</code> pool), a boxed string that <code>mojo_cstr_or_int_str</code> returns
+unchanged, dict/set keys read back out, elements of a list of <code>str</code>. Freeing any of these is a
+crash, so the ownership predicate for class C must be able to tell C from D (§4.1).</p>
+
+<h3>E. Ownerless (leaks)</h3>
+<p>Everything else: a string bound to a local or field, a struct instance, a boxed mutable local, a
+<em>nested</em> <code>def</code>'s environment (created and called without ever being bound to a local — 16 B/iter, §7), a
+bound method that escapes, the registries' entries for leaked containers, the element strings of a list whose elements
+can be named, a container returned from a call whose freshness cannot be proven. These are the gaps §7 orders.</p>
+
+<h2>4. Transient temporaries — the protocol that fixed the reported leak</h2>
+
+<h3>4.1 Int dict keys and string comparisons</h3>
+<pre>char *mojo_cstr_or_int_str(int64_t v);                 /* runtime */
+void  mojo_cstr_or_int_release(int64_t orig, char *s); /* frees s iff s != (char *)orig */</pre>
+<ul>
+<li><strong>Ownership is decidable at runtime from the pair <code>(orig, s)</code>:</strong> the function returns
+  <code>orig</code> unchanged for a boxed string (borrowed, class D) and a fresh decimal for an Int
+  (owned, class C). <code>release</code> frees exactly the second case.</li>
+<li><strong>Codegen:</strong> <code>_char_to_cstr(typ, val, transient=True)</code> records
+  <code>key-temp &rarr; orig</code> in <code>gen._cstr_key_src</code>. <code>_emit_call</code> emits the
+  <code>release</code> immediately after the one call that takes the key, and consumes the entry, so a
+  key can be released at most once. The table is reset per function (temp names such as
+  <code>_t12</code> repeat across functions; a stale entry would free something that never owned
+  anything).</li>
+<li><strong>Opt-in contract</strong> (the caller promises both): exactly <em>one</em> runtime call consumes the
+  key, and that call copies or merely reads it. Verified for every opted-in site: dict
+  get/set/augmented-set/contains/pop/setdefault/<code>del</code> (the runtime <code>strdup</code>s the key on insert)
+  and <code>mojo_cstr_cmp</code>. <strong>Not opted in</strong> (keys stay unreleased, i.e. leak): the
+  dict-subclass <code>__missing__</code> path (the key is passed to user code that may keep it), the dict
+  comprehension (it emits its set call as a raw string, not via <code>_emit_call</code>), and
+  <code>list.insert</code> on a <code>str</code> list (the list stores the pointer).</li>
+<li><strong>Superseded for dict operations (§10.4):</strong> a dict get/set/<code>in</code>/<code>pop</code>/<code>setdefault</code> whose key is an untracked <code>int64_t</code> no longer builds this string at all;
+  it passes the raw word to a <code>_kw</code> entry point. The conversion and release described here remain for string comparisons and as the fallback when a placeholder reaches a function with no <code>_kw</code> twin.</li>
+<li><strong>Failure mode:</strong> a transient key whose consuming call raises leaks one small string
+  (the release is on the fall-through path only). Freeing a wrong pointer is not reachable: the entry only
+  exists for a heap conversion this same site made.</li>
+</ul>
+
+<h3>4.2 Concatenation chains</h3>
+<p><code>mojo_str_cat</code> always copies, so in <code>a + b + c</code> and in an f-string's running
+accumulator every intermediate is dead the moment the next cat returns.
+<code>emit_infra._emit_str_cat(lv, rv, free_left, free_right)</code> emits the cat, frees the operands the
+caller proved fresh, and registers its own result in <code>gen._fresh_str_tmps</code> so a parent cat can free
+it in turn. <code>String + Int</code> also frees its own <code>mojo_str_from_int</code>/<code>mojo_char_to_str</code>
+conversion temp. <code>_is_fresh_operand</code> requires <em>both</em> that the value is in the fresh set
+<em>and</em> that the operand's AST node is itself a <code>+</code> — so <code>s = a + b; t = s + c</code>
+(operand node is an identifier that merely aliases a fresh temp) is never freed out from under
+<code>s</code>. Measured on <code>var c = k + "b" + "c" + "d"</code>: the two intermediates no longer
+leak; only the final string bound to <code>c</code> does (class E).</p>
+
+<h2>5. Measured behaviour</h2>
+<p>Each row builds the loop at 100k and 400k iterations and compares peak RSS of the compiled binary
+(<code>resource.getrusage(RUSAGE_CHILDREN).ru_maxrss</code> from a fresh helper interpreter, so it is this binary's own
+peak); B/iter is the slope. Baseline (int math, no allocation) is flat at ~1.6 MB. Rows marked
+<span class="ok">0</span> are flat: not leaking. Latest complete run 2026-09-28, with the four rows changed on
+2026-09-30 re-measured on the same harness.</p>
+<table>
+<tr><th>Case (loop body)</th><th>B/iter</th><th>What is happening</th></tr>
+<tr><td><code>d[i % 10] = i; d[i % 10]</code>, <code>in</code>, <code>.get</code> on <code>Dict[Int,Int]</code></td><td class="ok">0</td><td>the transient Int key is released after the call (§4.1); was ~48 B/iter</td></tr>
+<tr><td>str-key dict; a function taking a <code>Dict</code></td><td class="ok">0</td><td>a borrow is free</td></tr>
+<tr><td><code>var d/l/s</code> declared in the loop (dict, list, set, literals, list of str)</td><td class="ok">0</td><td>block-scoped destruction, stack-homed with an inline buffer (§3.A/B); was 232&ndash;540</td></tr>
+<tr><td><code>var a = base[0:2]</code>; <code>var c = [v + i for v in base]</code></td><td class="ok">0</td><td>a call-result local owned because codegen proves the value fresh at the declaration (§3.B)</td></tr>
+<tr><td><code>for z in [v * 2 for v in base]:</code>; <code>l.extend([i, 1])</code>; <code>a + b</code> operands</td><td class="ok">0</td><td>a fresh temporary freed by its one consumer (§3.C)</td></tr>
+<tr><td><code>var a = mk(i)</code> and <code>len(mk(i))</code>, <code>mk</code> returning a local it built (also <code>return l^</code>)</td><td class="ok">0</td><td>the callee is proven to return a fresh container, so the caller owns it (§3.B); was 232</td></tr>
+<tr><td><code>var p = Pt(i, 2)</code> (struct)</td><td class="ok">0</td><td>an owned struct instance, freed at scope exit (§3.B); was 28</td></tr>
+<tr><td><code>var m = [[1, 2], [i]]</code> (nested literal)</td><td class="leak">212</td><td>the inner lists have no owner (§7)</td></tr>
+<tr><td><code>var f = lambda x: x + i</code>, called in place</td><td class="ok">0</td><td>the bound method and the environment it was allocated with are one unit, freed at the owning loop body's exit (§3.B); was <b>74.33</b> B/iter, measured 2026-09-30 with <code>tools/mem_slope.py</code> on <code>build/memprobes/capture_lambda.mojo</code> (§8)</td></tr>
+<tr><td>a nested <code>def</code> created and called without being bound to a local</td><td class="leak">16</td><td>no local owns it, so there is nothing to hang the free on (§7; <code>bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md</code>). Do not confuse this with the <b>32.17</b> B/iter of the <code>{mut}</code>-capture + nested-<code>def</code> + bound-method shape in §7 — that is a different probe (<code>boxed_capture.mojo</code>) and a larger, still-open leak, not a reduction of this one</td></tr>
+<tr><td><code>var s = String("n=") + String(i)</code>, <code>String(i)</code>, <code>"n=" + String(i) + "!"</code>, a slice</td><td class="ok">0</td><td>a string local owned because the value is a provably fresh <code>mojo_str_cat</code>/<code>mojo_str_from_int</code>/<code>mojo_cstr_slice</code> result (§3.B); was 6&ndash;28</td></tr>
+<tr><td><code>String("abc").upper()</code> bound to a local</td><td class="ok">0</td><td><code>upper</code> now always returns a copy (<code>_str_fresh_copy</code>), so it is on the fresh list (§7)</td></tr>
+<tr><td><code>var s = mk(i)</code> and <code>len(mk(i))</code>, <code>mk</code> returning <code>"n" + String(i)</code>, a local bound to a <code>+</code>, or a slice</td><td class="ok">0</td><td>the callee is proven to return a fresh string, so the caller owns it, and <code>len</code> frees the temporary it consumes (§3.B/C); was 16</td></tr>
+<tr><td><code>var parts = s.split(" ")</code> then <code>len(parts)</code>; <code>splitlines()</code></td><td class="ok">0</td><td>the list owns the strings it allocated, and no element can be named (§3.B); was 48</td></tr>
+<tr><td>the same <code>split()</code> result, with <code>kept.append(parts[0])</code> or <code>for p in parts</code></td><td class="leak">48</td><td>the program can name an element, so the element free would dangle it; deliberately left (§3.B, <code>list_elements_owned</code>)</td></tr>
+</table>
+<div class="note">
+<code>String.format</code> measures flat, but the probe did not confirm that it exercises the f-string lowering; treat that row as
+unmeasured. History: the loop-local container rows were 540/456/232/232/232 before block-scoped destruction landed (a bug doc
+had reported that shape as already fixed; it was not). Regression tests pin each row group:
+they compare peak RSS with the feature on against the same program with it disabled, and each was checked to do so
+(56&ndash;125 MB against a 40 MB limit), with identical output.
+</div>
+
+<h2>6. Design: stack first, one owner otherwise</h2>
+<ol>
+<li><strong>Stack-home by proof, not by default.</strong> The solver's question for every allocation is "does
+  this value escape its frame?" Escape means returned, moved (<code>^</code>), stored in a wider-lifetime
+  location, appended to an outer container, captured by a closure, or passed to a callee that may retain it.
+  No escape &rarr; class A (frame storage). Escape &rarr; class B (one owner, one free site per exit) or
+  class E, which must be an explicit, visible fallback, never an accident.</li>
+<li><strong>Heap only for what the stack cannot hold.</strong> A stack container's <em>struct</em> is free; its
+  growth buffers are the only heap it needs, and they are owned by the struct, so <code>_destroy</code> at the
+  scope exit frees all of it. This is why class A cannot leak.</li>
+<li><strong>Temporaries never reach the heap ownership question.</strong> A transient (class C) is created and
+  consumed inside one lowering. Homing it on the stack would be better still — <code>char buf[24]</code> for a
+  decimal key — but <strong>address-taking is illegal in <code>__GIMPLE</code>-tagged bodies</strong>
+  (<code>emit_infra</code> Phase-6 note: verified with <code>gcc -fgimple</code>; struct methods and lifted loop bodies are
+  <code>__GIMPLE</code>). The heap-plus-release protocol of §4 is the form that works in every function kind.
+  If those bodies ever stop being <code>__GIMPLE</code>, class C becomes a stack buffer and
+  <code>release</code> disappears. The runtime side is already shaped for it: <code>orig</code> vs
+  <code>s</code> is the only ownership test.</li>
+<li><strong>Ownership is expressed at one place per class, and the free is chosen for a VALUE, not a type.</strong>
+  Class A/B: <code>emit_infra</code>'s Phase-3/6 section. Class C: <code>_emit_call</code>'s release hook and
+  <code>_emit_str_cat</code>. <code>owned_free_fn_for(gen, val, ctype)</code> is the one function that answers "which free
+  for THIS value", and the three cases that need it all look alike from the type: a list built by
+  <code>mojo_str_split</code> owns its element strings, a fresh <code>char *</code> is a plain malloc block, and a
+  <code>MojoBoundMethod</code>'s <code>self</code> is the receiver's or the closure's depending on which of the two it is.
+  A new allocation kind picks a class, records the property at the point where the value is still the temp its
+  producing call returned, and adds its free through that one function; it does not get its own ad-hoc
+  <code>free</code>.</li>
+<li><strong>Exceptions.</strong> Class B survives <code>longjmp</code> via the cleanup stack. Class C does not (one small
+  string leaks on the raise path). Extending the cleanup stack to a <code>MOJO_CLEANUP_CSTR</code> kind would close
+  it if it ever matters.</li>
+</ol>
+
+<h2>7. Remaining gaps, and the decisions taken</h2>
+<p><strong>Landed 2026-09-28</strong> (details in §3&ndash;§4 and §10): transient Int keys and concat temporaries; block-scoped destruction; the solver widened (iterated locals,
+per-loop declarations, callee summaries from the callee's own body, stack-homed non-empty literals); temporary containers consumed by <code>for</code>/<code>extend</code>/<code>+</code>/<code>len</code>;
+call-result locals owned when provably fresh; user functions proven to return fresh containers; struct instances; small-buffer lists; a dedicated pointer table for the registries;
+the runtime built at <code>-O2</code>.</p>
+<p><strong>Landed 2026-09-30:</strong> the per-slot element-KINDS side table's home function and deletion (§2.1 — it was
+losing <em>live</em> entries, and a heterogeneous list read with no kinds hands a double's bit pattern to
+<code>strlen</code>); a list that owns its own string elements, with the element-escape rule that gates it; a callee proven to
+return a fresh string, and the <code>len</code> that consumes one; a capturing lambda's bound method freed together with
+the environment it was allocated with, and the bound-method registry entry discarded so that freeing one is safe at all
+(§3.B). The four bug docs those closed are deleted; what is left, most valuable first:</p>
+<ol>
+<li><strong>Containers nested inside a literal</strong> (<code>[[1, 2], [i]]</code>, 212 B/iter). The outer list is owned; its inner lists have no owner. Freeing them with the outer is only sound if
+  no element read from the outer can escape (<code>x = m[0]; return x</code> would then return a freed list), which needs an analysis of element reads that does not exist. Left leaking on purpose.</li>
+<li><strong>Strings whose elements or provenance the program can name</strong> (~48 B/iter, deliberately left). Locals bound to a provably fresh string are owned (§3.B), and since 2026-09-29 so are the results of <code>upper</code>/<code>lower</code>/<code>strip</code>/<code>lstrip</code>/<code>rstrip</code>/<code>replace</code>/<code>join</code>/<code>expandtabs</code>/padding: the runtime functions always return a copy
+  (<code>_str_fresh_copy</code>; the price is a copy where Python returns the same object for an unchanged string), so they are on the fresh list, the receiver-result rule is relaxed for them, and a temporary receiver (<code>s.lower().lstrip()</code>) is freed after the call. Since 2026-09-30 a callee proven to return a fresh <code>String</code> hands it to its caller, and the strings inside a <code>split()</code> list are freed with the list.
+  Still leaking: a <code>split()</code> result whose ELEMENTS the program can name (<code>parts[0]</code> stored somewhere, <code>for p in parts</code>, <code>list(parts)</code>, <code>parts[:]</code>, <code>parts + other</code>, <code>extend</code>) — <code>list_elements_owned</code> answers only for the binding itself, <code>len</code>/<code>repr</code>/<code>print</code> and a comparison. Widening it is the same missing analysis as item 1, below, and for the same reason.</li>
+<li><strong>The two closure halves that are left</strong> (16 B/iter and <code>per call</code>). A nested <code>def</code> that is created and called without ever being bound to a local has nothing to hang a free on, and the box for a <code>{mut}</code>-captured local is what the closure's environment HOLDS, so its lifetime is the closure's, not the function's — freeing it at the function's return needs the reverse of the escape analysis that now exists ("no closure built here escapes it"), and a box reachable from a returned closure is a use-after-free.
+  Measured 2026-09-30 with <code>tools/mem_slope.py</code> (§8): <b>+32.17 B/iter</b> for the <code>{mut}</code>-capture + nested-<code>def</code> + bound-method shape (4.62 MB at 100k, 13.83 MB at 400k) — one <code>malloc(8)</code> box, the env struct and <code>mojo_bound_method_new</code> per call, all class E. That figure was itself a reduction: <code>analyze_returns_fresh</code> used to refuse <em>any</em> function containing a nested <code>def</code>/<code>lambda</code>, and it now decides its veto against the actual capture set (<code>FunctionDef.captures</code>), which recovered <b>106 B/iter</b> on a caller binding a closure-bearing callee's fresh container (138.50 &rarr; 32.17 B/iter on <code>build/memprobes/callee_returns_fresh.mojo</code>).
+  Also open: lifting the exclusion of functions containing a nested <code>def</code>/<code>lambda</code> from container ownership analysis, whose receiver rules are not switched off inside a closure (so <code>lambda k: d[k]</code> would not disqualify <code>d</code>). Written up, with the measurements, in <code>bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md</code>.</li>
+<li><strong>Boxes</strong> (one 16-byte <code>MojoBox</code> per double-slot read of a heterogeneous list, cached per list and freed only as the cache array, never individually, and never unregistered from <code>_reg_box</code>). A boxed value is a value the program may still hold, so this needs the same element-escape analysis as item 2 — not attempted.</li>
+<li><strong>Fixed 256-byte <code>sprintf</code> buffers</strong> in <code>%</code>-format: replace with a sized <code>snprintf</code> and release it as class C.</li>
+<li><strong>Dict comprehension keys, <code>__missing__</code> keys</strong>: route the comprehension's set call through <code>_emit_call</code>; <code>__missing__</code> stays unreleased by contract.</li>
+<li><strong>Speed still behind Rust:</strong> string building (1.7x); the string-keyed dict may have slipped to ~1.1x (§10.4). Int-keyed dicts are now within ~1.1x.</li>
+<li><strong>Not yet done:</strong> stack-homing inside lifted loop bodies (not investigated), and <code>Dict</code>/<code>Set</code> string keys still <code>strdup</code> per key (an integer-keyed or integer-element small dict/set now allocates nothing when stack-homed).</li>
+<li><strong>Int-keyed iteration is name-scoped:</strong> <code>for k in d</code> / <code>.keys()</code> / <code>.items()</code> return integer keys only when <code>d</code> is a local or parameter annotated <code>Dict[Int, V]</code> at every binding (<code>_compute_int_keyed_dicts</code>). A dict reached any other way (field, call result, unannotated) still yields string keys.</li>
+</ol>
+<p><strong>Considered and declined (measured):</strong> skipping the container registry for a stack-homed container the solver proves is never boxed. After the pointer-table rewrite the registry costs
+~0.5 ns of a 5.8 ns list lifecycle (~8%), and skipping it means proving no <code>int64_t</code> ever holds the pointer, which an untyped callee parameter breaks; a misclassified pointer is a
+wrong-behaviour bug, not a leak. Not worth the risk for 8%.</p>
+<p><strong>Bugs found on the way, filed:</strong> (fixed since: an inferred <code>var a = 0</code> was a 32-bit int and wrapped; it is now 64-bit),
+<code>bugs/CODEGEN_set_annotated_empty_braces_lowered_as_dict.md</code> (<code>var s: Set[Int] = {}</code> does not compile), and
+<code>bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md</code> (2026-09-30: an unannotated <code>List</code> bound from a
+call result reads every element with <code>mojo_list_get_str</code>, so a float slot's bit pattern reaches
+<code>strlen</code> — a SIGSEGV, and the mirror of
+<code>bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md</code>, which is a different root cause and is
+untouched by any of this work). <strong>Fixed and deleted 2026-10-01</strong>: a callee that returns a
+heterogeneous list is now marked, so the caller's read lowers as a BOXED one and the runtime answers per
+slot — and the box carries the slot's kind byte, so a <code>char *</code> slot is described as the string it
+is rather than as its own address decimal.</p>
+<p><strong>A test that was passing vacuously.</strong> <code>test_ptr_registry.py</code> compiles its harness with
+<code>python3-config --cflags</code>, which carries <code>-DNDEBUG</code>: every <code>assert</code> in it was compiled out, so
+the whole file reported PASS for any runtime at all (a deliberately broken delete still passed), and the
+<code>-O3</code> in the same flags overrode the <code>-O0</code>/<code>-O2</code> variants, making them the same build.
+Both are now dropped, and a one-line tripwire asserts they stay dropped. With the asserts live, three defects in the harness
+itself surfaced and were fixed: it <code>strcmp</code>'d <code>mojo_cstr_or_int_str</code>'s return for values inside the
+boxed-string window, where the runtime correctly returns the word unchanged; it expected <code>d-&gt;used == 4</code> after two
+pops of a seven-key dict; and its random model had two positions sharing key 0, which read as a phantom key at round 752 of
+400,000. The general lesson: a test whose only verification is an <code>assert</code> needs a test that the <code>assert</code>
+is live.</p>
+
+<h2>8. How to verify a memory change</h2>
+<ol>
+<li><code>tools/mem_slope.py &lt;file.mojo&gt;</code> does all of this and is the instrument to reach for. It builds the program at both sizes — so the count is substituted into the source through a <code>MEM_SLOPE_N</code> placeholder, and a probe lacking one is REFUSED rather than measured vacuously (two runs of an identical binary prove nothing, which is the trap this replaces) — reads peak RSS from a fresh <code>RUSAGE_CHILDREN</code> per run, and reports B/iter. It fails on a build error and on output that differs between the two sizes, because a slope with moving output is a wrong-value bug wearing a leak's clothes. Probes for the classes in §5 are in <code>build/memprobes/</code>. Underneath it is the rule this section states: a flat pair is not leaking, a slope is B/iter, and a single size proves nothing.</li>
+<li><code>python3 fire.py build -o exe file.mojo</code> reads its source to generate C; to look at the C for a case, call
+  <code>gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=...)</code> directly and search the
+  function for <code>mojo_*_new</code>/<code>free</code>. The build's own <code>.ci</code> is deleted after linking.</li>
+<li>Delete the previous binary before each build. A failed build that leaves a stale executable makes a broken loop
+  look like a passing "0 B/iter" row — this happened while writing this document.</li>
+<li>Any change under <code>mojo/backend_gimple/*</code>, <code>gimple_codegen.py</code> or the runtime owes the full
+  <code>make gate</code>; for a behaviour-preserving change, byte-identical generated C is the stronger standard.
+  A memory fix necessarily changes the C, so its evidence is the RSS slope plus unchanged program output.</li>
+<li>Keep a probe for every class in §5; an ownership regression is a slope that reappears.</li>
+</ol>
+
+<h2>9. Change log for this document's code</h2>
+<ul>
+<li><code>runtime/fire_runtime.{c,h}</code>: <code>mojo_cstr_or_int_release</code> and the transient-decimal block pool; <code>_PtrReg</code> replacing the six <code>MojoSet</code> registries; <code>MojoList</code> inline buffer;
+  <code>MOJO_CLEANUP_PTR</code>/<code>mojo_cleanup_push_ptr</code>; masked dict probing and a key-moving resize; a hand-rolled itoa.</li>
+<li><code>build_stdlib_dylib.py</code>: the runtime units default to <code>-O2</code>.</li>
+<li>2026-09-29, small dict/set with no malloc: <code>MojoDict</code>/<code>MojoSet</code> carry an 8-slot inline first table (<code>MOJO_DICT_INLINE</code>/<code>MOJO_SET_INLINE</code>; <code>slots == inl</code> until the first growth; every free of <code>slots</code> checks it);
+  an integer dict key's decimal string is built on demand (<code>_ikey_lazy</code> sentinel, <code>_slot_key</code>, <code>mojo_dict_slot_key</code> for generated repr code); <code>_dict_remove_slot</code> moves slots whole. Struct instances: <code>_init_S</code> (plain C) is factored out of
+  <code>_alloc_S</code>, and an owned, non-escaping struct local is initialised in frame storage (<code>maybe_stack_alloc_owned_ctor</code>/<code>_lower_struct_constructor</code>). Struct methods run the same ownership analysis as functions; an empty <code>List[T]()</code>/<code>Dict[K,V]()</code>/<code>Set[T]()</code> is a container literal.
+  <code>mojo_dict_iter_key_int</code>/<code>mojo_dict_items_int</code> serve Int-keyed loops (<code>_compute_int_keyed_dicts</code>); an unannotated integer local is 64-bit.</li>
+<li>Integer dict slots: <code>_DictSlot.ikey</code> and <code>keykind == 2</code>, <code>_canon_int</code>/<code>_ik_hash</code>/<code>_dict_find_ik</code>/<code>_dict_lookup_ik</code>, normalization in <code>_dict_find_k</code>/<code>_dict_lookup_k</code>/<code>_dict_set_raw_seq_kind_k</code>,
+  <code>_dict_remove_slot</code> (pop by slot address), ten <code>mojo_dict_*_kw</code> entry points; codegen <code>_char_to_cstr(word_ok)</code>, <code>_apply_kw_keys</code>, <code>_KW_DICT_FNS</code>.</li>
+<li><code>ownership_destruct.py</code>: <code>analyze_scoped_locals</code>, <code>analyze_returns_fresh</code>, <code>_summarize_params</code>, the struct rules (<code>_prescan_struct_binds</code>, method/<code>__init__</code> summaries),
+  <code>for</code>/comprehension/slice safe receivers, per-loop declarations, and the fix that routes a NESTED <code>VarDecl</code> to the statement scanner.</li>
+<li><code>infra_infer.py</code>: <code>_build_analysis_funcs</code>, <code>_build_analysis_structs</code>, <code>_build_fresh_returning</code>, the <code>_compute_*</code> entry points.</li>
+<li><code>emit_infra.py</code>: transient keys (<code>_char_to_cstr(transient)</code>, <code>_release_transient_cstr_args</code>), concatenation (<code>_emit_str_cat</code>, <code>_is_fresh_operand</code>), the block-scope section
+  (<code>gen_loop_body</code>, <code>emit_loop_exit_frees</code>, <code>_scope_register</code>), container temporaries (<code>is_fresh_container_operand</code>, <code>claim_loop_iterable_temp</code>,
+  <code>emit_container_new</code>), struct ownership (<code>_struct_ptr_owned</code>), the declaration gate in <code>maybe_push_owned_local</code>.</li>
+<li>Consumers and producers: <code>emit_exprs</code> (display lowerings mark results fresh; list <code>+</code>), <code>emit_methods</code> (<code>extend</code>), <code>emit_calls</code> (<code>len</code>), <code>emit_loops</code>/<code>emit_stmts</code>
+  (every loop body through <code>_gen_loop_body</code>; <code>break</code>/<code>continue</code> frees; the <code>for</code> statement's temporaries), <code>gimple_codegen</code> (<code>lower_expr</code> records a declaration's RHS value; <code>_lower_call</code> marks fresh-returning and struct-constructor results).</li>
+<li><strong>2026-09-30.</strong> Closure-veto precision and one convention table. <code>ownership_destruct.analyze_returns_fresh</code> decides its nested-scope veto against the captured NAME SET via the new <code>_nested_capture_names</code>, using the capture list the parser now records (<code>fire_compiler.FunctionDef.captures</code> / <code>has_capture_list</code>, the flag that distinguishes <code>{}</code> — "captures nothing" — from no list at all, where captures are inferred). Anything less certain (no list, a bare <code>{mut}</code>/<code>{var}</code>, any <code>lambda</code>) still refuses. <code>_is_free_eligible_function</code> is deliberately UNCHANGED: it is the caller-side exclusion and the two traps its docstring lists are not addressed. The argument-convention vocabulary is now ONE table in <code>fire_compiler</code> (<code>_CONV_READ_ONLY</code>/<code>_CONV_EXCLUSIVE</code>/<code>_CONV_TRANSFER</code> with <code>conv_is_*</code> predicates); <code>ownership_check</code>'s Phase 2 and <code>funcs_shared._param_ctype</code> ask it instead of each hardcoding a subset, which is what let the stdlib's new <code>imm</code> convention reach one and miss the other. <code>ownership_destruct</code> reads no conventions at all — <code>_summarize_params</code> deliberately replaced that — and rule 6's docstring said otherwise; corrected.</li>
+<li><strong>2026-09-30.</strong> <code>sizeof(T)</code> and <code>(void *)fn</code> are not valid GIMPLE operands ("expected expression before 'sizeof'", "invalid operand in unary operation"), so the closure-env and <code>_alloc_&lt;Struct&gt;</code>/<code>_alloc_&lt;env&gt;</code> allocations now take their size from a tiny non-GIMPLE accessor — <code>GimpleGen._c_sizeof_helper</code> / <code>_c_fnaddr_helper</code>, defined inline at the point of use and deduped across the concatenated modules.</li>
+<li><strong>2026-09-30.</strong> <code>tools/mem_slope.py</code>: the two-size slope instrument §8 specifies, with the stale-binary and output-drift guards it warns about.</li>
+  <li>Tests: <code>test_ownership_destruct.py</code> (analysis fixtures), <code>test_ptr_registry.py</code> (pointer table, inline lists, itoa/pool/dict resize; gcc <code>-O0</code>/<code>-O2</code> and clang AddressSanitizer), and a bounded-memory or values test per rule in <code>test_gimple_runner.py</code>.</li>
+</ul>
+
+<h2>10. Speed: containers vs Rust</h2>
+<p><strong>What was measured.</strong> One loop, 50,000,000 iterations: <em>create a list, push 3 values, read <code>len</code> and one
+element, drop it</em>, timed end to end as user CPU time with the process's own startup subtracted (an empty program costs ~0.017 s).
+Ours: the program built by <code>fire.py build</code>. Rust: <code>Vec&lt;i64&gt;</code> with <code>black_box</code> on the pushed value and the read
+so the allocation cannot be optimised away, <code>rustc -O</code>. One machine (Apple silicon, other users logged in), 3 runs each.</p>
+<table>
+<tr><th>Step</th><th>5M-iteration loop, user s</th><th>what changed</th></tr>
+<tr><td>start of this work</td><td>0.21&ndash;0.23</td><td>struct + <code>malloc</code>'d data + hash-set registry, runtime at <code>-O0</code></td></tr>
+<tr><td>4-slot inline buffer</td><td>not timed end to end on its own (the runtime loop alone: 19 &rarr; 9.5 ns)</td><td>no <code>malloc</code> for short lists</td></tr>
+<tr><td>dedicated pointer table for the registries</td><td>0.10&ndash;0.12</td><td>the registry was ~60% of the profile, not the 45% a clean micro-benchmark suggested (§10.2)</td></tr>
+<tr><td>runtime built at <code>-O2</code> instead of gcc's implicit <code>-O0</code></td><td class="ok">0.065&ndash;0.092</td><td>the stdlib dylib (which contains the runtime) had no optimisation flag</td></tr>
+</table>
+<table>
+<tr><th>50M iterations</th><th>user s</th><th>ns / iteration (startup removed)</th></tr>
+<tr><td>ours (stack-homed inline list)</td><td class="ok">0.556&ndash;0.574</td><td class="ok">~11</td></tr>
+<tr><td>Rust <code>Vec&lt;i64&gt;</code></td><td>0.636&ndash;0.693</td><td>~13</td></tr>
+</table>
+<div class="note"><strong>What this does and does not show.</strong> On this one loop the compiled program is ~15% faster than idiomatic Rust
+<code>Vec</code> code, because the solver proved the list does not escape and homed it on the stack with inline storage while <code>Vec</code> always
+allocates. It says nothing about anything else. A Rust programmer who writes a fixed array or <code>SmallVec</code> here removes the allocation too and wins
+easily; dicts, sets, strings, structs and every escaping container are still far behind or unmeasured; and this is one machine, one loop. "Beats Rust" is not
+established by this section — it is the first benchmark that is not embarrassing.</div>
+
+<h3>10.1 The small buffer</h3>
+<p><code>MojoList</code> carries <code>MOJO_LIST_INLINE</code> (4) slots inline. Invariants (<code>runtime/fire_runtime.h</code>): <code>data</code> is never NULL after init and
+<code>cap &gt;= MOJO_LIST_INLINE</code>; <code>data == inl</code> iff the elements are still inline, and only <code>_list_grow</code> (copy out, never
+<code>realloc</code>) and <code>mojo_list_destroy</code> (never <code>free</code>) distinguish the two; a list must not be copied or moved by value while inline.
+Dict and set slot arrays could get the same treatment, but a dict/set of strings still <code>strdup</code>s every key, so "no malloc" is not reachable for those
+without storing short keys inline (a larger change: keys are handed out as borrowed pointers).</p>
+
+<h3>10.2 The registries (<code>_PtrReg</code>)</h3>
+<p>The runtime tells a boxed <code>int64_t</code> that is a list from an int or a string by looking its address up in a registry, populated on every container
+<code>init</code> and cleared on every <code>destroy</code>. They were <code>MojoSet</code>s: 32-byte slots, a <code>%</code> per probe, and a re-hash of the whole cluster
+on every erase. <code>sample</code> on the compiled loop put <code>mojo_list_init</code>+<code>mojo_list_destroy</code>, almost all of it registry probing, at well over half of
+the runtime. They are now <code>_PtrReg</code>: a set of non-zero addresses with power-of-two masking, 8-byte slots, a one-multiply hash and backward-shift deletion (no
+tombstones, so the LIFO add/remove of one address a stack-homed container produces never degrades the table). <code>test_ptr_registry.py</code> checks it against a
+reference model (1.5M random operations, forced collisions, 2M cycles on one address) at <code>-O0</code>, <code>-O2</code> and under AddressSanitizer. The registry is
+still not free (~2 ns per container in the isolated runtime loop) and could be skipped for a stack-homed container the solver proves is never boxed; that needs an
+audit of every place a container pointer becomes an <code>int64_t</code> and is not done.</p>
+
+<h3>10.3 The runtime's optimisation level</h3>
+<p><code>build_stdlib_dylib.runtime_units</code> added an optimisation flag only when a caller passed one, and the stdlib dylib build passes none, so the hand-written
+runtime — every container operation, the registries, the cleanup stack — ran at gcc's implicit <code>-O0</code> in every compiled program (its own <code>static inline</code> hash
+helper was not even inlined). It now defaults to <code>-O2</code> for the C/C++ units (an explicit flag still wins). The generated stdlib modules stay at <code>-O0</code>
+for compile time. <code>mojoc</code> has always built the runtime at <code>-O2</code>, so this is a level it was already exercised at.</p>
+
+<h3>10.4 Dicts, sets, structs and strings against Rust</h3>
+<p>Same method as above (user CPU time, our ~0.017 s startup subtracted, best of 3, checksums verified equal to the Rust program's). Rust: <code>HashMap</code>/<code>HashSet</code>/<code>Box</code>/<code>format!</code>
+with <code>black_box</code> on the inputs so nothing is optimised away.</p>
+<table>
+<tr><th>Benchmark</th><th>before</th><th>now</th><th>Rust</th><th>now vs Rust</th></tr>
+<tr><td>Int-keyed dict: 1M inserts + 3M lookups, 1000 keys</td><td>0.241 s</td><td>0.026 s</td><td>0.023 s</td><td class="ok">1.04&ndash;1.13x</td></tr>
+<tr><td>String-keyed dict, same counts</td><td>0.061 s</td><td>0.050 s</td><td>0.045 s</td><td>1.1x (was parity; see below)</td></tr>
+<tr><td>Set of Int: 3M adds + 3M lookups</td><td>would not build (below)</td><td>0.024 s</td><td>0.028 s</td><td class="ok">0.86x</td></tr>
+<tr><td>Struct alloc: 5M constructions + field reads</td><td>not comparable</td><td>0.047 s</td><td>0.046 s</td><td class="ok">parity</td></tr>
+<tr><td>String building: 3M of <code>"n=" + String(i) + "!"</code></td><td>0.213 s</td><td>0.108 s</td><td>0.063 s</td><td class="leak">1.7x slower</td></tr>
+</table>
+<p>What moved them, in order. (1) A hand-rolled decimal formatter instead of <code>snprintf</code> (half of an Int-keyed access was <code>vfprintf</code>), a block pool for the transient key string, masked probing instead of a modulo per
+probe, and a dict resize that moves each key pointer instead of <code>strdup</code>ing and freeing every key: 2.6x behind Rust. (2) <strong>Integer dict slots</strong>: the last two thirds of the remaining gap was formatting the key to text, hashing the text and
+<code>strcmp</code>ing it on every access, so an integer key is now stored as an integer.</p>
+<p><strong>How integer slots work.</strong> A slot has <code>keykind == 2</code> and an <code>ikey</code> field; that integer is what is hashed (a murmur finalizer) and compared. The slot also keeps the key's decimal string in <code>key</code>, exactly the string it always held, so
+everything that reads a key as text (iteration, <code>repr</code>, <code>copy</code>, <code>update</code>, <code>pop</code>'s rebuild, %-format) is unchanged. <strong>Normalization:</strong> any key that is a canonical decimal integer (<code>"5"</code>, <code>"-12"</code>; never <code>"05"</code>, <code>"+5"</code>, <code>"-0"</code>, or a
+value that overflows <code>int64_t</code>) is stored as an integer slot whether it arrived as the integer 5 or the string <code>"5"</code>, so the two remain ONE key, as they always were here. Strings that only look numeric stay separate, and so do bytes keys.
+Codegen changes only the dict operations whose key is an untracked <code>int64_t</code>: <code>_char_to_cstr(word_ok=True)</code> returns a placeholder and <code>_emit_call</code> swaps the call for its <code>mojo_dict_*_kw</code> twin, passing the raw word. The twin makes the same "boxed string or integer?"
+decision <code>mojo_cstr_or_int_str</code> made (<code>mojo_boxed_is_str</code>), so which words count as strings did not change. If a placeholder ever reaches a function with no twin, that function gets the string built the old way and released after the call. String comparisons keep that path.
+Pinned by: a reference-model test of the runtime layer (400,000 operations, negatives, extremes, canonical-integer detection, int/string equivalence in both directions, numeric-looking strings and bytes keys staying separate; gcc <code>-O0</code>/<code>-O2</code> and AddressSanitizer), a C-shape test that the emitted code contains the <code>_kw</code> calls and no
+string conversion, and a program checked against CPython through every operation.</p>
+<p><strong>What it cost.</strong> The slot grew from 40 to 48 bytes (the <code>ikey</code> field), and the string-keyed dict measures ~1.1x Rust where it measured parity before. The machine was ~15% slower on the later run (Rust's own time moved by the same amount), so part of that is noise; part may be the wider slot. Not separated.</p>
+<p><strong>Follow-up fix:</strong> iterating an Int-keyed dict used to hand back the keys as strings (<code>for k in d: total += k</code> added string pointers). Loops over an annotated <code>Dict[Int, V]</code> name now read integer keys (<code>mojo_dict_iter_key_int</code>, <code>mojo_dict_items_int</code>); see §7. String building still allocates a result per concatenation and does not free the bound result (§7.2).
+A first version of the set benchmark failed to build: <code>var s: Set[Int] = {}</code> is refused (filed, §7).</p>
+
+<h2>11. The compiler compiling itself (<code>mojoc --dump-full fire.py</code>): measured sites and fixes (2026-09-30)</h2>
+<p>The §2-§7 work used small compiled programs. The worst case in the repo is the self-hosted compiler on its own source; it peaked at
+34-47 GB (and once 192 GB) and died with a SIGSEGV. Full log: <code>bugs/PERF_selfhost_memory_leak_hunt.md</code>. Tools:
+<code>tools/heapprof.c</code> (sampling live-heap profiler and use-after-free quarantine, <code>DYLD_INSERT_LIBRARIES</code>) and
+<code>tools/heapprof_report.py --lines</code>; <code>leaks</code> is not the tool here, nearly everything the compiler keeps is still reachable.</p>
+<table>
+<tr><th>build</th><th>peak RSS</th><th>note</th></tr>
+<tr><td>master</td><td>33.8 GB</td><td>SIGSEGV after 48 s</td></tr>
+<tr><td>master + crash fixes</td><td>37.2 GB</td><td>SIGSEGV after 65 s</td></tr>
+<tr><td>+ parse-once cache</td><td>9.0 GB</td><td>partial run</td></tr>
+<tr><td>+ shared 1-char strings, freed <code>in</code> displays</td><td>1.45 GB</td><td>partial run (still crashing)</td></tr>
+<tr><td>+ crashes fixed, run completes</td><td>22.4 GB</td><td>exit 0, ends in AttributeError: platform</td></tr>
+<tr><td>+ type-scan scratch pool, more copy sites</td><td><b>12.2 GB</b></td><td>61 s</td></tr>
+<tr><td>ab-native snippet (<code>--dump-full</code> from the repo root)</td><td>17.6 GB &rarr; <b>0.44 GB</b></td><td>26 s &rarr; 3.7 s</td></tr>
+</table>
+<p><b>Where the bytes were.</b> (1) A tuple used as a dict key is keyed by its address self-hosted, so a <code>(path, mtime)</code> cache never hit and every
+call re-parsed the ~60 compiler sources (16 of 19 GB). (2) <code>mojo_char_to_str</code> malloc'd per character and a tuple display built per <code>in</code> test:
+~150 B per scanned character, owned by nothing. The 256 one-character strings are now shared and immortal (so <code>mojo_char_to_str</code> is deliberately NOT in
+<code>_FRESH_STRING_RETURNS</code>, and <code>String + char</code> must not free it), and a display that is only the right side of <code>in</code> is freed after the test (class C).
+(3) The hermetic type scans copied a ~1,650-entry dict, keys strdup'd, on each of 153,580 calls (~23 GB): a depth-indexed pool of scratch dicts
+(<code>resolve_shared._scan_scratch_dict</code>, <code>gen._scan_scratch_top</code>; every user restores the top where it restores the dict it replaced) bounds it. Rule for new code:
+a "save, copy, mutate, restore" of a big dict takes its scratch from the pool, and per-function containers are emptied in place, never rebound
+(a rebound container is only garbage under CPython).</p>
+<p><b>What is left (12 GB, ~2,700 sites, none over 5%).</b> The list-kind registry table (512 MB, it is sized by the number of leaked containers);
+<code>_walk_ast</code> flat lists (~720 MB); <code>_dedup_variadic_externs</code> substrings (~650 MB); per-function inferred-type tables and an unresolved set under
+<code>_lower_call</code> (~640 MB); every parsed module's AST kept to the end. The next fixes have the same shape: find the per-call copy or temporary, pool it, empty it,
+or give it an owner.</p>
+<p><b>Regression checks.</b> <code>gimple_char_scan_allocates_nothing_per_character</code> (4,377 MB before, 1.5 MB after) in test_gimple_runner.py;
+<code>test_selfhost_memory.py</code> (<code>selfhost-memory</code>: one <code>--dump-full</code> under 1.5 GB; <code>selfhost-memory-fire</code>: fire.py under 16 GB, a tripwire to ratchet down).</p>
+<p><b>Bugs found on the way.</b> <code>bugs/CODEGEN_tuple_dict_key_hashed_by_address.md</code>, <code>bugs/CODEGEN_list_of_pairs_iterated_as_dict.md</code> (a heap overflow in
+<code>mojo_dict_order_indices</code> is fixed, the type confusion is not), <code>bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md</code>.</p>
+
+<h2>12. Change log for this document's code, 2026-09-30</h2>
+<p>runtime/fire_runtime.{c,h}: <code>mojo_list_free_owned_strs</code> + <code>mojo_cleanup_push_list_strs</code> (a list
+that allocated its own element strings); <code>mojo_bound_method_free</code> + <code>mojo_closure_free</code> +
+<code>mojo_cleanup_push_closure</code> (the two things a bound method can be, and the unwind thunk for both); the
+<code>_reg_kinds</code> side table's home function (<code>_kinds_home</code>, the same one-multiply hash
+<code>_PtrReg</code> uses) and its deletion (backward-shift, so no tombstone is left); <code>mojo_str_rsplit</code>'s scratch
+list freed on both return paths (its strings moved to the result, so only the struct and the buffer are).</p>
+<p>ownership_destruct.py: <code>list_elements_owned</code> (may any ELEMENT of this list be named?),
+<code>lambda_value_owned</code> (the only mention of a closure local may be the call it is written for, and a mention
+inside a nested scope is a capture), <code>_is_fresh_string_expr</code> (what a callee may return and still hand over
+ownership). All three are deliberately separate from the container candidate rules, because a function containing a
+<code>lambda</code> is excluded from those.</p>
+<p>emit_infra.py: <code>_OWNS_STR_ELEMS</code> and <code>owned_free_fn_for</code>/<code>owned_push_fn_for</code> (the one
+place a free is chosen for a value); the closure branch of <code>maybe_push_owned_local</code>;
+<code>gen._closure_vals</code> / <code>_owned_closure_names</code>; the per-FUNCTION ownership tables moved from
+<code>_reset_func</code> to <code>_reset_scope_state</code>, so a lifted closure — which runs <code>_reset_func</code> in the
+middle of its parent — cannot wipe them, while the TEMP tables stay in <code>_reset_func</code> next to the
+<code>temp_counter</code> that makes their reset necessary (they were not reset at all before, and a stale "this value is
+fresh" entry is a wrong free, not a missed one).</p>
+<p>emit_calls.py: the closure constructor marks the value it returns; <code>len(&lt;fresh string&gt;)</code> frees its
+operand after the read.</p>
+<p>Tests: <code>test_ptr_registry.py</code> gains <code>test_kinds_table</code> (a reference model plus a forced home-slot
+collision, since a real heap collision is no longer the norm) and stops compiling its asserts away;
+<code>test_gimple_runner.py</code> gains <code>gimple_kinds_survive_a_sibling_list_being_freed</code> (it segfaults
+without the fix), <code>gimple_split_result_element_strings_are_owned</code>,
+<code>gimple_split_elements_that_escape_are_not_freed</code>, <code>gimple_fresh_returning_string_functions_are_owned</code>,
+<code>gimple_returned_string_that_is_not_fresh_is_not_freed</code>, <code>gimple_owned_closure_env_is_freed</code> and
+<code>gimple_closure_that_escapes_is_not_freed</code>; <code>test_ownership_destruct.py</code> gains 12
+<code>list_elements_owned</code> and 8 <code>lambda_value_owned</code> fixtures.</p>
+<p>Bug docs closed and deleted: <code>CODEGEN_container_free_registry_dangling_entries.md</code>,
+<code>CODEGEN_container_no_deallocation_unbounded_growth.md</code>,
+<code>CODEGEN_call_result_container_never_freed.md</code>,
+<code>CODEGEN_large_dict_accumulation_exit_crash.md</code>. Filed:
+<code>CODEGEN_list_element_read_defaults_to_str_across_a_call.md</code> (fixed and deleted 2026-10-01: the call
+result of a callee returning a heterogeneous list is read as a BOX, per slot, instead of through the
+element type the joined ctypes imply).</p>
+
+</body>
+</html>

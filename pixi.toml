@@ -1,0 +1,14 @@
+[workspace]
+authors = ["Mike Stump <mikestump@comcast.net>"]
+channels = ["conda-forge"]
+name = "mojo-reference2"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+formalbuild = "python3 fire.py formalbuild"
+prooflib = "lean -o lib/ProofLib.olean lib/ProofLib.lean"
+proof-const2 = "bash tools/proof.sh const2"
+
+[dependencies]
+lean4 = "4.33.0.*"

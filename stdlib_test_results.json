@@ -1,0 +1,3693 @@
+{
+  "total": 334,
+  "results": {
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/algorithm/bench_elementwise.mojo": {
+      "file": "benchmarks/algorithm/bench_elementwise.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06267213821411133
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.903021812438965
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/bit/bench_bit.mojo": {
+      "file": "benchmarks/bit/bench_bit.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05797123908996582
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.772039890289307
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/builtin/bench_error.mojo": {
+      "file": "benchmarks/builtin/bench_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0563969612121582
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38756227493286133
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/builtin/bench_int.mojo": {
+      "file": "benchmarks/builtin/bench_int.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.055693864822387695
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37995004653930664
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/builtin/bench_sort.mojo": {
+      "file": "benchmarks/builtin/bench_sort.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.058155059814453125
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.802789926528931
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_bitset.mojo": {
+      "file": "benchmarks/collections/bench_bitset.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.058064937591552734
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.388897180557251
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_dict.mojo": {
+      "file": "benchmarks/collections/bench_dict.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0575718879699707
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.108571767807007
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_dict_string.mojo": {
+      "file": "benchmarks/collections/bench_dict_string.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06497001647949219
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.749691009521484
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_grapheme.mojo": {
+      "file": "benchmarks/collections/bench_grapheme.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05676007270812988
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.12865519523620605
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_grapheme_reverse.mojo": {
+      "file": "benchmarks/collections/bench_grapheme_reverse.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0565183162689209
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.12700796127319336
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_set.mojo": {
+      "file": "benchmarks/collections/bench_set.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.057971954345703125
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38651299476623535
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/bench_string.mojo": {
+      "file": "benchmarks/collections/bench_string.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06047487258911133
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.797529697418213
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/collections/string/bench_atof.mojo": {
+      "file": "benchmarks/collections/string/bench_atof.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.055725812911987305
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3806328773498535
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/format/bench_tstring.mojo": {
+      "file": "benchmarks/format/bench_tstring.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.056732177734375
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.807264089584351
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/hashlib/bench_hash.mojo": {
+      "file": "benchmarks/hashlib/bench_hash.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05833315849304199
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4160318374633789
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/math/bench_math.mojo": {
+      "file": "benchmarks/math/bench_math.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05714297294616699
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.732426881790161
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/memory/bench_alloc.mojo": {
+      "file": "benchmarks/memory/bench_alloc.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05456805229187012
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37966227531433105
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/memory/bench_heap_parallel.mojo": {
+      "file": "benchmarks/memory/bench_heap_parallel.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05602884292602539
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.625795125961304
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/utils/bench_formatter.mojo": {
+      "file": "benchmarks/utils/bench_formatter.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05743217468261719
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37330198287963867
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/benchmarks/utils/bench_memmem.mojo": {
+      "file": "benchmarks/utils/bench_memmem.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05727124214172363
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.693355083465576
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/gpu/test_binary_apply.mojo": {
+      "file": "test/algorithm/gpu/test_binary_apply.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05913496017456055
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38926005363464355
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/gpu/test_elementwise.mojo": {
+      "file": "test/algorithm/gpu/test_elementwise.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06374287605285645
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 7.22315526008606
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/gpu/test_reduce.mojo": {
+      "file": "test/algorithm/gpu/test_reduce.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06533408164978027
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.466564893722534
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/gpu/test_reduce_atomic.mojo": {
+      "file": "test/algorithm/gpu/test_reduce_atomic.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.060021162033081055
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.690873861312866
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_elementwise.mojo": {
+      "file": "test/algorithm/test_elementwise.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06061220169067383
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.903733968734741
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_elementwise_1d.mojo": {
+      "file": "test/algorithm/test_elementwise_1d.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05918002128601074
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.695204973220825
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_map.mojo": {
+      "file": "test/algorithm/test_map.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05819296836853027
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38357996940612793
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_parallelize.mojo": {
+      "file": "test/algorithm/test_parallelize.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06049799919128418
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.714107036590576
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_reductions.mojo": {
+      "file": "test/algorithm/test_reductions.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06052589416503906
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.069617986679077
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_stencil.mojo": {
+      "file": "test/algorithm/test_stencil.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06668996810913086
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.937869071960449
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_tile.mojo": {
+      "file": "test/algorithm/test_tile.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06026315689086914
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.744840860366821
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/algorithm/test_vectorize.mojo": {
+      "file": "test/algorithm/test_vectorize.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06027722358703613
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.713266849517822
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_buffer.mojo": {
+      "file": "test/asyncrt/test_buffer.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.059092044830322266
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38347387313842773
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_capture.mojo": {
+      "file": "test/asyncrt/test_capture.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.056741952896118164
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.383145809173584
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_copies.mojo": {
+      "file": "test/asyncrt/test_copies.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.061363935470581055
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4005470275878906
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_cuda.mojo": {
+      "file": "test/asyncrt/test_cuda.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.060632944107055664
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.804388046264648
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_device_pointer.mojo": {
+      "file": "test/asyncrt/test_device_pointer.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0617220401763916
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4095458984375
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_device_pointer_kernel.mojo": {
+      "file": "test/asyncrt/test_device_pointer_kernel.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06042218208312988
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39858007431030273
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_elementwise.mojo": {
+      "file": "test/asyncrt/test_elementwise.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05963897705078125
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.256700038909912
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_function.mojo": {
+      "file": "test/asyncrt/test_function.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.059899330139160156
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.578603982925415
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_function_regress.mojo": {
+      "file": "test/asyncrt/test_function_regress.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06136798858642578
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.617063999176025
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_hip.mojo": {
+      "file": "test/asyncrt/test_hip.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05987977981567383
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.770946025848389
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_host_func.mojo": {
+      "file": "test/asyncrt/test_host_func.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05843615531921387
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37441587448120117
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_host_mapped.mojo": {
+      "file": "test/asyncrt/test_host_mapped.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05743002891540527
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3728930950164795
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_memset.mojo": {
+      "file": "test/asyncrt/test_memset.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0590970516204834
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 1.1069989204406738
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_multi_context.mojo": {
+      "file": "test/asyncrt/test_multi_context.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.060159921646118164
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39153599739074707
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_multi_stream.mojo": {
+      "file": "test/asyncrt/test_multi_stream.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06803417205810547
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3906829357147217
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_multicast_memory.mojo": {
+      "file": "test/asyncrt/test_multicast_memory.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05980229377746582
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3815150260925293
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_smoke.mojo": {
+      "file": "test/asyncrt/test_smoke.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06026911735534668
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4054090976715088
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/asyncrt/test_timing.mojo": {
+      "file": "test/asyncrt/test_timing.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05915498733520508
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3901808261871338
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/atomic/test_atomic.mojo": {
+      "file": "test/atomic/test_atomic.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06106114387512207
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.7797901630401611
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/atomic/test_compile_atomic.mojo": {
+      "file": "test/atomic/test_compile_atomic.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06193113327026367
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.89606785774231
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/base64/test_base64.mojo": {
+      "file": "test/base64/test_base64.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.059992074966430664
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.12490010261535645
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/benchmark/test_bencher_device_context_iter_custom.mojo": {
+      "file": "test/benchmark/test_bencher_device_context_iter_custom.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05907011032104492
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3832709789276123
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/benchmark/test_benchmark.mojo": {
+      "file": "test/benchmark/test_benchmark.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07402229309082031
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.111962080001831
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/benchmark/test_benchmark_compiler.mojo": {
+      "file": "test/benchmark/test_benchmark_compiler.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.055364131927490234
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38164186477661133
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/benchmark/test_mojobench.mojo": {
+      "file": "test/benchmark/test_mojobench.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05812883377075195
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38271403312683105
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/benchmark/test_quick_bench.mojo": {
+      "file": "test/benchmark/test_quick_bench.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06436014175415039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.797323942184448
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/bit/test_bit.mojo": {
+      "file": "test/bit/test_bit.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0696561336517334
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.672810077667236
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/bit/test_mask.mojo": {
+      "file": "test/bit/test_mask.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.061493873596191406
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.74627423286438
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_any_all.mojo": {
+      "file": "test/builtin/test_any_all.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.057959794998168945
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.827360153198242
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_bfloat16.mojo": {
+      "file": "test/builtin/test_bfloat16.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05883502960205078
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.379863977432251
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_bool.mojo": {
+      "file": "test/builtin/test_bool.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05937600135803223
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38471198081970215
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_bool_indexer_compile_fail.mojo": {
+      "file": "test/builtin/test_bool_indexer_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05798006057739258
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6626460552215576
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_comparable.mojo": {
+      "file": "test/builtin/test_comparable.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05872321128845215
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3891489505767822
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert.mojo": {
+      "file": "test/builtin/test_debug_assert.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05533099174499512
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3773777484893799
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_compile_time.mojo": {
+      "file": "test/builtin/test_debug_assert_compile_time.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.055049896240234375
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.368502140045166
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_default_error.mojo": {
+      "file": "test/builtin/test_debug_assert_default_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05725908279418945
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.7242560386657715
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_location.mojo": {
+      "file": "test/builtin/test_debug_assert_location.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05852508544921875
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3869750499725342
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_all.mojo": {
+      "file": "test/builtin/test_debug_assert_mode_all.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05876588821411133
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.36858391761779785
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_all_error.mojo": {
+      "file": "test/builtin/test_debug_assert_mode_all_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.058393001556396484
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37183094024658203
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_none.mojo": {
+      "file": "test/builtin/test_debug_assert_mode_none.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05810999870300293
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3675830364227295
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_warning.mojo": {
+      "file": "test/builtin/test_debug_assert_warning.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05759096145629883
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3680257797241211
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_default_equatable_compile_fail.mojo": {
+      "file": "test/builtin/test_default_equatable_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05650019645690918
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6263082027435303
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_default_hashable_compile_fail.mojo": {
+      "file": "test/builtin/test_default_hashable_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05736112594604492
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3884451389312744
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_default_writable_compile_fail.mojo": {
+      "file": "test/builtin/test_default_writable_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0584259033203125
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5786449909210205
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_device_passable.mojo": {
+      "file": "test/builtin/test_device_passable.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06228184700012207
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.538841009140015
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_dtype.mojo": {
+      "file": "test/builtin/test_dtype.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.059020042419433594
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3820490837097168
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_error.mojo": {
+      "file": "test/builtin/test_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06894063949584961
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37647485733032227
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_file.mojo": {
+      "file": "test/builtin/test_file.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06730794906616211
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.15566587448120117
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_float_literal.mojo": {
+      "file": "test/builtin/test_float_literal.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06142783164978027
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3850691318511963
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_format_compile_fail.mojo": {
+      "file": "test/builtin/test_format_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05715012550354004
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5777673721313477
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_format_float.mojo": {
+      "file": "test/builtin/test_format_float.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.061578989028930664
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.629580020904541
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_format_float_lut_optimization.mojo": {
+      "file": "test/builtin/test_format_float_lut_optimization.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05873584747314453
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.565682888031006
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_format_int.mojo": {
+      "file": "test/builtin/test_format_int.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.060662031173706055
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.1346418857574463
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_global_constant_compile_fail.mojo": {
+      "file": "test/builtin/test_global_constant_compile_fail.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.057878971099853516
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5813519954681396
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_int.mojo": {
+      "file": "test/builtin/test_int.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.060437917709350586
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.40848708152770996
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_int_literal.mojo": {
+      "file": "test/builtin/test_int_literal.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06042814254760742
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.379194974899292
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_issue_1004.mojo": {
+      "file": "test/builtin/test_issue_1004.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.058757781982421875
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3688321113586426
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_issue_1505.mojo": {
+      "file": "test/builtin/test_issue_1505.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05927014350891113
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3750438690185547
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_issue_3908.mojo": {
+      "file": "test/builtin/test_issue_3908.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05790901184082031
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.596728801727295
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_list_literal.mojo": {
+      "file": "test/builtin/test_list_literal.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.05903887748718262
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37282514572143555
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_math.mojo": {
+      "file": "test/builtin/test_math.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06091904640197754
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.499351978302002
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_none.mojo": {
+      "file": "test/builtin/test_none.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06923413276672363
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37141990661621094
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_print.mojo": {
+      "file": "test/builtin/test_print.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06054210662841797
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.49555301666259766
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_print_long_string.mojo": {
+      "file": "test/builtin/test_print_long_string.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.41805005073547363
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 2.1875901222229004
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_print_stderr.mojo": {
+      "file": "test/builtin/test_print_stderr.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07078695297241211
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5904707908630371
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_range.mojo": {
+      "file": "test/builtin/test_range.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06942582130432129
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.41419410705566406
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_range_out_of_bounds.mojo": {
+      "file": "test/builtin/test_range_out_of_bounds.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06359291076660156
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37363195419311523
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_rebind.mojo": {
+      "file": "test/builtin/test_rebind.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07657217979431152
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3826329708099365
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_reversed.mojo": {
+      "file": "test/builtin/test_reversed.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0696258544921875
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3801300525665283
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_simd.mojo": {
+      "file": "test/builtin/test_simd.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.12147784233093262
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.970477819442749
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_simd_fastmath.mojo": {
+      "file": "test/builtin/test_simd_fastmath.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06410098075866699
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.46831202507019
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_slice.mojo": {
+      "file": "test/builtin/test_slice.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07800602912902832
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.770950078964233
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_some.mojo": {
+      "file": "test/builtin/test_some.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06533598899841309
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3752248287200928
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_sort.mojo": {
+      "file": "test/builtin/test_sort.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08329486846923828
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.165516138076782
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_sort_issue_1018.mojo": {
+      "file": "test/builtin/test_sort_issue_1018.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0640859603881836
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5823979377746582
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_stdin.mojo": {
+      "file": "test/builtin/test_stdin.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06333589553833008
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.619724988937378
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_string_compatibility.mojo": {
+      "file": "test/builtin/test_string_compatibility.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0689079761505127
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4035830497741699
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_string_literal.mojo": {
+      "file": "test/builtin/test_string_literal.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07117390632629395
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.634928941726685
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_stubs.mojo": {
+      "file": "test/builtin/test_stubs.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06360101699829102
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37277889251708984
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_swap.mojo": {
+      "file": "test/builtin/test_swap.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07460403442382812
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3764841556549072
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_tuple.mojo": {
+      "file": "test/builtin/test_tuple.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08111691474914551
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6312670707702637
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_uint.mojo": {
+      "file": "test/builtin/test_uint.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0685279369354248
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4021918773651123
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_value.mojo": {
+      "file": "test/builtin/test_value.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06520700454711914
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.7368180751800537
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/builtin/test_variadic.mojo": {
+      "file": "test/builtin/test_variadic.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08351373672485352
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4285430908203125
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_atof.mojo": {
+      "file": "test/collections/string/test_atof.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0650320053100586
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.643093585968018
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_grapheme.mojo": {
+      "file": "test/collections/string/test_grapheme.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07612228393554688
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.473283052444458
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_grapheme_conformance.mojo": {
+      "file": "test/collections/string/test_grapheme_conformance.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08843994140625
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3845179080963135
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_iterators.mojo": {
+      "file": "test/collections/string/test_iterators.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06534504890441895
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.701352119445801
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_mem_functions.mojo": {
+      "file": "test/collections/string/test_mem_functions.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06703329086303711
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.722265958786011
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_number_parsing_lut_optimization.mojo": {
+      "file": "test/collections/string/test_number_parsing_lut_optimization.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06322288513183594
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5831820964813232
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_string.mojo": {
+      "file": "test/collections/string/test_string.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.09227108955383301
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.9090869426727295
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_string_slice.mojo": {
+      "file": "test/collections/string/test_string_slice.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08368396759033203
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.789680242538452
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_string_unicode_panic.mojo": {
+      "file": "test/collections/string/test_string_unicode_panic.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06371879577636719
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.645725250244141
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_unicode.mojo": {
+      "file": "test/collections/string/test_unicode.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06396079063415527
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4473426342010498
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/string/test_utf8.mojo": {
+      "file": "test/collections/string/test_utf8.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06845498085021973
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.732742071151733
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_asan_annotations_list.mojo": {
+      "file": "test/collections/test_asan_annotations_list.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06305885314941406
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.690439939498901
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_binary_heap.mojo": {
+      "file": "test/collections/test_binary_heap.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06627893447875977
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.13389110565185547
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_binary_heap_assert_empty_peek.mojo": {
+      "file": "test/collections/test_binary_heap_assert_empty_peek.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06292510032653809
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5888519287109375
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_binary_heap_assert_empty_pop.mojo": {
+      "file": "test/collections/test_binary_heap_assert_empty_pop.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06284117698669434
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5975048542022705
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_bitset.mojo": {
+      "file": "test/collections/test_bitset.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08486294746398926
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.42994213104248047
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_check_bounds_assert_error.mojo": {
+      "file": "test/collections/test_check_bounds_assert_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0631411075592041
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3713960647583008
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_codepoint.mojo": {
+      "file": "test/collections/test_codepoint.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07868480682373047
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38704895973205566
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_conditional.mojo": {
+      "file": "test/collections/test_conditional.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06454324722290039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.602628946304321
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_counter.mojo": {
+      "file": "test/collections/test_counter.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07530689239501953
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.967555046081543
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_deque.mojo": {
+      "file": "test/collections/test_deque.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.09560894966125488
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5366830825805664
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_dict.mojo": {
+      "file": "test/collections/test_dict.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.09707331657409668
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.001476049423218
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_inline_array.mojo": {
+      "file": "test/collections/test_inline_array.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08424806594848633
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.863661050796509
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_interval.mojo": {
+      "file": "test/collections/test_interval.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07726097106933594
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.753668308258057
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_linked_list.mojo": {
+      "file": "test/collections/test_linked_list.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08733630180358887
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4514608383178711
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_list.mojo": {
+      "file": "test/collections/test_list.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.09381413459777832
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.942075967788696
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_list_getitem_invalid_index_int.mojo": {
+      "file": "test/collections/test_list_getitem_invalid_index_int.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06335830688476562
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6631591320037842
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_list_getitem_invalid_index_uint.mojo": {
+      "file": "test/collections/test_list_getitem_invalid_index_uint.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.062478065490722656
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.702239990234375
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_deque.mojo": {
+      "file": "test/collections/test_negative_index_deque.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06225895881652832
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38476109504699707
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_deque_insert.mojo": {
+      "file": "test/collections/test_negative_index_deque_insert.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.062467098236083984
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3814530372619629
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_inline_array.mojo": {
+      "file": "test/collections/test_negative_index_inline_array.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06332206726074219
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.586493968963623
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_linked_list.mojo": {
+      "file": "test/collections/test_negative_index_linked_list.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06373095512390137
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5925858020782471
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_list.mojo": {
+      "file": "test/collections/test_negative_index_list.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0626988410949707
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5873398780822754
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_string.mojo": {
+      "file": "test/collections/test_negative_index_string.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06166219711303711
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5878791809082031
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_negative_index_string_slice.mojo": {
+      "file": "test/collections/test_negative_index_string_slice.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06353092193603516
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5839998722076416
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_optional.mojo": {
+      "file": "test/collections/test_optional.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08107709884643555
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.5409791469573975
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_optional_none_abort.mojo": {
+      "file": "test/collections/test_optional_none_abort.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06356668472290039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5770707130432129
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/collections/test_set.mojo": {
+      "file": "test/collections/test_set.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0852518081665039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.48333168029785156
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/compile/test_compile.mojo": {
+      "file": "test/compile/test_compile.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06547999382019043
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.731442928314209
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/compile/test_functions_in_module.mojo": {
+      "file": "test/compile/test_functions_in_module.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06334686279296875
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5875129699707031
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/complex/test_complex.mojo": {
+      "file": "test/complex/test_complex.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07625126838684082
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.668684005737305
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/complex/test_mandelbrot.mojo": {
+      "file": "test/complex/test_mandelbrot.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0637669563293457
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37828874588012695
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/ffi/test_external_call.mojo": {
+      "file": "test/ffi/test_external_call.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06364011764526367
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.620151996612549
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/ffi/test_unsafe_union.mojo": {
+      "file": "test/ffi/test_unsafe_union.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06735396385192871
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.651097059249878
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/format/compile_fail/test_writable_error.mojo": {
+      "file": "test/format/compile_fail/test_writable_error.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06270694732666016
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5886280536651611
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/format/test_format.mojo": {
+      "file": "test/format/test_format.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06582307815551758
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.787894010543823
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/format/test_tstring.mojo": {
+      "file": "test/format/test_tstring.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07221198081970215
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.904114246368408
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/host/test_metal_device_type_encoder.mojo": {
+      "file": "test/gpu/host/test_metal_device_type_encoder.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06562256813049316
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.660220146179199
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/primitives/test_block_nd.mojo": {
+      "file": "test/gpu/primitives/test_block_nd.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06869792938232422
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.864200115203857
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/primitives/test_match_all.mojo": {
+      "file": "test/gpu/primitives/test_match_all.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06480598449707031
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.029381036758423
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/primitives/test_match_any.mojo": {
+      "file": "test/gpu/primitives/test_match_any.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0647439956665039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.037123918533325
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/test_apple_mma_8x8_invalid_types.mojo": {
+      "file": "test/gpu/test_apple_mma_8x8_invalid_types.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0633547306060791
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6870169639587402
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/gpu/test_apple_mma_invalid_types.mojo": {
+      "file": "test/gpu/test_apple_mma_invalid_types.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06359720230102539
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6069917678833008
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/hashlib/test_ahash.mojo": {
+      "file": "test/hashlib/test_ahash.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07965803146362305
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.42104005813598633
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/hashlib/test_fnv1a.mojo": {
+      "file": "test/hashlib/test_fnv1a.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0776979923248291
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4028759002685547
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/hashlib/test_hash.mojo": {
+      "file": "test/hashlib/test_hash.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06738519668579102
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.8673129081726074
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/hashlib/test_hasher.mojo": {
+      "file": "test/hashlib/test_hasher.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06495308876037598
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.41219019889831543
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/io/test_file_descriptor.mojo": {
+      "file": "test/io/test_file_descriptor.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06513094902038574
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.1282429695129395
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/io/test_write.mojo": {
+      "file": "test/io/test_write.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06945586204528809
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.998151063919067
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/io/test_write_to_stdout.mojo": {
+      "file": "test/io/test_write_to_stdout.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06408190727233887
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5886390209197998
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_chain.mojo": {
+      "file": "test/iter/test_chain.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06481671333312988
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.2050721645355225
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_empty.mojo": {
+      "file": "test/iter/test_empty.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06491208076477051
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.10481595993042
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_enumerate.mojo": {
+      "file": "test/iter/test_enumerate.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06586790084838867
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3874650001525879
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_iter.mojo": {
+      "file": "test/iter/test_iter.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06312227249145508
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.9895031452178955
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_map.mojo": {
+      "file": "test/iter/test_map.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07544660568237305
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3834059238433838
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_next.mojo": {
+      "file": "test/iter/test_next.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06130194664001465
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3819429874420166
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_nth.mojo": {
+      "file": "test/iter/test_nth.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06421184539794922
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.389909029006958
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_once.mojo": {
+      "file": "test/iter/test_once.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06354784965515137
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.100443363189697
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_peek.mojo": {
+      "file": "test/iter/test_peek.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06453227996826172
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.112248182296753
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_ref_iteration.mojo": {
+      "file": "test/iter/test_ref_iteration.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07765984535217285
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.143903017044067
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/iter/test_zip.mojo": {
+      "file": "test/iter/test_zip.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06839609146118164
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4187779426574707
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_count.mojo": {
+      "file": "test/itertools/test_count.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06517577171325684
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38546276092529297
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_cycle.mojo": {
+      "file": "test/itertools/test_cycle.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06793475151062012
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.41672396659851074
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_drop.mojo": {
+      "file": "test/itertools/test_drop.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06796526908874512
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4014139175415039
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_drop_negative_count.mojo": {
+      "file": "test/itertools/test_drop_negative_count.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06383395195007324
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38106393814086914
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_drop_while.mojo": {
+      "file": "test/itertools/test_drop_while.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06536698341369629
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4000589847564697
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_product.mojo": {
+      "file": "test/itertools/test_product.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08093070983886719
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.17348480224609375
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_repeat.mojo": {
+      "file": "test/itertools/test_repeat.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06450819969177246
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3844420909881592
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_take.mojo": {
+      "file": "test/itertools/test_take.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06627607345581055
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.40257787704467773
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_take_negative_count.mojo": {
+      "file": "test/itertools/test_take_negative_count.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06295514106750488
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38480710983276367
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/itertools/test_take_while.mojo": {
+      "file": "test/itertools/test_take_while.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06593489646911621
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3994781970977783
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/logger/test_logger.mojo": {
+      "file": "test/logger/test_logger.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06352901458740234
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3843851089477539
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/logger/test_logger_alias.mojo": {
+      "file": "test/logger/test_logger_alias.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06420111656188965
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6279699802398682
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/logger/test_logger_critical.mojo": {
+      "file": "test/logger/test_logger_critical.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06312274932861328
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5770430564880371
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/logger/test_logger_with_env.mojo": {
+      "file": "test/logger/test_logger_with_env.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06430697441101074
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38004279136657715
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_abs.mojo": {
+      "file": "test/math/gpu/test_abs.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06431698799133301
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.82293701171875
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_arithmetic_sm100.mojo": {
+      "file": "test/math/gpu/test_arithmetic_sm100.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0671389102935791
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39928674697875977
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_exp.mojo": {
+      "file": "test/math/gpu/test_exp.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06428909301757812
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.918726205825806
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_exp_approx_f32.mojo": {
+      "file": "test/math/gpu/test_exp_approx_f32.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06563997268676758
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.989543914794922
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_log.mojo": {
+      "file": "test/math/gpu/test_log.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0655210018157959
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.743499040603638
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_math.mojo": {
+      "file": "test/math/gpu/test_math.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06518006324768066
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.735111951828003
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_math_accuracy.mojo": {
+      "file": "test/math/gpu/test_math_accuracy.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06860971450805664
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.961636066436768
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_pow_bf16.mojo": {
+      "file": "test/math/gpu/test_pow_bf16.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06824707984924316
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.88707709312439
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_powf_bf16.mojo": {
+      "file": "test/math/gpu/test_powf_bf16.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07036900520324707
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.8919432163238525
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_recip.mojo": {
+      "file": "test/math/gpu/test_recip.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06697297096252441
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.034976005554199
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_rsqrt.mojo": {
+      "file": "test/math/gpu/test_rsqrt.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06646013259887695
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.847416162490845
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_sin_cos_f64.mojo": {
+      "file": "test/math/gpu/test_sin_cos_f64.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06492376327514648
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.815405607223511
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_sqrt_f64.mojo": {
+      "file": "test/math/gpu/test_sqrt_f64.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06438088417053223
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.810734033584595
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/gpu/test_trig.mojo": {
+      "file": "test/math/gpu/test_trig.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0648651123046875
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.701457262039185
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_erf.mojo": {
+      "file": "test/math/test_erf.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07721400260925293
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.743377208709717
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_exp.mojo": {
+      "file": "test/math/test_exp.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06576895713806152
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.862770080566406
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_ldexp.mojo": {
+      "file": "test/math/test_ldexp.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06446194648742676
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.647869825363159
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_math.mojo": {
+      "file": "test/math/test_math.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0806269645690918
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.129287004470825
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_max.mojo": {
+      "file": "test/math/test_max.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06342911720275879
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37310791015625
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_min.mojo": {
+      "file": "test/math/test_min.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06528401374816895
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3699009418487549
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_modf.mojo": {
+      "file": "test/math/test_modf.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06470680236816406
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.65489387512207
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_polynomial.mojo": {
+      "file": "test/math/test_polynomial.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0652318000793457
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38271212577819824
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_tanh.mojo": {
+      "file": "test/math/test_tanh.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07860708236694336
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.780367136001587
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_ulp_distance.mojo": {
+      "file": "test/math/test_ulp_distance.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0773160457611084
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3781759738922119
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/math/test_uutils.mojo": {
+      "file": "test/math/test_uutils.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06558990478515625
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.710452079772949
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_alloc.mojo": {
+      "file": "test/memory/test_alloc.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07926297187805176
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.753400802612305
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_arc.mojo": {
+      "file": "test/memory/test_arc.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08027291297912598
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.853076934814453
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_bitcast.mojo": {
+      "file": "test/memory/test_bitcast.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0655369758605957
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37993884086608887
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_is_trivially.mojo": {
+      "file": "test/memory/test_is_trivially.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07803487777709961
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38849306106567383
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_memory.mojo": {
+      "file": "test/memory/test_memory.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.09188103675842285
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.594034194946289
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_negative_index_span.mojo": {
+      "file": "test/memory/test_negative_index_span.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06451082229614258
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6123988628387451
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_owned_pointer.mojo": {
+      "file": "test/memory/test_owned_pointer.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07644796371459961
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39202308654785156
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_pointer.mojo": {
+      "file": "test/memory/test_pointer.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0782010555267334
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3885459899902344
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_span.mojo": {
+      "file": "test/memory/test_span.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08548402786254883
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.675075054168701
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/test_unsafe_maybe_uninit.mojo": {
+      "file": "test/memory/test_unsafe_maybe_uninit.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07748889923095703
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37996792793273926
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_bfloat16_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_bfloat16_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06365299224853516
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3696939945220947
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_disabled.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_disabled.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06232810020446777
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37067198753356934
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_float16_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_float16_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06266069412231445
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.373337984085083
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_float32_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_float32_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06437087059020996
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3770139217376709
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_float64_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_float64_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06384015083312988
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37543296813964844
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_gather_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_gather_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06534695625305176
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.57554030418396
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06516790390014648
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.737929105758667
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_no_false_positives.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_no_false_positives.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06690788269042969
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.966308116912842
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo": {
+      "file": "test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06535100936889648
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.5865190029144287
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/test_unsafe_pointer.mojo": {
+      "file": "test/memory/unsafe_pointer/test_unsafe_pointer.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08700799942016602
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.624992847442627
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_basename.mojo": {
+      "file": "test/os/path/test_basename.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06637120246887207
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38590312004089355
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_dirname.mojo": {
+      "file": "test/os/path/test_dirname.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06780314445495605
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37706780433654785
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_exists.mojo": {
+      "file": "test/os/path/test_exists.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06769394874572754
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3811349868774414
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_expanduser.mojo": {
+      "file": "test/os/path/test_expanduser.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06693196296691895
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.775141000747681
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_expandvars.mojo": {
+      "file": "test/os/path/test_expandvars.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0690908432006836
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39141201972961426
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_getsize.mojo": {
+      "file": "test/os/path/test_getsize.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06735610961914062
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37813782691955566
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_is_absolute.mojo": {
+      "file": "test/os/path/test_is_absolute.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06671929359436035
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37410926818847656
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_isdir.mojo": {
+      "file": "test/os/path/test_isdir.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06680583953857422
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11925983428955078
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_isfile.mojo": {
+      "file": "test/os/path/test_isfile.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06730175018310547
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37771010398864746
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_islink.mojo": {
+      "file": "test/os/path/test_islink.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06617903709411621
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.12082886695861816
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_join.mojo": {
+      "file": "test/os/path/test_join.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06600189208984375
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11762523651123047
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_realpath.mojo": {
+      "file": "test/os/path/test_realpath.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0670320987701416
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38356494903564453
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_split.mojo": {
+      "file": "test/os/path/test_split.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06700921058654785
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3848440647125244
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_split_extension.mojo": {
+      "file": "test/os/path/test_split_extension.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06664180755615234
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.945070743560791
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/path/test_splitroot.mojo": {
+      "file": "test/os/path/test_splitroot.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0676429271697998
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38359808921813965
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_chdir.mojo": {
+      "file": "test/os/test_chdir.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0662388801574707
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.048978805541992
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_env.mojo": {
+      "file": "test/os/test_env.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06672096252441406
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3757791519165039
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_isatty.mojo": {
+      "file": "test/os/test_isatty.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06591200828552246
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11683988571166992
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_link.mojo": {
+      "file": "test/os/test_link.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06606101989746094
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3734591007232666
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_listdir.mojo": {
+      "file": "test/os/test_listdir.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06685090065002441
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.36948680877685547
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_mkdir_and_rmdir.mojo": {
+      "file": "test/os/test_mkdir_and_rmdir.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06830883026123047
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3836972713470459
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_no_trap.mojo": {
+      "file": "test/os/test_no_trap.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06470012664794922
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11667203903198242
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_process.mojo": {
+      "file": "test/os/test_process.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0667269229888916
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.678805828094482
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_remove.mojo": {
+      "file": "test/os/test_remove.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06550407409667969
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37199997901916504
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_stat.mojo": {
+      "file": "test/os/test_stat.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06610584259033203
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3711099624633789
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_symlink.mojo": {
+      "file": "test/os/test_symlink.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06583118438720703
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3734860420227051
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_trap.mojo": {
+      "file": "test/os/test_trap.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06625103950500488
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11765313148498535
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/os/test_trap_gpu.mojo": {
+      "file": "test/os/test_trap_gpu.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06669878959655762
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.1168360710144043
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/pathlib/test_pathlib.mojo": {
+      "file": "test/pathlib/test_pathlib.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08142590522766113
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.40528178215026855
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/pwd/test_pwd.mojo": {
+      "file": "test/pwd/test_pwd.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06602597236633301
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37549901008605957
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_numpy.mojo": {
+      "file": "test/python/test_numpy.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06902623176574707
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 1.1938989162445068
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_ownership.mojo": {
+      "file": "test/python/test_ownership.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06776094436645508
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37989282608032227
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_cpython.mojo": {
+      "file": "test/python/test_python_cpython.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0757448673248291
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.908711910247803
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_error_handling.mojo": {
+      "file": "test/python/test_python_error_handling.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0663752555847168
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.37869691848754883
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_info.mojo": {
+      "file": "test/python/test_python_info.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06700921058654785
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.882559061050415
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_interop.mojo": {
+      "file": "test/python/test_python_interop.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06882810592651367
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.794301986694336
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_module_create.mojo": {
+      "file": "test/python/test_python_module_create.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06350898742675781
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6454010009765625
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_object.mojo": {
+      "file": "test/python/test_python_object.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07575201988220215
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 6.428461790084839
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/python/test_python_to_mojo.mojo": {
+      "file": "test/python/test_python_to_mojo.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0674431324005127
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.39011096954345703
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/random/test_philox.mojo": {
+      "file": "test/random/test_philox.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07039213180541992
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.9508960247039795
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/random/test_random.mojo": {
+      "file": "test/random/test_random.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07125115394592285
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.13805413246154785
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/random/test_random_internals.mojo": {
+      "file": "test/random/test_random_internals.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06811285018920898
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.794708967208862
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/reflection/test_function.mojo": {
+      "file": "test/reflection/test_function.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0671072006225586
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3849780559539795
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/reflection/test_location.mojo": {
+      "file": "test/reflection/test_location.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07096099853515625
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4202289581298828
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/reflection/test_reflect.mojo": {
+      "file": "test/reflection/test_reflect.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07462596893310547
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.4174439907073975
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/reflection/test_traits.mojo": {
+      "file": "test/reflection/test_traits.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07925105094909668
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.538403034210205
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/reflection/test_type_info.mojo": {
+      "file": "test/reflection/test_type_info.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06998205184936523
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.044779062271118
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_asyncrt.mojo": {
+      "file": "test/runtime/test_asyncrt.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0661323070526123
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.071490049362183
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_locks.mojo": {
+      "file": "test/runtime/test_locks.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06699705123901367
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.143744945526123
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_op_logging.mojo": {
+      "file": "test/runtime/test_op_logging.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06730914115905762
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.184131145477295
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_raising_asyncrt.mojo": {
+      "file": "test/runtime/test_raising_asyncrt.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07046318054199219
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.850583076477051
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_spin_waiter.mojo": {
+      "file": "test/runtime/test_spin_waiter.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06406688690185547
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.690280199050903
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/runtime/test_tracing.mojo": {
+      "file": "test/runtime/test_tracing.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06733489036560059
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.406117677688599
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/subprocess/test_run.mojo": {
+      "file": "test/subprocess/test_run.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06606912612915039
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.11953401565551758
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_aarch64_target.mojo": {
+      "file": "test/sys/test_aarch64_target.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06644082069396973
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.66611909866333
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_build_info_debug.mojo": {
+      "file": "test/sys/test_build_info_debug.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06653904914855957
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38289928436279297
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_c_types.mojo": {
+      "file": "test/sys/test_c_types.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06802940368652344
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.647559881210327
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_c_types_32bit.mojo": {
+      "file": "test/sys/test_c_types_32bit.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0678400993347168
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.581995964050293
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_compile.mojo": {
+      "file": "test/sys/test_compile.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06783103942871094
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.794921875
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_compile_debug.mojo": {
+      "file": "test/sys/test_compile_debug.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06609773635864258
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.752619028091431
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_compile_sanitize_address.mojo": {
+      "file": "test/sys/test_compile_sanitize_address.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0651860237121582
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.684950113296509
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_cstring.mojo": {
+      "file": "test/sys/test_cstring.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0814211368560791
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.650740146636963
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_dlhandle.mojo": {
+      "file": "test/sys/test_dlhandle.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06787109375
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.698743104934692
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_exit_0.mojo": {
+      "file": "test/sys/test_exit_0.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06560492515563965
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.6455180644989014
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_exit_1.mojo": {
+      "file": "test/sys/test_exit_1.mojo",
+      "interp": {
+        "status": "CRASH",
+        "elapsed": 0.06643414497375488
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.638422966003418
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_ffi.mojo": {
+      "file": "test/sys/test_ffi.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07385087013244629
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.741528749465942
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_intrinsics.mojo": {
+      "file": "test/sys/test_intrinsics.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06952500343322754
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.734820127487183
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_linux_target.mojo": {
+      "file": "test/sys/test_linux_target.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06736087799072266
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3911411762237549
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_macos_target.mojo": {
+      "file": "test/sys/test_macos_target.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06599187850952148
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.724820375442505
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_sizeof.mojo": {
+      "file": "test/sys/test_sizeof.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06744718551635742
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3810999393463135
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/sys/test_targetinfo.mojo": {
+      "file": "test/sys/test_targetinfo.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06678605079650879
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.700300931930542
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/tempfile/test_tempfile.mojo": {
+      "file": "test/tempfile/test_tempfile.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07053327560424805
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.4172821044921875
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/prop/test_random.mojo": {
+      "file": "test/testing/prop/test_random.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06987619400024414
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.13059186935424805
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/prop/test_runner.mojo": {
+      "file": "test/testing/prop/test_runner.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0676729679107666
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3966360092163086
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/prop/test_strategy.mojo": {
+      "file": "test/testing/prop/test_strategy.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0798649787902832
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.121220827102661
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/test_assert_raises.mojo": {
+      "file": "test/testing/test_assert_raises.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0684809684753418
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38928794860839844
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/test_assertion.mojo": {
+      "file": "test/testing/test_assertion.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.0709378719329834
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.591580867767334
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/test_suite.mojo": {
+      "file": "test/testing/test_suite.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06788897514343262
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.023414850234985
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/testing/test_suite_cli.mojo": {
+      "file": "test/testing/test_suite_cli.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06716418266296387
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 5.022726774215698
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/time/test_time.mojo": {
+      "file": "test/time/test_time.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06843805313110352
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.2280569076538086
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_coord.mojo": {
+      "file": "test/utils/test_coord.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.076080322265625
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.8601720333099365
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_index.mojo": {
+      "file": "test/utils/test_index.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07675290107727051
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3900637626647949
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_numerics.mojo": {
+      "file": "test/utils/test_numerics.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.07991194725036621
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 7.15873908996582
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_select.mojo": {
+      "file": "test/utils/test_select.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06791186332702637
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.12330007553100586
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_static_tuple.mojo": {
+      "file": "test/utils/test_static_tuple.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06645369529724121
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.3816978931427002
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_tuple.mojo": {
+      "file": "test/utils/test_tuple.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06629109382629395
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38352108001708984
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_type_functions.mojo": {
+      "file": "test/utils/test_type_functions.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.06786203384399414
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 0.38342905044555664
+      }
+    },
+    "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_variant.mojo": {
+      "file": "test/utils/test_variant.mojo",
+      "interp": {
+        "status": "PASS",
+        "elapsed": 0.08573079109191895
+      },
+      "jit": {
+        "status": "PASS",
+        "elapsed": 4.685979843139648
+      }
+    }
+  },
+  "summary": {
+    "interp": {
+      "pass": 333,
+      "fail": 0,
+      "crash": 1,
+      "timeout": 0
+    },
+    "jit": {
+      "pass": 334,
+      "fail": 0,
+      "crash": 0,
+      "timeout": 0
+    }
+  }
+}
