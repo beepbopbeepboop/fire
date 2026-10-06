@@ -1,5 +1,102 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.10 is new (2026-10-05, `work/formal29-4`): §0.9's defect has a THIRD source,
+one layer earlier, and it is 4 of the 105 items in the same sample — plus a
+MISATTRIBUTION in §0.6.3 that this measurement corrects.** `_entry_call` writes
+`def main(x): return f(x, x)`: it passes the startup stub's INTEGER to every
+parameter of the function it wraps. So a function whose body reads a FIELD
+through one of its own parameters is refused for a reason that is true of the
+harness's call and says nothing about the code generator — `t.width` cannot be
+lowered when `t` is the integer `x`, and the same function reached with a struct
+is a different program. It arrived as `codegen-refused`, which is the class
+`_refusal_class`'s own docstring names as the one a reader must not
+UNDER-count, and it is §0.9's exact shape one layer out: **a fact about this
+tool's own emission, counted against the thing being measured.**
+
+| class (105 items, both arches = 210 verdicts, phase A) | before | after |
+|---|---:|---:|
+| **`codegen-refused`** | **84** | **80** |
+| **`refused-harness-call`** (new) | 0 | **4** |
+| `proof-emitted` | 97 | 97 |
+| `proof-refused` | 17 | 17 |
+| `refused-builtin` | 12 | 12 |
+
+(The counts are VERDICTS, so each item contributes one per architecture. A
+second run over the same tree moves the sample itself whenever a repository file
+the selector reads has changed — §0.6.1's own warning — so the
+before/after that isolates this document's sibling commit compares the 208 items
+the two runs have in common, and that is the comparison
+`bugs/FORMAL_sweep_singles_second_half.md` §4a.1 records.)
+
+**The 4, named, and they are the §0.6.3 "field access through a value" row:**
+`mojo/backend_gimple/elab_intu.py:254:_callee_kind` (`gen._imported_generic_structs`),
+`mojo/backend_gimple/emit_stmts.py:3333:_loop_continue_bb` (`gen.loop_stack`),
+`mojo/middle/calls_shared.py:34:_ident_call_name` (`func_node.name`) and
+`mojo/middle/coro.py:2687:_mark_coro_body` (`body_fd._mojo_coro_body`). Every base
+is a parameter of the function the harness called, so every refusal was a
+statement about `_entry_call`.
+
+**Which makes §0.6.3's `whose it is` column wrong for that row, and it was
+wrong in the direction this document's §0.9 was fixed in.** The table attributes
+those 7 items to `FORMAL_pointer_value_model.md`, i.e. to the pointer value
+model; they are the harness's integer, not a pointer, and no pointer doc carries
+a row for them. The construct is a field read through a value whose layout the
+image cannot establish — the receiver/value model, which is
+`bugs/FORMAL_wide_receiver_by_reference.md` (`formal68-docs`) and the
+frame-receiver handoff (whose doc was deleted with its fix, so it is named by its
+symptom rather than by the deleted path); neither is this document's.
+**So that row's real owner was never recorded and its stated owner does not have
+it**, which is the failure mode `tools/dangling_doc_refs.py` exists for on a
+different kind of citation.
+
+**How the class decides, because the near-misses are the interesting part.**
+`_refusal_class` asks whether the unplaced base is a PARAMETER OF THE FUNCTION
+`_entry_call` CALLS — read back out of the emitted program through `main`, using
+`formal/build.py::parse_module` and `formal/model.py::function_param_shape`. Not
+"a parameter somewhere in the file": a transitively pulled-in helper's parameter
+is filled by the target's own call site, which is source this tool did not write.
+A field read through a LOCAL is the function's own problem. A `formal/examples`
+item's `main` is the FILE's own and its signature is not the harness's.
+`field_access_refusal`'s OTHER arm — "is a field of `o`, which the build DOES
+recognise as a frame receiver" — is a compiler bug by the model's own sentence
+and is matched by neither class. **A base that is a HELPER's parameter is left in
+`codegen-refused` even where the harness's integer reaches it through the
+target**, because the chain is not walked and under-counting the new class is
+the safe direction to be wrong in.
+
+**One thing this measurement found that is not about the census at all, and it
+is FIXED in the same commit: `_unlowered_builtins_in` could not read the text
+this tool writes.** The source is Mojo and `ast.parse` raises `SyntaxError` on
+the first line of a `struct` declaration, so the reader's `except` answered `[]`
+— which is indistinguishable from "this program calls no builtin this path does
+not lower" — and `_refusal_class`'s `refused-builtin` arm could not fire on any
+item whose program declares a struct, with `builtin_frontier` printing nothing
+for it. Both readers now go through `formal/build.py::parse_module`
+(`_parse_item_source`), and the measurement is the useful shape:
+
+| over this tree's 105-item sample | |
+|---|---:|
+| items `ast.parse` could NOT read | **6** |
+| items both readers could read, and they AGREE on every one | **99** (0 differences) |
+| class column movement from the fix | **0** — those 6 call no builtin this path does not lower |
+
+**So it is a guarantee and not a number, which is the whole point.** The arm was
+one `struct` away from mis-filing every row it exists for, and every
+`refused-builtin` figure this census has published was a lower bound with no
+stated floor. The `ast` import stays for the WORKLOAD selector, which reads this
+repository's own `*.py` and is CPython Python — the two never overlap, and the
+comment at `_parse_item_source` says which is which. Pinned by
+`test_formal_proof_breadth.py`'s `a_builtin_scan_reads_a_program_that_declares_a_struct`.
+
+**Tests:** `test_formal_proof_breadth.py` 33/33 (eight new cases: the positive one
+on BOTH architectures, the helper's parameter, a local base, a file-level
+`main`, the model's other arm, the class reaching the report, and the builtin
+scan on a struct-declaring program). The class column is 20 wide now —
+`refused-harness-call` overflowed 16 — and the one existing assertion that pinned
+the spacing was updated rather than loosened.
+
+## §0.9 (2026-10-05, `work/formal37-3`): the proof layer's own refusals, counted against the code generator
+
 **§0.9 is new (2026-10-05, `work/formal37-3`): the instrument's largest class was
 being FILLED with the proof layer's own refusals, and the A/B on one tree is 7
 of 60 items.** `tools/formal_proof_breadth.py::run_item` had two refusal arms and
@@ -1027,7 +1124,7 @@ is a `Counter` over the ledger.
 |---|---|---|---|
 | **20** | arm64 `proof-refused` | **a call to a second function in the same image** — `universal theorem: the call at 0x… targets 0x…, a second function in the same image. The machine model follows it -- every byte is present, and the callee's `ret` returns through x30 -- but the CFG walk is per-function` | `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` (filed here) |
 | **16** | both `codegen-refused` | **a string VALUE**: `'+'` on two strings, `'%'`/`<=`/`==` with a string operand, `join()`, `strip()`, `replace`, an f-string reaching `print()` | `FORMAL_string_value_model.md` (formal16-7) |
-| **7** | both `codegen-refused` | **a field access through a value** (`x.y`), which the path has no way to type | `FORMAL_pointer_value_model.md` (formal13-5) |
+| **7** | both `codegen-refused` | **a field access through a value** (`x.y`), which the path has no way to type — **CORRECTED 2026-10-05 (§0.10): all 7 are the HARNESS's integer, not a gap in the value model.** `_entry_call` passes the startup stub's integer to every parameter, so each base is a parameter of the function it wrapped and the refusal is about that call. They are now filed `refused-harness-call` | **none of the three named docs has this row.** It is the receiver/value model — `FORMAL_wide_receiver_by_reference.md` (`formal68-docs`) and the frame-receiver handoff (doc deleted with its fix) — and this table's `FORMAL_pointer_value_model.md` was an attribution nothing carried |
 | **6** | both `codegen-refused` | **a call this path does not lower**, refused by the LINK AUDIT rather than by name — `list`, `enumerate`, `max`, `min`, `REPORT.append`, `_DISPATCH_TABLE_GLOBAL_CTYPES.get` | `the link audit's naming of an unlowered callee.md` |
 | **4** | arm64 `proof-refused` | **a container literal with no value in the model** — `model: a ListExpr has no value in the semantic model`, and its Tuple/Dict/Ternary arms | the representation work; §6 |
 | **4** | arm64 `proof-refused` | **a call with no model** — `model: call to \`str\` has no model in this image`, `…to \`int\`…` | the same, one layer out |
