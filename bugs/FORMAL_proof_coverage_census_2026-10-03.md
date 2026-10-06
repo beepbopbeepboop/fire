@@ -794,7 +794,7 @@ with a doc of its own):
 | n | the site | whose |
 |---:|---|---|
 | 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
-| 5 | `⊢ (if sKey a ≤ sKey b then 1 else 0) = …` or a `t32s (t8s n) = n` round trip, all at `:2332:41` / `:2212:41` / `:61:57` | `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` and `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §Still open 3 |
+| 5 | `⊢ (if sKey a ≤ sKey b then 1 else 0) = …` or a `t32s (t8s n) = n` round trip, all at `:2332:41` / `:2212:41` / `:61:57` | **was** `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` — now **fixed and its document deleted**: the universal theorem carries `nw : n < 128` and the truncation discharges against it, so `sgt8`/`sle8`/`ug8`/`n8` are `PASS` with 0 admitted `sorry` (re-measured 2026-10-05, `PASS=4 KNOWN-GAP=0 FAIL=0`). The `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` half of this row is its `Still open 3`, which is about the loop MODELS and was never this obligation |
 | 2 | a frame-condition read: `fib`'s tree-recursion `FrameOk` window and `sum_range`'s conditions-operand slot | each has its own doc, both linked from `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
 
 **`too-large` is two examples at the SAME line** — `both_proof.lean:2600:8` and

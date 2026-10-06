@@ -61,9 +61,9 @@ about**.
 | 1 | `fact` | `lean-rejected` | `fact_proof.lean:2880:16: Tactic 'rfl' failed` — the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
 | 2 | `sqsum` | `lean-rejected` | `sqsum_proof.lean:3250:16`, the same goal | **no** | as #1 |
 | 3 | `sum` | `lean-rejected` | `sum_proof.lean:2880:16`, the same goal | **no** | as #1 |
-| 4 | `sgt8` | `lean-rejected` | `sgt8_proof.lean:2332:41: unsolved goals n : UInt64 …` — a narrow-typed-parameter round trip | **no** | `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` |
-| 5 | `sle8` | `lean-rejected` | `sle8_proof.lean:2332:41`, byte-identical to #4's goal | **no** | as #4 |
-| 6 | `ug8` | `lean-rejected` | `ug8_proof.lean:2212:41`, the same family | **no** | as #4 |
+| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on `sgt8_proof.lean:2332:41: unsolved goals n : UInt64 …` — a narrow typed parameter's truncation with no range hypothesis on the theorem, so Lean refused the file with no `sorry` in it. The universal theorem now carries `nw : n < 128` and the truncation discharges against it; 0 admitted `sorry`. Pinned by `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. Note the obligation is now spelled `t32s (t32u (t8s n))` — the extra `t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW` — so the `t32s (t8s n)` this row used to quote no longer matches the generator's text | **n/a — fixed** | — |
+| 5 | `sle8` | **PASS (2026-10-05)** | as #4; the obligation was byte-identical to #4's | **n/a — fixed** | — |
+| 6 | `ug8` | **PASS (2026-10-05)** | as #4, and its obligation is the different `t8u n = n` entirely | **n/a — fixed** | — |
 | 7 | `both` | `too-large` | `both_proof.lean:2600:8: (kernel) excessive memory consumption detected` | **no** | Lean's own `-M`, not the proof |
 | 8 | `either` | `too-large` | `either_proof.lean:2600:8` — **the same line as #7** | **no** | as #7 |
 | 9 | `sum_range` | `lean-rejected` | `sum_range_proof.lean:3136:175: unsolved goals s : Arm64State … h : mem_read_u64 s.mem (s.sp + …)` | **no** | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
@@ -200,15 +200,29 @@ up.
 
 ### What is NOT done here, and whose it is
 
-Items 1, 2, 3 and 5 are all **other claims** and were not touched: `fact`,
-`sqsum`, `sum` are `FORMAL_three_examples_fail_their_proofs_on_master.md`'s
-(`formal28-6-r2`); `sgt8`, `sle8`, `ug8` are
-`FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`'s
-(`formal28-2`); `floordiv`, `udivmod` are
-`FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`'s
-(`formal28-2`); `sum_range` is
-`FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`'s
-(`formal31-1`). **And `test_formal.py` is one of the eight Lean-checking formal
-gate tests that are `disabled=`,** so this change is not gating and was verified
-by its own classifier rows rather than by a run; the integration run over the
-whole corpus belongs to whoever re-enables that job.
+Items 1, 2 and 3 are **other work** and were not touched: `fact`, `sqsum`,
+`sum` are `FORMAL_three_examples_fail_their_proofs_on_master.md`'s, and they
+still fail on the same epilogue `x30` read — re-measured 2026-10-05 as
+`PASS=4 KNOWN-GAP=0 FAIL=3 TOO-LARGE=0` over `sgt8 sle8 ug8 n8 fact sqsum sum`,
+i.e. the four narrow-parameter stems PASS and those three FAIL. `floordiv`,
+`udivmod` are `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
+same_image.md`'s; `sum_range` is
+`FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`'s.
+
+**Items 4, 5 and 6 are no longer anybody's, because they are no longer broken.**
+They were a narrow typed parameter's truncation reaching the kernel with no range
+hypothesis on the theorem — `def sgt8(n: Int8)` narrowing the incoming word and
+the CFG walk then asking Lean for a round trip that is FALSE over the theorem's
+unconstrained `n`. The fix put `nw : n < 128` on the universal theorem and the
+truncation now discharges against it. **The document that owned this is deleted,
+which is why the reasoning is written out in the table above instead of cited:**
+a citation of a deleted document survives its subject, and nothing reported that
+these rows had stopped being true — the gap
+`tools/dangling_doc_refs.py` does not cover, since its ratchet counts citations
+rather than checking them. `bugs/FORMAL_a_surviving_citation_is_not_checked.md`
+is that gap's document.
+
+**And `test_formal.py` is one of the eight Lean-checking formal gate tests that
+are `disabled=`,** so the four re-measurements above were taken by running it
+directly rather than by a gate, and the integration run over the whole corpus
+belongs to whoever re-enables that job.

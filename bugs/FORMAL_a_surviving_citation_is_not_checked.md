@@ -12,14 +12,131 @@ the tool is right and the fix is the spelling, not the deletion. That is also th
 cleanest possible demonstration of the gap: the mechanism that catches a stale
 citation caught the document explaining stale citations.
 
-**Status: OPEN. The `bugs/`-prefixed dangling count is a deliberate floor of
-ONE (was zero), and that one is recorded here.**
-`tools/dangling_doc_refs.py --ratchet --write-baseline` raised
-`bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 0 → 1` so the gate stays
-green, because that file is another worker's and the project rule is explicit
-that the `bugs/`-prefixed corpus must not grow. The raise is the tool's own
-sanctioned escape and the reason is this file; a worker who fixes the citation
-should drop the entry rather than leave it.
+**Status: the FOUR ROWS are fixed (2026-10-05, `work/formal40-2`) and the
+baseline is back to its original floor. The instrument gap is NOT closed and is
+the whole of what is left.**
+
+Every claim that held one of the three files had been **released** by the time
+this was picked up — `python3 tools/control.py claims` lists no worker for any
+of them — so the standing rule ("report an area another worker holds rather
+than edit it") no longer applied and the rows were corrected against a fresh
+measurement rather than against the old doc's belief:
+
+| file | what changed |
+|---|---|
+| `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md:40` | the `sgt8`/`sle8` red is gone; the row is rewritten as the FIX with its current verdict and its pinning test |
+| `bugs/FORMAL_proof_coverage_census_2026-10-03.md:797` | the `lean-rejected` family's owner is marked fixed, with the four stems' new verdict |
+| `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md:64,206` | rows 4/5/6 moved from `lean-rejected` to `PASS`, and the "whose it is" prose says they are no longer anybody's because they are no longer broken |
+
+```
+$ python3 test_formal.py -j 1 sgt8 sle8 ug8 n8
+  [1/4] PASS  sgt8   [2/4] PASS  sle8   [3/4] PASS  ug8   [4/4] PASS  n8
+Results for arm64 formal proofs: PASS=4 KNOWN-GAP=0 FAIL=0 TOO-LARGE=0
+proof census: 0 admitted `sorry` in the generated file, in 0 of 4 proof(s) checked
+```
+
+**And the sanctioned escape this document recorded is withdrawn**, which is the
+part that made the raise safe to begin with: the baseline entry
+`'bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md': 1` is gone from
+`tools/dangling_refs_baseline.py`, so the corpus is back at the floor of zero it
+started from. `tools/dangling_doc_refs.py --ratchet` is green and its count went
+**7 → 6**, and `test_suite.py` is 335/0 — the self-test that checks the registry
+and the ratchet agree agrees.
+
+**A fourth citation exists that this document did not list, and it is already
+honest.** `bugs/FORMAL_floordiv_and_udivmod_are_red.md:4` names the same
+deleted document, and its sentence is *"Found 2026-10-05 while fixing
+`…`"* — a statement about the history, which is what
+`BARE_REF`'s `deleted_convention` exists to skip. It is also **another worker's
+live claim** (`formal40-5`), so it was left alone on both counts.
+
+## What is still open: the instrument gap, and it is the worthier half
+
+**The ratchet counts citations of deleted documents; it does not check that a
+surviving one is still TRUE, and nothing in the tree does.** The four rows above
+were false about the tree for as long as the document they named existed, and
+the only thing that reported them was a reader who went looking — which is the
+definition of a gap.
+
+Two halves, and the first is already done and is worth knowing about:
+**`tools/dangling_doc_refs.py::bare_find` catches the un-prefixed spelling**
+(`BARE_REF`, and its existence-by-name resolution, since a bare stem is only a
+citation when no file of that name exists anywhere in the tree). It reports 306
+of them across 114 files and is **deliberately not in the ratchet** — a bare
+name has no convention separating the ~20 historical "was X, deleted" sentences
+from a new one, so a ledger for it would have to bless every existing sentence
+and would move whenever any branch edits prose in a file another branch is
+editing. That reasoning is still sound.
+
+**What is missing is the second half the document names, and it is a different
+check rather than a second regex.** "Every `bugs/` path named in another `bugs/`
+document still exists" is the `dangling` half and has been implemented since
+this was written. What does not exist is any check that a document's *claims*
+about the tree are still its claims — which is undecidable in general and
+decidable for the narrow, high-value case here: **a `bugs/` document that states
+a TEST STATUS is checked against the registry by `test_suite.py`, and a document
+that states a TALLY is not checked against anything.** The three rows fixed above
+were of the second kind (a per-stem verdict table), which is why nothing
+noticed. The cheapest honest version of the check is the one
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md` demonstrates: re-measure, then
+replace the row with the fact rather than with a pointer to whoever owned it.
+
+**The next step, in order.** (1) Teach `dangling_doc_refs.py` to report — not
+to fail on — a `bugs/` document whose most recent `PASS`/`FAIL` claim names a
+stem whose current verdict is different, for the handful of documents that keep
+a verdict TABLE (`FORMAL_eighteen_examples…` and `FORMAL_proof_coverage_census…`
+are the two). (2) Leave it reporting-only, for `BARE_REF`'s reason: the tables
+are prose-adjacent and a branch that fixes one must be able to move it without a
+ledger. (3) Add the negative control — a fixture table with a deliberately wrong
+verdict — because a checker that cannot fail is not a checker.
+
+**What this does NOT do:** it does not make any stale citation fail, and it does
+not cover the `test_suite.py` fixtures, which are six deliberate
+self-referential citations and stay a fixed intentional number.
+
+## What is still open: the instrument gap, and it is the worthier half
+
+**The ratchet counts citations of deleted documents; it does not check that a
+surviving one is still TRUE, and nothing in the tree does.** The four rows above
+were false about the tree for as long as the document they named existed, and
+the only thing that reported them was a reader who went looking — which is the
+definition of a gap.
+
+Two halves, and the first is already done and is worth knowing about:
+**`tools/dangling_doc_refs.py::bare_find` catches the un-prefixed spelling**
+(`BARE_REF`, and its existence-by-name resolution, since a bare stem is only a
+citation when no file of that name exists anywhere in the tree). It reports 306
+of them across 114 files and is **deliberately not in the ratchet** — a bare
+name has no convention separating the ~20 historical "was X, deleted" sentences
+from a new one, so a ledger for it would have to bless every existing sentence
+and would move whenever any branch edits prose in a file another branch is
+editing. That reasoning is still sound.
+
+**What is missing is the second half the document names, and it is a different
+check rather than a second regex.** "Every `bugs/` path named in another `bugs/`
+document still exists" is the `dangling` half and has been implemented since
+this was written. What does not exist is any check that a document's *claims*
+about the tree are still its claims — which is undecidable in general and
+decidable for the narrow, high-value case here: **a `bugs/` document that states
+a TEST STATUS is checked against the registry by `test_suite.py`, and a document
+that states a TALLY is not checked against anything.** The three rows fixed above
+were of the second kind (a per-stem verdict table), which is why nothing
+noticed. The cheapest honest version of the check is the one
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md` demonstrates: re-measure, then
+replace the row with the fact rather than with a pointer to whoever owned it.
+
+**The next step, in order.** (1) Teach `dangling_doc_refs.py` to report — not
+to fail on — a `bugs/` document whose most recent `PASS`/`FAIL` claim names a
+stem whose current verdict is different, for the handful of documents that keep
+a verdict TABLE (`FORMAL_eighteen_examples…` and `FORMAL_proof_coverage_census…`
+are the two). (2) Leave it reporting-only, for `BARE_REF`'s reason: the tables
+are prose-adjacent and a branch that fixes one must be able to move it without a
+ledger. (3) Add the negative control — a fixture table with a deliberately wrong
+verdict — because a checker that cannot fail is not a checker.
+
+**What this does NOT do:** it does not make any stale citation fail, and it does
+not cover the `test_suite.py` fixtures, which are six deliberate
+self-referential citations and stay a fixed intentional number.
 
 It is NOT a dangling citation in the ratchet's sense — `tools/dangling_doc_refs.py
 --ratchet` is green — which is the point of filing it. The ratchet checks that no
@@ -82,23 +199,21 @@ fixed in formal/arm64_proof_gen.py, pinned by
 test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange
 ```
 
-**The instrument gap this is really about**, which is worth more than the four
-rows: `tools/dangling_doc_refs.py` proves the corpus of citations can only
-shrink, and nothing proves a surviving citation is still TRUE. A citation
-survives its subject. If the ratchet is ever extended, the check to add is
-"every `bugs/` path named in another `bugs/` document still exists" — which is
-the `dangling` half and is already implemented — **plus** a per-file ratchet on
-the count of citations *to a document that has been deleted*, which is what
-would have caught these four at the moment of the delete rather than at the next
-reader's convenience.
-
 ## Reproducing
 
 ```console
 $ python3 tools/dangling_doc_refs.py --ratchet     # green — the point
+$ python3 tools/dangling_doc_refs.py                # 6 prefixed, 306 BARE
+$ python3 test_formal.py -j 1 sgt8 sle8 ug8 n8     # PASS=4 FAIL=0
+$ python3 test_suite.py                            # 335 passed
 $ grep -rn FORMAL_arm64_a_narrow_typed_parameter bugs/ --include=*.md
 ```
 
-Four hits, in the three files named above, plus `bugs/OPEN_WORK.md` if it lists
-the document by name (check before editing: it is a triage index and its rows
-move as claims are taken and released).
+Two hits remain, both honest: this document (which is ABOUT the deleted name and
+says so with the `deleted` convention `BARE_REF` skips on), and
+`bugs/FORMAL_floordiv_and_udivmod_are_red.md`, whose sentence is *"Found
+2026-10-05 while fixing `…`"* — a statement about the history rather than a
+claim on it, and another worker's live claim (`formal40-5`) besides.
+`bugs/TEST_the_two_dangling_ref_mechanisms_disagree_and_suite_self_test_is_red.md`
+names it in its own reproduction, which is the third and is that document's
+subject.

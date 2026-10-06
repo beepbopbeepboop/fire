@@ -33,12 +33,37 @@ typechecks with zero holes, which is the strongest single result here: the
 `dec`-while contract's two back-edge obligations and both loop-contract closers
 are not holes at all for the shape they were written for.
 
-**Two reds this entry's `PASS=39 KNOWN-GAP=6 FAIL=0` no longer describes, both
-pre-existing and neither a `sorry`:** `count` fails at proof line 5330
-(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`), and `sgt8`/`sle8` fail
-on the obligation `⊢ t32s (t8s n) = n`
-(`bugs/FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md`).
-Neither stem is in `test_formal.py`'s `EXPECTED_FAILURES`.
+**One red this entry's `PASS=39 KNOWN-GAP=6 FAIL=0` no longer describes, and it
+is pre-existing and not a `sorry`:** `count` fails at proof line 5330
+(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`). It is not in
+`test_formal.py`'s `EXPECTED_FAILURES`.
+
+**The `sgt8`/`sle8` row that used to sit beside it is GONE, and its owner was
+deleted with its fix.** These four were **lean-rejected**: `def sgt8(n: Int8)`
+narrowed the incoming word (`SXTB` then `SXTW`) and the CFG walk then asked Lean
+for `⊢ t32s (t8s n) = n`, which is FALSE over the theorem's unconstrained `n`,
+so Lean rejected the file with no `sorry` anywhere. The universal theorem now
+carries the range hypothesis that obligation needs (`nw : n < 128`) and the
+truncation discharges against it. Re-measured 2026-10-05:
+
+```
+$ python3 test_formal.py -j 1 sgt8 sle8 ug8 n8
+  [1/4] PASS  sgt8
+  [2/4] PASS  sle8
+  [3/4] PASS  ug8
+  [4/4] PASS  n8
+Results for arm64 formal proofs: PASS=4 KNOWN-GAP=0 FAIL=0 TOO-LARGE=0
+proof census: 0 admitted `sorry` in the generated file, in 0 of 4 proof(s) checked
+```
+
+Note the obligation's spelling also moved: this sentence recorded
+`t32s (t8s n)` where the generator emits `t32s (t32u (t8s n))` (the extra
+`t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW`), and `ug8`'s is the
+different `t8u n = n` entirely. Pinning is in
+`test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. The
+document that used to own this is deleted, so the fact is recorded here rather
+than left to a citation of it — which is the whole of
+`bugs/FORMAL_a_surviving_citation_is_not_checked.md`.
 
 **`Still open 3` below is unchanged and is still the whole of what is left here.**
 What is new is that the work is now pinned to two model changes with the sites
