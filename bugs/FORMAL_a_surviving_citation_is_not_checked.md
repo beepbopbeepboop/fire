@@ -134,7 +134,14 @@ the ledger. A check that punishes a fix is a check that gets disabled.
 
 **The stale entry is dropped**, which is the fix the tool then named:
 `tools/dangling_refs_baseline.py` is one entry smaller, so the corpus count the
-ledger implies is the corpus the tree has.
+ledger implies is the corpus the tree has. **A merger dropped the same entry
+independently** (`17402790`, "take master's un-dangling of the narrow-typed-
+parameter citation, and bank the baseline drop") while this work was in flight, so
+the ledger change is a convergent duplicate rather than a conflict — which is
+the outcome the ratchet is for. **The tool fix is not duplicated there**: that
+commit removed the entry but left `stale_baseline_entries` reading
+`ledger_verdicts`, so the blindness that HID the entry is still in place and the
+next one will be invisible again in exactly the same way.
 
 Pinned by `test_suite.py`'s `dangling refs: an entry for a file that cites
 NOTHING is stale too, which the corpus join cannot see`, which asserts the
