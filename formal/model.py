@@ -26232,6 +26232,124 @@ def builtin_base_fields(base: str) -> tuple:
     return ()
 
 
+# ── the EXCEPTION KIND TABLE: one small integer per class this image can name ──
+#
+# Shared infrastructure for the unwinder, landed on its own and fixing nothing
+# by itself — which is the honest description and the reason it is worth having
+# separately. `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
+# designs the convention: one callee-visible word per function meaning "an
+# exception is in flight", holding the KIND of the current exception, and §5
+# step 2 is this. The dispatch, the raise sites, the CFG and the Lean model are
+# steps 3-6 and are not attempted; **nothing reads this table yet**, and a
+# reader should not mistake it for a working unwinder.
+#
+# **TWO DISJOINT RANGES, and that is the whole requirement.** Both backends and
+# both proof generators must agree about which integer means `ValueError`,
+# because the word is written by one and read by another; and the agreement has
+# to survive an image DECLARING a class of its own, because a dylib and the
+# executable that links it are two `_prepare_functions` runs with different
+# declared sets and the same CPython half. Measured on the first version of this
+# function, which numbered one sorted set: adding `class MyErr` moved
+# `ValueError` from 38 to 69, so a word written by the library would have meant
+# nothing in the caller's image.
+#
+# So the ranges are separate: `CPYTHON_EXCEPTION_BASES` occupies 1..N by sorted
+# name, and a class THIS IMAGE declares occupies N+1.. by sorted name. Adding a
+# declaration cannot move a builtin, and adding a builtin cannot move a
+# declaration's relative order. 0 is reserved for "no exception in flight", so a
+# zeroed frame is a frame with nothing to dispatch and every real kind is
+# distinguishable from it without a second flag.
+_EXCEPTION_KINDS: dict = {}
+
+
+def exception_kind_table(structs=None) -> dict:
+    """`{exception class name: kind}` for every class THIS IMAGE can name.
+
+    The names are `CPYTHON_EXCEPTION_BASES` plus the classes `structs` declares,
+    in the two disjoint ranges the block comment above states. A name in both
+    takes the CPython range — it IS the same class by name, and one name must
+    not have two integers.
+
+    **`structs` is the image's own class table and it is `None`-tolerant**,
+    because the emitters and the proof generators hold the class table under
+    different names and a caller with none must still get CPython's half — which
+    is the half two images built from the same sources always agree on.
+
+    **A class the image cannot name has no entry, and that is what the callers
+    must treat as the interesting case rather than as absence.** §4's third
+    bullet: an image whose `raise` or `except` names a class from outside
+    `CPYTHON_EXCEPTION_BASES` and outside its own declarations is an UNMODELLED
+    base, and §4's answer for it is a kind that is real but not matchable by
+    name. This function deliberately does NOT invent that kind — it cannot, it
+    does not know which class is meant — and `exception_kind_for` is where a
+    caller asks the question that has an answer.
+    """
+    builtins = sorted(CPYTHON_EXCEPTION_BASES)
+    table = {name: i + 1 for i, name in enumerate(builtins)}
+    # The declared half, from the top of the reserved space and in name order,
+    # skipping any name CPython already numbers. Written as one pass with the
+    # membership test FIRST because the alternative — a `setdefault` that both
+    # inserts and leaves the counter un-advanced for a shadowing name — is
+    # exactly the off-by-one that shows up as two images disagreeing about one
+    # class's integer, which is the failure this split exists to prevent.
+    nxt = len(builtins) + 1
+    for name in sorted(str(s) for s in (structs or {})):
+        if name in table:
+            continue
+        table[name] = nxt
+        nxt += 1
+    return table
+
+
+def publish_exception_kinds(table: dict) -> None:
+    """Install `table` as this image's kind numbering.
+
+    REPLACES, for `publish_module_symbols`'s reason and not
+    `publish_non_ascii_strings`'s: this is one property of ONE image, and two
+    images built in one process must not see each other's numbering. The
+    clear is at the top of the image beside the other two.
+    """
+    global _EXCEPTION_KINDS
+    _EXCEPTION_KINDS = dict(table or {})
+
+
+def exception_kinds() -> dict:
+    """The published `{class: kind}` table. Empty before a publish."""
+    return dict(_EXCEPTION_KINDS)
+
+
+def clear_exception_kinds() -> None:
+    """Start a NEW IMAGE's kind numbering over.
+
+    The third of the three per-image tables, and it exists for the same reason
+    as the other two: without it the second program a harness builds inherits
+    the first one's numbering, and an image whose declared classes differ gets
+    the first one's integers. `formal/build.py::compile_formal` is the one
+    caller that is not a test.
+    """
+    global _EXCEPTION_KINDS
+    _EXCEPTION_KINDS = {}
+
+
+def exception_kind_for(name: str, kinds: dict = None):
+    """The kind `name` has in this image, or None when the image cannot name it.
+
+    **None is the ANSWER for an unmodelled base, not a failure to look.** §4's
+    third bullet is exactly this case — a `raise` of, or an `except` for, a class
+    from outside CPython's hierarchy and outside this image's declarations — and
+    §4 says it "gets kind 1 and is not matchable by name, which is honest rather
+    than convenient". So a caller that has a class it cannot name asks here and
+    is told so; what it does with that (refuse the arm, or give the exception a
+    single unmatchable kind) is the design question §4 records as still open,
+    and it is NOT decided here.
+
+    `kinds` defaults to the published table, so a proof generator holding `info`
+    and an emitter holding nothing answer the same question the same way.
+    """
+    table = exception_kinds() if kinds is None else kinds
+    return table.get(str(name)) if name else None
+
+
 # ── what a `raise` of an exception CLASS lowers to ─────────────────────────
 #
 # `raise E(...)` / `raise E` where `E` names a CPython builtin exception class

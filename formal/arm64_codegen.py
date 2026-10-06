@@ -1084,6 +1084,16 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
+            # The EXCEPTION KIND TABLE, published rather than recomputed and put
+            # in `info` for both proof generators to read, because the word an
+            # unwinder writes on one side has to mean the same integer on the
+            # other (`model.exception_kind_table`'s docstring). Nothing reads it
+            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # §5, where this is step 2 of 6. `info` rather than a re-derivation
+            # here is the point: x86-64's `info` carries the same table from the
+            # same publisher, so a proof that reads one cannot drift from the
+            # other.
+            "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text: a string literal's value
             # on this path is the address of its bytes, and this is where those
             # addresses are.  `self._str_intern` is interning by content, so it

@@ -1047,6 +1047,13 @@ class X86_64Codegen:
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
+            # The EXCEPTION KIND TABLE — the same publisher, the same key and
+            # the same reason as arm64's copy: the word an unwinder writes on one
+            # side has to mean the same integer on the other, and `info` is how
+            # both proof generators are handed one list instead of each
+            # recomputing it. Nothing reads it yet
+            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
             # literal's value is the address of its bytes, and the label

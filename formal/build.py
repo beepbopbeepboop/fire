@@ -1748,6 +1748,11 @@ def compile_formal(source_path: str, output: str = None,
     # inherit the first program's compiled modules and refuse a `try` on their
     # account.
     M.clear_module_raisers()
+    # …and this image's EXCEPTION KIND NUMBERING, which is the third per-image
+    # table and is here for the same reason: the numbering is only meaningful
+    # relative to the set of classes THIS image can name, so a second image
+    # built in one process must not inherit the first one's.
+    M.clear_exception_kinds()
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
@@ -16941,6 +16946,22 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             seen_struct.add(st.name)
             structs.append(st)
     structs_by_name = {st.name: st for st in structs}
+    # …and the EXCEPTION KIND TABLE, published here because `structs_by_name` is
+    # the first point this unit's own class NAMES are complete: the table is
+    # `CPYTHON_EXCEPTION_BASES` plus what this unit declares, numbered by sorted
+    # name so both backends and both proof generators get the same integers out
+    # of it (`model.exception_kind_table`'s docstring says why that property is
+    # the whole requirement).
+    #
+    # **This fixes nothing on its own, and that is the point of landing it
+    # separately.** It is the shared infrastructure the unwinder design asks for
+    # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 2), and
+    # nothing reads it yet: the dispatch, the raise sites, the CFG and the Lean
+    # model are steps 3-6. It is here, in the one pipeline both front ends go
+    # through, so that when step 3 lands there is ONE list rather than one per
+    # backend — which is the failure mode that produced this tree's recurring
+    # two-architecture answer splits.
+    M.publish_exception_kinds(M.exception_kind_table(structs_by_name))
     # `@dataclass` is a COMPILE-TIME transform (formal/dataclass_transform.py
     # has the measurement that decides the layer), so it runs HERE, in the one
     # pipeline both front ends go through, and not in a backend: a Mojo

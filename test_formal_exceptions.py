@@ -68,6 +68,146 @@ def check(ok, what, detail=""):
     return bool(ok)
 
 
+def kind_table_checks():
+    """The EXCEPTION KIND TABLE, asked as a pure function. No build, no Lean.
+
+    **This is shared infrastructure and it fixes nothing yet**, and the rows say
+    so: it is step 2 of six in
+    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`, and the dispatch,
+    the raise sites, the CFG and the Lean model are steps 3-6. It is pinned
+    because it is the one place a future unwinder's correctness rests, and the
+    property that matters there is not "does it produce a number" but "do two
+    images agree about which number means the same class".
+    """
+    import formal.model as M
+
+    plain = M.exception_kind_table()
+
+    check(0 not in plain.values(),
+          "kind table: 0 is reserved for 'no exception in flight'",
+          "some class was numbered 0, so a zeroed frame would be "
+          "indistinguishable from an exception being raised")
+
+    check(set(plain) == set(M.CPYTHON_EXCEPTION_BASES),
+          "kind table: every CPython exception class is numbered",
+          f"{sorted(set(M.CPYTHON_EXCEPTION_BASES) - set(plain))[:5]} missing")
+    check(len(plain) == len(set(plain.values())),
+          "kind table: one integer per class, no collisions",
+          "two classes share an integer, so a compare against it cannot say "
+          "which one is in flight")
+
+    # THE property. A dylib and the executable that links it are two
+    # `_prepare_functions` runs with DIFFERENT declared sets and the same
+    # CPython half, and the word an unwinder writes on one side has to mean the
+    # same thing in the other's. Measured on the first version of this function,
+    # which numbered one sorted set: declaring `MyErr` moved `ValueError` from
+    # 38 to 69.
+    with_one = M.exception_kind_table({"MyErr": 1})
+    with_two = M.exception_kind_table({"Aaa": 1, "Zed": 2})
+    check(plain["ValueError"] == with_one["ValueError"]
+          == with_two["ValueError"],
+          "kind table: a builtin keeps its integer whatever the image declares",
+          f"ValueError is {plain['ValueError']} / {with_one['ValueError']} / "
+          f"{with_two['ValueError']} across three images")
+    check(min(v for k, v in with_one.items() if k not in plain)
+          > max(plain.values()),
+          "kind table: the declared range starts above the CPython range",
+          "a declared class and a CPython class can collide, so one image's "
+          "declared class would read as another's builtin")
+
+    # A declared name that SHADOWS a CPython one is the same class by name, so
+    # it must not get a second integer — one name, one integer.
+    shadow = M.exception_kind_table({"ValueError": 1})
+    check(shadow["ValueError"] == plain["ValueError"],
+          "kind table: a declared class shadowing a builtin keeps its integer",
+          f"{shadow['ValueError']} against {plain['ValueError']}")
+
+    check(M.exception_kind_for("Widget", plain) is None,
+          "kind table: a class the image cannot name has NO kind",
+          "it was given one, so `except Widget:` would look matchable when the "
+          "image cannot say what Widget is")
+    check(M.exception_kind_for("ValueError", plain) == plain["ValueError"],
+          "kind table: a nameable class answers with its integer")
+    check(M.exception_kind_for("", plain) is None,
+          "kind table: no name is not a kind")
+
+    # The publish/replace/clear trio, because the numbering is only meaningful
+    # relative to ONE image and a harness that builds two programs must not have
+    # the second inherit the first's table.
+    saved = M.exception_kinds()
+    try:
+        M.publish_exception_kinds(plain)
+        check(M.exception_kinds() == plain,
+              "kind table: publish installs what it was handed")
+        M.publish_exception_kinds({"Only": 1})
+        check(M.exception_kinds() == {"Only": 1},
+              "kind table: publish REPLACES rather than merges",
+              "a second publish kept the first image's classes, so a kind would "
+              "mean different things in two images built in one process")
+        check(M.exception_kind_for("ValueError") is None,
+              "kind table: a caller with no argument reads the published one")
+    finally:
+        M.clear_exception_kinds()
+        check(M.exception_kinds() == {},
+              "kind table: clear empties it for the next image")
+        M.publish_exception_kinds(saved)
+
+
+def kind_table_in_info_checks(tmpdir):
+    """Both backends' `info` must carry the SAME published table, under one key.
+
+    The proof generators read `info`, so this is what makes "one list" true
+    rather than aspirational: two emitters that each computed their own would
+    agree today and could not be shown to. It is read out of the `(code, info)`
+    pair each backend's `compile` RETURNS — the same object the linker and the
+    proof generators are handed — rather than out of the publisher, because the
+    claim is about what a PROOF GENERATOR is given and only `info` is that.
+    """
+    import formal.build as FB
+    from formal.arm64_codegen import ARM64Codegen
+    from formal.x86_64_codegen import X86_64Codegen
+
+    src = ('class MyErr(ValueError):\n'
+           '    """no fields at all"""\n'
+           '\n'
+           '\n'
+           'def boom():\n'
+           '    raise MyErr("the message")\n'
+           '\n'
+           'def main(n):\n'
+           '    boom()\n'
+           '    return 0\n')
+    check(FB.M.exception_kind_for("MyErr") is None,
+          "kind table: nothing is published before a unit is prepared",
+          "a kind was already installed, so the numbering a proof generator "
+          "reads is not this image's")
+    seen = {}
+    for label, cls in (("arm64", ARM64Codegen), ("x86_64", X86_64Codegen)):
+        try:
+            stmts = FB.parse_module(src, filename=f"<{label}>")
+            _fns, _structs, _symbols, _slots = FB._prepare_functions(
+                stmts, synthetic=True, source_path=None)
+            _code, info = cls().compile(stmts, structs=None)
+        except Exception as exc:                          # noqa: BLE001
+            check(False, f"the kind-table program compiles on {label}",
+                  repr(exc)[:200])
+            continue
+        seen[label] = info.get("exception_kinds")
+        check(seen[label] is not None,
+              f"{label}'s info carries the exception kind table",
+              "`exception_kinds` is absent from `info`, so a proof generator "
+              "reading it would have no table to read")
+    if len(seen) == 2 and all(seen.values()):
+        check(seen["arm64"] == seen["x86_64"],
+              "both backends hand their proof generators the SAME kind table",
+              f"arm64 has {len(seen['arm64'])} entries and x86-64 has "
+              f"{len(seen['x86_64'])}, and they differ")
+        check(FB.M.exception_kind_for("MyErr") is not None,
+              "kind table: the image's own class is nameable in it",
+              "`class MyErr(ValueError)` did not get a kind, so a `raise MyErr` "
+              "would be an exception the image cannot name")
+
+
 def build(source, out, backend=None, tmpdir=None, arg=3):
     """`fire.py build --formal --no-prove -n <arg>`, as (rc, output).
 
@@ -825,6 +965,9 @@ def main():
                 continue
             run_cross_module_answered(name, files, needle, tmpdir,
                                       args.verbose)
+        kind_table_checks()
+        if not args.cases:
+            kind_table_in_info_checks(tmpdir)
 
     total = len(RESULTS)
     passed = sum(1 for ok, _ in RESULTS if ok)

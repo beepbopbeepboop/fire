@@ -2,10 +2,39 @@
 # fixing in one function is that EVERY arm in this repository calls something
 
 **Area:** FORMAL, exceptions. Claim `project33:exceptions`, measured 2026-10-05
-on `work/formal33-exceptions`. **OPEN.** The uncaught half of the exception
-contract landed on that branch (three commits: `raise` of a class leaving with
-CPython's status, a float `/` by a zero divisor leaving, and a failing `assert`
-running its message and its enclosing `finally`) and this is the remainder.
+on `work/formal33-exceptions`. **OPEN, with §5 step 2 LANDED (2026-10-05,
+`work/formal40-2`).** The uncaught half of the exception contract landed on that
+branch (three commits: `raise` of a class leaving with CPython's status, a float
+`/` by a zero divisor leaving, and a failing `assert` running its message and its
+enclosing `finally`) and this is the remainder.
+
+**§5 step 2 is done and it is shared infrastructure that fixes nothing by
+itself** — which is what §5 said it would be, and it is landed separately for
+that reason rather than as a claim of progress. `formal/model.py` now has the
+kind table: `exception_kind_table(structs)` builds it,
+`publish_exception_kinds` / `exception_kinds` / `clear_exception_kinds` are the
+per-image trio beside the other two, `formal/build.py::_prepare_functions`
+publishes it at the point `structs_by_name` is first complete, and **both**
+emitters put `M.exception_kinds()` into `info["exception_kinds"]` so the two
+proof generators read one list rather than one each. **Nothing reads the table
+yet**; steps 1, 3, 4, 5 and 6 are untouched and §4's two open design questions
+(the superclass-matching question and the `as e` question) are still open and
+still block the emitters, exactly as §5 step 1 says.
+
+**The one design decision this step had to make, and it is not §4's two:** the
+numbering has to survive an image DECLARING a class, because a dylib and the
+executable that links it are two `_prepare_functions` runs with different
+declared sets and the same CPython half — so a word written by the library would
+mean nothing in the caller's image. Measured on the first version of the
+function, which numbered one sorted set: declaring `MyErr` moved `ValueError`
+from 38 to 69. The two ranges are therefore disjoint (`CPYTHON_EXCEPTION_BASES`
+at 1..N by sorted name, the image's own classes at N+1.. by sorted name), 0 is
+reserved for "no exception in flight", and a declared name that shadows a
+builtin keeps the builtin's integer. Pinned in
+`test_formal_exceptions.py::kind_table_checks` (14 pure-function rows, no build
+and no Lean) and `::kind_table_in_info_checks` (which reads it out of the
+`(code, info)` pair each backend's `compile` RETURNS, so the claim is about what
+a proof generator is handed). That file is 228/0, up from 198.
 
 **Read this before planning the work.** The obvious plan — emit the arms, route
 a `raise` inside the same function to the arm that matches — is measurably
@@ -173,11 +202,18 @@ a FRAME on this path and copying one per raise site is a frame-budget question
 1. **Decide §4's superclass question and the `as e` question.** Both are
    design, both block the emitters, and neither is discoverable by reading more
    code. Write the answers here.
-2. **The kind table** in `formal/model.py`: `{class name -> integer}`, from
+2. ~~**The kind table** in `formal/model.py`: `{class name -> integer}`, from
    `CPYTHON_EXCEPTION_BASES` plus this unit's declarations, published in
    `info` so both emitters and both proof generators read ONE list. This is
    shared infrastructure and fixes nothing by itself — it is worth landing on
-   its own and saying so.
+   its own and saying so.~~ **DONE** (2026-10-05, `work/formal40-2`): see the
+   Status. `model.exception_kind_table` + the publish/clear trio, published in
+   `_prepare_functions` where the image's own class names are first complete,
+   and `info["exception_kinds"]` in BOTH emitters. The numbering is two
+   disjoint ranges rather than one sorted set, which the Status measures and
+   explains: a dylib and its caller are two images with different declared
+   sets, so a single sorted set made `ValueError` mean 38 in one and 69 in the
+   other.
 3. **The raise sites** already know their class on this branch: `RaiseStmt`
    (`model.raise_class_name` / `raise_declared_class_name`),
    `_emit_div_shift_pow`'s integer `div0_label` and
