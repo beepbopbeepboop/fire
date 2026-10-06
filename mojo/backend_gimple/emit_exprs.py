@@ -33,11 +33,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -51,10 +46,6 @@ from mojo.middle.module_shared import builtin_module_constant, bare_global_read_
 # `_CONTAINER_KIND_TYPES` (see its own comment for why it left this file) and
 # is imported under its own name: `import *` would drop the leading underscore.
 from mojo.middle.types import _BOXED_CONTAINER_CTYPES
-# The one answer to "the function `f` as a bare C value". Re-exported through
-# emit_calls the way its other callers reach it, rather than imported here, so
-# there is exactly one spelling of it in the tree.
-from mojo.middle.calls_shared import _callable_value_symbol
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -585,46 +576,74 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # For non-identifier expressions like ((int)0), emit directly
             t = gen._new_val('void *', f'(void *){c_name}')
             return 'void *', t
-    # C function name used as a value (e.g. tokenize, MojoParser passed to
-    # Scope_define). Can't use a function name as rvalue in GIMPLE -- use the
-    # pre-declared static void* this codegen uses for every such site.
+    # C function name used as a value (e.g. tokenize, MojoParser passed to Scope_define).
+    # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
     #
-    # `name in gen._generator_api` is the OTHER half of the membership test
-    # `_callable_value_symbol` applies, and it was missing here: a generator
-    # this compile already lowered has no entry in `func_return_types` under
-    # its OWN name (only its `<base>_start/_resume/_value/_destroy` do), so a
-    # generator read as a value fell through every branch here to the "unknown
-    # identifier" placeholder at the bottom -- a literal `(int64_t)0` -- and
-    # the consumer then CALLED it: `consume("/r", leaf)` (passing a module
-    # generator to a function that iterates what it is handed) compiled and
-    # linked, then took SIGSEGV calling address 0.
-    #
-    # DELEGATED, not restated. This arm used to answer the question itself
-    # and `_callable_value_symbol` -- which a callable-valued parameter
-    # DEFAULT goes through -- answered it separately, and the two answers
-    # drifted on exactly one input: a VARIADIC function, whose real C
-    # signature is the packed `MojoList *` / `MojoDict *` form that the
-    # arity-based `mojo_fnptr_call_N` convention cannot express. The
-    # variadic-lambda work taught THIS arm to materialize a `MojoVarargFn`;
-    # the callable-default work did not, so `f = f; f(1, 2, 3)` printed 6
-    # while `def apply(x, *, g=f): return g(1, 2, 3)` exited -11 on the same
-    # tree. One question, one answer, one place -- see that function's
-    # docstring for why it is the place.
-    _cv = _callable_value_symbol(gen, node)
-    if _cv is not None:
-        # `_callable_value_symbol` answers "the function `f` as a bare C
-        # value" for BOTH spellings (a direct binding and a callable-valued
-        # parameter default), but it does not carry the two per-temp
-        # records the direct-binding arm used to set here. Keep setting them
-        # on the returned `_funcptr_` symbol: a later call through the value
-        # reads `_callable_ret_types` to get the real return type (the
-        # `mojo_fnptr_call_N` convention hands back a boxed int64_t), and
-        # `_func_value_names` is what `print(f)` renders.
-        _ct, _cvv = _cv
-        if isinstance(_cvv, str) and _cvv.startswith('_funcptr_'):
-            gen._callable_ret_types[_cvv] = gen.func_return_types.get(name, 'int64_t')
-            gen._func_value_names[_cvv] = name
-        return _cv
+    # `name in gen._generator_api` is the OTHER half of the membership
+    # test, and it was missing: a generator this compile already lowered
+    # has no entry in `func_return_types` under its OWN name (only its
+    # `<base>_start/_resume/_value/_destroy` do), so a generator read as
+    # a value fell through every branch here to the "unknown identifier"
+    # placeholder at the bottom — a literal `(int64_t)0` — and the
+    # consumer then CALLED it: `consume("/r", leaf)` (passing a module
+    # generator to a function that iterates what it is handed) compiled
+    # and linked, then took SIGSEGV calling address 0. gen_module's
+    # `_funcptr_target` already redirects a generator's bare csym to
+    # `<base>_start` when it emits the static — which is exactly right
+    # here, since calling a generator FUNCTION is what constructs the
+    # generator object without running its body.
+    if ((name in gen.func_return_types or name in gen._generator_api)
+            and name not in gen.var_types
+            and name not in gen.struct_field_types and name not in gen._global_var_types):
+        # Use the overload-mangled C symbol so &fn points at the real
+        # definition. Membership + subscript, NOT
+        # `gen._c_names.get(name, gen._func_csym(name))` — on the
+        # self-hosted path `_c_names` can lower boxed and the defaulted
+        # `.get`'s char* default was then coerced through a list accessor
+        # (`mojo_list_get_int("mojo_make_list", 0)` — a hard segfault on
+        # `--dump myinterpreter.py`, reached via `ctor in (Fn, ...)`).
+        c_name = gen._func_csym(name)
+        if name in gen._c_names:
+            c_name = gen._c_names[name]
+        # A VARIADIC function taken as a VALUE. Its real C signature is the
+        # packed form (`MojoList *` for `*args`, `MojoDict *` for
+        # `**kwargs`), which the arity-based `mojo_fnptr_call_N` convention
+        # cannot express: `def f(*a)` reached through `f = f` got loose
+        # scalars and the callee dereferenced the integer 1 — a SIGSEGV.
+        # Materialize the same `MojoVarargFn` a variadic LAMBDA gets (see
+        # `_lower_LambdaExpr` and runtime/fire_runtime.h's "Variadic
+        # callables"), so a direct call by name is untouched and only the
+        # value form changes.
+        _vshape = (getattr(gen, '_variadic_func_shape', None) or {}).get(c_name) \
+            or (getattr(gen, '_variadic_func_shape', None) or {}).get(name)
+        if _vshape is not None:
+            _fnv = gen._new_val('void *', f'(void *){c_name}')
+            _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                                 [('void *', _fnv), ('void *', '0'),
+                                  ('int64_t', f'({_vshape[0]})'),
+                                  ('int64_t', f'({_vshape[1]})'),
+                                  ('int64_t', '(0)')])
+            return 'void *', gen._new_val('void *', f'(void *){_vf}')
+        gen._funcptr_builtins_needed.add(c_name)
+        static_name = f'_funcptr_{c_name}'
+        t = gen._new_val('void *', f'{static_name}')
+        # What this function RETURNS, so a later call through the value reads
+        # the right one. `mojo_fnptr_call_N` is the homogenized `int64_t`
+        # convention -- right for the box it hands back, wrong for the value
+        # inside -- so without this every bare-function-pointer VALUE printed
+        # the box: `d = {}; d['k'] = add3; print(d['k'](1, 2, 3))` answered 0
+        # for CPython's 6, while the named-local spelling `f = add3; f(...)`
+        # was right only because it consults `func_return_types` directly.
+        # Mirrors the sibling branches: a capturing closure records
+        # `_bound_method_ret_types`, and a lambda records
+        # `_callable_ret_types` in `_lower_LambdaExpr`.
+        gen._callable_ret_types[t] = gen.func_return_types.get(name, 'int64_t')
+        # And the BARE name, so `print(f)` can render `<function f at 0x...>`
+        # where CPython does. `c_name` cannot answer that: it is the mangled C
+        # symbol (`step_9f63a2`) or a module qualifier (`mod_a_thing`), while
+        # CPython's repr is the name the source wrote.
+        gen._func_value_names[t] = name
+        return 'void *', t
     # Module-level global variable (persistent type known across functions).
     # Also catches `global x` declarations inside functions
     # (_func_declared_globals). The DECISION — which module's
@@ -1283,31 +1302,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return gen.lower_expr(node.obj)
 
     # Check if obj is a simple identifier (module access)
-    # `os.path.sep` / `os.path.pathsep` / `os.path.curdir` / `os.path.pardir`:
-    # `os.path` itself lowers to a bare module MARKER (the int 0), so the outer
-    # `.sep` fell to the dynamic-getattr dispatch with obj=NULL and raised a
-    # fatal `AttributeError: sep` at RUN time -- which is what
-    # `imports.cpython_lib_root`'s `d == os.path.sep` did, caught by the module
-    # loader's blanket `except`, so every import of a sibling module silently
-    # resolved to nothing in the self-hosted compiler. The four are `posixpath`'s
-    # literals and `os`'s own (this platform is POSIX), i.e. the same table
-    # `os.sep` is answered from.
-    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
-            and node.obj.member == 'path'
-            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
-            and node.member in ('sep', 'pathsep', 'curdir', 'pardir')):
-        _opc = _as_str(node.obj.obj.name)
-        _opb = gen.imported_symbols.get(_opc)
-        if _opb:
-            _opm = _opb.get('module')
-            if _opm:
-                _opc = _as_str(_opm)
-        if _opc == 'os':
-            _opk = builtin_module_constant('os', node.member)
-            if _opk is not None:
-                _opk_ctype, _opk_val = _opk
-                _opk_text = gen._intern_string(gimple_ctypes._c_escape(_opk_val))
-                return _opk_ctype, gen._new_val(_opk_ctype, _opk_text)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
         # The REAL module this identifier is bound to, for `import X as Y`.
@@ -2032,15 +2026,54 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                                      'c_contiguous', 'f_contiguous',
                                                      'contiguous', 'shape', 'strides',
                                                      'suboffsets', 'ndim'):
-        # ONE table for `mv.<attr>`, shared with the `mv.<attr>()` call
-        # spelling -- the question is the same and the two sites used to
-        # carry separate copies of the member -> runtime-entry-point mapping,
-        # each with a comment claiming the rule lived in "one place". See
-        # emit_methods._memoryview_attr_value.
-        _shared = gmp._memoryview_attr_value(
-            gen, gen._ensure_local('MojoMemoryView *', ov), node.member)
-        if _shared is not None:
-            return _shared
+        mp = gen._ensure_local('MojoMemoryView *', ov)
+        if node.member in ('nbytes', 'itemsize'):
+            fn = ('mojo_memoryview_nbytes' if node.member == 'nbytes'
+                  else 'mojo_memoryview_itemsize')
+            return 'int64_t', gen._call_expr('int64_t', fn, [('MojoMemoryView *', mp)])
+        if node.member == 'format':
+            return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
+                                            [('MojoMemoryView *', mp), ('char *', '"B"')])
+        if node.member == 'obj':
+            return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
+                                                 [('MojoMemoryView *', mp)])
+        if node.member in ('shape', 'strides', 'suboffsets'):
+            # The tuple-valued descriptors. Neither this member read nor the
+            # call form (_lower_memoryview_method) had a case, so each fell
+            # to the generic unknown-member path and printed its own heap
+            # ADDRESS as a decimal: `mv.shape` printed 4341225952 where
+            # CPython prints `(4,)`. The runtime returns the spelling string,
+            # which is exact for this always-1-D representation.
+            if node.member == 'suboffsets':
+                return 'char *', gen._call_expr(
+                    'char *', 'mojo_memoryview_suboffsets_str', [])
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_' + node.member + '_str',
+                [('MojoMemoryView *', mp)])
+        if node.member == 'ndim':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                             [('MojoMemoryView *', mp)])
+        if node.member == 'readonly':
+            # A real query, not a constant fold: the answer is the
+            # MUTABILITY of the object the view was taken over, which the
+            # view records from its source (see MojoMemoryView's `readonly`
+            # field in fire_runtime.h) — True over a bytes, False over a
+            # bytearray, exactly as CPython. Folding it to a constant
+            # answered `memoryview(b'abcd').readonly` False: the fold's own
+            # reasoning ("this representation is always a writable window")
+            # is a true statement about the WINDOW and an irrelevant one
+            # about the ANSWER. The call form asks the same question
+            # (_lower_memoryview_method).
+            t = gen._call_expr('int', 'mojo_memoryview_readonly',
+                               [('MojoMemoryView *', mp)])
+            return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, so these really are constant — but they are asked of
+        # the runtime rather than folded here, so all three come from ONE
+        # place instead of this being the only site that knows the rule.
+        t = gen._call_expr('int', 'mojo_memoryview_' + node.member,
+                           [('MojoMemoryView *', mp)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
@@ -6097,8 +6130,8 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
     # re-lowered comprehension lands the same way.
     for _gen0 in node.generators:
-        if isinstance(_gen0.target, str) and not for_target_is_tuple(_gen0.target):
-            _gen0.target = for_target_single_name(_gen0.target)
+        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
+            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
 
     gen0 = node.generators[0]
 
@@ -6184,7 +6217,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # declines it for the `for`-statement form.
     _cur = None
     if (isinstance(gen0.iterable, gimple_ctypes.IdentExpr)
-            and not for_target_is_tuple(_as_str(gen0.target))):
+            and not gimple_ctypes.for_target_is_tuple(_as_str(gen0.target))):
         _cur = itc.cursor_for(gen, gen._cname(gen0.iterable.name))
     if _cur is not None:
         gen._compr_cursor_loop(node, gen0, res, res_type, _cur)
@@ -6245,7 +6278,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # its own merge.
     if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
-            kind=node.kind, element=node.element, value=node.value,
+            kind=node.kind, element=node.element, key=node.key,
             generators=list(node.generators[1:]))
     else:
         gen._compr_pending_inner = None

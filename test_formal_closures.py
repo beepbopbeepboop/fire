@@ -20,16 +20,15 @@ lambda, decorator and generator questions are made of; nothing here needs a
 `printf` spelling CPython cannot run.
 
 ONE divergence found while building this table is deliberately ABSENT from it,
-and lives in `test_formal_run.py` instead: a comprehension whose element is a
-container (`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) used to alias every
-outer iteration's element to the LAST one and answer 93 where CPython answers 63,
-on both backends. It is not a closure/lambda/generator question, so its rows are
-`test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`: the flat-container literals
-are now materialised per-iteration (CPython's answer), and the nested / slice /
-list-of-lists shapes are refused rather than aliased. See
-`bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` for
-the remaining runtime-base work (the shape is not B1, B2 or B4 in
-`bugs/OPEN_WORK.md`).
+and is filed instead: a comprehension whose element is a container
+(`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) aliases every outer
+iteration's element to the LAST one and answers 93 where CPython answers 63, on
+both backends, with exit 0. An answered row would have to assert that number, and
+this file's premise is that an answered row EQUALS CPython's; a refusal row
+would have to be a refusal, and this is not one. See
+`bugs/FORMAL_a_comprehension_element_container_aliases_every_iteration.md` for the
+signature (it is not B1, B2 or B4 in `bugs/OPEN_WORK.md`) and for why pinning it
+here would be the wrong kind of test.
 
     python3 test_formal_closures.py [-v] [case ...]
 
@@ -125,93 +124,6 @@ CASES = [
      "    return s\n"
      "def main():\n"
      "    print(outer(10))\n"
-     "    return 0\n"),
-    # ── a nested `def` capturing a LOOP VARIABLE ──
-    #
-    # CPython answers 3 (`get()` is called inside the iteration that defined it,
-    # so it reads the current `i`) and the by-value capture ABI already answers
-    # this shape for an ordinary local, so this is the same capture and only the
-    # BINDING FORM differs. It used to be refused, and the root cause was one arm
-    # missing from a loop in `mojo/middle/closures.py::discover_closures`: a
-    # `ForStmt` target never entered `enriched_scope`, which is the map every
-    # inferred capture is filtered against (`if v in enriched_scope`), so the
-    # capture was dropped and the lift produced a `main_get()` whose body read a
-    # name with no home — refused downstream as `'i' has no home`, a sentence
-    # about the register allocator for what is a fact about the closure pass.
-    # The arm is `loop_target_names` now, and it is the ONE reader of a loop
-    # target's names for both of the two questions this file asks about it.
-    #
-    # `capture_read_inside_a_loop_body` above is the row that keeps this honest
-    # in the other direction: it captures a name that is NOT a loop target, so a
-    # fix that made every name in a loop body capturable — rather than making the
-    # TARGET a local — would pass this row and fail that one.
-    ("a_nested_def_capturing_a_loop_variable",
-     "def main():\n"
-     "    s = 0\n"
-     "    for i in range(3):\n"
-     "        def get():\n"
-     "            return i\n"
-     "        s = s + get()\n"
-     "    print(s)\n"
-     "    return 0\n"),
-    # The TUPLE-UNPACK target, which is the case the shared reader exists for and
-    # which the spelling this replaced (`isinstance(tgt, str)` /
-    # `hasattr(tgt, 'name')`) was SILENT on: `loop_target_names` recurses into
-    # `elts`, so `k` and `v` both enter `enriched_scope` and the inner def's
-    # capture of `k` is inferred. The answer is 10, and it is `k` and not `v`
-    # because only `k` is used — so a reader that returned the wrong element of
-    # the pair would answer 11 here rather than merely fail to build.
-    #
-    # This is what makes `loop_target_names` a READER rather than a rename: an
-    # arm spelled for the single-identifier form would leave the capture filter
-    # dropping `k`, and this case would be refused with `'k' has no home`.
-    #
-    # **NESTED groups (`for a, (b, c) in …`) are a row below.** They used to be
-    # absent, because a separate x86-64 defect in the UNPACK itself — not in the
-    # capture — made the shape print nothing and exit 1 there while arm64
-    # answered; a closure row on it would have gone red for a reason its own
-    # name did not say. That defect is FIXED (both backends now unpack
-    # `fire_compiler.for_target_tree`; see `test_formal_run.py`'s
-    # `both_arch_a_for_target_nested_two_groups_deep`), so the row is here and
-    # it is a capture row again: `loop_target_names` flattens nested groups
-    # through `for_target_names`, and this is what says a leaf two groups deep
-    # is captured.
-    ("a_nested_def_capturing_an_unpacked_loop_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for k, v in [(10, 11)]:\n"
-     "        def get():\n"
-     "            return k\n"
-     "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    # The leaf is two groups deep — `b` inside `(b, (c, d))` inside the outer
-    # target — and it is `b` and not `a`/`c`/`d` because only `b` is read, so a
-    # reader that captured the wrong leaf (or none of the nested ones) would
-    # answer a different number or refuse with `'b' has no home`.
-    ("a_nested_def_capturing_a_leaf_two_groups_deep_in_a_for_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, (c, d)) in [(1, (20, (300, 4000)))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    ("a_nested_def_capturing_a_nested_group_loop_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, c) in [(1, (20, 300))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get() + a\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
      "    return 0\n"),
     # A nested `def` with NO capture, which is the shape that must keep working
     # for the rows above to mean anything: if the lifting machinery refused
@@ -409,44 +321,6 @@ CASES = [
      "def main():\n"
      "    print(g(3))\n"
      "    return 0\n"),
-
-    # ── a nested `def` capturing a `for` TARGET ──
-    #
-    # CPython answers 3: `get()` is called inside the iteration that defined it,
-    # so it reads the current `i`. This row was a REFUSAL ("main_get: 'i' has no
-    # home") until 2026-10-05, and the refusal named the REGISTER ALLOCATOR for
-    # what is a fact about the closure pass — `mojo/middle/closures.py`'s
-    # `enriched_scope`, the map every inferred capture is filtered against, had
-    # arms for an `AssignStmt` target and a `VarDecl` and neither for a
-    # `ForStmt` target, so `i` was not in it, `i` was free in the nested body,
-    # and the filter dropped it.
-    #
-    # It is ANSWERED rather than merely un-refused because the by-value capture
-    # ABI has to produce CPython's NUMBER here, and it does: 3 on both
-    # architectures, diffed against CPython by the harness.
-    ("a_nested_def_capturing_a_for_target",
-     "def main():\n"
-     "    s = 0\n"
-     "    for i in range(3):\n"
-     "        def get():\n"
-     "            return i\n"
-     "        s = s + get()\n"
-     "    print(s)\n"
-     "    return 0\n"),
-    # THE HAZARD, and the reason the row above is not simply "capture by value".
-    # CPython answers 2 2 2 here, not 0 1 2: the closures outlive the iteration,
-    # so all three read the FINAL `i`. A by-value capture answers 0 1 2, which
-    # is a silently wrong number rather than a refusal, so this shape must stay
-    # refused — and it is, by a refusal about a DIFFERENT construct (the `def`
-    # stored into a container, `a_nested_def_stored_in_a_list_and_called` in
-    # `REFUSALS`), because the by-value ABI cannot express one cell and three
-    # closures at all. This row is what would catch that refusal disappearing.
-    #
-    # The two CONTROL rows for the row above are in `REFUSALS`
-    # (`a_loop_target_closure_stored_past_its_iteration_is_still_refused` and
-    # `a_comprehension_target_is_not_a_capture`) rather than beside it here,
-    # because a row in this table asserts an ANSWER and both of those assert a
-    # refusal. They are the controls for this fix and they read next to it.
 
     # The three shapes in which a `NOT_LOWERED_BUILTINS` NAME is not the
     # builtin, which is the half of the pre-pass that decides whether it is a
@@ -647,67 +521,37 @@ REFUSALS = [
      "    return 0\n",
      ["`m`", "a lambda has no environment to be given them"]),
 
-    # ── a nested `def` capturing a LOOP VARIABLE: ANSWERED in `CASES` ──
+    # ── a nested `def` capturing a LOOP variable ──
     #
-    # This was a REFUSAL row here with the needle `['i', 'main_get']` — the
-    # missing name in the ALLOCATOR's spelling, which is the wrong sentence for
-    # the defect, and which the row's own comment said so while deliberately
-    # pinning it so the fix would be noticed.
+    # CPython answers 3 (`get()` is called inside the iteration that defined it,
+    # so it reads the current `i`) and the by-value capture ABI answers exactly
+    # this for an ordinary local — so the shape "should" work and does not. The
+    # root cause is one arm missing from a loop in
+    # `mojo/middle/closures.py::discover_closures`: a `ForStmt` target never
+    # enters `enriched_scope`, which is the map every inferred capture is
+    # filtered against, so the capture is dropped and the lifted body reads a
+    # name with no home.
     #
-    # `mojo/middle/closures.py::discover_closures` now has a `ForStmt` arm
-    # feeding `enriched_scope` through the shared `loop_target_names` reader,
-    # so the build ANSWERS and matches CPython on both backends. The row moved
-    # to the answered group as `a_nested_def_capturing_a_loop_variable` and
-    # `a_nested_def_capturing_an_unpacked_loop_target`.
-    #
-    # The LATE-BINDING hazard is why the move was safe and not merely quiet: a
-    # by-value capture reads the value at the DEFINING iteration, so the STORED
-    # spelling of the same construct — `fs.append(g)`, then `fs[0]()` — answers
-    # `0 1 2` where CPython answers `2 2 2`. That is still REFUSED here (it
-    # reaches the lifted-symbol rename, verified on both backends), and the
-    # answered-group row for the same construct written with a lambda is
-    # `a_lambda_closing_over_a_loop_variable_binds_late`. So this ABI answers
-    # the shape it can and refuses the one it cannot, which is the honest
-    # division: it cannot express a shared CELL at all.
-    #
-    # These two are what say the fix stopped where it should. Both are refusals,
-    # and both are about a DIFFERENT construct from the capture — so their
-    # needles are deliberately not about `i`, which is the point: a by-value
-    # capture that reached either of these would be a silently wrong NUMBER
-    # rather than a refusal.
-    #
-    # The first is the late-binding hazard the bug doc names. CPython answers
-    # 2 2 2 — the closures outlive the iteration, so all three read the final
-    # `i` — where a by-value capture answers 0 1 2. The by-value ABI cannot
-    # express one cell and three closures at all, so this shape is correct to
-    # keep refusing; what is pinned is that it is STILL refused after the
-    # capture change, which is a different property from the one it had before.
-    ("a_loop_target_closure_stored_past_its_iteration_is_still_refused",
+    # The needle is that name in the ALLOCATOR's spelling, which is not the right
+    # sentence — it is a fact about the closure pass, not about the register
+    # allocator — and pinning it deliberately: the row fails loudly the moment
+    # the pass learns the loop target, so whoever fixes it moves this row into the
+    # ANSWERED group instead of re-deriving what it should say. Filed as
+    # `bugs/FORMAL_a_nested_def_capturing_a_for_target_is_not_a_capture.md`, which
+    # also records why the fix was not landed in the round that measured it (the
+    # file is shared with the compiled backend and owes a full gate) and the
+    # late-binding hazard a by-value capture would introduce for the STORED
+    # spelling of the same construct.
+    ("a_nested_def_capturing_a_loop_variable",
      "def main():\n"
-     "    fs = []\n"
+     "    s = 0\n"
      "    for i in range(3):\n"
-     "        def g():\n"
+     "        def get():\n"
      "            return i\n"
-     "        fs.append(g)\n"
-     "    print(fs[0](), fs[1](), fs[2]())\n"
+     "        s = s + get()\n"
+     "    print(s)\n"
      "    return 0\n",
-     ["'g'", "main_g"]),
-    # The second is the scope boundary. A COMPREHENSION target is a separate
-    # scope whose names are NOT locals of the enclosing function, so `q` must
-    # still be refused — capturing it would shadow the comprehension's own
-    # binding, and `_apply_module_constant_sites`'s docstring says so at
-    # length. The `ForStmt` arm does not reach a comprehension, which is what
-    # this row checks rather than the reader inferring it.
-    ("a_comprehension_target_is_not_a_capture",
-     "def outer(n):\n"
-     "    ys = [q for q in range(3)]\n"
-     "    def get():\n"
-     "        return q\n"
-     "    return ys\n"
-     "def main():\n"
-     "    print(outer(3))\n"
-     "    return 0\n",
-     ["'q'", "outer_get"]),
+     ["'i'", "main_get"]),
 
     # ── a callable stored in a container and read back ──
     # The result is BOUND before it is printed, and that is not incidental:

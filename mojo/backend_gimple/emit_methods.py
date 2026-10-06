@@ -32,7 +32,6 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.backend_gimple.emit_funcs as _ggf
-from fire_compiler import _as_set
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -543,17 +542,7 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
         ip = gen._ensure_local(stored_ctype, bm_raw)
         vp = gen._new_val('void *', f'(void *){ip}')
         bm = gen._new_val('MojoBoundMethod *', f'(MojoBoundMethod *){vp}')
-    ret_type = gen._bound_method_ret_types.get(fname_raw)
-    if ret_type is None:
-        # The whole-program half: a bound method stored into a module global
-        # and called from a DIFFERENT function than the one that stored it.
-        # `_bound_method_ret_types` is reset per function, so by the time the
-        # call is emitted the store's entry is gone; `_note_global_callable_
-        # store` carries it to `_global_callable_ret_types` (keyed by name),
-        # which is what survives the box. Without this `f = None; global f;
-        # f = m.truthy` in one function and `f()` in another printed `1` for
-        # a `-> bool` method.
-        ret_type = gen._global_callable_ret_types.get(fname_raw, 'int64_t')
+    ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
     return gen._lower_bound_method_call_value(bm, node, ret_type)
 
 
@@ -592,9 +581,7 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
     else:
         helper = f'mojo_maybe_bound_call_{min(n, 8)}'
         lead = [('void *', fp_void)]
-    ret_type = gen._bound_method_ret_types.get(fname_raw)
-    if ret_type is None:
-        ret_type = gen._global_callable_ret_types.get(fname_raw, 'int64_t')
+    ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
     raw_t = gen._call_expr('int64_t', helper, lead +
                              [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
@@ -1374,7 +1361,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"generator .send() on a value with no known generator "
                     f"API ({av!r}) — bind the generator to a variable first "
                     f"(g = gen(); g.send(v))")
-            return gen._lower_generator_send(node, av, api)
+            return ggc._lower_generator_send(gen, node, av, api)
 
     if func.member in ('send', 'throw', 'close'):
         at, av = gen.lower_expr(func.obj)
@@ -1387,10 +1374,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"generator API ({av!r}) — bind the generator to a "
                     f"variable first (g = gen(); g.{func.member}(...))")
             if func.member == 'send':
-                return gen._lower_generator_send(node, av, api)
+                return ggc._lower_generator_send(gen, node, av, api)
             if func.member == 'throw':
-                return gen._lower_generator_throw(node, av, api)
-            return gen._lower_generator_close(node, av, api)
+                return ggc._lower_generator_throw(gen, node, av, api)
+            return ggc._lower_generator_close(gen, node, av, api)
 
     # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
     # static heap-allocation constructor, whose receiver is the type
@@ -3030,7 +3017,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and gen._get_actual_type(ot, ov) == 'MojoGenerator *'):
         api = gen._generator_var_api.get(ov)
         if api is not None:
-            return gen._lower_generator_next(ov, api)
+            return ggc._lower_generator_next(gen, ov, api)
 
     # `it.__next__()` on a resumable iterator local is `next(it)` — Python
     # spells the same operation both ways, and this branch used to fall
@@ -3047,7 +3034,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(func.obj, gimple_ctypes.IdentExpr)):
         _cur = itc.cursor_for(gen, gen._cname(func.obj.name))
         if _cur is not None:
-            return gen._lower_next_iter_cursor(node, _cur, ())
+            return ggc._lower_next_iter_cursor(gen, node, _cur, ())
 
     # struct.Struct instance namespace — receiver holds a compiled
     # `MojoStructFmt *`. Deliberately TOTAL (not gated on a method-name
@@ -3188,13 +3175,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     'int64_t', '__mojo_future_set_running_or_notify_cancel', [('int64_t', ov)])
             if method == 'add_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
-                _tag = gen._future_done_callback_kind_tag(_ct)
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 gen._emit_call('void', '', '__mojo_future_add_done_callback',
                                [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
                 return 'void', ''
             if method == 'remove_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
-                _tag = gen._future_done_callback_kind_tag(_ct)
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 return 'int64_t', gen._call_expr('int64_t', '__mojo_future_remove_done_callback',
                                                  [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
 
@@ -4537,7 +4524,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         t = gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
-        gen._copy_dict_metadata(t, ov)
+        ginf._copy_dict_metadata(gen, t, ov)
         return 'MojoDict *', t
     if method == 'clear':
         gen._emit(f"  mojo_dict_clear ({ov});")
@@ -4685,19 +4672,8 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # the table's key would depend on whether the list was written
             # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
             # inside the helper.
-            gen._note_container_callable_ret(ov, av, at, args[0])
-            # An argument whose pointer type exists only because an enclosing
-            # `isinstance(x, Struct)` guard NARROWED it says nothing about the
-            # list: `if isinstance(_s, TryStmt): out.append(_s)` / `else:
-            # out.append(_s)` appends two different static types of the SAME
-            # heterogeneous value, and recording the narrowed one typed the whole
-            # list `TryStmt *` -- so `stmts = out` (gen_module_impl's
-            # `_try_replaced`) made every later `for s in stmts` declare `s` as a
-            # `TryStmt *`, and `s.body` on a FunctionDef read the NAME. The
-            # narrowed type holds in the branch, not in the container.
-            _arg_narrowed = (gen._narrow_key_for_expr(args[0])
-                             in getattr(gen, '_narrowed_exprs', {}))
-            if (not _arg_narrowed) and (at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *'))):
+            ginf.note_container_callable_ret(gen, ov, av, at, args[0])
+            if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
                 if actual_elem == 'MojoList *' and av in gen._elem_types:
@@ -4804,7 +4780,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                                 and not _v.value)
         _keys_val = 'NULL'
         if _key_expr is not None:
-            _keys_val = gen._build_sort_keys(ov, _elem, _key_expr)
+            _keys_val = ggc._build_sort_keys(gen, ov, _elem, _key_expr)
             # The KEYS are what get compared, so the kind argument describes
             # them, not the elements (the same split mojo_sorted_by_keys
             # makes). Its own recorded type is the one the builder just
@@ -5820,73 +5796,6 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     return gen._stub_result('int', '0', f'TODO: bytes.{method}')
 
 
-def _memoryview_attr_value(gen, mv: str, method: str):
-    """`(ctype, cexpr)` for a `MojoMemoryView *` ATTRIBUTE -- the answer for
-    `mv.<method>` -- or None when `method` is not one of the attributes that
-    has a real lowering here.
-
-    ONE table for a question with TWO spellings. `mv.shape` (an attribute
-    read, emit_exprs.py) and `mv.shape()` (a method call,
-    `_lower_memoryview_method` below) are the same question, and each site
-    used to carry its own copy of the member -> runtime-entry-point mapping.
-    Both copies even carried the same comment claiming the rule lives in
-    "ONE place", which was true of the runtime and false of these two
-    tables -- so a fix to one was invisible to the other. The method form is
-    a superset of the attribute form (`tolist`, `release`, the context
-    manager, `__len__`, `cast`, ... have no attribute spelling here), so the
-    extra names stay at their call site and this answers the shared subset.
-
-    The contiguity triple really is constant-foldable -- a 1-D byte window
-    over contiguous memory is C-contiguous by construction -- but it is
-    ASKED of the runtime rather than folded, so the rule has one home
-    instead of one per spelling of the question.
-    """
-    if method in ('nbytes', 'itemsize'):
-        fn = ('mojo_memoryview_nbytes' if method == 'nbytes'
-              else 'mojo_memoryview_itemsize')
-        return 'int64_t', gen._call_expr('int64_t', fn,
-                                         [('MojoMemoryView *', mv)])
-    if method == 'format':
-        return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
-                                        [('MojoMemoryView *', mv), ('char *', '"B"')])
-    if method == 'obj':
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
-                                             [('MojoMemoryView *', mv)])
-    if method in ('shape', 'strides', 'suboffsets'):
-        # The tuple-valued descriptors. Neither spelling had a case, so each
-        # fell to the generic unknown-member path and printed its own heap
-        # ADDRESS as a decimal: `mv.shape` printed 4341225952 where CPython
-        # prints `(4,)`. The runtime returns the spelling string, which is
-        # exact for this always-1-D representation -- and `suboffsets` is the
-        # one descriptor the runtime takes no receiver for.
-        if method == 'suboffsets':
-            return 'char *', gen._call_expr(
-                'char *', 'mojo_memoryview_suboffsets_str', [])
-        return 'char *', gen._call_expr(
-            'char *', 'mojo_memoryview_' + method + '_str',
-            [('MojoMemoryView *', mv)])
-    if method == 'ndim':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
-                                         [('MojoMemoryView *', mv)])
-    if method == 'readonly':
-        # A real query, not a constant fold: the answer is the MUTABILITY of
-        # the object the view was taken over, which the view records from
-        # its source (see MojoMemoryView's `readonly` field in
-        # fire_runtime.h) -- True over a bytes, False over a bytearray,
-        # exactly as CPython. Folding it to a constant answered
-        # `memoryview(b'abcd').readonly` False: the fold's own reasoning
-        # ("this representation is always a writable window") is a true
-        # statement about the WINDOW and an irrelevant one about the ANSWER.
-        t = gen._call_expr('int', 'mojo_memoryview_readonly',
-                           [('MojoMemoryView *', mv)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
-    if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
-        t = gen._call_expr('int', 'mojo_memoryview_' + method,
-                           [('MojoMemoryView *', mv)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
-    return None
-
-
 def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower `MojoMemoryView *` method calls (1-D byte view)."""
     arg_pairs = [gen.lower_expr(a) for a in args]
@@ -5908,12 +5817,54 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
             fmt = arg_pairs[0][1]
         return 'MojoMemoryView *', gen._call_expr('MojoMemoryView *', 'mojo_memoryview_cast',
                                                   [('MojoMemoryView *', ov), ('char *', fmt)])
-    # Everything below is the shared attribute set -- `mv.<m>` and `mv.<m>()`
-    # ask the same question, so they are answered by one table rather than
-    # one table each. See `_memoryview_attr_value`.
-    _shared = _memoryview_attr_value(gen, ov, method)
-    if _shared is not None:
-        return _shared
+    if method == 'nbytes':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_nbytes',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'itemsize':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_itemsize',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'format':
+        return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
+                                        [('MojoMemoryView *', ov), ('char *', '"B"')])
+    if method == 'obj':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
+                                             [('MojoMemoryView *', ov)])
+    if method == 'readonly':
+        # A real query, not a fold: the answer is the mutability of the
+        # object the view was taken over, which MojoMemoryView records from
+        # its source (`readonly` field, see fire_runtime.h). It used to be
+        # constant-folded to `0` on the grounds that "this representation is
+        # always a writable 1-D byte window" — true of the WINDOW, wrong for
+        # the ANSWER, and it made `memoryview(b'abcd').readonly` False where
+        # CPython (correctly) says True, because the view is over an
+        # immutable object.
+        t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, and `f_contiguous`/`contiguous` are the same fact
+        # under this representation. Asked of the runtime rather than
+        # folded here, so all three come from ONE place (the other memoryview
+        # attributes are queries) instead of this call site being the only
+        # one that knows the rule.
+        fn = 'mojo_memoryview_' + method
+        t = gen._call_expr('int', fn, [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('shape', 'strides', 'suboffsets'):
+        # Tuple-valued descriptors. They have no lowering at all, so each
+        # fell to the unknown-member stub and printed its own heap ADDRESS as
+        # a decimal: `mv.shape` printed 4340423136 where CPython prints
+        # `(4,)`. The runtime returns the spelling string, which is exact for
+        # this always-1-D representation.
+        if method == 'suboffsets':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_suboffsets_str', [])
+        t = gen._call_expr('char *', 'mojo_memoryview_' + method + '_str',
+                           [('MojoMemoryView *', ov)])
+        return 'char *', t
+    if method == 'ndim':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                         [('MojoMemoryView *', ov)])
     if method == 'tolist':
         # The view's elements as a real list of ints; this answered a raw
         # int 0 from the unknown-member stub.
@@ -6330,15 +6281,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # emitted the real `int64_t __GIMPLE lm_helper_Thing_show (Thing * self)`.
     # The struct-typedef pass's OWN guard is `_MOJO_STUB_<Struct>` (no method
     # name), so it could never have suppressed this one.
-    # `_as_set`: `_struct_method_names` is `dict[str, set[str]]`, but the value
-    # type is not recorded on the self-hosted path, so the bare lookup was
-    # compiled as a LIST and `method not in _methods_here` ran
-    # `mojo_list_contains_str` over a `MojoSet` -- a strcmp on garbage, the
-    # SIGSEGV that killed every self-hosted compile that lowered a method call.
-    _mh_raw = (getattr(gen, '_struct_method_names', {}) or {}).get(struct_name)
-    _methods_here: set = set()
-    if _mh_raw:
-        _methods_here = _as_set(_mh_raw)
+    _methods_here = (getattr(gen, '_struct_method_names', {}) or {}).get(
+        struct_name) or []
     if (mangled not in gen._KNOWN_SIGS
             and mangled not in gen.func_return_types
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types

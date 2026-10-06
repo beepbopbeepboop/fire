@@ -1230,14 +1230,7 @@ LIBRARY_TRUST = {
     # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
-    # **1585, not 1518: +67 arrived in the merge** (2026-10-06).  The formal
-    # branches merged here modelled more of arm64 in `lib/ProofLib.lean` — the
-    # `SMULH`/`SMULL`/`STUR`/`TST` step arms among them — and each new
-    # `work_step_*` lemma is proved by `bv_decide` over a quantified word, which
-    # is the right tool for that shape and still an axiom in the closure of every
-    # theorem proved with it.  The per-module census moved with the source, so
-    # this is the sanctioned "record new debt" raise, not a replacement.
-    "ProofLib": (0, 0, 1585, 1585),
+    "ProofLib": (0, 0, 1518, 1518),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
@@ -1351,28 +1344,9 @@ AXIOM_CLOSURE = {
     # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
     # which is the assertion that makes this a measurement rather than a number
     # somebody typed.
-    # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
-    # declaration added by one of the merged branches rests on a decide axiom.
-    # The partition still closes (312 = 61 + 243 + 0 + 8).
-    "ProofLib": (312, 61, 243, 0, 8, 0),
+    "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
-    # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
-    # `imul` successor rows began to need (`x86_set_reg_narrow_mem`,
-    # `x86_set_flag4_mem`), the two overflow helpers the multiply arms read
-    # (`x86_imul_ovf`, `x86_mul_ovf`), the byte-wise `and`/`or` step
-    # (`x86_step_alu_r8`) and the four step lemmas that came with the three
-    # forms this branch made decodable. All six are `rfl` or one `simp` over a
-    # record update or a `match` on a literal, which is the same proof the five
-    # `_mem` facts beside them already carry, and a fall in `clean` is the
-    # direction this column is watched in: a wrapper that did not leave memory
-    # alone would put `rdi` into a term the closing read has to evaluate.
-    #
-    # **And +1 more from `work/formal43-x86-endtoend-red`**, whose `x86_shift_post`
-    # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
-    # reaches no decide axiom, so `asked` and `clean` both move by one. The
-    # partition still closes (151 = 2 + 148 + 0 + 1).
-    "X86": (151, 2, 148, 0, 1, 0),
+    "X86": (144, 2, 141, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
@@ -1394,13 +1368,7 @@ AXIOM_CLOSURE = {
     # `test_the_axiom_names_are_classified_not_guessed`; `library_theorems` had
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
-    # 2026-10-08: 26 declarations, not 24.  `negative_values_order_by_value_not_by_magnitude`
-    # and `an_infinity_is_ordered` (f4e905eb) are pure `UInt64`/`Bool` comparison
-    # facts, so they are proved with `decide` and are KERNEL-CHECKED: `reaches`
-    # stays 19 and `clean` rises 5 -> 7.  They first landed as `native_decide`,
-    # which silently moved this row to (26, 21, 5) and made
-    # `formal-sweep-truth` red on any tree with the Lean library built.
-    "IEEE754": (26, 19, 7, 0, 0, 0),
+    "IEEE754": (24, 19, 5, 0, 0, 0),
     # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
     # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
     # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
@@ -3707,8 +3675,8 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     nothing here knows what the tree spells.
 
     The failure it is aimed at is the one the `subprocess` row of the host-import
-    ranking recorded (measured over all 143 importing files, zero of them worth a
-    build): a module that is "modelled" for nobody, green in
+    ranking records (`bugs/FORMAL_subprocess_row_measured_b7.md`, measured over
+    all 143 importing files): a module that is "modelled" for nobody, green in
     every differential test, and callable by zero of its callers.  A keyword the callers
     use and the model does not declare is exactly that, and it is invisible until
     somebody counts the call sites — which is what this does.

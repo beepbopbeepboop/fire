@@ -624,9 +624,7 @@ class TestDyldProbe(unittest.TestCase):
         # visible to the sweeping interpreter. If this ever starts passing,
         # the old mechanism would stop being wrong for the wrong reason.
         image = self.resolvable_img
-        # The image may also bind libSystem's own `getrlimit` (the stack-floor
-        # guard's), so the helper is the bind that names the dylib, not "the one".
-        (ordinal, name), = [b for b in S._binds(image) if b[0] == 2]
+        (ordinal, name), = S._binds(image)
         self.assertEqual(ordinal, 2, "the helper must bind from the dylib")
         import ctypes
         self.assertFalse(hasattr(ctypes.CDLL(None), name),
@@ -797,7 +795,7 @@ class TestDyldProbe(unittest.TestCase):
         from formal import macho_linker as ML
         helper = S._load_dylib_names(self.resolvable_img)[1]
         code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
-        name = [b for b in S._binds(self.resolvable_img) if b[0] == 2][0][1]
+        name = S._binds(self.resolvable_img)[0][1]
 
         wrong = ML.build_macho_executable_extern(
             code, [name], "arm64", dylibs=[{"install_name": helper,
@@ -824,7 +822,7 @@ class TestDyldProbe(unittest.TestCase):
                          "precondition: the helper is a thin non-x86_64 dylib")
         self.assertIn(ML.CPU_TYPE_ARM64, S._macho_cputypes(helper))
         code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
-        name = [b for b in S._binds(self.resolvable_img) if b[0] == 2][0][1]
+        name = S._binds(self.resolvable_img)[0][1]
         img = ML.build_macho_executable_extern(
             code, [name], "x86_64", dylibs=[{"install_name": helper,
                                              "symbols": {name}}])
@@ -3088,25 +3086,12 @@ class TestRoundOverRound(unittest.TestCase):
         "publishes: api_version, byteorder, flush_output, … "
         "`bugs/FORMAL_module_state_no_storage.md` records the design and what "
         "would have to be true to close it, and §(2) is this shape")
-    def _exports_message(self):
-        """`no_public_api_reason`'s own sentence for a constants-only module,
-        CALLED rather than hand-quoted.
-
-        The other three fixtures are hand-copies of messages this tree only
-        reaches through a 700-file sweep, and there is no function to call for
-        them. This one is built by `formal.build.no_public_api_reason` from a
-        two-line module, so a reword of the refusal cannot leave the fixture
-        quoting a sentence nothing emits — which is exactly what happened here:
-        `formal/` reworded this message (it used to end \"nothing this backend
-        could add\", false in both clauses) and the hand-copy went on matching
-        the OLD wording, so the fixture was pinning a dead string while the test
-        that exists to catch that reported green.
-        """
-        import formal.build as B
-        path = os.path.join(self._tmp.name, "constants.mojo")
-        with open(path, "w") as f:
-            f.write("STDIN = 0\nSTDOUT = 1\n")
-        return B.no_public_api_reason([path])
+    EXPORTS = (
+        "formal dylib has no public functions: constants.mojo exports nothing "
+        "under doc/ABI.md's rules because it declares no function and no type at "
+        "all — only module-level constants, which are inlined at their use site "
+        "and cross no boundary. There is nothing an importer could bind, and "
+        "nothing this backend could add.")
 
     #: fixture name -> (message, the cause label it must still classify to)
     FIXTURES = (("FSTRING", "string composition: nothing to compose into"),
@@ -3165,11 +3150,7 @@ class TestRoundOverRound(unittest.TestCase):
         import formal_sweep_causes as C
         for name, label in self.FIXTURES:
             with self.subTest(fixture=name):
-                # `EXPORTS` is GENERATED (see `_exports_message`) and the other
-                # three are quoted, so the one that has to be asked for is named
-                # here rather than read off the class.
-                message = (self._exports_message() if name == "EXPORTS"
-                           else getattr(self, name))
+                message = getattr(self, name)
                 self.assertEqual(C.classify_message(message), label,
                                  f"{name} no longer classifies to {label!r}. "
                                  f"If formal/ reworded the message, take the "
@@ -3211,7 +3192,7 @@ class TestRoundOverRound(unittest.TestCase):
         # "which row emptied" answer above is quietly short by it.
         rows = [("a.py", "codegen", self.HANDLER),
                 ("b.py", "codegen", self.MODATTR),
-                ("c.py", "codegen", self._exports_message())]
+                ("c.py", "codegen", self.EXPORTS)]
         out = self._printed(rows, rows)
         for kind in ("to a pass", "from a pass", "cause", "class", "unchanged"):
             self.assertRegex(out, rf"  {kind:<12} \d")
