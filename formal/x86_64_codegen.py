@@ -5690,7 +5690,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))    # count
-        self._emit_bounds_check(Reg.RAX, Reg.R11)
+        self._emit_bounds_check(Reg.RAX, Reg.R11,
+                                M.subscript_out_of_range_message(
+                                    M.spelled(e.obj), M.spelled(e.index),
+                                    M.integer_literal_value(e.index),
+                                    M.exact_blob_count(self._cur_fn, e.obj,
+                                                       self._list_caps_by_name)))
         # The blob's OWN element stride, and `_sub_width` from the same number:
         # a byte blob steps one byte per element and loads a byte, and a
         # right address with a word load would read seven bytes of whatever
@@ -5702,8 +5707,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                              header=M.BLOB_HEADER_BYTES,
                              scale=M.walk_shift(False, stride))
 
-    def _emit_bounds_check(self, index_reg: Reg, count_reg):
-        """Exit(1) unless `index_reg` is a valid element index.
+    def _emit_bounds_check(self, index_reg: Reg, count_reg, why: str):
+        """Stop LOUDLY unless `index_reg` is a valid element index.
 
         A negative index counts from the end, Python-style: it is negated and
         `count` added, and only then range-checked, so an index below `-count`
@@ -5713,7 +5718,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         `count_reg` None means a string, which has no count header: its
         elements run to a NUL, so there is nothing to check the index against
-        and the read stops at the terminator."""
+        and the read stops at the terminator.
+
+        **`why` is the message this stop writes, and it is a REQUIRED argument
+        rather than an optional one because this arm used to be silent.** An
+        out-of-range subscript called `exit(1)` with nothing on either stream —
+        the one bounded stop on this path with no `_emit_overflow_diagnostic`
+        above it, and the reason a memcheck row for it (`list_subscript_past_end`)
+        reported MATCH and could still not tell a reader that the check was
+        there. A default of `None` would let the silence back in the next time
+        somebody added a caller, so a caller that has nothing to say has to say
+        so out loud. The text is built by the CALLER, which is where the base
+        spelling and the static index and count are (`model.
+        subscript_out_of_range_message`, shared with arm64's `oob_label`), and
+        it is written through `_emit_overflow_diagnostic` so the raw-`write`
+        property both backends keep is preserved.
+
+        `_emit_overflow_diagnostic` sets up the whole System V argument triple
+        and clobbers RAX/RCX/RDX/RSI/RDI/R8/R9 — all of which this block has
+        already discarded, since `bad_label` is terminal and the `ok_label` arm
+        re-reads the base through RAX.
+        """
         self._if_counter += 1
         bid = self._if_counter
         fn = self.func_name
@@ -5735,6 +5760,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc(COND_AE, bad_label)     # index >= count
         self._emit_jmp(ok_label)
         self.asm.label(bad_label)
+        self._emit_overflow_diagnostic(why)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
 

@@ -2,30 +2,28 @@
 # version of this comment claimed.
 #
 # First reading: "a[3] on a three-element list reads out of range with no
-# bounds check".  That is WRONG, and the correction is the reason the row
-# exists.  `formal/arm64_codegen.py`'s `_emit_subscript_addr` loads the blob's
-# own count, applies Python's negative-index rule, and takes an `oob_label` arm
-# unless `count > index` unsigned; the x86-64 emitter has the mirror of it.
-# The check is there and it is correct.
+# bounds check".  That is WRONG, and it was wrong twice over.  The check was
+# always there and always correct -- `formal/arm64_codegen.py`'s
+# `_emit_subscript_addr` loads the blob's own count, applies Python's
+# negative-index rule, and takes its `oob_label` arm unless `count > index`
+# unsigned; the x86-64 emitter has the mirror of it in `_emit_bounds_check`.
+# What was missing was the MESSAGE, so the arm called `exit(1)` having written
+# nothing at all.
 #
-# What actually happens, on both architectures, identically:
+# What happens now, on both architectures, identically:
 #
 #     ./list_subscript_past_end.arm64 ; echo $?
 #     10
 #     30
+#     formal: a[3] is out of range -- index 3 is not below the 3 elements the
+#     blob holds. CPython raises `IndexError: list index out of range` ...
 #     1
 #
-# The image prints the two in-range lines and then stops with exit 1 having
-# written NOTHING AT ALL -- not stdout, not stderr (measured: 0 bytes on
-# stderr).  Every other bounded stop on this path calls
-# `_emit_overflow_diagnostic` first and says which bound was hit; this one does
-# not.  CPython answers the same program with `IndexError: list index out of
-# range`, on stderr.
-#
-# Filed as `bugs/FORMAL_an_out_of_range_subscript_exits_1_with_no_message.md`.
-# The row stays because a memcheck sweep reports it MATCH -- the answer and the
-# exit status are both stable -- and a reader who takes the old comment at its
-# word will go looking for a check that is already there.
+# and the message lands on STDERR, so the two in-range lines are all that
+# reaches stdout and nothing is appended to them.  The row stays because a
+# memcheck sweep reports it MATCH -- the answer and the exit status are both
+# stable -- and a reader who takes the older comment at its word will go
+# looking for a check that is already there.
 def main(n: Int) -> Int:
     var a = [10, 20, 30]
     printf("%d\n", a[0])

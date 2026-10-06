@@ -11559,6 +11559,110 @@ def dict_store_other_blob_message(name: str, key: str) -> str:
             f"— or copy it into one built here first.")
 
 
+def subscript_out_of_range_message(base: str, index_spelling: str,
+                                   index=None, count=None) -> str:
+    """The ONE text an out-of-range `base[index]` writes to fd 2 before it stops.
+
+    `dict_store_overflow_message`'s sibling, and it closes the last bounded stop
+    on this path that said nothing: `_emit_subscript_addr`'s `oob_label` (and
+    x86-64's `_emit_bounds_check`) fired the bounds check and called `exit(1)`
+    with no `_emit_overflow_diagnostic` in between, so an out-of-range read
+    printed the in-range lines and then stopped with **nothing on either
+    stream** — the failure mode `list_append_overflow_message`'s docstring calls
+    the worst of the three answers this backend can give. The CHECK was always
+    there and always correct; what was missing is which bound it hit, which is
+    why the memcheck row for it (`formal/memcheck/list_subscript_past_end.mojo`)
+    could report MATCH and a reader could still conclude the bound was absent.
+
+    **The index is spelled when it is a literal and the count when this build
+    knows it exactly, and neither is invented when it does not** — `index` and
+    `count` are `None` for a computed index and for a blob whose length a run
+    time write can change, and the message then says so in words rather than
+    printing a number that could be wrong. `exact_blob_count` is what decides
+    the count, and its refusal to guess is the point: a diagnostic that states
+    a bound the machine did not use is worse than one that names the bound and
+    cannot count it.
+
+    No `printf` on this path — the same bargain `list_append_overflow_message`
+    states — so both numbers are spelled into the text by the build. The
+    alternative, formatting them at run time, is not available: the oob block
+    is a block the arm64 CFG walk FOLLOWS (the bounds-check branch is one it
+    has to step), so every instruction in it needs an `arm64_step` row and an
+    `hne_` fact in all 18 `work_step_*` theorems. A decimal conversion is a
+    division and a store loop; the two instructions it would need beyond what
+    is already modelled (`STRB`, and a loop back edge) are exactly the two this
+    walk cannot take for a trap block.
+    """
+    what = f"{base}[{index_spelling}]"
+    if index is not None and count is not None:
+        asked = f"index {index} is not below the {count} elements the blob holds"
+    elif index is not None:
+        asked = (f"index {index} is not below the element count of the blob, "
+                 f"and that count is read out of the blob's own header word at "
+                 f"run time, so this build cannot name it here")
+    elif count is not None:
+        asked = (f"the index is not below the {count} elements the blob holds, "
+                 f"and the index is computed at run time, so this build cannot "
+                 f"name it here")
+    else:
+        asked = (f"the index was not below the element count of the blob, and "
+                 f"both are computed at run time here, so this build can name "
+                 f"neither")
+    return (f"formal: {what} is out of range — {asked}. CPython raises "
+            f"`IndexError: list index out of range` and writes that to stderr; "
+            f"this path has no exceptions, so a bounded stop names the bound it "
+            f"hit and exits 1. This one used to exit 1 having written nothing "
+            f"at all, which no reader could tell from a missing check.")
+
+
+def exact_blob_count(fn, obj, grown=()):
+    """The element count of `obj`'s blob when this build knows it EXACTLY.
+
+    `None` means "not exactly", and the two ways of not knowing are different
+    facts a diagnostic should be able to tell apart:
+
+      * the blob is built by something whose length is not a literal — a call's
+        result, a parameter, a `bytearray(3)` the build can size but a writer
+        can grow;
+      * it IS a literal, but a run-time write can change its length. `grown` is
+        the caller's list of names this function can APPEND to (each backend's
+        `_list_caps_by_name`, which is exactly the set whose append sites the
+        build already had to reserve room for), because `xs = [1, 2]` plus
+        `xs.append(3)` holds three elements at the subscript and saying "2"
+        would be a false statement about the machine.
+
+    A `*` element is the third shape and is already refused by
+    `list_literal_reserved_slots`' own rule: a splat literal builds its blob by
+    appending, so what it reserves is a capacity and what it holds is the sum of
+    the spliced lengths, which no pass over the source can read.
+
+    A name bound more than once in the function is `None` too, and that is the
+    count of BINDINGS rather than a guess: `a = [1, 2, 3]` followed by
+    `a = other` binds `a` twice, the blob live at the subscript is whichever
+    value ran, and a message that picked the literal would be wrong every time
+    the second one did. The same reason `_scan_list_caps` takes a `min` for a
+    RESERVATION and this must not take one for a STATEMENT. A binding inside a
+    nested `def` counts against the name even though it is a different
+    variable, which costs the number rather than inventing it.
+    """
+    node = obj
+    if isinstance(obj, F.IdentExpr):
+        if obj.name in grown:
+            return None
+        bound = [v for v in (_binding_value(n, obj.name)
+                             for n in iter_nodes(getattr(fn, "body", None) or []))
+                 if v is not None]
+        if len(bound) != 1:
+            return None
+        node = bound[0]
+    if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return None
+    elements = node.elements or []
+    if any(_is_star_unpack(el) for el in elements):
+        return None
+    return len(elements)
+
+
 def list_literal_reserved_slots(literal) -> int:
     """How many element slots a list literal's own construction occupies.
 

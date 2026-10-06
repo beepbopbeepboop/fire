@@ -313,10 +313,13 @@ def test_heap():
             "NONDETERMINISTIC, and that is how it was found"),
         "list_subscript_past_end.mojo": (
             "MATCH",
-            "`a[3]` on a three-element list is an out-of-range read with no "
-            "bound to check; it is deterministic on both architectures today, "
-            "so the row pins THAT and any change to it is a change to the "
-            "lowering"),
+            "the bounds check FIRES on `a[3]` against a three-element list and "
+            "stops the program; it is deterministic on both architectures "
+            "today, so the row pins THAT and any change to it is a change to "
+            "the lowering. The check has always been there -- what was missing "
+            "was the message, and `test_formal_run.py`'s "
+            "`subscript_past_end_names_the_index_and_the_count` is the row that "
+            "says so"),
         "stack_deep_recursion.mojo": (
             "MATCH",
             "40 frames of recursion, which arm64's 128 KB container budget per "

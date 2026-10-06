@@ -5542,6 +5542,27 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
         self.asm.label(oob_label)
+        # THE LAST SILENT BOUNDED STOP ON THIS PATH. The check above was always
+        # here and always correct, and the arm it took called `exit(1)` with
+        # nothing written — so `a[3]` on a three-element list printed the
+        # in-range lines and then stopped with zero bytes on stdout AND on
+        # stderr, on both architectures. `_emit_overflow_diagnostic` (a raw
+        # `write(2)`, not a libc call, for the single-halt-address reason its
+        # own docstring gives) is what every other bounded stop here uses, and
+        # the message comes from `model.subscript_out_of_range_message` so this
+        # backend and x86-64's `_emit_bounds_check` cannot name the limit
+        # differently.
+        #
+        # It is safe inside a PROVED function, which the `_emit_exit(1)` below
+        # was already: the diagnostic adds `adrp`/`add`/`movz`/`svc`, all four
+        # of which `arm64_step` already has rows for, and it adds no `BL` — the
+        # thing the CFG walk counts. What it could NOT be is a run-time decimal
+        # of the index and the count; see that function's docstring for why the
+        # oob block may not grow a conversion loop.
+        self._emit_overflow_diagnostic(M.subscript_out_of_range_message(
+            M.spelled(e.obj), M.spelled(e.index),
+            M.integer_literal_value(e.index),
+            M.exact_blob_count(self._cur_fn, e.obj, self._list_caps_by_name)))
         self._emit_exit(1)
         self.asm.label(end_label)
 
