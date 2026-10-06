@@ -1441,6 +1441,66 @@ DIFF_CASES = [
     # is reserved per call SITE (`model.struct_returned_frame_sites`) so this
     # needs no holder, and it is the arrangement a reader is most likely to
     # write.
+    # A COPY CONSTRUCTION is a FRESH BLOCK, and this is the row that says so.
+    # `positional_init_and_copy_constructions_all_land_in_the_block` above
+    # exercises `Wide(t)` and checks that the fields LAND; it cannot tell a copy
+    # from an alias, because an aliased copy prints the same numbers. This one
+    # mutates the copy and reads the ORIGINAL, which is the only arrangement
+    # that separates them — and it is the representation rule
+    # `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §2
+    # names ("a clone of a framed struct is a fresh frame"), for a feature that
+    # doc recorded as MISSING and that is in fact present on both architectures
+    # (measured: `S(x)` builds, runs, copies every field, and leaves the
+    # original untouched). That doc's item 2 is closed BY this row rather than
+    # deleted — its item 3, the reflection table, is still open.
+    #
+    # **The oracle writes the copy out field by field, and that is not a
+    # shortcut — it is the only spelling that exists in the other language.**
+    # Python has no `S(x)` copy construction: `Wide(t)` there calls
+    # `__init__(self, t)` and raises `TypeError` for the two arguments it is
+    # missing (measured, and it is why this row's first draft failed its own
+    # oracle). Mojo's shallow n-slot copy is `copy.copy(t)`, which needs a host
+    # module this path does not have — the very gap
+    # `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §1 is
+    # about, and a backend-level refusal rather than one this row can lean on.
+    # So the oracle states the same PROGRAM, which is what a DIFF case compares:
+    # three assignments that copy every field, exactly what the lowering does.
+    ("a_copy_construction_is_a_fresh_block_not_an_alias",
+     "struct Wide:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n\n"
+     "def copyit(t):\n"
+     "    var u = Wide(t)\n"
+     "    u.a = u.a + 100\n"
+     "    u.c = 0 - 1\n"
+     "    return u\n\n"
+     "def main(n) -> Int:\n"
+     "    var t = Wide(5, 6, 7)\n"
+     "    var u = copyit(t)\n"
+     '    printf("%d %d %d|", u.a, u.b, u.c)\n'
+     '    printf("%d %d %d", t.a, t.b, t.c)\n'
+     "    return 0\n",
+     "class Wide:\n"
+     "    def __init__(self, a, b, c):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "        self.c = c\n\n"
+     "def copyit(t):\n"
+     "    u = Wide(0, 0, 0)\n"
+     "    u.a = t.a\n"
+     "    u.b = t.b\n"
+     "    u.c = t.c\n"
+     "    u.a = u.a + 100\n"
+     "    u.c = -1\n"
+     "    return u\n\n"
+     "def main():\n"
+     "    t = Wide(5, 6, 7)\n"
+     "    u = copyit(t)\n"
+     '    print("%d %d %d|" % (u.a, u.b, u.c), end="")\n'
+     '    print("%d %d %d" % (t.a, t.b, t.c), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
     ("a_returned_construction_read_through_the_call",
      "struct A:\n"
      "    var x: Int\n"
