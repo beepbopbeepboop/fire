@@ -142,6 +142,22 @@ ROWS = [
     ("precedence_mod", "print(0 - 7 % 3)", ("value", -1)),
     ("floordiv_zero", "print(7 // 0)", ("trapped", TRAP)),
     ("mod_zero", "print(7 % 0)", ("trapped", TRAP)),
+    # The two rows that pin what the divide-by-zero GUARD is for, now that it
+    # is emitted only when the divisor is not a nonzero literal
+    # (`model.division_needs_zero_guard`). The literal zero still traps — the
+    # guard is dead code for `// 7` and is the whole mechanism for `// 0` — and
+    # a divisor that is zero only at RUN time still traps, which is the half a
+    # build-time fold cannot see and the reason the rule is about the
+    # denominator's SPELLING rather than its value.
+    ("mod_zero_var", "d = 0\nprint(7 % d)", ("trapped", TRAP)),
+    ("floordiv_zero_var", "d = n - n\nprint(7 // d)", ("trapped", TRAP)),
+    # …and the control: two divisions with LITERAL divisors, which is the shape
+    # `formal/examples/floordiv.mojo` and `udivmod.mojo` are and the one whose
+    # emitted guard (and its `bl fflush`) is now gone. The harness compares ONE
+    # printed value, so this row is the quotient; the guard's ABSENCE is pinned
+    # separately, by `test_formal_call_proof_gen.py`'s
+    # `TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire`.
+    ("floordiv_literal_pair", "print(n // 7)", ("value", 1)),
     # `INT64_MIN // -1` is 2**63. arm64 answered the dividend; x86-64's IDIV
     # raised #DE and the image died on SIGFPE. One source, two architectures,
     # one wrong number and one signal.

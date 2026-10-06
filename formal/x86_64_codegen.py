@@ -7508,11 +7508,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Python's integer division."""
         signed = cmp_signed(common_type(self._ttype(e.left),
                                         self._ttype(e.right)))
+        folded_right = M.fold_literal_expr(e.right)
         reason = M.division_overflow_refusal(
-            M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+            M.fold_literal_expr(e.left), folded_right,
             op if op != "/" else "//", [e.left, e.right])
         if reason:
             raise CodegenError(reason)
+        # The divide-by-zero test, when it is emitted at all. A nonzero LITERAL
+        # divisor cannot be zero, so the test is dead code and so is the exit
+        # that follows it — which on this backend is an extern `exit` call, the
+        # same unfollowable-call shape arm64's `bl fflush` is.
+        # `model.division_needs_zero_guard` is the shared decision.
+        needs_guard = M.division_needs_zero_guard(folded_right)
         self._if_counter += 1
         cid = self._if_counter
         fn = self.func_name
@@ -7523,9 +7530,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_expr(e.right)
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
         self._pop_slot(Reg.RAX)
-        self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
-        self._record_cond_branch()
-        self._emit_jcc(COND_E, div0_label)
+        if needs_guard:
+            self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+            self._record_cond_branch()
+            self._emit_jcc(COND_E, div0_label)
         if signed:
             self.asm.emit(encode_cqo())
             self.asm.emit(encode_idiv_r64(Reg.R11))
@@ -7542,10 +7550,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_floor_quotient()
         self._emit_trunc(common_type(self._ttype(e.left),
                                      self._ttype(e.right)))
-        self._emit_jmp(ok_label)
-        self.asm.label(div0_label)
-        self._emit_call_exit(1)
-        self.asm.label(ok_label)
+        if needs_guard:
+            self._emit_jmp(ok_label)
+            self.asm.label(div0_label)
+            self._emit_call_exit(1)
+            self.asm.label(ok_label)
 
     def _emit_floor_correction(self) -> None:
         """`R8 = fdiv_correction(r, d)`, the 0-or-1 word `//` and `%` differ by.

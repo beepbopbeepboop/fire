@@ -1193,6 +1193,86 @@ def _decode(word):
     return idx, G._step_rhs(word, idx)
 
 
+class TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire(unittest.TestCase):
+    """`model.division_needs_zero_guard`, over both backends and both directions.
+
+    The guard's taken arm is the divide-by-zero EXIT, and that exit begins with
+    an extern call — arm64's `_emit_exit` starts with `bl fflush`, x86-64's
+    `_emit_call_exit` calls the C library. `_unfollowable_calls` classifies
+    both as `opaque`, and the proof walk discharges ONE such call by halting at
+    it, so **a function with two divisions carried two unfollowable calls and
+    the universal theorem stopped generating by name** — which is why
+    `formal/examples/floordiv.mojo` and `udivmod.mojo` were red in
+    `test_formal.py` for a reason that had nothing to do with a floor
+    correction.
+
+    A nonzero LITERAL divisor cannot be zero, so for `n // 7` the whole guard
+    is dead code and goes with it. Lean-free and image-free: it reads the
+    emitter's own recorded call sites.
+    """
+
+    def _calls(self, source, arch="arm64"):
+        """The number of CALL SITES the emitter recorded for this source.
+
+        Read from the assembler's own `extern_refs` rather than by scanning
+        bytes: an `0xE8`/`0xE9` byte scan also matches a `jmp rel32`, which is
+        what a control-flow rewrite of the same block emits, so it counted two
+        calls where there is one.
+        """
+        from formal.build import parse_module
+        if arch == "arm64":
+            import formal.arm64_codegen as AC
+            g = AC.ARM64Codegen()
+            g.compile(parse_module(source), emit_startup=False)
+            return sum(1 for _s, _p, _l, kind in g.asm.extern_refs
+                       if kind == "bl")
+        import formal.x86_64_codegen as XC
+        g = XC.X86_64Codegen()
+        g.compile(parse_module(source), emit_startup=False)
+        return len(g.asm.extern_refs)
+
+    def _rule(self):
+        from formal import model as M
+        return M.division_needs_zero_guard
+
+    def test_the_rule_refuses_only_for_a_nonzero_literal(self):
+        rule = self._rule()
+        for nonzero in (1, -1, 2, 7, 1000):
+            self.assertFalse(rule(nonzero), f"// {nonzero} cannot trap")
+        for zero_or_unknown in (0, None, "7", 3.5):
+            self.assertTrue(rule(zero_or_unknown),
+                            f"{zero_or_unknown!r} is not a nonzero literal")
+
+    def test_a_literal_divisor_emits_no_call_on_either_backend(self):
+        one = "def f(n):\n    return n // 7\n"
+        two = "def f(n):\n    return (n // 7) + (n % 7)\n"
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(arch):
+                self.assertEqual(0, self._calls(one, arch),
+                                 f"{arch}: `// 7` must emit no call at all")
+                # Two divisions, two guards, two `fflush`/`exit` calls — and
+                # this is the shape that stopped the theorem generating.
+                self.assertEqual(0, self._calls(two, arch),
+                                 f"{arch}: two literal divisions must emit no "
+                                 f"call at all")
+
+    def test_a_variable_divisor_still_emits_its_guard(self):
+        # The half a build-time fold cannot see: the divisor is zero only at RUN
+        # time, so the guard is the whole mechanism and `d = n - n` must trap.
+        var = "def f(n):\n    d = n - n\n    return 7 // d\n"
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(arch):
+                self.assertEqual(1, self._calls(var, arch),
+                                 f"{arch}: a variable divisor must keep its "
+                                 f"divide-by-zero exit")
+
+    def test_a_zero_literal_divisor_keeps_its_guard(self):
+        # `// 0` is a REFUSED division on this path, so what matters is that the
+        # rule does not treat a zero literal as safe. `test_formal_int_
+        # semantics.py`'s `floordiv_zero` row is the end-to-end half.
+        self.assertTrue(self._rule()(0))
+
+
 class TestFloorCorrectionDecodes(unittest.TestCase):
     """Every word the floor correction emits decodes to the term it meant.
 
@@ -1204,13 +1284,35 @@ class TestFloorCorrectionDecodes(unittest.TestCase):
     """
 
     def _block(self, expr):
-        """The words from the `SDIV` to the block's trailing branch."""
+        """The words from the `SDIV` to the block's trailing branch.
+
+        The trailing branch is the `b <ok_label>` that skips the divide-by-zero
+        exit, and it is only emitted when that exit is — so for a LITERAL
+        divisor (`n % 3`) the block now ends at the correction's last word
+        instead, and this cannot look for a word that is not there.
+        `model.division_needs_zero_guard` decides that, so the terminator is
+        asked rather than assumed in either direction.
+        """
+        import re
+        from formal import model as M
         words = _arm64_words("def f(n):\n    return %s\n" % expr)
         start = next(i for i, w in enumerate(words)
                      if _decode(w)[1].startswith("some (arm64_set_reg 2 s (sdiv64"))
-        end = next(i for i in range(start, len(words))
-                   if _decode(words[i])[1].startswith("some { s with pc := ")
-                   and "s.pc" in _decode(words[i])[1])
+        divisor = 3 if re.search(r"[%/]\s*3\s*$", expr) else None
+        if M.division_needs_zero_guard(divisor):
+            end = next(i for i in range(start, len(words))
+                       if _decode(words[i])[1].startswith("some { s with pc := ")
+                       and "s.pc" in _decode(words[i])[1])
+        else:
+            # No exit to skip, so the `b ok_label` that USED to end the block
+            # is not emitted. The correction ends at the first word of the
+            # frame TEARDOWN, which is the one that restores `sp` — a
+            # `some { s with sp := … }`, and the only such word in a function
+            # whose division did not need an exit. Measured on both fixtures:
+            # `n // 3` and `n % 3` each emit 9 words here, and 10 with the
+            # branch, which is the count `_check` asserts either way.
+            end = next(i for i in range(start, len(words))
+                       if _decode(words[i])[1].startswith("some { s with sp := "))
         return words[start:end]
 
     def _check(self, expr, tail):

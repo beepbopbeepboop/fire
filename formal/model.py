@@ -3513,6 +3513,44 @@ def division_floors(op: str, signed: bool) -> bool:
     return bool(signed) and op in ("//", "%")
 
 
+def division_needs_zero_guard(denominator) -> bool:
+    """Must this `/`, `//` or `%` emit the divide-by-zero test?
+
+    `False` only when the DENOMINATOR is a literal integer the emitter already
+    folded, and not zero. Everything else — a variable, a folded expression
+    this file cannot evaluate, a zero literal — needs the guard, because
+    `SDIV`/`UDIV`/`IDIV`/`DIV` by zero is not defined by A64 or by Intel and the
+    program is entitled to the trap.
+
+    **Why it is asked at all, which is the cost side.** The guard is not two
+    instructions. Its taken arm is the divide-by-zero EXIT, and on arm64
+    `_emit_exit` begins with a `bl fflush` — an extern call, which
+    `arm64_proof_gen.py::_unfollowable_calls` classifies as `opaque` because the
+    target is outside the image. **The walk discharges ONE such call by halting
+    at it**, so a function containing TWO divisions carried two unfollowable
+    calls and the universal theorem stopped generating, by name:
+
+        universal theorem: 2 calls this walk cannot follow
+        (0x10000046c -> 0x100000508 (opaque), 0x1000004d8 -> 0x100000508
+        (opaque)), and ONE halt address cannot discharge them
+
+    Measured, and the shape is not about division at all — it is the same
+    refusal a two-`print` program gets, because it is the same two-calls rule.
+    `n // 7` alone generates a proof; `n // 7 + n % 7` and `n // 7 + n % 3` do
+    not. `formal/examples/floordiv.mojo` and `udivmod.mojo` were red in
+    `test_formal.py` for exactly this and for nothing about a floor correction.
+
+    So the fix available without the `lib/ProofLib.lean` change
+    `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
+    asks for is to stop emitting a guard that cannot fire: for `// 7` there is
+    no zero to trap, and the `bl fflush` that made the theorem unprovable goes
+    with it. **What this does NOT do is fix a two-call program whose calls are
+    real** — that document's own precondition, unchanged, and it is a library
+    change rather than an emitter one.
+    """
+    return not (isinstance(denominator, int) and denominator != 0)
+
+
 # ── Integer OVERFLOW: CPython is unbounded and a word is 64 bits ──────────
 #
 # Every other rule in this file is about what an operator MEANS. This one is
