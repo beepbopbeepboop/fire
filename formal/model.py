@@ -17878,6 +17878,153 @@ NOT_LOWERED_BUILTINS = {
     "sum": "a fold over a sequence, the same shape as `all`",
     "tuple": "a counted blob, the same gap as `list`, and a two-element tuple "
              "is a list blob this path cannot copy at run time either",
+
+    # ── the rest of CPython's builtin NAMESPACE ─────────────────────────────
+    #
+    # **These thirty-four rows are one measurement, and it is the same one this
+    # table was built for: a CPython builtin this path does not lower must be
+    # REFUSED BY NAME, at a chokepoint that can say why, and not discovered four
+    # stages later by a message about SYMBOLS.** Until they were here, 26 of
+    # these names reached the LINK AUDIT — "the image would bind 1 symbol(s)
+    # that nothing provides: isinstance … Write the operation out, or bind the
+    # name from a library that provides it" — whose advice is about the link
+    # line when the truth is that no library on any line provides a Python
+    # builtin's semantics, and 7 more reached a refusal about a DIFFERENT
+    # construct entirely: `var v = globals(); len(v)` was refused with "len() of
+    # a value classified as 'int', and an integer has no length", because
+    # `kind_of`'s CallExpr arm answers INT_KIND for a call it does not
+    # recognise, so the build blamed `len` for a name it never lowered.
+    #
+    # Every row below was MEASURED on both architectures by building
+    # `var v = <name>(…)` with the call's value observed and CPython as the
+    # arbiter, and every one refused — by
+    # `test_formal_builtins_conformance.py`, which holds the whole namespace to
+    # this and prints the count per builtin. The one name in that sweep which is
+    # NOT here is the measured exception: **`exit` lowers** — `exit(3)` builds,
+    # prints what came before it and exits 3, which is CPython's `SystemExit`
+    # status and what `raise SystemExit(n)` already does — while its alias `quit`
+    # does not and is a row below.
+    #
+    # The rows are grouped by WHAT LOWERING WOULD TAKE, and the groups are not
+    # interchangeable: a reader asking "can I use this?" wants the group, and a
+    # reader asking "what would it cost?" wants the sentence.
+
+    # A RUNTIME TYPE QUESTION, which needs a type tag in the value.
+    "isinstance": "a runtime type tag on the value, and every value on this "
+                  "path is one 64-bit integer word or a frame address with no "
+                  "tag in it; this build DOES classify values, but from "
+                  "annotations and literals at BUILD time, which is a different "
+                  "question from the one `isinstance` asks",
+    "issubclass": "a runtime type tag on the CLASS rather than the value, and "
+                  "the same absence; a type constructor is a compile-time name "
+                  "with no run-time object behind it on this path",
+    "type": "a runtime type tag, the same absence as `isinstance`, and the "
+            "object it would name has no representation either",
+    "callable": "a runtime question about whether a value carries a code "
+                "address, and a value here is one word with no address in it — "
+                "the same wall as `map` and `filter`",
+    "id": "the run-time ADDRESS of an object, which is a fact about this "
+          "backend's own allocation and not about the program: every frame is "
+          "at a fixed offset in one stack frame, so the answer would be a "
+          "number that means nothing to a reader",
+
+    # A NAME LOOKED UP ON A FRAME AT RUN TIME, and a frame's slots are chosen
+    # by its DECLARATION before any code runs.
+    "getattr": "a field read by a NAME the build never saw, and a frame's slots "
+               "are fixed by the struct's declaration — there is no slot for a "
+               "name that is not a declared field, and no dictionary to find one "
+               "in",
+    "setattr": "the same absent slot as `getattr`, and this path also has to "
+               "answer whether the write takes a different width from the field "
+               "already in the slot",
+    "delattr": "a field REMOVED by a name the build never saw, so the same "
+               "absent slot as `getattr` — and removing one would renumber the "
+               "slots after it, which a frame's layout does not survive",
+    "hasattr": "the same absent slot as `getattr`, asked as a yes/no",
+    "dir": "a LIST of the names an object has, which is a run-time-sized blob "
+           "this path cannot build — the same gap as `list`, reached through "
+           "reflection rather than through a constructor",
+    "vars": "the frame's own slots as a dict, which is both the absent-slot "
+            "problem and the run-time-sized blob `dir` is",
+    "globals": "the module's symbol table as a dict — a run-time-sized blob, "
+               "and the module table this build consults is a compile-time "
+               "structure it answers questions about rather than materialises",
+    "locals": "the function's own slots as a dict, the same two problems as "
+              "`globals`",
+    "super": "a proxy that carries a receiver AND the next frame in the MRO, "
+             "and both are run-time facts about a layout this build fixes",
+
+    # A FRESH OBJECT, where every value here is a word or a frame the build has
+    # already laid out.
+    "slice": "a three-field object (start, stop, step), and a value here is one "
+             "word — the same reason `divmod`'s PAIR is out of reach. Note this "
+             "is NOT about slicing: `xs[1:3]` lowers and answers CPython's "
+             "length, it is the standalone `slice(...)` object that has nowhere "
+             "to live",
+    "object": "a fresh base instance, and the identity of an object on this path "
+              "is its frame ADDRESS, which is a fixed offset in one stack frame",
+    "memoryview": "a VIEW over another buffer — a base address, a length and a "
+                  "stride, so three words where a value is one, and the buffer "
+                  "it views is the same `char *` every other string is",
+    "frozenset": "a hash SET, and a set needs a hash table this path does not "
+                 "lay out; `BLOB_TYPE_CTORS` builds a counted blob of elements "
+                 "in order, which is a list and not a set",
+
+    # A SECOND COMPILER, or the interpreter's own REPL, inside an image that is
+    # already the output of one.
+    "compile": "a source-to-object compiler, and this image is the OUTPUT of "
+               "that compiler — there is no second one in it",
+    "eval": "the same absent compiler as `compile`, over an expression",
+    "exec": "the same absent compiler as `compile`, over statements",
+    "breakpoint": "a REPL read from stdin and a traceback write, and this "
+                  "backend has one output stream and no debugger client to "
+                  "talk to",
+    "help": "a paged reader over the interpreter's own documentation, which is "
+            "a process this image is not",
+
+    # AN ITERATOR CURSOR: a sequence AND a position, which is two words.
+    "iter": "an iterator is a CURSOR — a sequence plus an index into it — and a "
+            "value here is one 64-bit word, so there is nowhere to keep both. "
+            "`for x in xs` is the lowering that a cursor exists for and needs no "
+            "object: the loop's induction variable IS the position",
+    "next": "the same absent cursor as `iter`, and its `default=` needs a second "
+            "word to say whether the default was taken",
+    "aiter": "an ASYNC cursor, so the same absent pair as `iter` plus the "
+             "coroutine machinery, which this path has no edge for either",
+    "anext": "the same absent async cursor as `aiter`, awaited where `next` is "
+             "called",
+
+    # THE INTERPRETER'S OWN PROCESS STATE, which is not a fact about the
+    # program.
+    "input": "a line read from stdin into a string, and a string here is an "
+             "interned NUL-terminated literal — there is no buffer a read can "
+             "fill (`bugs/FORMAL_string_composition_has_no_buffer.md`)",
+    "copyright": "a string baked into CPython's own binary; this image's build "
+                 "does not have one, and answering it would mean inventing one",
+    "credits": "the same absent build-time string as `copyright`",
+    "license": "the same absent build-time string as `copyright`",
+    "quit": "CPython's `exit` under its other name, and `exit(3)` IS lowered — "
+            "so this row is a NAME that has no lowering behind it rather than a "
+            "construct that cannot be lowered, which makes it the one row here "
+            "that an alias table would close",
+
+    # A RENDERING OR A CONVERSION whose spelling depends on the value's TYPE.
+    "ascii": "a `repr` with non-ASCII characters escaped, so it is `repr`'s "
+             "row plus a table — and `repr` is already out of reach because the "
+             "spelling depends on a type this path does not carry",
+    "format": "a format-spec mini-language applied to a value, and the "
+              "conversion it performs is chosen by the value's type — the same "
+              "wall as `repr`. `printf` is a libc call and lowers; what does not "
+              "is building the format at run time from a value",
+    "complex": "a pair of doubles, and a `Double` is not a value on this path "
+               "(the same fact as `float`'s row, in the other direction)",
+
+    # A RUN-TIME-SIZED CONTAINER BUILT BY A REDUCTION, which is the gap
+    # `enumerate`'s row already names for the same reason.
+    "zip": "a blob whose ELEMENT COUNT is the shortest input's length, so the "
+           "reservation cannot be made before the inputs are read — the same "
+           "run-time-sized-blob gap as `enumerate`, and its `strict=` needs a "
+           "second word for the flag",
 }
 
 # The three names whose absence was SILENT, and the only reason this table has
