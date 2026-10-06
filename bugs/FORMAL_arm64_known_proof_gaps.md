@@ -24,7 +24,7 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
 | `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
 | `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
-| `floordiv`, `udivmod` | not mentioned at all | **FAIL** — reproduced identically on `master`'s `formal/arm64_proof_gen.py` (measured one at a time), so pre-existing and not this file's | `bugs/FORMAL_floordiv_and_udivmod_are_red.md` |
+| `floordiv`, `udivmod` | not mentioned at all | **PASS** (2026-10-05, `work/formal53-docs`) — were **FAIL** on `universal theorem: 2 calls this walk cannot follow … ONE halt address cannot discharge them`, which is not a proof obligation at all: no proof was generated. Every division emitted a divide-by-zero guard whose TAKEN ARM is an exit beginning with `bl fflush`, and the walk discharges one unfollowable call by halting at it | **FIXED**, with its doc deleted — `model.division_needs_zero_guard`, asked by both backends |
 
 **The three corrections, so a reader does not have to diff the table:**
 
@@ -56,11 +56,17 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    precisely because "the obligation became admissible" is the failure mode a
    bound can hide).  The document that owned them is deleted with the fix.
 
-   **Two more examples were missing here too and are now recorded rather than
-   found later**: `floordiv` and `udivmod` are red, were red on `master` before
-   anything of mine, and are not in `EXPECTED_FAILURES` — so they are FAILURES
-   by this file's own argument, and
-   `bugs/FORMAL_floordiv_and_udivmod_are_red.md` is where they are worked from.
+   **`floordiv` and `udivmod` were also missing here, and they are now FIXED
+   rather than recorded.** They were `FAIL` by this file's own argument — not in
+   `EXPECTED_FAILURES`, so a failure — and they were not a division gap at all:
+   neither generated a proof, and both were refused by name for having two
+   unfollowable calls, because each division's divide-by-zero guard ends in a
+   `bl fflush`. `model.division_needs_zero_guard` elides the guard for a
+   nonzero literal divisor, which is the only case where it cannot fire, and
+   both are `PASS` with 0 admitted `sorry`. **What is left standing for a
+   program with two REAL calls** is
+   `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`,
+   and it is a `lib/ProofLib.lean` change rather than an emitter one.
 
 **What is still true of everything below, and is why the rest of the file is
 kept as it is:** the four declared gaps are each owned by another document or by
