@@ -26,6 +26,7 @@ order in one place, not twice.
 import collections
 import dataclasses
 from dataclasses import field
+import keyword
 import os
 import re
 from typing import NamedTuple
@@ -45015,6 +45016,40 @@ def _dunder_receiver_params(method) -> int:
     return len(params)
 
 
+def with_alias_bare_name(item):
+    """The BARE NAME a `with` item's `as` clause binds, or None if it is not one.
+
+    **The rule is `str.isidentifier()`, and it is here because the AST cannot
+    tell the shapes apart.**  `fire_compiler::_parse_with` parses every alias
+    target — `as x`, `as (a, b)`, `as obj.attr`, `as holder[0]` — with
+    `_parse_unpack_target` and stores the result as a bare STRING in
+    `WithItem.alias`, so `'(a, b)'` and `'obj.attr'` arrive as strings that are
+    not names.  `build.py::_with_protocol` used to accept any string, which made
+    a `VarDecl` for a variable literally called `(a, b)`: the three shapes BUILT,
+    ran the body, and exited 0 with nothing bound, and `refuse_unlowerable_with_
+    alias` — written for exactly this — could not fire, for the reason its own
+    message gives ("the shape is not in the AST this function is handed").
+
+    The shape IS recoverable from the string, and this is the one reader of it:
+    a bare name is an identifier and nothing else is, so one predicate separates
+    all four spellings without the parser changing and without the self-hosted
+    front end (which BOXES the alias as an `IdentExpr`, hence the second
+    spelling below) having to agree about a representation it does not share.
+
+    A keyword is excluded as well as a non-identifier, because `str.isidentifier`
+    says `class` is one and `with C() as class:` is not a program — the parser
+    rejects it, so a build that reached here with one has a front end that does
+    not, and binding it would be answering a program nobody wrote.
+    """
+    alias = getattr(item, "alias", None)
+    name = alias if isinstance(alias, str) else getattr(alias, "name", None)
+    if not isinstance(name, str):
+        return None
+    if not name.isidentifier() or keyword.iskeyword(name):
+        return None
+    return name
+
+
 def with_expr_struct(expr, structs_by_name: dict, functions: dict = None):
     """The struct a `with` item's EXPRESSION constructs, or None if undecidable.
 
@@ -45050,6 +45085,82 @@ def with_expr_struct(expr, structs_by_name: dict, functions: dict = None):
     return structs_by_name.get(name)
 
 
+def with_context_manager_defect(struct_def) -> str:
+    """Why `struct_def` is not a context manager this path can enter and exit.
+
+    **Every sentence here has to be TRUE about the struct, and one of them was
+    not until 2026-10-05.**  `refuse_unlowerable_with` used to answer any framed
+    struct that was not enterable with "it declares no `__enter__`", asked as
+    `_declares(struct, CONTEXT_ENTER)` — a PRESENCE test.  So a struct declaring
+    BOTH dunders whose `__exit__` is written CPython's way,
+    `(self, exc_type, exc_val, tb)`, was told it had no `__enter__` — false about
+    a class that has one, and a fix that sends the reader to add a dunder they
+    already have.  That spelling is what every context manager in the wild
+    writes, so this sentence was the FIRST one a reader of real code met.
+
+    Four shapes, and they are four different edits:
+
+      * a dunder ABSENT — the fix is a method in the struct.
+      * a dunder whose receiver-parameter count is not 1 — the fix is that
+        signature, and the sentence has to say which dunder, because
+        `__enter__(self, x)` and `__exit__(self, a, b, c)` are different problems
+        with different reasons.
+      * a dunder VARIADIC — refused rather than assumed, because `*args` cannot
+        be counted from the tree, exactly as a variadic CALL is
+        (`refuse_variadic_parameter_read`).
+
+    The counts are read with `_dunder_receiver_params`, the same predicate
+    `struct_is_context_manager` gates on, so the sentence and the decision
+    cannot come apart: a struct this function says is fine is one the gate lets
+    through, and vice versa.  It takes a struct that IS framed — the caller has
+    already said so, and "it is a struct of ONE field" is a different sentence
+    with a different fix.
+    """
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    missing = [name for name in (CONTEXT_ENTER, CONTEXT_EXIT)
+               if name not in methods]
+    if missing:
+        return ("it declares no "
+                + " and no ".join(missing)
+                + ", so there is nothing to enter and nothing to call on the "
+                  "way out")
+    for name in (CONTEXT_ENTER, CONTEXT_EXIT):
+        params = _dunder_receiver_params(methods[name])
+        if params == 1:
+            continue
+        if params < 0:
+            return (f"it declares both dunders, but its `{name}` is variadic "
+                    f"(`*args`/`**kwargs`), which cannot be counted from the "
+                    f"tree — so this path refuses it rather than assume it "
+                    f"takes the receiver and nothing else")
+        if name == CONTEXT_EXIT:
+            return (
+                f"it declares both dunders, but its `{CONTEXT_EXIT}` takes "
+                f"{params - 1} parameters after the receiver — CPython's own "
+                f"signature is `{CONTEXT_EXIT}(self, exc_type, exc_val, tb)` — "
+                f"and this path calls it with the receiver alone. Those three "
+                f"words are a question about an UNWINDER this backend does not "
+                f"have: there is nothing to pass them, and CPython also uses "
+                f"`{CONTEXT_EXIT}`'s return value to SUPPRESS the exception in "
+                f"flight, which is that same missing runtime seen from the "
+                f"other side. Drop the exception arguments: a `{CONTEXT_EXIT}` "
+                f"that ignores them is the cleanup-only shape, it is what "
+                f"`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` "
+                f"declares, and it lowers")
+        return (f"it declares both dunders, but its `{name}` takes {params - 1} "
+                f"parameters after the receiver and this path calls it with "
+                f"the receiver alone — the protocol's `__enter__` receives the "
+                f"context manager and nothing else, so the word a second "
+                f"parameter names would be an uninitialised register")
+    # Unreachable while `struct_is_context_manager` is the gate — both dunders
+    # present with one receiver parameter each IS that predicate's answer.  Kept
+    # rather than `raise`d because a reader who changes the gate should read a
+    # sentence here rather than an IndexError from three lines away.
+    return "it declares both dunders in the shape this path calls, so the " \
+           "reason is not in the struct — that is a compiler bug, not a " \
+           "program to fix"
+
+
 def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
     """Why this `with` cannot be the context-manager protocol, in reader's terms.
 
@@ -45058,8 +45169,9 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
     one:
 
       * the expression CONSTRUCTS a struct that is not enterable — not framed
-        (the one-word value model), or framed without both dunders.  The fix is
-        in the struct, and the message says which half is missing.
+        (the one-word value model), or framed without both dunders in the shape
+        the protocol calls.  The fix is in the struct, and
+        `with_context_manager_defect` says which half and why.
       * the expression constructs a struct that IS enterable but this image does
         not compile — which cannot happen here and is not given an arm, because
         an arm that is never reached is a sentence a future reader has to check.
@@ -45093,11 +45205,7 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
               ("it is a struct of ONE field, so its receiver IS that field and "
                "there is no address to call a method on"
                if not struct_is_framed(struct) else
-               f"it declares no {CONTEXT_ENTER}"
-               + ("" if _declares(struct, CONTEXT_EXIT)
-                  else f" and no {CONTEXT_EXIT}")
-               + ", so there is nothing to enter and nothing to call on the way "
-                 "out"))
+               with_context_manager_defect(struct)))
     return (
         f"{head}{fn.name}: `with {spelled} as …` is CPython's CONTEXT-MANAGER "
         f"PROTOCOL — `type(mgr).__enter__` binds the name, and "
@@ -45110,10 +45218,12 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
         f"program that exits 0 having skipped the call that IS the contract: "
         f"CPython raises AttributeError on a word, a redirect that does not "
         f"redirect prints the program's own output and looks right, and a "
-        f"temporary directory is left on disk. Give the value a struct with "
-        f"`{CONTEXT_ENTER}` and `{CONTEXT_EXIT}`, or construct it in the `with` "
-        f"itself; a `with` whose context is a plain value cannot be made "
-        f"faithful here."
+        f"temporary directory is left on disk. What the value has to be is a "
+        f"struct of more than one field declaring `{CONTEXT_ENTER}` and "
+        f"`{CONTEXT_EXIT}` in the shape this path calls, or a resource this "
+        f"image already has a value for (`open`), and the `with` has to "
+        f"construct one of those rather than name something untyped; a `with` "
+        f"whose context is a plain value cannot be made faithful here."
     )
 
 
@@ -45143,6 +45253,20 @@ def refuse_unlowerable_with_alias(fn, where) -> str:
     (`fire_compiler` parses all three spellings to a string, so the shape is not
     in the AST this function is handed), and a message that guesses between two
     shapes it cannot see is the failure this repository keeps deleting.
+
+    **This refusal was DEAD CODE until 2026-10-05, and the reason is the second
+    half of the paragraph above read as an excuse.**  `build.py::_with_protocol`
+    asked `isinstance(alias, str)` — which every alias spelling answers — and so
+    bound `VarDecl('(a, b)', …)`: `with Ctx() as (a, b):` built, ran the body,
+    printed it and exited 0 with nothing bound, on both architectures, with
+    nothing anywhere in the tree to see it.  `with_alias_bare_name` above is the
+    reader that separates the four spellings, and it is a predicate on the STRING
+    rather than a change to `fire_compiler`: the shape is recoverable, but
+    recovering it in the parser would be a change to the shared AST that every
+    other front end in this repository also parses, for one back end's rules.
+    `test_formal_with.py`'s three alias rows are the measurement, and the
+    subscript spelling is there because it is the third shape and a reader who
+    has been refused twice tries the third thing they can think of.
     """
     line = getattr(where, "line", 0) or 0
     head = f"line {line}: " if line else ""
@@ -45156,11 +45280,6 @@ def refuse_unlowerable_with_alias(fn, where) -> str:
         f"reader's own source, and dropping it leaves a program that runs the "
         f"body with the name unset."
     )
-
-
-def _declares(struct_def, method_name) -> bool:
-    return any(getattr(m, "name", None) == method_name
-               for m in struct_methods(struct_def))
 
 
 def dotted_struct_construction(func, structs: dict, import_aliases: dict) -> bool:

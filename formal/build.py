@@ -18573,12 +18573,17 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
     # explicitly: `alias.name` on the string raises, and in the compiled path
     # that raise silently truncated the enclosing function. Both spellings are
     # accepted here for the same reason, and neither is normalised anywhere else.
-    alias = item.alias
-    alias_name = (alias if isinstance(alias, str)
-                  else getattr(alias, "name", None))
-    if isinstance(alias_name, str):
+    #
+    # …and why the question is asked of `model.with_alias_bare_name` rather than
+    # of `isinstance(alias, str)`.  This front end spells EVERY alias target as a
+    # string, so `as (a, b)` / `as obj.attr` / `as holder[0]` all arrived here as
+    # strings and were bound to `VarDecl` names literally called `(a, b)`:
+    # three shapes that built, ran the body and exited 0 with nothing bound,
+    # which is the `refuse_unlowerable_with_alias` refusal below being dead code.
+    alias_name = M.with_alias_bare_name(item)
+    if alias_name is not None:
         opened = F.VarDecl(alias_name, None, enter)
-    elif alias is None:
+    elif item.alias is None:
         opened = F.ExprStmt(enter)
     else:
         # `with EXPR as (a, b)` and `with EXPR as obj.attr` are two shapes this
