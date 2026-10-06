@@ -11647,6 +11647,111 @@ def blob_nodes_bound_to(fn, name: str) -> list:
     return out
 
 
+
+def dict_lookup_miss_message(base: str, key: str) -> str:
+    """Why a dict lookup found no such key — the arm with nothing else to say.
+
+    A bounded stop on this path is supposed to NAME its bound before it stops;
+    `_emit_stop_diagnostic` is the shared `write(2)` every one of them uses, and
+    `dict_store_overflow_message` / `dict_store_no_room_message` /
+    `dict_store_other_blob_message` are the three that answer for a dict STORE.
+    A dict READ's miss was the fourth bounded stop with no message, and it is
+    the one a program is most likely to take: `d = {"a": 1}` then `d["z"]`
+    exits 1 on both architectures with nothing on stdout and nothing on stderr,
+    where CPython raises `KeyError: 'z'`.
+
+    Measured on this tree, both backends: that program exits 1 silently.  The
+    exit STATUS is the right answer — a lookup that missed has no value to
+    invent — but silence makes it indistinguishable from a program that
+    crashed, from an assert that failed, and from a divide by zero, and a
+    reader of the output cannot tell which.  So this is the sentence for the
+    case the three store messages do not cover, which is a base whose capacity
+    this build never computed: the STORE arms know the capacity because a store
+    is what needed the reservation, and a READ has no reservation to know it by.
+
+    `base` and `key` are the spellings, so the message names the pair the source
+    wrote rather than a position.
+    """
+    return (
+        f"KeyError: {key} is not a key of {base}. Python raises `KeyError` for a "
+        f"dict lookup that misses, and this path has no value to answer with, "
+        f"so it stops here. Measured on this tree, both backends, this case "
+        f"exited 1 with nothing on stdout and nothing on stderr, which is "
+        f"indistinguishable from an assert, a divide by zero or a crash. Ask "
+        f"first — `if k in d:` — or build the pair with a store, which INSERTS "
+        f"on a miss the way CPython's `d[k] = v` does")
+
+def dict_walk_mutation_message(what: str, detail: str) -> str:
+    """Why a dict's SIZE may not change while a walk over it is running.
+
+    One message for two sites — the `del` that removes a pair and the store
+    that INSERTS one — because they are the same rule and CPython raises the
+    same `RuntimeError` for both: "dictionary changed size during iteration".
+    A store of a key the dict already holds does not change the size and CPython
+    permits it, so this is about the INSERT arm only and about `del` at all.
+
+    Measured on this tree, both backends, before the gate:
+
+        d = {"a": 1, "b": 2}
+        for k in d:
+            del d[k]
+        printf("%d\n", len(d))
+
+    answered **1**, exit 0, no diagnostic, where CPython raises
+    `RuntimeError: dictionary changed size during iteration`; and
+
+        d = {"a": 1}
+        for k in d:
+            d["z"] = 5
+        printf("%d\n", len(d))
+
+    answered **2** where CPython raises the same `RuntimeError`.  Both are the
+    same defect: the walk is an index loop over a count read at run time, so a
+    size change under it is not detected by anything, and the program continues
+    with a container whose shape the iteration has already lost track of.  The
+    `del` row is refused while emitting; the INSERT row cannot be — the miss
+    may never happen — so it is a diagnostic and a stop on the arm that
+    performs the insert, which is where the question is decidable.
+
+    `what` names the construct ("`del d[k]`" or "`d[k] = v`") and `detail`
+    says which arm, so the two sites do not read as one another's sentence.
+    """
+    return (
+        f"RuntimeError: dictionary changed size during iteration. {what} "
+        f"{detail}, while a walk over that dict is running, and CPython "
+        f"refuses the program there — the walk is an index loop over a count "
+        f"read at run time, so a size change under it is detected by nothing "
+        f"and the iteration carries on against a container whose shape it has "
+        f"already lost track of. Measured on this tree, both backends, before "
+        f"this gate: `for k in d:` with `del d[k]` reported 1 where CPython "
+        f"raises, and `for k in d:` with `d[\"z\"] = 5` reported 2 where CPython "
+        f"raises. Collect the keys first — `ks = []` then `for k in d: ks.append"
+        f"(k)` — and delete afterwards, or build a new dict and rebind")
+
+
+def del_during_walk_refusal(base: str, base_is_dict: bool,
+                            walk_depth: int) -> str | None:
+    """Why a `del` from a dict may not be emitted inside a container walk.
+
+    The BUILD-TIME half of `dict_walk_mutation_message`, and it is asked from
+    `del` rather than from the walk because `del` changes the size
+    UNCONDITIONALLY, so whether the program is legal does not depend on
+    anything that is only known at run time.  `walk_depth` is the emitter's
+    `for … in <blob>` nesting depth; a plain `for k in range(n)` leaves it at
+    zero and is not a walk over a container at all.
+
+    A `del` from a LIST inside the walk is deliberately NOT refused: CPython
+    permits it, and this path agrees — measured, both backends,
+    `a = [1, 2, 3]` then `for x in a: del a[0]` leaves `len(a) == 1` on all
+    three, because the list iterator advances by index and a shrink simply ends
+    it earlier.
+    """
+    if walk_depth <= 0 or not base_is_dict:
+        return None
+    return dict_walk_mutation_message(
+        f"`del {base}[…]`", "removes a pair from the dict")
+
+
 def slice_store_refusal() -> str:
     """Why `xs[a:b] = v` is refused outright on the backend that has no slice
     store at all.
@@ -11823,6 +11928,66 @@ def container_membership_refusal(spelled_needle: str, spelled_haystack: str,
         f"Test membership of the elements instead — write the loop yourself "
         f"with `for x in haystack:` and an element test, which is the same "
         f"question and is answered")
+
+
+def is_tuple_expr(e) -> bool:
+    """True when `e` builds a TUPLE literal or a tuple comprehension.
+
+    The third of the three container-constructor predicates, beside
+    `is_dict_expr` and `is_set_expr`, and it exists for the same structural
+    reason they do — the value model keeps none of the three, so nothing can
+    tell a tuple from a list without one — but for a DIFFERENT question, and
+    that difference is what makes it worth having.
+
+    `is_dict_expr` decides whether a subscript means "look this key up" and
+    `is_set_expr` whether `|` is a union.  This one decides whether a subscript
+    may be WRITTEN AT ALL, because a tuple is IMMUTABLE in CPython: `t = (1, 2,
+    3); t[0] = 9` raises `TypeError` there, and a lowering that performs the
+    store answers a program CPython rejects.  Measured on this tree, both
+    architectures, before the gate: that exact program built, ran, exited 0 and
+    printed `t0=9 len=3` — so the mutation happened, silently, where CPython
+    refuses to perform it.  That is the worst direction for this backend: the
+    program's own later reads then see a tuple that CPython would never have
+    produced, and the divergence is not one number but every read of `t` after
+    the store.
+
+    The literal half only, as with the other two; a NAME bound to a tuple is
+    each backend's `_tuple_vars`, asked from `container_store_refusal`.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.TupleExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "tuple")
+
+
+def container_store_refusal(spelled_base: str, base_is_tuple: bool,
+                            spelled_index=None) -> str | None:
+    """Why `xs[i] = v` must not be emitted when `xs` is a TUPLE, or None.
+
+    One function for one question, asked from both backends at the subscript
+    STORE — the one site where the answer changes what is emitted rather than
+    what is compared.  `is_tuple_expr`'s docstring holds the measurement.
+
+    `spelled_index` is quoted when there is one so the diagnostic names the
+    whole write rather than only its base, and a dict subscript is NOT refused
+    here: `d[k] = v` reaches a different emitter (`_is_dict_key_subscript`) and
+    a dict store is correct, so the caller asks this only on the sequence path.
+    """
+    if not base_is_tuple:
+        return None
+    where = f"{spelled_base}[{spelled_index}]" if spelled_index else spelled_base
+    return (
+        f"{where} is a STORE into a TUPLE, and a tuple is IMMUTABLE in Python: "
+        f"`t = (1, 2, 3); t[0] = 9` raises `TypeError: 'tuple' object does not "
+        f"support item assignment`. Measured on this tree, both backends before "
+        f"this gate, that exact program built, ran, exited 0 and printed "
+        f"`t0=9 len=3` — the store HAPPENED, so every later read of `t` in the "
+        f"program sees a tuple CPython would never have produced, and the "
+        f"divergence is not one number but all of them. A tuple lowers as a "
+        f"frame blob here, which is also what a list is, so nothing else in the "
+        f"value model can tell the two apart; the refusal is what keeps the "
+        f"mutability that CPython's type system guarantees")
 
 
 def is_set_expr(e) -> bool:
