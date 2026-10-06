@@ -11038,6 +11038,174 @@ def _interpolated_shape_sentence(segs: list) -> str:
     return out
 
 
+def integer_text_width(bits: int) -> int:
+    """The widest decimal text a signed `bits`-wide integer renders as.
+
+    **Including the sign, because that is what the value can be.** A 64-bit
+    integer reaches `-9223372036854775808`, which is 20 characters; the largest
+    positive one is 19. The derivation is `len(str(-(2 ** (bits - 1))))` rather
+    than a table of digits because a table would be 4 remembered rows where one
+    expression is right for every width, and because a reader checking this
+    against `decimal` should find a formula.
+
+    This is the number §7.1 of
+    `bugs/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
+    never been asked for: a buffer with a COMPILE-TIME-KNOWN bound needs each
+    field's WIDTH to be known at compile time, and an integer's width is a
+    property of its declared type rather than of its value — which is the only
+    reason the doc's step 1 can promise a bound at all.
+    """
+    if not isinstance(bits, int) or bits < 2:
+        return 0
+    return len(str(-(1 << (bits - 1))))
+
+
+# The four widths this path actually declares. Keyed on the bit width rather
+# than on a type name, because a name is a spelling the two backends share as
+# vocabularies (`formal/types.py`) and a width is arithmetic — and because a
+# `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
+# different spelling.
+INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
+
+# What an f-string's FIELD has to be for a buffer's bound to be known before
+# the program runs. Read out of the corpus by
+# `test_formal_run.py::check_interpolated_literal_bound_census`, which is where
+# the shape distribution behind this table is measured rather than assumed.
+FIELD_SHAPES = ("int-literal", "str-literal", "name", "attribute", "call",
+                "subscript", "other")
+
+
+def interpolated_field_shape(expr: str) -> str:
+    """Which of `FIELD_SHAPES` an f-string field's TEXT is written as.
+
+    The field is text, not an AST node: `interpolated_literal_segments` reads it
+    out of the source token because that is all the parser kept (see its
+    docstring), so this is a reader over a spelling and it says so — it answers
+    "what would have to be known about this text", never "what is this value".
+
+    The four shapes that can be resolved WITHOUT the enclosing scope — an
+    integer literal and a string literal, which carry their own width — and the
+    four that cannot: a bare name and an attribute need a DECLARED type to be
+    resolved at all, and a call, a subscript and anything else need the whole
+    expression tree this path never built. **Which of the two kinds a field is
+    is the number that decides whether a bound exists**, which is what the
+    census measures and what `interpolated_literal_bound` turns into a verdict.
+    """
+    text = (expr or "").strip()
+    if not text:
+        return "other"
+    try:
+        int(text, 0)
+        return "int-literal"
+    except ValueError:
+        pass
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return "str-literal"
+    if text.endswith(")") and "(" in text:
+        return "call"
+    if "[" in text and "]" in text:
+        return "subscript"
+    if "." in text:
+        return "attribute"
+    if text.isidentifier():
+        return "name"
+    return "other"
+
+
+def interpolated_literal_bound(spelled: str, field_width=None):
+    """`(bound, why)` — the compile-time-known bound of a composed literal, or
+    `(None, why)` naming the ONE obligation that stops there being one.
+
+    **`bound` counts the NUL terminator**, because the composed value has to be
+    one: a string on this path is a bare `char *` whose length is a `strlen`
+    over its bytes (`formal/model.py`'s text-encoding block and
+    `LENGTH_DEPENDENT_METHODS`), so a composition that is not terminated is a
+    `len()` that walks past the end of it. That is the obligation
+    `bugs/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
+    the first method which can build a string at run time inherits the
+    obligation" — and inheriting it is cheaper than a second word in every
+    string value on this path.
+
+    **`field_width(expr)` is the caller's resolver and is what makes this a
+    function of the SOURCE rather than of a guess.** It returns the widest
+    decimal rendering of that field — an integer for one it can bound, `None`
+    for one it cannot — and the default resolver below bounds exactly two
+    shapes, the two that carry their width with them:
+
+        >>> interpolated_literal_bound('f"--backend={7}"')
+        (12, None)
+        >>> interpolated_literal_bound('f"--backend={name}"')[0] is None
+        True
+        >>> interpolated_literal_bound('f"--backend={name}"',
+        ...                             lambda e: integer_text_width(64))
+        (31, None)
+
+    **The finding this exists to record is that the bound exists for exactly
+    one class of field.** A field whose value is an INTEGER has a width that is
+    a property of its declared type (`integer_text_width`), so the buffer's size
+    is arithmetic. A field whose value is a STRING does not: its width is a
+    `strlen` over bytes whose length is a property of the RUN, so no buffer in a
+    frame — whose size is reserved at compile time, which is what
+    `formal/arm64_codegen.py`'s blob cursor and `formal/model.py`'s
+    `frame_blob_refusal` are — can be sized for it. §7.1 of the doc says the
+    bound "is computable at compile time (chunk lengths are known; a field's
+    width is its declared type's)", which is true of the integer field and false
+    of the string one, and the false half is the half that decides how much of
+    the feature is buildable. `test_formal_run.py::
+    check_interpolated_literal_bound_census` is the measurement.
+
+    **`why` is a single sentence naming the FIRST unmet obligation, in the order
+    the obligations are independent of each other**: a t-string is refused for a
+    reason no buffer fixes (§7.3), a `:` spec and a `!` conversion are
+    RENDERINGS rather than values (§7.3 again, and the doc counts them
+    separately for exactly this reason), and only then does the width come up.
+    Reporting them in that order is what makes the sentence a next step rather
+    than a restatement.
+    """
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError as e:
+        return (None, f"its text could not be taken apart either: {e}")
+    if (spelled or "")[:1] in ("t", "T"):
+        return (None, "a t-string's `{name}` is a TEMPLATE, which is "
+                      "`str.format` evaluating an argument against a format "
+                      "string, so no bound over field VALUES is the right "
+                      "question for it")
+    if field_width is None:
+        def field_width(expr):                                # noqa: E306
+            shape = interpolated_field_shape(expr)
+            if shape == "int-literal":
+                return len(str(int(expr.strip(), 0)))
+            return None
+    total = 0
+    for seg in segs:
+        if seg[0] == "lit":
+            total += len(seg[1].encode("utf-8"))
+            continue
+        _kind, expr, spec, conv = seg
+        if spec:
+            return (None, f"the field `{expr}` carries a FORMAT SPEC (`:"
+                          f"{spec}`), which is a RENDERING rather than a value: "
+                          f"its width depends on the spec and on the field's "
+                          f"value, so it is not a compile-time constant")
+        if conv:
+            return (None, f"the field `{expr}` carries a CONVERSION "
+                          f"(`!{conv}`), which is a RENDERING rather than a "
+                          f"value")
+        width = field_width(expr)
+        if width is None:
+            shape = interpolated_field_shape(expr)
+            return (None, f"the field `{expr}` is a {shape} whose width is "
+                          f"not known before the program runs — a name or an "
+                          f"attribute is bounded only by its DECLARED type, "
+                          f"and an integer's width is arithmetic "
+                          f"(`integer_text_width`) while a STRING field's width "
+                          f"is a `strlen` over the value, which no frame buffer "
+                          f"reserved at compile time can be sized for")
+        total += int(width)
+    return (total + 1, None)      # the +1 is the NUL, and it is load-bearing
+
+
 def refuse_interpolated_literals(stmts) -> None:
     """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
 
