@@ -7090,6 +7090,55 @@ BOTH_ARCH_CASES = [
      "    printf(\"g=%d\", b.get())\n"
      "    return 0\n",
      0, "g=411"),
+    # And the shape none of the five above has: an INTERMEDIATE frame that
+    # declares a constructor of its own. `Inner.__init__` writes `a`, `b` and
+    # `d = Deep()`, so the bring-up has to run one constructor at each level and
+    # `Deep()`'s own bring-up has to come up before `Inner`'s store to `d`
+    # lands. 7 is what only `Deep.__init__`'s `x = 7` can produce.
+    #
+    # **It is also the row that pins the x86-64 base arithmetic.** x86-64's
+    # defaults walk added `self._blob_base` to an offset `struct_block_direct_
+    # children` had already made absolute, so every frame from the third level
+    # down was placed at `blob_base + blob_base + …`. It was invisible while
+    # the defaults were zeros — a store to the wrong address of zeros is
+    # indistinguishable from a store to the right address of zeros — and it
+    # became visible the moment a constructor wrote something else there:
+    # measured on master before this change, arm64 printed `q=0`, x86-64
+    # printed `q=5`, and CPython prints 70. Two machines, two different wrong
+    # numbers, nothing refused.
+    ("nested_frame_runs_the_nested_constructor_at_depth_three",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.x = 7\n"
+     "        self.y = 9\n"
+     "\n"
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var d: Deep\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "        self.d = Deep()\n"
+     "\n"
+     "    def read_d(self) -> Int:\n"
+     "        return self.d.x\n"
+     "\n"
+     "struct Outer:\n"
+     "    var n: Inner\n"
+     "\n"
+     "    def read_d(self) -> Int:\n"
+     "        return self.n.read_d()\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var t = Outer()\n"
+     "    printf(\"t=%d\", t.read_d())\n"
+     "    return 0\n",
+     0, "t=7"),
     # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
     # cannot reach: the frame is reserved in the PROLOGUE, one block per call
     # site, laid out in walk order by `model.struct_constructor_sites`, and the
@@ -13226,6 +13275,26 @@ SUBSCRIPT_CASES = [
      "    return 0\n",
      "refuse:None of its 2 element(s) names something this image can resolve "
      "to a declaration (StaticString, ImmStaticOrigin)", None),
+    # …and that row's sentence now carries the SAME clause the mixed case does,
+    # which is the point of the row: two unresolved names leave the reader with
+    # two candidates and the actionable fact is that a bare name has two SHAPES
+    # here, one of which is a `comptime` alias in a module this build cannot
+    # fold. It used to be named only in the mixed case, and this is the shape
+    # `std/sys/arg.mojo` actually gets — `StaticString` is in neither
+    # `type_constructor_kind`, nor `POINTER_TYPE_CTORS`, nor the struct table
+    # this unit compiles, nor the 220 structs `formal/imports.py`'s
+    # `imported_struct_defs` reaches from that file, so the contrast never fires
+    # there and the reader was left to guess which element was the interesting
+    # one. Pinned with the SPELLING as well as the clause, because the sentence
+    # is what names the file and the module whose binding is the actual cause.
+    ("sub_multi_index_comptime_params_with_nothing_resolvable_names_the_two_shapes",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:a `comptime` ALIAS whose initializer does not fold — measured on "
+     "`std/sys/arg.mojo`'s `Span[StaticString, ImmStaticOrigin]`", None),
     # A BRACKETED type as an element — `List[Int]` — is a type, and it is the
     # case a first version of the classifier got wrong by asking
     # `subscript_is_a_type_application`, which answers about the WHOLE

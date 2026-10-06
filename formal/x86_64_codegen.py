@@ -2726,19 +2726,49 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
         return self._emit_extern_call("exit")
 
-    def _emit_diverge(self) -> None:
+    def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(1)`.
 
         The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the call each: a `raise`, which has no unwinder
+        it rather than spelling the exit each: a `raise`, which has no unwinder
         to route to, and a dialect trap used as a statement
         (`model.mlir_effect_diverge_call`), which has no result and so leaves
         nothing else to emit. The finally flush is the part that is easy to
-        drop — a `raise` inside a `try` must still run the `finally` on its
-        way out — so it lives with the exit rather than at each call site.
+        drop — a `raise` inside a `try` must still run the `finally` on its way
+        out — so it lives with the exit rather than at each call site.
+
+        **`None` is the COMPUTED status and the caller has already pushed the
+        word**, which `_emit_call_exit` pops. The push is here rather than in
+        `_emit_raise` because the finally flush is here, and the flush is
+        SP-balanced (`_push_slot`/`_pop_slot` around the bodies), so a word
+        pushed before it survives it.
         """
         self._flush_pending_finally()
-        self._emit_call_exit(1)
+        self._emit_call_exit(status)
+
+    def _emit_diverge_computed(self, value) -> None:
+        """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
+
+        The status is `M.raise_exit_status`'s `None`, and this is the only place
+        that answer reaches code. The argument is evaluated into RAX — this
+        backend's value register, the one `_flush_pending_finally` itself names
+        as "the return value being built" — PUSHED before the remaining
+        arguments and the finally flush can overwrite it, and popped by
+        `_emit_call_exit` straight into RDI. CPython evaluates the arguments
+        left to right, so the arguments after the status run after it — and
+        `raise SystemExit(a, b())` is a `TypeError` at run time rather than
+        something this path reproduces, so `b()` is evaluated for its effects and
+        its word discarded.
+        """
+        args = M.raise_arg_exprs(value)
+        if not args:
+            self._emit_diverge(0)
+            return
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)
+        for arg in args[1:]:
+            self._emit_expr(arg)
+        self._emit_diverge(None)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -11237,11 +11267,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"construction's layout table and the body rather than a "
                     f"limit of the path — a compiler bug.")
             # `base` is the same arithmetic `_emit_frame_constructor` uses for a
-            # struct with a frame of its own, and the nested subtree goes up
-            # through `_emit_frame_nested` ITSELF rather than a second walk of
-            # the same rows: that helper reads only the struct and the offset
-            # out of the tuple it is handed, so passing the nested pair is the
-            # one way to bring a subtree up at an offset the layout chose.
+            # struct with a frame of its own. The nested subtree goes up through
+            # ONE call rather than the two lines this replaced, because
+            # `_emit_nested_frame_defaults` is that walk — children deepest
+            # first, this frame's defaults, this frame's `__init__` — and the
+            # third step is the one that was missing: measured, both
+            # architectures, `struct Box: var inner: Opt` where `Opt` declares
+            # `def __init__` printing `b=0` where CPython prints 41, with
+            # nothing refused. The addresses go in after, below.
             base = self._blob_base + site[1]
             self._emit_frame_nested((nested, site[1], ()))
             self._emit_frame_bringup(nested, base)

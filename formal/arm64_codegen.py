@@ -1429,11 +1429,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `svc` sequence (which is why this trap is not `_emit_exit` and does no
         # `fflush` — see `_emit_stack_floor_guard`).
         self.asm.emit(encode_stp_sp_pre(29, 30))
-        if self.func_name in self._guarded_names:
-            self._emit_stack_floor_guard()
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
-        for i in range(self._npairs):
-            self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
         # The module-global initializer, LAZILY: a function that touches a
         # global checks a flag and fills the slots if they are not filled yet.
         # Placed here — after the frame is established and the callee-saved
@@ -1571,6 +1567,61 @@ dylib_exports: list = None, globals_base: int = None,
                     or f"{f.name} needs one hidden word for the caller's block "
                        f"and there is no argument register left for it")
             self._load_home_from_reg(_SRET_LOCAL, sret_arg)
+        # **The guard goes HERE: after every incoming argument is in its
+        # callee-saved home, and before this prologue pushes ANY register or
+        # reserves the frame.** Both halves are measurements, and the order above
+        # is the only one that has both.
+        #
+        # Before the `sub sp, #_SCRATCH` because that reservation is what the
+        # guard exists to catch: with the guard after it, the frame had already
+        # been reserved — and the saved registers already pushed — by the time
+        # anything compared SP, so a frame that crossed the real limit had
+        # already touched the memory below it. Measured, arm64, `deep(n)` under
+        # `ulimit -s 2048` where the usable stack is exactly 14 frames: `n=13`
+        # exits 0 and `n=14` dies of SIGSEGV with no output.
+        #
+        # AFTER the argument moves because the guard's own `getrlimit` is a CALL
+        # and AAPCS gives a call every caller-saved register: X0..X17, which is
+        # where every incoming argument still is at the top of this prologue.
+        # The guard parks argument 0 in X14 and puts it back, because it is the
+        # one register whose value it needed for itself, and arguments 1..7 were
+        # simply destroyed. Measured, and the shape of the failure is a contract
+        # check reading a parameter that is no longer the caller's: on arm64,
+        # `formal/examples/bounds_index.mojo`'s `at_offset(2, 5)` and
+        # `at_offset(4, 5)` exited 1 through `debug_assert` where CPython answers
+        # 2 and 4 — two parameters, and the guard ran before the second was
+        # saved. One-argument functions were unaffected, which is why this sat
+        # behind every single-argument case in the corpus.
+        #
+        # It cannot be fixed by pushing the arguments around the call instead:
+        # a `sub sp, #16` across `getrlimit` was measured as a hang or a SIGSEGV
+        # on EVERY program (`def helper(x): return x + 1` with a `main` that
+        # calls it), because the C library reads SP-relative state across the
+        # boundary and the offsets the rest of this prologue computes from SP
+        # are then wrong by that much. The callee-saved homes are the only place
+        # an argument can live across this call.
+        #
+        # **…which is why the homes are written BEFORE the guard and the pushes
+        # that preserve them come AFTER it.** The registers are the homes, so
+        # "the argument is saved" and "the home is on the stack" are two
+        # different moments, and the guard has to sit between them: before the
+        # first, or it destroys arguments 1..7; after the second, and this
+        # prologue has touched the stack below the limit before anything
+        # compared SP. Measured on the second: arm64, `deep(n)` under
+        # `ulimit -s 2048`, where the budget is exactly 14 frames and the usable
+        # stack is exactly 14 — with the pushes first, `k=13` answers `d=13` and
+        # `k=14` dies of SIGSEGV with no output, which is the crash this whole
+        # mechanism exists to replace. So the order is:
+        #
+        #     STP X29, X30 — argument homes (X19..X28) — GUARD — STP X19..X28 —
+        #     SUB SP, #_SCRATCH
+        #
+        # and the one property to preserve if this is ever moved again is that
+        # the guard sees an SP this prologue has not yet written to.
+        if self.func_name in self._guarded_names:
+            self._emit_stack_floor_guard()
+        for i in range(self._npairs):
+            self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:
@@ -2907,9 +2958,23 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_stmt(s)
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
-    def _emit_exit(self, status, computed: bool = False) -> None:
+    def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
         raw Darwin trap.  Never returns, and nothing is emitted after it.
+
+        `status` is an `int` to materialise as an immediate, or **`None` to mean
+        the word is at `[sp]`** — pushed there by `_emit_diverge` before the
+        finally flush so that it survives it, which is the reason the parameter
+        is allowed to be a `None` rather than a register number: the stack is the
+        only storage that is not the C library's to reuse, and the exit is the
+        one place this emitter cannot know what a call did to a scratch
+        register.
+
+        The computed form masks to `M.EXIT_STATUS_BITS`, which the literal form
+        gets from `raise_exit_status` instead — so both deliver the same byte and
+        the raw `svc` (which does **not** truncate the way `exit(3)` does, which
+        is the measured reason `raise SystemExit(-1)` is 255 and not 1) cannot
+        leave a status only one of the two machines agrees with.
 
         **The flush is the whole reason this is one method.**  The trap itself is
         `movz x0, #status ; movz x16, #1 ; svc #0x80` — a raw `SYS_exit`, which
@@ -2945,8 +3010,8 @@ dylib_exports: list = None, globals_base: int = None,
         of the trap is how twenty call sites come to differ, and the flush is
         the part that is easy to forget at the twenty-first.
 
-        **`computed` is the one caller that has no immediate to put in X0**, and
-        it is a flag rather than a second exit because the flush is the part
+        **`status is None` is the one caller that has no immediate to put in
+        X0**, and it is a spelling rather than a second exit because the flush is the part
         that must not be duplicated. With it, the status is ALREADY in X0 (an
         expression was emitted for it) and the two extra instructions are what
         carry it across the `fflush` call — which clobbers every caller-saved
@@ -2975,22 +3040,22 @@ dylib_exports: list = None, globals_base: int = None,
         `formal/examples/` emits NO exit trap at all (measured, `svc` absent from
         each entry function's range), so no example's proof changed.
         """
-        if computed:
+        if status is None:
             self.asm.emit(encode_stp_sp_pre(0, 31))
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        if computed:
+        if status is None:
             self.asm.emit(encode_ldp_sp_post(0, 31))
-            # `exit(3)`'s `status & 0xFF`, so a computed value out of byte range
-            # is the number the C library would deliver rather than the word the
+            # `exit(3)`'s low BYTE, so a computed value out of byte range is the
+            # number the C library would deliver rather than the word the
             # expression produced.
-            self.asm.emit(encode_and_xd_xn_imm(0, 0, 8))
+            self.asm.emit(encode_and_xd_xn_imm(0, 0, M.EXIT_STATUS_BITS))
         else:
             self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _emit_diverge(self, status=1, computed: bool = False) -> None:
+    def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
 
         The ONE way control stops on this path, and both of its callers share
@@ -3005,9 +3070,50 @@ dylib_exports: list = None, globals_base: int = None,
         `raise SystemExit(3)` is CPython's way of saying "exit 3", and
         `model.raise_exit_status` is where that is decided. Every other caller
         passes nothing and gets the 1 the whole hierarchy leaves behind.
+
+        **`None` is the COMPUTED status and the caller has already pushed the
+        word**, which is what `_emit_exit` pops. The push is here rather than in
+        `_emit_raise` because the finally flush is here: it is SP-balanced
+        (`stp`/`ldp` around the bodies), so a word pushed before it survives, and
+        a word held in a register would not be guaranteed to.
         """
         self._flush_pending_finally()
-        self._emit_exit(status, computed=computed)
+        self._emit_exit(status)
+
+    def _emit_diverge_computed(self, value) -> None:
+        """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
+
+        The status is `M.raise_exit_status`'s `None`, and this is the only place
+        that answer reaches code. Three things have to happen in this order and
+        the order is the whole of it:
+
+        1. the argument is EVALUATED into X0, which is this backend's value
+           register, and PUSHED before anything else can run — the arguments
+           after it (CPython evaluates left to right, and `raise SystemExit(a,
+           b())` is a `TypeError` at run time rather than something this path has
+           to reproduce, so `b()` is evaluated for its effects and its word
+           discarded) and the finally flush would both overwrite X0;
+        2. the remaining arguments run for their effects, in source order;
+        3. `_emit_diverge(None)`, which flushes the finallys and pops the word
+           back into X0 for the trap.
+
+        **`_flush_pending_finally` cannot lose the word and that is the reason the
+        stack is used.** It brackets the finally bodies in `stp x0, xzr, [sp,
+        #-16]!` / `ldp x0, xzr, [sp], #16`, so SP is the same before and after and
+        the word this pushed is the word that comes back — measured on both
+        architectures by `test_formal_exceptions.py`'s `systemexit_*` rows, which
+        put a `print` in a `finally` and a `code()` call in the status so the two
+        would have to come apart to disagree.
+        """
+        args = M.raise_arg_exprs(value)
+        if not args:
+            self._emit_diverge(0)
+            return
+        self._emit_expr(args[0])
+        self.asm.emit(encode_stp_sp_pre(0, 31))
+        for arg in args[1:]:
+            self._emit_expr(arg)
+        self._emit_diverge(None)
 
     def _emit_raise(self, stmt: F.RaiseStmt) -> None:
         """`raise <expr>` — run the expression's effects, then leave the process.
@@ -3058,23 +3164,13 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_diverge()
             return
         status = M.raise_exit_status(exc_name, value,
-                                 argument_is_int=self._sys_exit_status_is_int(
-                                     value))
+                                     argument_is_int=self._sys_exit_status_is_int(
+                                         value))
         if status is None:
-            # COMPUTED, and the only caller of `_emit_exit(computed=True)`: the
-            # status is not in the text, so it has to be a VALUE, and X0 is
-            # where an expression leaves one. The FIRST argument is emitted for
-            # its value here and the rest for their effects, rather than every
-            # argument being emitted twice — `raise SystemExit(code())` runs
-            # `code()` once, which is what the source says and what the
-            # `for arg in raise_arg_exprs(value)` loop below does for the
-            # non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
-                self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_exit(None, computed=True)
+            # A COMPUTED status: the argument is the status, so it is evaluated
+            # once and carried, not evaluated for its effects and then discarded
+            # — and `_emit_diverge_computed` is where those three steps are.
+            self._emit_diverge_computed(value)
             return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
@@ -9376,13 +9472,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 value = F.StringLiteral(value=payload)
             else:
                 value = int(payload or 0)
-            self._emit_block_store(site, slot, value)
+            self._emit_block_store(site[1], slot, value)
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
         for _field, slot, value in (plan[1] if shape ==
                                     M.CONSTRUCTION_INIT else ()):
-            self._emit_block_store(site, slot, value)
+            self._emit_block_store(site[1], slot, value)
         self._emit_frame_nested_addresses(site)
         # …and once more at the end, because the address is the RESULT and
         # every store above left something else in X0. An address materialized
@@ -9544,8 +9640,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
-    def _emit_block_store(self, site, slot: int, value) -> None:
-        """One store into a CONSTRUCTION's fresh block: `value` to `8·slot`.
+    def _emit_block_store(self, base: int, slot: int, value) -> None:
+        """One store into a construction's fresh block: `value` to `base + 8·slot`.
 
         The register discipline every construction shape shares, and unchanged
         by any of them: the value is evaluated into X0 and the base is
@@ -9557,12 +9653,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is what lets the class-level defaults and an inlined
         constructor's stores share one loop: a literal default has nothing to
         evaluate, and a literal inside a constructor body is the same node.
+
+        **`base`, not a `site`, and the two backends' signatures now match.** A
+        site is a tuple whose `[1]` is the offset, and only the site's OWN slots
+        want it: a nested frame's stores land at the CHILD's offset, which is a
+        number the placement walk carries and no site tuple holds.
         """
         if isinstance(value, int):
             self._emit_mov_imm("X0", value)
         else:
             self._emit_expr(value)
-        self._emit_frame_base(site[1])
+        self._emit_frame_base(base)
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_frame_positional(self, e: F.CallExpr, name: str, st, site,
@@ -9583,7 +9684,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         """
         self._emit_frame_nested(site)
         for arg, (_field, slot) in zip(e.args, fields):
-            self._emit_block_store(site, slot, arg)
+            self._emit_block_store(site[1], slot, arg)
         self._emit_frame_nested_addresses(site)
         # The address is the RESULT, and every store above left something else
         # in X0.  Same last line as the default constructor's, and for the same

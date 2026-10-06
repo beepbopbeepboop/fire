@@ -3,9 +3,66 @@
 
 **Area:** FORMAL (the multi-element subscript classifier,
 `formal/model.py::multi_index_refusal`'s `MULTI_INDEX_COMPTIME_PARAMS` arm, over
-`../new-modular/Mojo/stdlib/std/sys/arg.mojo:51`). **Status: MEASURED, not
-fixed.** The refusal is CORRECT; the SENTENCE is what is wrong about it, and the
-root cause is two links down in a module this repository cannot edit.
+`../new-modular/Mojo/stdlib/std/sys/arg.mojo:51`). **Status: PARTIAL, and §5 is
+what landed 2026-10-05 — the SENTENCE half, in BOTH branches. The refusal is
+CORRECT and stays; what is still not fixed is LINK 1, which is
+`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`'s area and
+not this doc's.** Read §5 before the rest: this document's own recommendation
+("a name in the sentence, not a new rule") has landed, and **§5 also records the
+measurement that shows the recommendation CANNOT reach the case it was written
+for**, which is why this doc is not deleted.
+
+## 5. What landed 2026-10-05, and the measurement that limits it
+
+**The two-shapes clause is now in BOTH branches of
+`_comptime_param_element_sentence`, and it was in only one.** It used to be
+appended by the MIXED branch — "element 1 `Int` is a type this image knows; and
+element 2 `ImmStaticOrigin` is a bare name…" — and the all-names branch stopped
+at "None of its 2 element(s) names something this image can resolve to a
+declaration (StaticString, ImmStaticOrigin), so there is no word to bind for any
+of them." Two unresolved names leave the reader with two candidates and no way to
+choose, and the clause that says what a bare name can BE was the answer to that.
+It is now one module-level string, `_UNRESOLVABLE_NAME_SHAPES`, used by both, so
+there is one sentence about it rather than two that can drift. Pinned by
+`test_formal_run.py`'s
+`sub_multi_index_comptime_params_with_nothing_resolvable_names_the_two_shapes`.
+
+**And the reason that fix cannot do what §3 wanted is measured here, because it
+is why this doc stays.** §3's proposal was to distinguish
+`Span[StaticString, ImmStaticOrigin]` from `size_of[type, target]` by classifying
+`StaticString` as the type it is, so the contrast would fire and the message
+would name `ImmStaticOrigin` alone. **`StaticString` cannot be classified, on this
+tree, by any table this call holds.** Run over `std/sys/arg.mojo`:
+
+```
+$ python3 -c "… I.imported_struct_defs('…/std/sys/arg.mojo', stmts, root) …"
+imported structs reachable from arg.mojo: 220
+StaticString in it: False
+ImmStaticOrigin in it: False
+```
+
+220 reachable struct declarations and `StaticString` is not one of them — it is
+neither in `type_constructor_kind`'s table, nor in `POINTER_TYPE_CTORS`, nor in
+the struct table this unit compiles, nor in the imported set. So the
+`Span[StaticString, ImmStaticOrigin]` case lands in the **all-names** branch and
+the sentence that reaches a reader of `arg.mojo` is the all-names one. That is
+why the fix had to go there rather than in the mixed branch, and why it is worth
+having at all.
+
+**What §3's other half still wants** — the reader being told *which* of the two is
+the interesting one — needs `StaticString` to be resolvable, which is a fact
+about a module this repository does not own (`std/builtin/static_string.mojo` is
+not reachable from `arg.mojo`'s import closure through
+`formal/imports.py`'s walk). That is an import-reachability question and it is
+**not measured here** beyond the 220 above.
+
+**What this does NOT do.** It changes no lowering and no refusal: the same
+programs are refused on both architectures with the same verdict, and
+`test_formal_run.py`'s four other `sub_multi_index_comptime_params_*` rows are
+unchanged — including `…_of_literals_says_nothing_extra`, which asserts with
+`refuse_without:` that the clause is ABSENT when every element is bindable. That
+row is the load-bearing half: a change that appended the clause everywhere would
+pass the four positive rows and fail it.
 
 Filed 2026-10-04 on `work/formal25-5` because two bug docs said this construct had
 no doc of its own — `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`
@@ -105,7 +162,8 @@ list has nothing to bind for it" — which is the sentence a reader of `arg.mojo
 needs, and it is FALSE for the other bracket in the same corpus that this arm
 refuses (`size_of[type, target]`, where both elements are types and the sentence
 above is the right one). The two need distinguishing because they are two
-different walls; today they are one sentence.
+different walls; today they are one sentence. **§5 says how far this landed and
+why the reader of `arg.mojo` gets the ALL-NAMES branch rather than this one.**
 
 **What it is worth:** 4 files of one scope, and the honest number for the corpus
 is not measured here. Take it from a sweep rather than from this doc.

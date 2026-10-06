@@ -406,6 +406,47 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit(code())\n", 3),
+    # Two more rows over the same mechanism, and each is the half of it the five
+    # above cannot see. The OUT OF RANGE one is 300, which is
+    # the only value in that family that tells a mask from an implicit 32-bit
+    # truncation: 300 & 0xFF is 44 and 300 & 0xFFFFFFFF is 300, so the row
+    # says the mask is `EXIT_STATUS_BITS` and not merely "some mask".
+    # The FINALLY one is the instruction the change actually adds on arm64
+    # (`stp`/`ldp` around the flush) and the pop it adds on x86-64: the status
+    # word has to survive `fflush`, which clobbers every caller-saved register.
+    ("systemexit_with_a_computed_out_of_range_status_is_truncated_to_a_byte",
+     "def code():\n"
+     "    return 300\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n",
+     "def code():\n"
+     "    return 300\n"
+     "\n"
+     "def main(n):\n"
+     "    print('before')\n"
+     "    raise SystemExit(code())\n", 3),
+
+    ("systemexit_with_a_computed_status_survives_a_finally",
+     "def code():\n"
+     "    return 7\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        print('t')\n"
+     "        raise SystemExit(code())\n"
+     "    finally:\n"
+     "        print('f')\n",
+     "def code():\n"
+     "    return 7\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        print('t')\n"
+     "        raise SystemExit(code())\n"
+     "    finally:\n"
+     "        print('f')\n", 3),
     # ── ZeroDivisionError from a builtin operation ───────────────────────────
     # The INTEGER divide already guarded itself; these pin it against CPython
     # rather than against a constant, and `uncaught_zd_*` is the pair that says

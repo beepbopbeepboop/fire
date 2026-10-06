@@ -526,7 +526,7 @@ CASES = [
      "    printf(\"n=%d s=%d\", len(ks), s)\n"
      "    return 0\n",
      "n=2 s=50"),
-    # A DICT comprehension over the same iterable: the generator walk is the
+    # A dict comprehension over the same iterable: the generator walk is the
     # same code and the result is a pair blob, so a fix that taught only the
     # LIST comprehension's arm would leave this one reading values.
     ("dict_comprehension_over_a_dict_yields_every_key",
@@ -537,6 +537,83 @@ CASES = [
      "        print(\"k:\", k)\n"
      "    return 0\n",
      "k: 10\nk: 20\nk: 30\n"),
+    # STRING keys, through BOTH comprehension spellings, and this is the pair
+    # that used to be a `REFUSALS` row — a build-time refusal whose sentence was
+    # false about the reader's own source, because `len()` of the walk's target
+    # came back "an integer has no length" on both architectures while the source
+    # plainly wrote string keys.  `for_in_a_dict_of_strings_binds_a_string_target`
+    # answered the same walk's key spelling, so two walks over one dict disagreed.
+    #
+    # What was missing was not the STRIDE (the rows above) and not
+    # `_iterable_dict_key_kind` (which is asked for a `for` target and was
+    # already right); it was that a comprehension's ELEMENT is evaluated inside
+    # its own generators' scope, and `kind_of` read it with the module-level
+    # `_kind_of_simple`, which cannot resolve a NAME.  So `[k for k in d]` bound
+    # `ks` to a blob of unstated elements, the walk over `ks` fell to the word
+    # default, and `k` became an integer.  The rule that fixes it is about the
+    # comprehension's ITERABLE, which is why the dict comprehension below — one
+    # step later and through a blob the comprehension BUILT — is the row that
+    # says so rather than the row that says it happened once.
+    ("comprehension_over_a_string_keyed_dict_yields_string_targets",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
+    ("dict_comprehension_over_a_string_keyed_dict_yields_string_targets",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var e = {k: 1 for k in d}\n"
+     "    for k in e:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
+    # And a walk of a string-keyed comprehension's result ACCUMULATED, which is
+    # the shape that turns the refused read into a wrong NUMBER rather than a
+    # wrong line — the difference between a diagnostic and a silent fault, and
+    # the reason the group above measures sums as well as prints.
+    ("comprehension_over_a_string_keyed_dict_sums_the_key_lengths",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var s = 0\n"
+     "    var ks = [k for k in d]\n"
+     "    for k in ks:\n"
+     "        s = s + len(k)\n"
+     "    printf(\"n=%d s=%d\", len(ks), s)\n"
+     "    return 0\n",
+     "n=2 s=5"),
+    # The other direction, and the one that was SILENT rather than refused: an
+    # element that is a NAME none of the generators bind is a read of the
+    # ENCLOSING scope, and it used to be classified as nothing, so `k` became
+    # the word default and `print(k)` wrote the interned string's ADDRESS twice
+    # (`4299818428`) with exit 0 and nothing on stderr.  Both rows above are the
+    # wrong-scope defect too — one asked the generators for a name they own, the
+    # other refused to ask anyone for a name they do not — so they are one fix
+    # and this is the row that says a narrower fix would not have been one.
+    ("a_comprehension_element_named_by_nothing_it_generates_reads_its_own_scope",
+     "def main(n):\n"
+     "    var out = \"zz\"\n"
+     "    var ks = [out for i in range(2)]\n"
+     "    for k in ks:\n"
+     "        print(\"v:\", k)\n"
+     "    return 0\n",
+     "v: zz\nv: zz\n"),
+    # A name the generators own AND the enclosing scope also binds, with the two
+    # bindings of DIFFERENT kinds: the comprehension's own wins, which is
+    # Python's rule and the reason `scope_lookup` answers a name it has rather
+    # than falling through to the enclosing map.  `len` over the walk's result is
+    # what observes it — the enclosing `k` is an integer, so a fall-through would
+    # classify the comprehension as a blob of integers and refuse.
+    ("a_comprehension_target_shadows_the_enclosing_binding_of_its_own_name",
+     "def main(n):\n"
+     "    var k = 5\n"
+     "    var ks = [k for k in [\"ab\", \"cde\"]]\n"
+     "    for j in ks:\n"
+     "        print(\"n:\", len(j))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
     # The `*` splice, whose loop is a different emitter entirely
     # (`_emit_star_splice`) with the same one-thing-per-count contract.
     ("star_splice_of_a_dict_yields_keys_not_values",
@@ -717,6 +794,29 @@ MODEL_RULES = [
      "def g(n):\n"
      "    if n:\n"
      "        return 1\n", "g", True),
+]
+
+
+# `__DATA`'s layout, as a model question with no image. The four
+# `MODULE_GLOBAL_CASES` rows measure the same property the expensive way — two
+# architectures, an image each — and this is the one that says it in 0.1 s, so a
+# layout regression is a fast red rather than a four-image one. `run_layout`'s
+# docstring has the measurement and the shape of the failure.
+LAYOUT_CASES = [
+    ("a_container_globals_words_are_outside_the_reserved_area",
+     "D = {\"a\": 10, \"b\": 20}\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", D[\"a\"])\n"
+     "    return 0\n",
+     "main", None),
+    ("a_list_globals_words_are_outside_the_reserved_area",
+     "L = [1, 2]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", L[0])\n"
+     "    return 0\n",
+     "main", None),
 ]
 
 # ── the tuple-store target shapes ──
@@ -2286,6 +2386,66 @@ def run_refusal(name, source, needle, tmpdir, verbose):
     return True, ""
 
 
+def run_layout(name, source, fn_name, want, verbose):
+    """`__DATA`'s layout: the RESERVED words and a container's own, disjoint.
+
+    A model question with no image and no Lean, and the cheap half of what the
+    four `MODULE_GLOBAL_CASES` rows above measure the expensive half of: those
+    build two architectures to notice that a module-global container's words and
+    the `getrlimit` scratch are the same bytes, and this asks the layout
+    directly.
+
+    **The invariant is that nothing a program's own value needs is inside the
+    area the backend reserves for itself** — the initializer flag, the stack
+    floor, the cached `RLIMIT_STACK` and the 16-byte scratch `getrlimit` writes
+    into. It was violated by a count spelled twice and disagreed with itself:
+    the image reserved five words and the trailing area started after two, so
+    every container global's words began on the floor. `getrlimit` then wrote 16
+    bytes of a limit over the container's elements, once per process, and the
+    measured result was an image that built, printed nothing and exited 1.
+
+    So the rows are: the reserved area ends where the first container word
+    begins, and the scratch's 16 bytes are inside the reserved area rather than
+    past the end of the image.
+    """
+    import formal.model as M
+    from formal.build import _prepare_functions, parse_module
+    stmts = parse_module(source, filename=name + ".mojo")
+    prepared = _prepare_functions(stmts, synthetic=True, source_path=name)
+    functions, structs = prepared[0], prepared[1]
+    structs_by_name = {st.name: st for st in structs}
+    frame_slots = M.prepare_module_frame_slots(stmts, functions,
+                                               structs_by_name)
+    table = M.collect_global_slots(stmts, functions, frame_slots=frame_slots)
+    base = 0x100000000
+    image = M.build_data_image(table, base)
+    reserved_end = (image.init_flag_offset
+                    + M.GLOBAL_RESERVED_WORDS * M.GLOBAL_SLOT_BYTES)
+    scratch_end = image.stack_scratch_offset + 16
+    blob_slots = [s for s in table.values() if s.init[0] in ("blob", "frame")]
+    if not blob_slots:
+        return False, ("the case declares no container global, so the layout "
+                       "question is not exercised")
+    by_offset = {slot.index * M.GLOBAL_SLOT_BYTES: name
+                 for name, slot in table.items()}
+    offenders = [(by_offset.get(at, "slot@%d" % at), t)
+                 for at, t in image.fixups if t < reserved_end]
+    if offenders:
+        return False, (
+            "%d container slot(s) point inside the reserved area (which ends at "
+            "%d): %s — `getrlimit` writes 16 bytes of limit over the words the "
+            "first of those addresses"
+            % (len(offenders), reserved_end, offenders[:4]))
+    if scratch_end > len(image.blob):
+        return False, ("the getrlimit scratch ends at %d and the image is %d "
+                       "bytes, so the call writes past it"
+                       % (scratch_end, len(image.blob)))
+    if verbose:
+        print("      reserved ends at %d, scratch ends at %d, image is %d bytes"
+              % (reserved_end, scratch_end, len(image.blob)))
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -2307,7 +2467,8 @@ def main():
                   + [(c, "fixed") for c in FIXED_CASES]
 + [(c, True) for c in REFUSALS]
                   + [(c, True) for c in BUILTIN_REFUSALS]
-                  + [(c, "model") for c in MODEL_RULES])
+                  + [(c, "model") for c in MODEL_RULES]
+                  + [(c, "layout") for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -2322,6 +2483,9 @@ def main():
                 if kind == "model":
                     ok, detail = run_model_rule(entry[0], entry[1], entry[2],
                                                 entry[3], args.verbose)
+                elif kind == "layout":
+                    ok, detail = run_layout(entry[0], entry[1], entry[2],
+                                            entry[3], args.verbose)
                 elif kind == "fixed":
                     ok, detail = run_fixed_case(entry[0], entry[1], entry[2],
                                                 tmpdir, args.verbose)

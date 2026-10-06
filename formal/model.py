@@ -2508,15 +2508,14 @@ def _comptime_param_element_kind(node, structs_by_name=None) -> str:
     resolve to a declaration" — **not** "not a type".
 
     That direction is the whole point, and it is the opposite of the reader's
-    first guess. `Span[StaticString, ImmStaticOrigin]` has a first element that
-    IS a type and a second that is a bare name, and a message that said "the
-    second is not a type" would be a claim this call cannot make — it never
-    resolved `StaticString` either, it only knows the name is not in a table it
-    holds. So `'name'` says what is knowable, and the refusal that uses it says
-    which of the two shapes a name can be: a type this image could not resolve,
-    or a `comptime` alias whose initializer does not fold — and
-    `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
-    measured the second, on the second element of exactly this bracket list.
+    first guess. `Span[StaticString, ImmStaticOrigin]` — the bracket
+    `std/sys/arg.mojo:51` spells — has a first element this call resolves as a
+    bare name too, and a message that said "the second is not a type" would be a
+    claim this call cannot make: it only knows the name is not in a table it
+    holds. So `'name'` says what is knowable, `_UNRESOLVABLE_NAME_SHAPES` says
+    which of the two shapes a name can be — a type this image could not resolve,
+    or a `comptime` alias whose initializer does not fold — and the second of
+    those is measured on the second element of exactly this bracket list.
     """
     if isinstance(node, F.SubscriptExpr):
         # `subscript_is_a_type_application` is the right QUESTION and the wrong
@@ -2564,10 +2563,25 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
     **The sentence is emitted only when it can name a culprit**, which is the
     condition that keeps it from being a guess. It fires when at least one
     element is a `'name'` AND at least one is positively classified, because
-    only then is the contrast informative: a list of two names says the reader
-    has to resolve both, and a list of two types says the refusal is about the
-    LIST and not about an element (which is the `size_of[type, target]` case the
-    old sentence already served correctly, and it is still served).
+    only then is the contrast informative: a list of two types says the refusal
+    is about the LIST and not about an element (which is the `size_of[type,
+    target]` case the old sentence already served correctly, and it is still
+    served). **When NO element resolves there is no culprit to name, and the
+    sentence says the reader has two to resolve instead** — which is the honest
+    answer and not a weaker one, because it is followed by the same
+    `_UNRESOLVABLE_NAME_SHAPES` clause either way: a bare name has exactly two
+    shapes here, and naming them is what tells the reader of
+    `Span[StaticString, ImmStaticOrigin]` that the second one may be a `comptime`
+    alias whose initializer is an MLIR attribute template in a module this build
+    cannot fold — which is the whole of what can be said about it.
+
+    **The clause is ONE string in both branches, not one per branch.** It used to
+    live only in the mixed case, so the all-names case — which is what
+    `std/sys/arg.mojo` gets, measured, because `StaticString` is in neither
+    `type_constructor_kind` nor `POINTER_TYPE_CTORS` nor the struct table this
+    unit compiled nor the 220 structs `formal/imports.py::imported_struct_defs`
+    reaches from that file — named the two unresolved elements and stopped there.
+    The reader was left to guess which of them was the interesting one.
     """
     els = list(getattr(getattr(e, "index", None), "elements", ()) or ())
     kinds = [_comptime_param_element_kind(x, structs_by_name) for x in els]
@@ -2577,7 +2591,7 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
         return (f" None of its {len(kinds)} element(s) names something this "
                 f"image can resolve to a declaration "
                 f"({', '.join(_spell(x) for x in els)}), so there is no word "
-                f"to bind for any of them.")
+                f"to bind for any of them.{_UNRESOLVABLE_NAME_SHAPES}")
     shown, cls = [], []
     for i, (x, k) in enumerate(zip(els, kinds), 1):
         if k == "type":
@@ -2589,12 +2603,34 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
     return (f" Of its {len(kinds)} element(s): {'; '.join(cls)}; and "
             f"{' and '.join(named)} {'is a bare name' if len(named) == 1 else 'are bare names'}"
             f" this image cannot resolve to a declaration. That is where the "
-            f"missing word is, and it has two shapes: a TYPE this unit does not "
-            f"declare, or a `comptime` ALIAS whose initializer does not fold "
-            f"(measured on `std/sys/arg.mojo`'s "
-            f"`Span[StaticString, ImmStaticOrigin]` — see "
-            f"`bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template"
-            f".md`, which is what this sentence exists for).")
+            f"missing word is.{_UNRESOLVABLE_NAME_SHAPES}")
+
+
+#: What a bare name in a comptime parameter list can BE, for a reader who has to
+#: decide what to do about it. **One string, in both branches of
+#: `_comptime_param_element_sentence`,** because a reader who is told "element 2
+#: is unresolvable" and a reader who is told "both elements are unresolvable" are
+#: in the same position: neither this call nor this backend can say which of the
+#: two shapes the name has, and saying so is what stops the search.
+#:
+#: The second shape is the measured one and it is a fact about a module this
+#: repository does not own: `std/sys/arg.mojo:51` spells
+#: `Span[StaticString, ImmStaticOrigin]()`, where `ImmStaticOrigin` is a
+#: `comptime` ALIAS in `std/origin/__init__.mojo` whose initializer is
+#: `Origin[_mlir_attr[...]]()` — an MLIR attribute template, and that module does
+#: not build here. So the word is missing because ANOTHER module's comptime
+#: binding cannot be folded, not because this backend lacks a capability, and a
+#: reader sent to look for a compiler limit would be looking in the wrong place.
+_UNRESOLVABLE_NAME_SHAPES = (
+    " A bare name has two shapes here, and this path cannot tell them apart: a "
+    "TYPE this unit does not declare, or a `comptime` ALIAS whose initializer "
+    "does not fold — measured on `std/sys/arg.mojo`'s "
+    "`Span[StaticString, ImmStaticOrigin]`, whose second element is exactly the "
+    "second shape, because `std/origin/__init__.mojo` binds it to "
+    "`Origin[_mlir_attr[…]]()` and that module does not build. The word is "
+    "missing because of a binding in another module, not because of a capability "
+    "here."
+)
 
 
 def multi_index_refusal(kind: str, spelled: str, elements_note: str = "") -> str:
@@ -27759,6 +27795,15 @@ def integer_literal_value(e) -> int | None:
     return None
 
 
+#: How many bits of a `SystemExit` status survive into the process's exit
+#: status. CPython's is `exit()`'s, which keeps the low BYTE, and both backends
+#: read the same number from here so a computed status cannot be masked on one
+#: machine and not the other — the asymmetry is invisible in the answer and is
+#: exactly what `test_formal_exceptions.py`'s negative and out-of-range rows are
+#: for.
+EXIT_STATUS_BITS = 8
+
+
 def raise_exit_status(exc_name: str, value=None,
                       argument_is_int: bool = False) -> int | None:
     """The status an uncaught `raise` of `exc_name` leaves behind, or None.
@@ -27777,13 +27822,14 @@ def raise_exit_status(exc_name: str, value=None,
         raise SystemExit(3)     -> 3
         raise SystemExit(-1)    -> 255   (the C library masks to a byte)
         raise SystemExit("msg") -> 1, and `msg` on stderr
+        raise SystemExit(f())   -> f()   (computed; see below)
 
     Measured on the interpreter this compiler runs on, all five. The two
     cases that are not a plain small non-negative integer are the reason the
     rule is stated and not guessed: a non-integer argument is the "print it and
     fail" form, and a negative or out-of-range one is truncated by
-    `exit(3)`'s `status & 0xFF`, which is a fact about the C library rather
-    than about this backend — so it is reproduced rather than refused, because
+    `exit(3)`'s `status & ((1 << EXIT_STATUS_BITS) - 1)`, which is a fact about
+    the C library rather than about this backend — so it is reproduced rather than refused, because
     a program's own exit status is the one thing a caller can observe.
 
     Only an integer LITERAL is read, a NEGATED one included: `raise
@@ -27832,7 +27878,7 @@ def raise_exit_status(exc_name: str, value=None,
         # value exists — and the two differ on the negative case, which is why
         # the negative row is an ORACLE row in `test_formal_exceptions.py`
         # rather than a claim about this function.
-        return status & 0xFF
+        return status & ((1 << EXIT_STATUS_BITS) - 1)
     if argument_is_int:
         return None
     # A non-integer argument is CPython's "print the object and exit 1" form.
@@ -42153,6 +42199,25 @@ Not 4 and not 16: the value model decides it, and the value model is also why a
 container global needs a BLOB beside the slot rather than more words here."""
 
 
+#: How many words `__DATA` reserves AFTER the slots for the BACKEND's own
+#: bookkeeping: the initializer flag, the stack floor, the cached `RLIMIT_STACK`
+#: and the 16-byte `getrlimit` scratch (two words). **One number, and four places
+#: have to agree about it** — the allocation in `build_data_image`, the three
+#: `GlobalDataImage.stack_*_offset` properties, and `build_data_image`'s
+#: `tail_base`.
+#:
+#: It was a literal in the allocation and a different literal in the tail
+#: layout, and the disagreement was invisible until both were five and two: a
+#: module-global container's own words started inside the reserved area, so the
+#: floor, the cached limit and the scratch were a container's elements. arm64's
+#: guard writes 16 bytes of `RLIMIT_STACK` into the scratch once per process, on
+#: a path nothing else writes, and measured on `L = [1, 2]` with
+#: `print("v:", L[0])` the image built, printed nothing and exited 1 — on both
+#: architectures, with nothing refused. An `int` or a `str` global was
+#: unaffected, because their slot words are not in the tail.
+GLOBAL_RESERVED_WORDS = 5
+
+
 class GlobalSlot:
     """One module-level name's `__DATA` slot.
 
@@ -44332,8 +44397,9 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # than a `None` that every reader would have to test for.
     count = max(s.index for s in table.values()) + 1 if table else 0
     flag_offset = count * GLOBAL_SLOT_BYTES
-    # FIVE reserved words, not two: the initializer flag, the stack floor, the
-    # cached `RLIMIT_STACK`, and the 16-byte scratch `getrlimit` writes into.
+    # `GLOBAL_RESERVED_WORDS` reserved words, not two: the initializer flag, the
+    # stack floor, the cached `RLIMIT_STACK`, and the 16-byte scratch `getrlimit`
+    # writes into.
     # The third is there because the floor's budget is read from the process at
     # run time (measured: a constant budget larger than the real stack is a guard
     # that never fires — same binary, same depth, `exit 2` at the default
@@ -44342,11 +44408,15 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # the answer in. The fourth and fifth are that call's 16-byte destination,
     # which cannot be stack: `GlobalDataImage.stack_scratch_offset` has the
     # measurement for all three alternatives.
-    blob = bytearray(flag_offset + 5 * GLOBAL_SLOT_BYTES)
+    blob = bytearray(flag_offset + GLOBAL_RESERVED_WORDS * GLOBAL_SLOT_BYTES)
     fixups = []
     string_cells = []
-    # The trailing area starts after the reserved words, so a slot's address
-    # never depends on how many trailing items there are.
+    # The trailing area starts after the RESERVED words, so a slot's address
+    # never depends on how many trailing items there are — and so a container's
+    # own words cannot land inside the area `getrlimit` writes into. It is
+    # `GLOBAL_RESERVED_WORDS` and not a literal precisely because the allocation
+    # above and this line were two literals, and the tail was the one that lost.
+    tail_base = flag_offset + GLOBAL_RESERVED_WORDS * GLOBAL_SLOT_BYTES
     tail = bytearray()
     for slot in sorted(table.values(), key=lambda s: s.index):
         kind = slot.init[0]
@@ -44374,9 +44444,9 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             # shape of bug the nested-blob paragraph below is about.
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
-            offset = flag_offset + 2 * GLOBAL_SLOT_BYTES + len(tail)
+            offset = tail_base + len(tail)
             _lay_out_blob_words(slot.init[2], tail, fixups, string_cells,
-                                flag_offset + 2 * GLOBAL_SLOT_BYTES)
+                                tail_base)
             blob[at:at + GLOBAL_SLOT_BYTES] = (base + offset).to_bytes(
                 GLOBAL_SLOT_BYTES, "little", signed=True)
             fixups.append((at, offset))

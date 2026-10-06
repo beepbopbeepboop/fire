@@ -2322,15 +2322,19 @@ def _search_contracts(sources: dict, ordered, functions_by_source=None,
     **A REFUTED contract is REPORTED, and only ENFORCED under `enforce`.**
     Both halves of that are deliberate and they are not the same decision:
 
-      * always reported.  `formal/examples/fact.mojo` carries
-        `@ensure(result >= 0)` and it is FALSE — `fact(21)` overflows a `UInt64`
-        to -4249290049419214848.  That was true before this module existed and
-        nothing reported it, because nothing read the decorator.  A checker
-        that reported it and let the build continue still makes it visible on
-        every build of that file, which is the whole discovery; a checker that
-        made it fatal by default would instead turn four corpus builds red for
-        a reason that is a bug in an EXAMPLE, and the fix belongs to whoever
-        owns the example rather than to a flag nobody set.
+      * always reported.  **The corpus file it was written for has been FIXED
+        and no longer demonstrates this** — `formal/examples/fact.mojo` carried
+        `@ensure(result >= 0)` over `@require(n >= 0)`, which is FALSE
+        (`fact(21)` overflows a `UInt64` to -4249290049419214848), and the
+        precondition now bounds `n` at the same 20 its `@refines(Specs.
+        factorial64; 20)` claims, so the file reports UNKNOWN.  That was true
+        before this module existed and nothing reported it, because nothing read
+        the decorator, and a checker that reported it and let the build continue
+        still made it visible on every build of that file — which is how it was
+        found.  The rows that keep the division honest now live in
+        `test_formal_contracts.py`'s `loop_wrong` / `wrong_clampv` /
+        `test_the_fact_contract_is_refuted`, each of which refutes its own
+        clause, so "reported" does not rest on one corpus file.
       * enforced under `--check-contracts`.  That is what the flag is FOR: it
         is the request "hold this program to its contracts", and a request that
         a false contract does not stop the build is not a request.
@@ -18358,10 +18362,16 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
         # own and for a one-field struct whose sole field holds a placed nested
         # frame — and both backends' `_emit_fresh_one_word` bring that frame up
         # before they hand back its address, at a site the prologue reserved.
-        # So what is left to check is whether the bring-up writes every slot it
-        # reserves, which is `model.construction_bringup_is_complete`: a nested
-        # struct with a declared `__init__` is NOT run by a bring-up, and lifting
-        # over it would answer a frame of zeros where the source wrote stores.
+        # So what is left to check is whether the nested subtree is PLACEABLE at
+        # all, which is `model.construction_bringup_is_complete`. **Its
+        # `__init__` arm is gone**: a nested struct with a declared `__init__` IS
+        # run by a bring-up now — `model.nested_frame_constructor_stores` inlines its
+        # stores and both emitters ask it — so the refusal this verdict used to
+        # raise ("the bring-up writes each field's class-level DEFAULT and does
+        # not run a constructor") became false about every program it was
+        # printed for. What remains is the layout: a chain deeper than
+        # `MAX_NESTED_FRAME_DEPTH` gets no bytes, and a struct that reaches
+        # itself is a cycle the placement cannot terminate.
         if not M.struct_construction_yields_frame_address(
                 _st0, structs_by_name):
             return _st0, "construction"
