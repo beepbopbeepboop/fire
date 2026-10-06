@@ -1739,6 +1739,15 @@ def compile_formal(source_path: str, output: str = None,
     # builds inherits the first program's accented literals and refuses
     # `len()` over text that never had any.
     M.clear_non_ascii_strings()
+    # …and this image's SET OF COMPILED MODULES starts empty too, for the same
+    # reason and with the same shape: `model.publish_module_raisers` records
+    # which of a module's functions end the process, keyed by the dotted
+    # identity an importer spells, and a unit must be able to ask about the
+    # modules this image compiled. Per-IMAGE rather than per-process is what
+    # makes the residual honest — a second program built in one process must not
+    # inherit the first program's compiled modules and refuse a `try` on their
+    # account.
+    M.clear_module_raisers()
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
@@ -16531,6 +16540,86 @@ def refuse_member_reads_through_a_literal_base(functions: list) -> None:
     return None
 
 
+def _own_module_identity(source_path: str):
+    """The dotted name `source_path` is addressed by, or None.
+
+    `formal.imports.own_module_identity` behind a guard, because this is asked
+    on a path that must not raise: the raise answer is a REFUSAL this pipeline
+    adds, and a failure to compute a module's identity must leave the
+    pre-existing behaviour alone rather than become a new one. `None` means "no
+    identity", which `publish_module_raisers` reads as "publish nothing".
+    """
+    if not source_path:
+        return None
+    try:
+        from formal.imports import own_module_identity
+        return own_module_identity(source_path, source_path)
+    except Exception:                            # noqa: BLE001
+        return None
+
+
+def _publish_imported_raisers(source_path, stmts) -> None:
+    """Publish, for every module `stmts` imports, which of ITS functions raise.
+
+    **This is what makes `try: boom()` answerable when `boom` raises in another
+    module, and it is here rather than in `_resolve_imports` because the check
+    that asks has to stay where it is.** `_prepare_functions` runs BEFORE
+    `_resolve_imports`, so at the moment `uncatchable_raise` runs no imported
+    module has been compiled — and its ORDER is deliberate: `test_formal_run.py`
+    pins, in `constr_the_arm_refusal_precedes_the_base_clause`, that the arm
+    sentence arrives BEFORE a construct-time one, because it is a fact about
+    control flow that holds whatever the callee is. Moving the check later to
+    meet the data breaks that row. So the DATA is brought to the check.
+
+    What it publishes is `model.publish_module_raisers`'s answer for each
+    module, computed from that module's own `RaiseGraph` — the same class, the
+    same fixpoint, the same extern set, so the entry unit's `try: boom()` and
+    the imported module's own `try: boom()` are answered by one implementation
+    rather than two.
+
+    **It parses, and does not compile, and that is the deliberate cost.** The
+    alternative — compiling the imports here — is what `_resolve_imports` does a
+    few lines later and would do it twice. A parse is the whole of what the
+    question needs: `RaiseGraph` reads statements, and `build_module_dylib`'s
+    own compile of the same file is unaffected by having been parsed once
+    already. What is NOT shared is any derived state, which is why this
+    publishes only the raise set.
+
+    **A module that cannot be resolved or parsed contributes NOTHING**, and
+    nothing is raised: a callee in it stays unresolved and the pre-existing
+    "unknown is not raising" answer stands. That is the residual this doc names
+    — it is a host module, a `--link-dylib` library, or a builtin method, none
+    of which this pass can read the body of — and it is now the ONLY residual,
+    where before it also contained every ordinary `import`.
+    """
+    if not source_path:
+        return
+    try:
+        from formal.imports import (imported_modules, module_source_text,
+                                    resolve_module_path)
+        mods = imported_modules(stmts)
+    except Exception:                            # noqa: BLE001
+        return
+    for mod in mods or ():
+        try:
+            path = resolve_module_path(mod, relative_to=source_path)
+            if not path:
+                continue
+            parsed = parse_module(module_source_text(path),
+                                  filename=path)
+            fns = [n for n in M.iter_nodes(parsed)
+                   if isinstance(n, F.FunctionDef)]
+            identity = _own_module_identity(path)
+            if identity:
+                M.publish_module_raisers(
+                    identity,
+                    M.RaiseGraph(fns, externs=M.BARE_C_RETURN_KINDS,
+                                 bound_modules=M.imported_module_bindings(
+                                     parsed)).raising)
+        except Exception:                        # noqa: BLE001
+            continue
+
+
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
                        as_dylib: bool = False,
@@ -16668,14 +16757,51 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # it into. See the docstring for the measurement — a `try` whose handler
     # printed built, ran, printed nothing and exited 0.
     #
-    # The call graph is built ONCE, before the loop, because the question below
+    #: The call graph is built ONCE, before the loop, because the question below
     # is about the MODULE rather than about a function: which of this unit's
     # functions can end the process, so that a `try` with arms anywhere in the
     # unit can be told that its arms are unreachable. `BARE_C_RETURN_KINDS` is
     # the extern set — a C symbol returns and there is no frame of ours for it
     # to raise into, so `printf(…)` inside a `try` is not a reason to refuse
     # anything.
-    raise_graph = M.RaiseGraph(functions, externs=M.BARE_C_RETURN_KINDS)
+    #
+    # `bound_modules` is this unit's own `from mod import f` bindings, read by
+    # `model.imported_module_bindings`, so that `f(…)` is a call into a KNOWN
+    # module rather than a free name — the other half of what makes an imported
+    # callee resolvable, and the half that costs nothing because it is a fact
+    # about this unit's own statements. The dotted half (`mod.f(…)`) needs no
+    # binding: the qualifier is in the AST.
+    bound_modules = M.imported_module_bindings(stmts)
+    raise_graph = M.RaiseGraph(functions, externs=M.BARE_C_RETURN_KINDS,
+                               bound_modules=bound_modules)
+    # …and PUBLISHED, because this unit's answer is the only place the units it
+    # imports get theirs, and because the check below reads the table for a
+    # callee in ANOTHER module. Keyed by the dotted identity an importer spells
+    # (`own_module_identity`), and published even when the set is EMPTY — an
+    # empty set is the fact "this module raises nothing", and without it every
+    # call into a module this image knows would still be a possibility.
+    if source_path:
+        _own = _own_module_identity(source_path)
+        if _own:
+            M.publish_module_raisers(_own, raise_graph.raising)
+    #
+    # The imported modules' OWN raisers, published HERE and read by the loop
+    # below, and that placement is the whole design. `uncatchable_raise` has to
+    # stay in `_prepare_functions` because its ORDER against the codegen-time
+    # refusals is deliberate and pinned — `test_formal_run.py`'s
+    # `constr_the_arm_refusal_precedes_the_base_clause` requires the arm
+    # sentence to arrive before a construct-time one, and moving it later (which
+    # is the obvious place, since `_resolve_imports` runs after this) breaks
+    # that row. So the FACT is brought to the check instead of the check being
+    # moved to the fact.
+    #
+    # It costs a PARSE of each imported module — `build_module_dylib` parses
+    # them again when it compiles them — and that is the trade: a duplicated
+    # parse of a file this build is about to read anyway, against an ordering
+    # the suite pins. What is published is only the raise answer, so a module
+    # whose parse fails contributes nothing and leaves its calls unresolved,
+    # which is the pre-existing behaviour rather than a new failure.
+    _publish_imported_raisers(source_path, stmts)
     for fn in functions:
         found = M.unemitted_handler_arm(fn)
         if found is not None:

@@ -659,6 +659,148 @@ def run_refusal(name, source, needle, tmpdir, verbose):
         print(f"      arm64 and x86-64 agree: {needle!r}")
 
 
+# ── the CROSS-MODULE refusals ───────────────────────────────────────────────
+#
+# (name, {filename: source}, needle)
+#
+# These are the shapes `RaiseGraph`'s own call graph cannot see, because the
+# `raise` is in ANOTHER MODULE of the same image — `try: boom()` contains no
+# `raise` at all. `model.RaiseGraph` is built from ONE unit's function list, so
+# before the published per-module table (`model.publish_module_raisers`, read
+# here through `formal/build.py::_publish_imported_raisers`) an imported callee
+# was UNRESOLVED, and unresolved is answered `False`.
+#
+# **That `False` was a wrong answer and not a shrug**, and the symptom is the
+# shape that is worse than a wrong number: the program BUILT. Measured on both
+# architectures before the table existed, the first row below built, printed
+# NOTHING and exited 1, where CPython prints `caught` and exits 0 — every
+# statement after the `try` missing from the image because the `raise` left it.
+CROSS_MODULE_REFUSALS = [
+    # The bare spelling, `from h2 import boom`, which is the commonest one and
+    # the one that needed `model.imported_module_bindings` to carry: `boom(…)` is
+    # a bare callee, so without the binding it is the same unresolved name as
+    # `dict.get`.
+    ("a_try_over_a_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("the message")\n'
+                 '\n'
+                 '\n'
+                 'def quiet():\n'
+                 '    return 1\n',
+      "main.mojo": 'from h2 import boom\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("caught\\n")\n'
+                   '    return 0\n'},
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
+    # The dotted spelling, `import h2` then `h2.boom()`, which needs no binding
+    # at all — the qualifier is in the AST — so it is the row that would still
+    # pass if `imported_module_bindings` were deleted, and the pair is what says
+    # both spellings of one cross-module call are answered.
+    ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("the message")\n',
+      "main.mojo": 'import h2\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        h2.boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("caught\\n")\n'
+                   '    return 0\n'},
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
+]
+
+
+def run_cross_module_refusal(name, files, needle, tmpdir, verbose):
+    """Both backends must REFUSE an image of SEVERAL modules, with the needle.
+
+    Written out rather than reusing `build` because the subject IS the
+    multi-module image: the callee has to live in a second file or the row is
+    measuring the single-module rule it sits beside.
+    """
+    for filename, text in files.items():
+        with open(os.path.join(tmpdir, filename), "w") as f:
+            f.write(text)
+    seen = {}
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        src = os.path.join(tmpdir, "main.mojo")
+        p = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             f"--backend={backend}", "-o", out, src],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        text = p.stderr or p.stdout or ""
+        if not check(p.returncode != 0,
+                     f"{name} is refused on {backend}",
+                     "it BUILT and ran, so a `try` whose callee ends the "
+                     "process in ANOTHER module is in the image as a program "
+                     "that stops where CPython goes on"):
+            continue
+        seen[backend] = text
+        check(needle in text,
+              f"{name} on {backend} names the callee it cannot resolve",
+              f"the message does not contain {needle!r}: "
+              f"{text.strip()[-300:]}")
+    if len(seen) == 2 and verbose:
+        print(f"      arm64 and x86-64 agree: {needle!r}")
+
+
+# ── the CROSS-MODULE ANSWERED table ─────────────────────────────────────────
+#
+# (name, {filename: source}, needle-in-stdout)
+#
+# **The negative half of the table above, and it is what makes the two a pair.**
+# An empty raiser set is a FACT — "this module's functions cannot end the
+# process" — and if it were not published, every call into a compiled module
+# would still be a possibility and the table above would have over-refused its
+# own corpus. So the control is a `try` around an imported function that raises
+# nothing, which must keep BUILDING and keep running the statements after the
+# `try`.
+CROSS_MODULE_ANSWERED = [
+    ("a_try_over_a_callee_that_raises_nothing_still_builds",
+     {"h2.mojo": 'def quiet():\n'
+                 '    return 1\n',
+      "main.mojo": 'from h2 import quiet\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        quiet()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("after\\n")\n'
+                   '    return 0\n'},
+     "after\n"),
+]
+
+
+def run_cross_module_answered(name, files, needle, tmpdir, verbose):
+    """Both backends must BUILD and print `needle` for a multi-module image."""
+    for filename, text in files.items():
+        with open(os.path.join(tmpdir, filename), "w") as f:
+            f.write(text)
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        src = os.path.join(tmpdir, "main.mojo")
+        p = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             f"--backend={backend}", "-o", out, src],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        text = p.stderr or p.stdout or ""
+        if not check(p.returncode == 0,
+                     f"{name} builds on {backend}", text[-400:]):
+            continue
+        rc, got, _err = run(out)
+        check(got == needle,
+              f"{name} on {backend} prints what the source says",
+              f"printed {got!r}, the source says {needle!r}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -674,6 +816,15 @@ def main():
             if args.cases and name not in args.cases:
                 continue
             run_refusal(name, source, needle, tmpdir, args.verbose)
+        for name, files, needle in CROSS_MODULE_REFUSALS:
+            if args.cases and name not in args.cases:
+                continue
+            run_cross_module_refusal(name, files, needle, tmpdir, args.verbose)
+        for name, files, needle in CROSS_MODULE_ANSWERED:
+            if args.cases and name not in args.cases:
+                continue
+            run_cross_module_answered(name, files, needle, tmpdir,
+                                      args.verbose)
 
     total = len(RESULTS)
     passed = sum(1 for ok, _ in RESULTS if ok)
