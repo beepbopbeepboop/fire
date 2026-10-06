@@ -18374,7 +18374,10 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 #     statements for `if`. A new emitter arm would be a new BLOCK SHAPE in the
 #     step function, which is the expensive half of the proof work
 #     (`bugs/FORMAL_arm64_known_proof_gaps.md`), and it would have to be built
-#     twice — once per architecture — for the same language construct.
+#     twice — once per architecture — for the same language construct. It also
+#     would not have elaborated: the operand order arm64's generator accepts is
+#     the one `if <expr> == <literal>` produces, which is the second bullet of
+#     `_lower_one_case`'s docstring.
 #   * The arm bodies are ordinary control flow. `return` / `break` / `continue` /
 #     a nested `match` / a `try` inside an arm all work because the body is
 #     SPLICED into the enclosing statement list rather than called. `test_
@@ -18398,9 +18401,12 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 # patterns (which all parse here as plain expressions and would otherwise be
 # silently mis-lowered).
 #
-# `test_formal_match.py` is the oracle table: 40 rows, both architectures, each
-# compared against CPython or against `fire.py run` where the two read a pattern
-# differently — the file's docstring says which is which for every row.
+# `test_formal_match.py` is the oracle table, and it names its own size rather
+# than this comment: each row is built and RUN on both architectures and
+# compared against CPython — or against `fire.py run`, for the patterns the two
+# read differently, which the file says per row. Its proof section measures the
+# claim in the first bullet above: a `match` and the `if` chain it lowers to are
+# the same pair of programs to both proof generators.
 _MATCH_TEMP_PREFIX = "_match_val"
 
 
