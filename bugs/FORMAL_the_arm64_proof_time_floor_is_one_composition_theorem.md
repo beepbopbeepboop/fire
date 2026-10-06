@@ -169,6 +169,23 @@ state literals) and its "the measurement below is CONFIRMED" line are all
 reproduced above or in §"The measurement", and its one open question — whether
 the cost is the term or the pretty-print — is answered.
 
+**Re-measured 2026-10-05 (`work/formal31-5`), two runs, and THE FLOOR IS
+UNCHANGED: 20.5 s / 20.1 s wall, 29.3 s / 28.7 s CPU, peak RSS 2.0 GB, `rc=0`,
+no warnings, on `master` at `7ac78995`.** The table below was measured on the
+`formal24-proof-speed` tree, so this is the statement that it still describes
+today's emitter: nothing in the five weeks since moved the number, and the
+attribution (83% in one declaration) is the thing a fix has to beat, not the
+total.
+
+**And the re-measurement found a TRAP that would have produced a fake timing,
+which is why it is written down at all: `fire.py build --formal` on an unchanged
+tree prints `Proof: … (verified from cache)` and runs NO Lean at all** — the
+verdict is content-addressed on the proof bytes, `lib/*.olean` and the
+toolchain, so the whole command takes ~1.1 s and its cost is not a proof time.
+Any timing taken from a `fire.py build --formal` line is a timing of the cache.
+The bytes have to change (or the check has to be made directly, as §"How to
+re-derive" now spells it) before Lean runs.
+
 ## The measurement
 
 `formal/examples/bitops.mojo`, arm64, one `lean` per file through
@@ -293,6 +310,12 @@ first and now answers the question the sweep was reaching for too**, and it
 goes through `formal/lean.py::run_lean` for every Lean run, so nothing here
 launches `lean` by hand:
 
+Every command in this section was run on 2026-10-05 and is one a reader can
+paste. The generation step is `fire.py build --formal --no-prove`, which
+writes the same `.lean` next to the image — `--no-prove` is the whole point
+of that step, because without it `fire.py` may print "(verified from
+cache)" and check nothing.
+
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
 
@@ -367,3 +390,11 @@ truncating between those leaves an attribute with nothing to apply to. For
 `bitops` that is **346 groups**, so the full sweep is 346 runs of 2-20 s where
 the five groups this document's table has are worth five: `--at` is how you say
 which five.
+
+**And the sweep itself is no longer scratch**, which is what the `--mode
+prefix` row above is: the split, the boundary rule and the `run_lean` call
+are all in `tools/formal_proof_shape.py`, and `declaration_starts` /
+`prefix_text` are the two functions that hold them. Before that tool this
+was a script under `.tmp/` — and `.tmp/` is git-ignored, so nothing in the
+repository regenerated it, which is the whole of why the measurement
+behind this table was not reproducible from the tree.

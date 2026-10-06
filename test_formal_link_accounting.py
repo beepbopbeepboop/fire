@@ -391,6 +391,13 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     # module, is that `wrap`, `fill` and `shorten` are absent — a rendering WIDTH is
     # the subject and no file in this repository asks for one.
     "textwrap": "test_formal_textwrap.py",
+    # `random` was already in `PRE_SPLIT_HOST_MODULES`, so what it needed here
+    # was the TEST and not a tier move.  Its row is the one where the module
+    # moves HALF the files and the other half stop one level out — a
+    # `random.Random(n)` instance is an object with 624 words behind a pointer
+    # — so its test pins both halves: the three names that build, against
+    # CPython's own `random`, and the absent ones refused naming themselves.
+    "random": "test_formal_random.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot

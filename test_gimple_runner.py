@@ -5504,6 +5504,91 @@ print(zip([0, 1], [2, 3]))
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
 
+    # ── zip_longest's PADDED slot: the one thing a loop's own element read
+    # cannot supply ──────────────────────────────────────────────────────
+    #
+    # A padded slot holds CPython's `fillvalue`, which DEFAULTS to `None`, and
+    # this model's `None` is a per-domain zero: 0 in an integer slot
+    # (`print(None)` answers `0` here, so an integer slot's padded row is
+    # right modulo that one convention) and NULL in a string slot
+    # (`mojo_print`'s own rule). A FLOATING-POINT slot has neither, and the
+    # old `(double)0` fill answered `0.0` where CPython answers `None` — a
+    # number no source wrote, indistinguishable from a real `0.0` the
+    # sequence held. So that row now raises, naming the domain, from inside
+    # the loop and only on the row that IS padded: the equal-length float
+    # case below pads nothing and has to keep working, which is why the
+    # refusal is not a shape-level one.
+    #
+    # The first program is the ORACLE for the second and third, so the
+    # expectations here are CPython's own answers rather than strings this
+    # file has to keep in sync by hand.
+    test_gimple_matches_cpython("gimple_zip_longest_pads_every_domain_it_can", """\
+import itertools
+for a2, b2 in itertools.zip_longest(["x"], ["y", "z"]):
+    print(a2, b2)
+for a3, b3 in itertools.zip_longest(["x", "w"], ["y"], fillvalue="-"):
+    print(a3, b3)
+for a4, b4 in itertools.zip_longest(["x", "w"], ["y"], fillvalue=None):
+    print(a4, b4)
+for a5, b5 in itertools.zip_longest([1.5, 2.5], [9.0], fillvalue=0.0):
+    print(a5, b5)
+for a6, b6 in itertools.zip_longest([1, 2], [3], fillvalue=0):
+    print(a6, b6)
+""")
+
+    # An INTEGER slot's padded row is this model's `None` — 0 — and CPython's
+    # is `None`, so this one program cannot be an oracle comparison and is
+    # pinned by hand. That divergence is `print(None)`'s own convention on
+    # this path (measured: `print(None)` answers `0`, and `print(x is None)`
+    # tests the same 0), not a gap in the padding: an absent integer is
+    # spelled 0 everywhere else on this backend too.
+    test_gimple_stdout("gimple_zip_longest_an_integer_slot_pads_with_zero", """\
+import itertools
+for a, b in itertools.zip_longest([1, 2], [3]):
+    print(a, b)
+""", "1 3\n2 0\n")
+
+    # The float slot, unpadded: the refusal is on the padded ROW, not on the
+    # shape, so this program is CPython's answer unchanged. A refusal
+    # emitted before the loop would take this down on its first line, which
+    # is what makes this the test for WHERE the raise is.
+    test_gimple_matches_cpython("gimple_zip_longest_an_unpadded_float_slot_is_fine",
+                                """\
+import itertools
+for a, b in itertools.zip_longest([1.5, 2.5], [9.0, 8.0]):
+    print(a, b)
+""")
+
+    # The refusal is a BUILD refusal on this backend, not a raise emitted into
+    # the loop body: `work/formal31-5` answered this construct by emitting
+    # `mojo_raise_not_implemented` on the padded row, and the arm above pins
+    # the build refusal instead — a program that builds and then exits 1 is
+    # the shape this path calls a wrong answer wearing a runtime error's
+    # clothes. Same program, same reason, the refusal point this backend uses.
+    test_gimple_build_refusal(
+        "gimple_zip_longest_a_padded_float_slot_raises", """\
+import itertools
+for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
+    print(a, b)
+""", "a padded `double` slot has no value that means `absent`")
+
+    # A fillvalue outside the slot's own domain is the same wrong answer in a
+    # second spelling: CPython hands every slot the value as given, so this
+    # prints `b 5` where the old `(int64_t)(0.0)` fill printed `b 0`. The
+    # string slot's half is here too, and it is the one that used to be a
+    # refusal for the WRONG reason (`fillvalue=None` spelled out is the
+    # default, not a fill) — see the program above.
+    # …and the same shape at BUILD time, for the same reason as the row above.
+    # `b` is an integer slot and the loop runs three times over a sequence of
+    # two, so the fill IS selected into it; `a` is a float slot the float fill
+    # matches, so only the second slot is the question.
+    test_gimple_build_refusal(
+        "gimple_zip_longest_a_cross_domain_fill_is_refused", """\
+import itertools
+for a, b in itertools.zip_longest([1.5, 2.5], [7], fillvalue=0.0):
+    print(a, b)
+""", "`fillvalue` is double and cannot fill an integer sequence")
+
 
     # A pair's VALUE slot kept no kind, so every reader of it guessed: the
     # zero word printed `None` (the generic element repr's `val == 0` arm, right

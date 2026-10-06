@@ -1230,6 +1230,22 @@ def _gen_for_zip_longest(gen, node):
     `TypeLattice.slot_kind_byte` already names) is the precedent, and a loop
     target would have to carry that kind alongside its value.
 
+    A padded slot the model cannot FILL faithfully is REFUSED rather than
+    handed a value, and it is refused AT BUILD TIME: a float slot has no
+    absent value (0.0 is a number, and CPython answers None), and a
+    `fillvalue` outside the slot's own domain is a value the slot cannot
+    carry. Both are decided in the per-slot loop below, against
+    `_zip_longest_reaches`, so a slot the fill can never be selected into is
+    not asked the question — which is what keeps a program that does not pad
+    that slot building (`zip_longest([1.5, 2.5], [9.0, 8.0])`). **The refusal
+    is a build refusal and not a raise emitted into the loop body**, because a
+    program that builds and then exits 1 on the padded row is the shape this
+    path calls a wrong answer wearing a runtime error's clothes;
+    `ZipLongestFillRefusal` is re-raised by `_gen_stmt_ForStmt` for exactly
+    that reason. `test_gimple_runner.py` pins both directions: the three
+    refusals by message, and the unpadded float slot as a program that still
+    matches CPython.
+
     Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
     boxed-iterable fallback, where `itertools` is an opaque module global:
     the call itself stubbed to a bare int64_t and the loop targets fell to
@@ -1259,6 +1275,14 @@ def _gen_for_zip_longest(gen, node):
             fill_node = kwv
         else:
             raise ValueError(f"unsupported zip_longest argument {kwn}=...")
+    if gen._is_none_literal(fill_node):
+        # `fillvalue=None` IS the default, spelled out — CPython's own
+        # signature says so — so it asks for the same absent value rather
+        # than for a fill, and not for one in the domain of `None`'s own
+        # lowered type (an int64_t 0), which a string slot used to refuse.
+        # `gen._is_none_literal` is the predicate the rest of the backend
+        # asks (`None` parses as a bare `IdentExpr`, not a literal node).
+        fill_node = None
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
@@ -1414,8 +1438,7 @@ def _gen_for_zip_longest(gen, node):
                 'double' if raw_ct == 'double' else ('char *' if raw_ct == 'str' else 'int64_t'),
                 read_fn())
             if raw_ct == 'double':
-                fill_v = fills[si] if fills[si] is not None else "(double)0"
-                sel = gen._new_val('double', f"{in_t} ? {raw} : {fill_v}")
+                sel = gen._new_val('double', f"{in_t} ? {raw} : {fills[si]}")
             elif raw_ct == 'str':
                 sel = gen._new_val('int64_t', f"{in_t} ? (int64_t){raw} : {fills[si]}")
             else:
