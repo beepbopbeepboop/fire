@@ -4253,30 +4253,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     raise CodegenError(word)
                 self._emit_optional_unwrap(e, how, word)
                 return
-        reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
-            receiver_is_fd=self._expr_is_fd(obj),
-            receiver_shape=M.receiver_shape(obj))
-        if reason is not None:
-            raise CodegenError(reason)
-        if e.kwargs:
-            raise CodegenError(
-                f"{_dotted(e.func)}() takes no keyword arguments on the formal "
-                f"x86-64 path (got {[k for k, _v in e.kwargs]})")
-        how = (M.builtin_value_method(method)
-               or M.pointer_bounded_method(method)
-               or M.string_identity_method(method))
-        # THE ARGUMENT GUARD, asked once per backend and after the receiver's,
-        # so the two are complementary rather than redundant: `value_method_
-        # refusal` above has established that the RECEIVER is text, and this
-        # establishes that the operands the libc call reads are. Before it, a
-        # number where a needle belongs reached `strncmp` as an address —
-        # measured SIGSEGV on both architectures for `find`, `count`,
-        # `startswith` and `endswith` — and a `chars` argument to `lstrip` was
-        # accepted and then ignored. The DECISION is `model`'s; the kinds are
-        # this backend's.
+        # THE STRING-METHOD PLAN, asked for EVERY string method and BEFORE the
+        # receiver guard, because the order is what lets the two coexist: a
+        # method that FOLDS has no receiver question to ask (its receiver is a
+        # literal by definition) and a method that does not is refused by
+        # whichever of the two has the more specific thing to say. Before the
+        # guard it can reach the thirty-five methods `model.STRING_FOLDED_
+        # METHODS` computes from text the build can see; after it, every one of
+        # them would already have been refused by name for want of a buffer.
+        #
+        # The DECISION is the model's and is shared by both backends; the kinds
+        # are this backend's, and the plan needs them only for the five methods
+        # whose arguments are read as `char *`.
         accept = None
-        if M.pointer_bounded_method(method) is not None:
+        if M.is_string_method(method):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -4290,6 +4280,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_expr(F.StringLiteral(payload))
                 return
             accept = payload
+        reason = M.value_method_refusal(
+            method, self._method_recv_kind(e), _dotted(e.func),
+            receiver_is_fd=self._expr_is_fd(obj),
+            receiver_shape=M.receiver_shape(obj))
+        if reason is not None:
+            raise CodegenError(reason)
+        if e.kwargs:
+            raise CodegenError(
+                f"{_dotted(e.func)}() takes no keyword arguments on the formal "
+                f"x86-64 path (got {[k for k, _v in e.kwargs]})")
+        how = (M.builtin_value_method(method)
+               or M.pointer_bounded_method(method)
+               or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
         elif how == "list_clear":

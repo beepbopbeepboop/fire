@@ -180,9 +180,12 @@ def check(ok, what, detail=""):
 RECEIVERS = ["", "a", "abc", "abcabc", "aaa", " a b  c ", "  hi  ", "xxaxx",
              "héllo"]
 
-#: The five methods this path lowers, and the ARGUMENTS each is asked about.
-#: `None` is the no-argument spelling and is only meaningful for `lstrip`,
-#: whose two-argument-free forms are different answers.
+#: The ARGUMENTS each of the five libc-backed methods is asked about. A
+#: separate table from `FOLD_ARGS` because these five are answered by a call at
+#: RUN time and their arguments are read as `char *`, so what the corpus has to
+#: cover is the OPERAND SHAPE and not the text. `None` is the no-argument
+#: spelling and is only meaningful for `lstrip`, whose two argument-free forms
+#: are different answers.
 ARGUMENT_METHODS = {
     # `chars` — the argument `lstrip` exists for. CPython strips any leading
     # character in the SET, so `"xxaxx".lstrip("x")` is `"axx"` and not the
@@ -216,6 +219,102 @@ ARGUMENT_METHODS = {
     "count": ['"a"', '"b"', '"c"', '"z"', '""', '"aa"', '"abc"', '"ab"',
               '"é"'],
 }
+
+#: The methods this path computes at RUN time through a libc call, read out of
+#: the model rather than typed, so this file cannot claim a coverage the table
+#: does not have. `coverage_checks` asserts the two agree in both directions.
+ANSWERED_METHODS = ("lstrip", "startswith", "endswith", "find", "count")
+
+#: The methods this path FOLDS: it computes Python's answer when every
+#: operand's text is visible to the build and materialises the result. Read out
+#: of the model, and `coverage_checks` asserts it agrees with
+#: `model.STRING_FOLDED_METHODS`.
+FOLDED_METHODS = sorted(M.STRING_FOLDED_METHODS)
+
+#: The arguments each folded method is asked about. Every entry is a source
+#: fragment, and every one is one CPython ACCEPTS, so a row measures the method
+#: rather than a `TypeError`:
+#:
+#:   * the six case conversions take no argument, so their one row per receiver
+#:     IS the whole of their signature — and the interesting receivers are the
+#:     non-ASCII ones, because `"ß".upper()` is `"SS"` and `"ǳ".title()` is
+#:     `"ǲ"` and both are Unicode questions a byte-level implementation could
+#:     not answer at all;
+#:   * the width-taking family is asked for a width LARGER than the receiver
+#:     (the case where the padding is non-zero) and for one SMALLER (the case
+#:     where the answer is the receiver unchanged, which a lowering that pads
+#:     unconditionally gets wrong), and `center`/`ljust`/`rjust` are also asked
+#:     for the one-argument form so the default fill character is covered;
+#:   * `replace` is asked for a substitution that GROWS the text, one that
+#:     SHRINKS it, and the three-argument form with a count — the three
+#:     different lengths, which is the whole of why it is refused at run time;
+#:   * `removeprefix`/`removesuffix` are asked both for a PREFIX THAT IS THERE
+#:     (a new string) and one that is not (the receiver itself), because the
+#:     two are different answers and a lowering that always allocates gets the
+#:     second one wrong;
+#:   * `expandtabs` is asked about a tab that is there, for the default size
+#:     and for an explicit one;
+#:   * the twelve predicates take no argument, so their corpus IS the receiver
+#:     list, and it carries the rows that separate them: `""` is false for every
+#:     one of them except `isascii`, `"²".isdigit()` and `"²".isdecimal()`
+#:     differ, `"ǅ".istitle()` and `"ǅ".isupper()` differ, and `"a b".isspace()`
+#:     is false while `" ".isspace()` is true;
+#:   * `index`/`rfind`/`rindex` are asked for a needle that IS there (so the
+#:     answer is a position rather than the exception `index` raises).
+FOLD_ARGS = {
+    "upper": [], "lower": [], "title": [], "capitalize": [], "swapcase": [],
+    "casefold": [], "strip": [], "rstrip": [],
+    "zfill": ["6", "1", "0 - 3", "0"],
+    "center": ["8, \"-\"", "8", "1", "0 - 2, \"*\""],
+    "ljust": ["8, \"-\"", "8", "1"],
+    "rjust": ["8, \"-\"", "8", "1"],
+    "replace": ['"X", "--"', '"b", ""', '"a", "a", 1', '"z", "y"'],
+    "removeprefix": ['"a"', '"z"', '""'],
+    "removesuffix": ['"c"', '"z"', '""'],
+    "expandtabs": ["4", "0", "8"],
+    "isalnum": [], "isalpha": [], "isascii": [], "isdecimal": [],
+    "isdigit": [], "isidentifier": [], "islower": [], "isnumeric": [],
+    "isprintable": [], "isspace": [], "istitle": [], "isupper": [],
+    "index": ['"b"', '"a"', '"z"', '""'],
+    "rfind": ['"b"', '"a"', '"z"', '""'],
+    "rindex": ['"b"', '"a"', '""'],
+}
+
+#: The receivers the folded methods are asked about. A shorter list than
+#: `RECEIVERS` and deliberately so: a fold's answer does not depend on the
+#: receiver's SHAPE — it is Python's own method on the text — so what this list
+#: has to cover is the TEXT, and specifically the text that separates CPython's
+#: rules from each other:
+#:
+#:   ""            every predicate is false except `isascii`, and every case
+#:                 conversion and trim is the identity
+#:   "a"           the one-character case, where `zfill(6)` is five pad
+#:                 characters and `center` is asymmetric
+#:   "abc"         ordinary, and the receiver `index("z")` is ABSENT on — the
+#:                 row that must be a refusal and not a -1
+#:   "  hi  "      both ends, and the shape `strip`'s refusal is written about
+#:   "a\tb"        the tab `expandtabs` exists for, and a control character
+#:                 `isprintable` is false of
+#:   "42"          the sign case `zfill` treats specially: `zfill(6)` is
+#:                 "000042" and not "-00042"
+#:   "-42"         the same, with the sign already there
+#:   "ß"           one CHARACTER that is two BYTES and whose `upper` is two
+#:                 characters — the row that separates a character answer from
+#:                 a byte answer more sharply than any other
+#:   "ǳ"           a titlecase letter, so `title`, `istitle`, `isupper` and
+#:                 `islower` each have a case CPython gives them alone
+#:   "héllo"       ordinary non-ASCII, and non-ASCII text whose BYTE length
+#:                 differs from its character length, which is what a width or
+#:                 a pad would get wrong
+#:   "Straße"      `casefold` is `"strasse"` and `upper` is `"STRASSE"`, so
+#:                 the answer is not a per-character map
+#:   "²"           a digit to `isdigit` and `isnumeric` and NOT to
+#:                 `isdecimal`, `isalpha` or `isalnum`
+#:   "a1_"         what `isidentifier` is a question about, and what
+#:                 `isalnum` and `isalpha` disagree on
+#:   "Ab Cd"       two words, so `title` and `istitle` have something to do
+FOLD_RECEIVERS = ["", "a", "abc", "  hi  ", "a\tb", "42", "-42", "ß", "ǳ",
+                  "héllo", "Straße", "²", "a1_", "Ab Cd"]
 
 #: `start`/`end`, for the two methods whose CPython signature has them. These
 #: are the rows a signature check has to be able to tell apart: the same call
@@ -336,12 +435,21 @@ class Case:
         return self._value
 
     def expects(self):
-        """`ANSWER`, `REFUSED` or `RAISES` — the row's own verdict."""
+        """`ANSWER`, `REFUSED` or `RAISES` — the row's own verdict.
+
+        The refusal is checked BEFORE the CPython answer, and the order is
+        load-bearing for the multi-statement rows: `fold_scope_rows` spells a
+        receiver binding and a call on two lines, which is not an expression at
+        all, so `cpython()` records a `SyntaxError` for it. A row that DECLARES
+        a refusal is a refusal row whatever CPython made of its text, and
+        reading the two the other way round would turn every scope row into a
+        `raises` row and quietly stop asserting the message.
+        """
+        if self.refusal is not None:
+            return REFUSED
         self.cpython()
         if self._raises is not None:
             return RAISES
-        if self.refusal is not None:
-            return REFUSED
         return ANSWER
 
     def needle(self):
@@ -527,7 +635,7 @@ def str_method_names():
 
 
 def answer_rows():
-    """Every ANSWER row: the five lowered methods over the whole corpus."""
+    """Every ANSWER row: the five libc-backed methods over their corpus."""
     cases = []
     for method, args in ARGUMENT_METHODS.items():
         for recv in RECEIVERS:
@@ -537,6 +645,68 @@ def answer_rows():
                         else "%s.%s(%s)" % (r, method, arg))
                 cases.append(Case("%s_%s_%d" % (method, _slug(recv), i),
                                   expr, method))
+    return cases
+
+
+def fold_rows():
+    """Every ANSWER row for the folded methods, over `FOLD_RECEIVERS`.
+
+    One row per (receiver, argument) pair rather than one row per receiver,
+    because a folded method's answer is a function of the TEXT and the
+    arguments are half of that text — `"42".zfill(6)` and `"42".zfill(1)` are
+    different answers, and so are `"  hi  ".strip()` and `"  hi  ".rstrip()`.
+    """
+    cases = []
+    for method in FOLDED_METHODS:
+        for recv in FOLD_RECEIVERS:
+            r = _mojo(recv)
+            for i, arg in enumerate(FOLD_ARGS.get(method, [])):
+                expr = ("%s.%s(%s)" % (r, method, arg) if arg
+                        else "%s.%s()" % (r, method))
+                case = Case("%s_%s_%d" % (method, _slug(recv), i),
+                            expr, "fold")
+                case.cpython()
+                if case._raises is not None:
+                    # CPython RAISES for this call — `index("z")` with no `z`,
+                    # `center` with a two-character fill. There is no answer to
+                    # compare against, so the row is about what this path does
+                    # with a call it cannot answer: it must REFUSE, and name the
+                    # method's own reason. Asserting CPython's exception type
+                    # instead would be asserting a `ValueError` message from an
+                    # interpreter, and the right refusal here is this path's
+                    # own sentence about the missing representation.
+                    case.refusal = REFUSAL_SUBSTRINGS.get(method)
+                    case._raises = None
+                cases.append(case)
+    return cases
+
+
+def fold_scope_rows():
+    """One REFUSAL row per folded method, with the receiver bound to a NAME.
+
+    **The half of the fold that is a refusal, and the reason it is in this
+    file at all.** A fold needs every operand's text to be visible to the build,
+    and a name is text behind a `char *` at run time — so `s.upper()` where
+    `s = "abc"` one line earlier is NOT folded, and the method's own
+    by-name refusal stands. Without these rows the table would assert that the
+    thirty-five methods are answered, and a reader would reasonably conclude
+    they are answered for any receiver; with them the table says exactly what it
+    means: answered for text the build can see, refused for text it cannot.
+
+    The needle for each row is the method's own subject rather than one shared
+    word, so a message that stopped carrying its subject would fail here — and
+    `s.strip()` and `s.isalpha()` are deliberately both present, because they
+    are the two halves of the same boundary and they are refused for DIFFERENT
+    reasons (a buffer and a code point).
+    """
+    cases = []
+    for method in FOLDED_METHODS:
+        args = FOLD_ARGS.get(method) or [""]
+        cases.append(Case(
+            "scope_%s" % method,
+            's = "aBc dEf 42"\nprintf("[%%s]%s", s.%s(%s))'
+            % (REC, method, args[0]),
+            "scope", refusal=REFUSAL_SUBSTRINGS.get(method)))
     return cases
 
 
@@ -551,9 +721,10 @@ def guard_rows():
 
 
 def refusal_rows():
+    """One row per `str` method this path neither lowers nor folds."""
     cases = []
     for name in str_method_names():
-        if name in ARGUMENT_METHODS:
+        if name in ARGUMENT_METHODS or name in M.STRING_FOLDED_METHODS:
             continue
         cases.append(Case("refusal_%s" % name,
                           REFUSAL_CALLS.get(name, '"abc".%s()' % name),
@@ -705,38 +876,61 @@ def judge_records(case, backend, recs):
 
 
 def coverage_checks():
-    """This file and the model must agree about which methods are ANSWERED.
+    """This file and the model must agree about what is ANSWERED.
 
-    Both directions. A method the model lowers with no corpus here is a method
-    nothing measures, which is the hole the project's own convention about
-    ungated registrations is about; and a corpus for a method the model does
-    not lower is a row asserting an answer this path does not give, which fails
-    loudly instead — but it fails as a WRONG ANSWER report, which points at the
-    backend rather than at the drift, so it is checked here where the message
-    can name the drift.
+    Both directions and all three tables, because each names a different way a
+    row can be measuring the wrong thing. A method the model lowers or folds
+    with no corpus here is a method nothing measures, which is the hole the
+    project's own convention about ungated registrations is about. And a corpus
+    for a method the model does NOT lower or fold is a row asserting an answer
+    this path does not give — it would fail, but as a WRONG ANSWER report,
+    which points at the backend rather than at the drift, so it is checked here
+    where the message can name the drift.
     """
     lowered = set(M.POINTER_BOUNDED_METHODS)
-    mine = set(ARGUMENT_METHODS)
-    check(lowered == mine, "the answered-method set matches the model",
+    mine_lowered = set(ARGUMENT_METHODS)
+    check(lowered == mine_lowered,
+          "the libc-backed method set matches the model",
           "the model lowers %s, this file measures %s; the difference is %s"
-          % (sorted(lowered), sorted(mine), sorted(lowered ^ mine)))
+          % (sorted(lowered), sorted(mine_lowered),
+             sorted(lowered ^ mine_lowered)))
+    folded = set(M.STRING_FOLDED_METHODS)
+    check(folded == set(FOLDED_METHODS),
+          "the folded method set matches the model",
+          "the model folds %s, this file measures %s; the difference is %s"
+          % (sorted(folded), sorted(FOLDED_METHODS),
+             sorted(folded ^ set(FOLDED_METHODS))))
+    check(set(FOLD_ARGS) == folded,
+          "every folded method has an argument corpus",
+          "%s has no entry in FOLD_ARGS, so its rows would all be the "
+          "no-argument form" % (sorted(folded - set(FOLD_ARGS)),))
+    answered = lowered | folded
     missing = sorted(n for n in str_method_names()
-                     if n not in ARGUMENT_METHODS
-                     and n not in REFUSAL_SUBSTRINGS)
+                     if n not in answered and n not in REFUSAL_SUBSTRINGS)
     check(not missing,
-          "every str method is either measured or has a refusal reason",
+          "every str method is answered or has a refusal reason",
           "%s has no entry in REFUSAL_SUBSTRINGS, so CPython grew a method "
           "this table has no reason for" % (missing,))
     # And the refusal CALLS: a row spelled `"abc".strip()` would measure
     # CPython's `TypeError` rather than this path's refusal, so every method
     # that takes an argument has to be spelled a call CPython accepts.
     uncalled = sorted(n for n in str_method_names()
-                      if n not in ARGUMENT_METHODS
-                      and n not in REFUSAL_CALLS)
+                      if n not in answered and n not in REFUSAL_CALLS)
     check(not uncalled,
           "every refused method is spelled a call CPython accepts",
           "%s has no entry in REFUSAL_CALLS, so its row would be measuring "
           "CPython's TypeError instead of this path's refusal" % (uncalled,))
+    # And the model's own "not folded, and here is why" table, which is the
+    # list a reader consults when a method is absent from the two above.
+    unaccounted = sorted(set(M.STRING_METHODS_NOT_FOLDED)
+                         - answered
+                         - set(M.LENGTH_DEPENDENT_METHODS))
+    check(not unaccounted,
+          "every method the model declines to fold is refused by name",
+          "%s is in STRING_METHODS_NOT_FOLDED but in neither "
+          "POINTER_BOUNDED_METHODS nor LENGTH_DEPENDENT_METHODS, so a call to "
+          "it would fall through to the generic shape refusal"
+          % (unaccounted,))
 
 
 def main():
@@ -748,7 +942,8 @@ def main():
                     help="list the rows and their verdicts, and exit")
     args = ap.parse_args()
 
-    cases = (answer_rows() + range_rows() + guard_rows() + refusal_rows())
+    cases = (answer_rows() + fold_rows() + fold_scope_rows() + range_rows()
+             + guard_rows() + refusal_rows())
     # Every CPython answer is computed HERE, before a single build, so a row
     # whose expression CPython itself rejects shows up in `--list` as a `raises`
     # row rather than as a surprise in the middle of a run.
@@ -771,7 +966,7 @@ def main():
     got = {}
     with tempfile.TemporaryDirectory(prefix="strmeth") as tmpdir:
         for group in ("lstrip", "startswith", "endswith", "find", "count",
-                      "range", "guard", "refusal"):
+                      "fold", "scope", "range", "guard", "refusal"):
             rows = [c for c in cases if c.group == group]
             if not rows:
                 continue

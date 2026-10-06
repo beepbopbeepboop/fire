@@ -14549,9 +14549,25 @@ def string_has_static_storage() -> bool:
 
 
 def string_method_result_kind(method: str):
-    """The kind a lowered string method yields, or None if it is not one."""
+    """The kind a lowered or folded string method yields, or None.
+
+    Both tables, and the reason they are read together is a measured wrong
+    answer rather than a tidy-up. `POINTER_BOUNDED_METHODS` records what the
+    five libc-backed methods yield; `STRING_FOLDED_METHODS` records what the
+    thirty-five folded ones yield. They have to agree about the RESULT rather
+    than each knowing its own half, because the consumer is a classifier and a
+    classifier that is told a `str` method yields a number reads a `char *` as
+    an integer: `m = "ab".upper()` followed by `printf("[%s]", m)` printed an
+    address, and `m == "AB"` compared a pointer against an integer. That is the
+    `_expr_str_kind` lesson one level up, and the fold is the third way to reach
+    the same place — a method whose result is misclassified poisons every use
+    site after it, with a wrong answer rather than a diagnostic as the symptom.
+    """
     entry = POINTER_BOUNDED_METHODS.get(method)
-    return entry[1] if entry else None
+    if entry is not None:
+        return entry[1]
+    folded = STRING_FOLDED_METHODS.get(method)
+    return folded[2] if folded is not None else None
 
 
 def string_method_yields_string(call, receiver_is_str: bool) -> bool:
@@ -14899,17 +14915,287 @@ def string_method_lstrip_accept_set(dotted: str, arg) -> str | None:
             f"same set")
 
 
+# ── THE COMPILE-TIME FOLD, and the thirty-five methods it answers ──────────
+#
+# `LEN_FROM_CODPOINT_FOLD`, `STRING_POSITION_FOLD` and `ord_fold` already fold
+# the three constructs whose answer is a function of text the build can read.
+# This block is the same idea for the rest of `str`, and the reason it is worth
+# having is arithmetic rather than taste: on this path the answer to most string
+# methods is a NEW BUFFER, and there is nowhere to put one — a literal is
+# interned into `__TEXT,__text` with `initprot 0x5`, read and execute and not
+# writable, which is the measured reason half of `LENGTH_DEPENDENT_METHODS`
+# gives. But that obstacle is about the RUN-TIME answer, and it does not apply
+# when the build can see the text: then the answer is computed here, in Python,
+# by the same `str` methods CPython runs, and the result is an ordinary literal
+# this path already knows how to emit. No buffer, no length, no new instruction
+# on either architecture.
+#
+# So the row's cost is a SCOPE, not a correctness risk, and the scope has one
+# rule: **every operand's text must be visible to the build.** A name, a
+# parameter or a call result is text behind a `char *` at run time, and there
+# the fold does not apply and the method's own refusal stands. That is the same
+# rule `string_position_verdict` applies to `find`, and the reason it can be
+# stated once for the whole family.
+#
+# **What this buys that is not obvious, and is the reason to do it at all: the
+# fold is exact where a run-time lowering could not be.** `isdigit` over "²",
+# `upper` over "ß", `title` over "ǳ" and `swapcase` over "i̇" are Unicode
+# questions, and a byte-level implementation of any of them would be a
+# DIFFERENT predicate rather than a wrong one this path could honestly emit (see
+# `CODEPOINT_CLASS_REFUSAL`). Computed here they are CPython's own answers,
+# because they are CPython's own methods — `"²".isdigit()` folds to True, and
+# the image materialises a 1. So the twelve predicates, which are the largest
+# group in `dir(str)` after the case conversions, are answered outright for
+# text the build can see, with no character model at all.
+#
+# The values are the UNBOUND `str` METHODS, not lambdas. `str.upper` applied to
+# a decoded literal is Python's own `upper`, so this table cannot be a second
+# implementation of any of them: a change in CPython's rules changes this
+# backend's answers, which is the property a table of hand-written case folding
+# would not have.
+#
+# `arity` is the number of arguments the method takes AFTER the receiver, and it
+# is `None` for a method this path will not fold however many arguments it is
+# given — `translate` (a table), `format`/`format_map` (another worker's claim),
+# `encode` (a `bytes` result, which is a blob and not a string). The arity is
+# what decides a refusal for a call this path would otherwise fold: a
+# three-argument `center` is CPython's answer too, so it folds, and a
+# three-argument `strip` is a `TypeError` in CPython, so the fold declines and
+# the call is refused rather than folded into something CPython never computed.
+STRING_FOLDED_METHODS = {
+    # ── the case conversions: receiver only, and all six are Unicode ──
+    "upper": (str.upper, 0, STR_KIND),
+    "lower": (str.lower, 0, STR_KIND),
+    "title": (str.title, 0, STR_KIND),
+    "capitalize": (str.capitalize, 0, STR_KIND),
+    "swapcase": (str.swapcase, 0, STR_KIND),
+    "casefold": (str.casefold, 0, STR_KIND),
+    # ── the trims: receiver only ──
+    # `lstrip` is absent because it is LOWERED, not folded: its answer is an
+    # interior pointer and `strspn` computes it at run time, which also answers
+    # the case where the receiver is a name. Folding it would be the smaller
+    # answer.
+    "strip": (str.strip, 0, STR_KIND),
+    "rstrip": (str.rstrip, 0, STR_KIND),
+    # ── the pads: a WIDTH, and a fill character that may be given or not ──
+    "zfill": (str.zfill, 1, STR_KIND),
+    "center": (str.center, 2, STR_KIND),
+    "ljust": (str.ljust, 2, STR_KIND),
+    "rjust": (str.rjust, 2, STR_KIND),
+    # ── the substitutions ──
+    "replace": (str.replace, 3, STR_KIND),
+    "removeprefix": (str.removeprefix, 1, STR_KIND),
+    "removesuffix": (str.removesuffix, 1, STR_KIND),
+    "expandtabs": (str.expandtabs, 1, STR_KIND),
+    # ── the predicates: receiver only, and each is a CHARACTER-class
+    # question. This is the group a byte-level lowering could not answer at
+    # all, and the group the fold answers outright. ──
+    "isalnum": (str.isalnum, 0, INT_KIND),
+    "isalpha": (str.isalpha, 0, INT_KIND),
+    "isascii": (str.isascii, 0, INT_KIND),
+    "isdecimal": (str.isdecimal, 0, INT_KIND),
+    "isdigit": (str.isdigit, 0, INT_KIND),
+    "isidentifier": (str.isidentifier, 0, INT_KIND),
+    "islower": (str.islower, 0, INT_KIND),
+    "isnumeric": (str.isnumeric, 0, INT_KIND),
+    "isprintable": (str.isprintable, 0, INT_KIND),
+    "isspace": (str.isspace, 0, INT_KIND),
+    "istitle": (str.istitle, 0, INT_KIND),
+    "isupper": (str.isupper, 0, INT_KIND),
+    # ── the three SEARCHES that raise or need a direction `find` does not
+    # answer. `index` is `find` plus "and raise if it is -1", and the raise is
+    # the whole difference; folding it computes the position AND the fact that
+    # there is one, and a needle that is absent falls through to the refusal
+    # rather than to a -1 that CPython never returns. `rfind` walks backwards
+    # and `rindex` is its raising form; both are pure functions of the text and
+    # both are answers a `strstr` cannot give. ──
+    "index": (str.index, 1, INT_KIND),
+    "rfind": (str.rfind, 1, INT_KIND),
+    "rindex": (str.rindex, 1, INT_KIND),
+}
+
+# The methods this block deliberately does NOT fold, and the one-line reason for
+# each. A table rather than a comment, because `test_formal_str_methods.py`
+# asserts against it: a `str` method that is neither in `STRING_FOLDED_METHODS`
+# nor in `POINTER_BOUNDED_METHODS` nor given a refusal reason fails that file's
+# coverage check, so this table and the test are two ends of one ratchet.
+STRING_METHODS_NOT_FOLDED = {
+    "translate": "a translation TABLE, keyed by code point — the same missing "
+                 "half as `CODEPOINT_CODEC_REFUSAL`, and the table itself is a "
+                 "sequence this path would have to read",
+    "maketrans": "builds that table",
+    "encode": "its result is a `bytes` object, which on this path is a counted "
+              "BLOB rather than a `char *`, so there is nothing to intern the "
+              "answer into",
+    "decode": "CPython's `str.decode` does not exist — the method is on "
+              "`bytes` — so there is no `str` method to fold",
+    "format": "`formal65-format-and-repr`'s claim; not touched here",
+    "format_map": "`formal65-format-and-repr`'s claim; not touched here",
+    "join": "its operand is a SEQUENCE, and a sequence's ELEMENTS have to be "
+            "text the build can see; see `STRING_FOLDED_LIST_METHODS`",
+    "split": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "rsplit": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "splitlines": "its result is a SEQUENCE; see "
+                  "`STRING_FOLDED_LIST_METHODS`",
+    "partition": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "rpartition": "its result is a SEQUENCE; see "
+                  "`STRING_FOLDED_LIST_METHODS`",
+    # The five lowered ones are answered at RUN time by a libc call, which is
+    # strictly more than the fold: it also answers a receiver that is a name.
+    "lstrip": "lowered by `strspn`, which also answers a receiver the build "
+              "cannot see",
+    "startswith": "lowered by `strncmp`, same",
+    "endswith": "lowered by `strncmp`, same",
+    "find": "lowered by `strstr`, and folded for a non-ASCII haystack by "
+            "`string_position_verdict`",
+    "count": "lowered by a `strstr` loop, and folded for an EMPTY needle by "
+             "`string_method_count_empty_needle`",
+}
+
+
+def fold_operand_value(node):
+    """The Python VALUE of a literal the build can compute with, else None.
+
+    The operand reader `string_method_fold` uses, and it is four shapes
+    because a folded string method takes more than text: `zfill`'s width is an
+    integer, `split`'s separator may be `None` (which is a DIFFERENT algorithm
+    — CPython's whitespace rule with its own runs — and not a default value the
+    fold could substitute), and `expandtabs`'s size may be omitted.
+
+    `0 - 2` is here for the reason it is all over this tree's own tests: the
+    project's convention is that a negative number is written `0 - n` because a
+    unary minus binds tighter than the arithmetic around it (see
+    `test_formal_int_semantics.py`'s precedence rows), so a fold that read only
+    `IntLiteral` would decline every negative width in a corpus written this
+    way. The evaluator is deliberately tiny — literals, `+`/`-` over them, and
+    a unary sign — because every shape it does NOT cover is a shape that falls
+    through to the refusal, which is the safe direction: a fold that guessed an
+    arithmetic expression's value would be computing CPython's answer to a
+    question nobody asked.
+
+    `None` is returned for "not a literal the build can see", and a fold that
+    wants a real `None` cannot have one — which is why `split(None)` is in
+    `STRING_METHODS_NOT_FOLDED`'s companion table rather than folded here. The
+    distinction is worth stating because it is the one place this function's
+    return value is ambiguous, and it is resolved by the CALLER checking
+    `isinstance(node, F.NoneLiteral)` rather than by this function inventing a
+    sentinel.
+    """
+    if isinstance(node, F.StringLiteral):
+        return string_literal_text(node)
+    if isinstance(node, F.BoolLiteral):
+        return bool(node.value)
+    if isinstance(node, F.IntLiteral):
+        return int(node.value)
+    if isinstance(node, F.NoneLiteral):
+        return None
+    if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
+        inner = fold_operand_value(node.operand)
+        if isinstance(inner, int) and not isinstance(inner, bool):
+            return -inner if node.op == "-" else inner
+        return None
+    if isinstance(node, F.BinaryOp) and node.op in ("+", "-"):
+        left = fold_operand_value(node.left)
+        right = fold_operand_value(node.right)
+        if (isinstance(left, int) and not isinstance(left, bool)
+                and isinstance(right, int) and not isinstance(right, bool)):
+            return left + right if node.op == "+" else left - right
+        return None
+    return None
+
+
+def string_method_fold(method: str, dotted: str, recv, args: list):
+    """`(verdict, payload)` for a FOLDABLE string method, or `EMIT` to decline.
+
+    The reader behind `STRING_FOLDED_METHODS`, and the rule it applies is one
+    sentence: **if the build can see the text of every operand, the answer is
+    Python's own and no instruction is needed.** `STRING_PLAN_FOLD_TEXT` for a
+    `str` answer, `STRING_PLAN_FOLD_INT` for a number, and
+    `(STRING_PLAN_EMIT, None)` — which the caller reads as "not foldable, carry
+    on" — whenever any operand's text is behind a `char *`.
+
+    The decline cases are four and each is deliberate:
+
+      * an operand the build cannot see. The fold is a compile-time
+        computation, so a run-time value has nothing to compute from.
+      * a call CPython itself rejects, or one whose arity this path does not
+        fold (`"abc".center(1, "-", "x")`). The fold DECLINES rather than
+        raising, so the caller's own refusal speaks — a fold that raised
+        CPython's `TypeError` would be reporting Python's message for a
+        construct this path has its own words about.
+      * a folded `str` that CONTAINS A NUL. `"a\0b".upper()` is `"A\0B"` in
+        CPython and is unrepresentable here: a `char *` ends at its NUL, so
+        emitting the answer would produce `"A"` — a string that is not what the
+        method returned and that looks entirely plausible. This is the same
+        latent gap `model.py`'s string-representation note records for
+        `len`, reached from a method.
+      * a folded LIST, which is `STRING_FOLDED_LIST_METHODS`'s business and is
+        declined here so that the text table above stays a table of TEXT and
+        NUMBERS.
+
+    Everything it computes, it computes by calling the unbound `str` method on
+    the DECODED text — `string_literal_text`, which is the tree's one decoder,
+    the same one both backends' `_intern_string` calls. So `"a\\nb".upper()` is
+    an `A`, a newline and a `B`, and the image interns those three characters
+    and not a backslash and an `n`.
+    """
+    entry = STRING_FOLDED_METHODS.get(method)
+    if entry is None:
+        return (STRING_PLAN_EMIT, None)
+    fn, arity, kind = entry
+    if len(args) > arity:
+        return (STRING_PLAN_EMIT, None)
+    recv_text = string_literal_text(recv)
+    if recv_text is None:
+        return (STRING_PLAN_EMIT, None)
+    arg_texts = []
+    for a in args:
+        if isinstance(a, F.NoneLiteral):
+            return (STRING_PLAN_EMIT, None)
+        text = fold_operand_value(a)
+        if text is None:
+            return (STRING_PLAN_EMIT, None)
+        arg_texts.append(text)
+    try:
+        value = fn(recv_text, *arg_texts)
+    except Exception:                                       # noqa: BLE001
+        # CPython raises here — `index` on an absent needle, `center` with a
+        # two-character fill — so there is no answer to fold. Decline and let
+        # the caller refuse in its own words.
+        return (STRING_PLAN_EMIT, None)
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int):
+        return (STRING_PLAN_FOLD_INT, value)
+    if isinstance(value, str):
+        if "\0" in value:
+            return (STRING_PLAN_EMIT, None)
+        return (STRING_PLAN_FOLD_TEXT, value)
+    return (STRING_PLAN_EMIT, None)
+
+
+def string_method_fold_nul_refusal(dotted: str) -> str:
+    """Why a folded answer holding a NUL cannot be emitted, if it is needed."""
+    return (f"{dotted}() folds to text containing a NUL, and a `char *` on "
+            f"this path ENDS at its NUL, so interning the answer would produce "
+            f"the text before it — a string that is not what the method "
+            f"returned and that prints as though it were. This is the same "
+            f"representation gap `len` of a string with an embedded NUL has, "
+            f"reached from a method")
+
+
 def string_method_call_plan(method: str, dotted: str, recv, args: list,
                             arg_kinds: list):
-    """`(verdict, payload)` for one call to a lowered string method.
+    """`(verdict, payload)` for one call to a string method.
 
     The ONE reader of "may this call be lowered", asked by both backends from
     their method dispatch, so a construct the two machines could disagree about
-    cannot be answered differently by them. It is asked AFTER
-    `value_method_refusal` has approved the RECEIVER and before any emitter
-    runs, which is the order that makes the two guards complementary rather than
-    redundant: the receiver guard says the haystack is text, this one says the
-    needle is.
+    cannot be answered differently by them. It is asked BEFORE
+    `value_method_refusal`, which is the order that lets the two guards be
+    complementary rather than conflicting: a method that can be FOLDED here has
+    no receiver question to ask — its receiver is a literal by definition — and
+    a method that cannot is refused by one of the two, with this one naming the
+    operand and `value_method_refusal` naming the missing representation.
 
     `arg_kinds` is the backend's own per-argument answer — one kind per
     positional argument — because the kind of an expression is a flow fact
@@ -14919,8 +15205,10 @@ def string_method_call_plan(method: str, dotted: str, recv, args: list,
 
     `STRING_PLAN_EMIT`'s payload is the `lstrip` ACCEPT SET when the source
     supplied one and `None` when it did not, which is the only payload an emit
-    verdict carries; the other three verdicts carry the folded value itself.
+    verdict carries; the fold verdicts carry the folded value itself.
     """
+    if method in STRING_FOLDED_METHODS:
+        return string_method_fold(method, dotted, recv, args)
     if method not in STRING_METHOD_ARGS:
         return (STRING_PLAN_EMIT, None)
     names = STRING_METHOD_ARGS[method]
@@ -23670,23 +23958,32 @@ class ValueKinds:
         return dict_literal_key_value_kind(self._dict_inits.get(obj.name), e.index)
 
     def _string_method_kind(self, call):
-        """What a lowered string method call yields, or None if this is not one.
+        """What a lowered or folded string method call yields, or None.
 
-        None for a method the model does not lower, for a bare name, and — the
-        case that makes this a guard rather than a lookup — for a method whose
-        receiver is not classified as a string. `x.value()` on a struct whose
-        kind is unknown must stay unknown here, or the caller would bind `x`'s
-        result to a string and format an integer as text."""
+        None for a method the model does not lower or fold, for a bare name,
+        and — the case that makes this a guard rather than a lookup — for a
+        method whose receiver is not classified as a string. `x.value()` on a
+        struct whose kind is unknown must stay unknown here, or the caller would
+        bind `x`'s result to a string and format an integer as text.
+
+        The receiver gate is what stops a folded method from being believed on
+        a receiver it cannot be: a fold needs its receiver to be a LITERAL, and
+        `"abc".upper()` is one while `s.upper()` is not — so on a name the
+        answer is None and the name binds to an unclassified word, which is the
+        conservative direction and the same one the five libc-backed methods
+        already took.
+        """
         func = call.func
         if not isinstance(func, F.MemberExpr):
             return None
         method = func.member
-        if method not in POINTER_BOUNDED_METHODS:
+        if method not in POINTER_BOUNDED_METHODS \
+                and method not in STRING_FOLDED_METHODS:
             return None
         if not string_method_yields_string(
                 call, string_operand_is_string(self.kind_of(func.obj))):
             return None
-        return POINTER_BOUNDED_METHODS[method][1]
+        return string_method_result_kind(method)
 
 
 _COMPARISON_OPS = ("<", ">", "<=", ">=", "==", "!=", "is", "is not", "in",
