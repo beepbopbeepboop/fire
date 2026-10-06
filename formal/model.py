@@ -11613,6 +11613,39 @@ def blob_reserved_slots(node) -> int:
     return 0
 
 
+def blob_bytes_reserved(node, list_caps=None, dict_caps=None):
+    """How many BYTES `node`'s own construction reserves, or None.
+
+    **None means "not a shape this function sizes", and the one shape it is is a
+    nested COMPREHENSION** — because a comprehension's reservation is
+    `cap × element size` and `cap` is each backend's own `_compr_cap`, which the
+    two architectures compute by different routes (arm64 from the generator's
+    literal `range` arguments, x86-64 from its `_blob_est`) and which are NOT
+    interchangeable. So the caller asks its own for that one shape and this
+    function is the answer for the rest; `None` is the signal, not a zero, and a
+    zero would be indistinguishable from an empty blob.
+
+    Both caps tables are passed rather than read from the emitter because both
+    are per-FUNCTION state (`_scan_list_caps`'s append-site reservations), and
+    the answer has to be an UPPER BOUND: a reservation smaller than the blob it
+    is for would make the per-iteration copy below overwrite its neighbour.
+
+    The blob layouts are the emitters' own and are the whole of why this is a
+    question at all: `[count:i64][element…]` for a list/set/tuple and
+    `[count:i64][key][value]…` for a dict, so a dict literal's bytes are
+    `8 × (1 + 2 × pairs)` and not `8 × (1 + pairs)`.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        slots = max(list_literal_reserved_slots(node),
+                    (list_caps or {}).get(id(node), 0))
+        return 8 * (1 + slots)
+    if isinstance(node, F.DictExpr):
+        pairs = max(dict_literal_static_pairs(node),
+                    (dict_caps or {}).get(id(node), 0))
+        return 8 * (1 + 2 * pairs)
+    return None
+
+
 def blob_nodes_bound_to(fn, name: str) -> list:
     """Every blob-constructing node in `fn` that binds `name`.
 
@@ -28247,6 +28280,43 @@ def template_attribute_read_ambiguous(template: str, attr: str,
             f"(`d.{attr}`) names one; reading it through one instantiation's own "
             f"name does too. Guessing the first one built would answer with a "
             f"number the source never wrote")
+
+
+def comprehension_element_not_sized(node_text: str) -> str:
+    """The compiler-internal refusal for an element blob the per-iteration
+    region was not sized for.
+
+    `blob_bytes_reserved` sizes the region and the emitters that build the blob
+    record what they actually reserved, and those are two readers of ONE
+    layout. A program that got an answer from one and not the other would get
+    the aliasing bug the region exists to remove — every element of the result
+    pointing at one object — so the disagreement is stopped here instead.
+    Reaching it is a compiler bug rather than a program error, and the sentence
+    says so rather than blaming the source."""
+    return (f"a comprehension's element (`{node_text}`) reserved a container "
+            f"that the per-iteration element region was not sized for. The "
+            f"region's size and the blob's own reservation are two readers of "
+            f"one blob layout (`model.blob_bytes_reserved` and the emitter's "
+            f"record of what it reserved), and this build got different "
+            f"answers from them — which is a compiler bug, not a program error")
+
+
+def comprehension_element_too_large(nbytes: int, limit: int) -> str:
+    """The refusal for an element blob too big to copy with an immediate offset.
+
+    The copy's addressing is the immediate-offset `LDR`/`STR` pair, because that
+    is the form `arm64_step` models and a copy in a form the model cannot decode
+    is an image the proof cannot talk about — `_emit_returned_blob_copy` argues
+    the same thing for the same instruction pair. Past the immediate's scaled
+    reach the copy would need the register-offset form, which is a different
+    modelled shape and a new case in every proof generator that walks this
+    image, so the honest answer at this size is a refusal that names the number
+    rather than a silently different instruction sequence."""
+    return (f"a comprehension's element is {nbytes} bytes, and the per-iteration "
+            f"copy of it reaches {limit} bytes with the immediate-offset load "
+            f"and store this path emits; a larger element would need addressing "
+            f"this path does not model here. Build the element in its own "
+            f"function, or keep it under that size")
 
 
 def struct_field_names(struct_def) -> list:
