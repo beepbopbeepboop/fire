@@ -135,7 +135,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_dataclass_runtime_reflection.md` | `formal40-4` | `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag |
 
-### `formal/imports` — 10 documents, 7 claimed
+### `formal/imports` — 11 documents, 7 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -149,6 +149,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_comptime_class_attribute_of_a_generic_struct_read_through_its_template_name.md` | **unclaimed** | `TypeDict.length`: a `comptime` class attribute of a generic struct, read through the TEMPLATE's name |
 | `FORMAL_a_linked_library_path_is_in_the_image.md` | **unclaimed** | one image cannot be byte-identical across two CAS roots, and the reason is dyld |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
+| `FORMAL_the_export_gate_row_is_148_files_and_one_gate.md` | **unclaimed** | the corpus's largest codegen row re-measured on master, ONE gate behind it, and 133 of its 145 refusals named no line |
 
 ### `formal/lean` — 12 documents, 8 claimed
 
