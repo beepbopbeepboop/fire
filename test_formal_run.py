@@ -23259,8 +23259,19 @@ _BLOB_GROWTH_PROBES = [
     # `a | b`. arm64-only, and that is the POINT of the row: this is a site that
     # existed on one architecture only, with no guard on it, and the check is
     # what stops a fourth blob-producing site appearing on one backend alone.
+    #
+    # The operands are SETS, and that is not a spelling choice. `|` is a union
+    # only between two sets — Python raises `TypeError` for `[1, 2] | [3]` —
+    # and `model.container_union_refusal` now refuses every other pair, so a
+    # list-valued probe does not compile at all.  That refusal is what makes
+    # this row's operands load-bearing: it is the reason the guard below is
+    # about `a | b` between two sets and not about lists, which is where the
+    # union emitter's reservation `nL + nR` is the right one.  A probe that
+    # stopped compiling would have been a hole in this check (it is reported as
+    # one), and this is the fix: the site is still the same site, reached by
+    # the only program that can reach it.
     ("arm64", "uni",
-     "def main(n):\n    var a = [1, 2]\n    var b = [2, 3]\n"
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
 ]

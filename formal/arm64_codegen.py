@@ -48,7 +48,7 @@ from mojo.middle.boundnames import (
 _SCRATCH = M.ARM64_CONTAINER_BUDGET
 _SCRATCH_CHUNK = 4080
 
-#: Darwin's `SYS_write`, the number `_emit_overflow_diagnostic` puts in x16.
+#: Darwin's `SYS_write`, the number `_emit_stop_diagnostic` puts in x16.
 #: It is a named constant rather than a literal at the one site that uses it
 #: because the sibling `SYS_exit` at `_emit_exit` writes the same register with
 #: `1` written out, and two spellings of "which syscall is this" in one file is
@@ -801,6 +801,12 @@ dylib_exports: list = None, globals_base: int = None,
         # RHS or an alias of one). Subscript on these is a key lookup, not
         # a list index. Reset per function.
         self._dict_vars = set()
+        # Names bound to a SET, which `_blob_vars` cannot distinguish
+        # from a list because a set lowers as one.  Reset per function,
+        # #tracked for the same reason the other two are: `a | b` is a
+        # union only when both sides are sets, and Python defines it for
+        # nothing else.
+        self._set_vars = set()
         # Names bound to a list/tuple/set blob.  This is what makes `a + b` on
         # two LOCALS a concatenation: without it two bare idents are
         # indistinguishable from two integers and the operator silently lowers
@@ -4793,6 +4799,43 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
             self._blob_var_est.pop(name, None)
+        # SET-NESS is its OWN block rather than a fourth arm of the chain
+        # above, because it is not one of the mutually exclusive kinds: a set
+        # lowers as a list here (`model.is_set_expr`'s docstring says why), so
+        # `_blob_vars` holds a set and a list alike and this is the only record
+        # of which one a name is.  `model.container_union_refusal` is its one
+        # reader, and the only thing it can change is whether `|` is a union at
+        # all — so this is one fact with one consumer, rather than a fourth
+        # mark threaded through a chain whose every arm would then have to be
+        # right about a question none of them is about.
+        if self._expr_is_set_like(value):
+            self._set_vars.add(name)
+        else:
+            self._set_vars.discard(name)
+
+    def _expr_is_set_like(self, e) -> bool:
+        """True when `e` is a set literal, a set comprehension, or a NAME this
+        function has bound to one.
+
+        The flow-sensitive half of `model.is_set_expr`, beside `_dict_vars` and
+        for the reason `_note_binding`'s docstring gives for that one: a name
+        gets its kind from the assignment it is bound by, and the assignment is
+        not at the use.  `_blob_vars` cannot answer it — a set and a list are
+        the same blob on this path, which is exactly why `|` needs this and
+        `+` does not.
+        """
+        if M.is_set_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._set_vars
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
+            # `+` is a concatenation and `|` a union, and both leave a SET a
+            # set — but only where one side is one, and a list-plus-set is a
+            # CPython `TypeError` whose refusal is
+            # `container_union_refusal`'s answer rather than this one's.
+            return (self._expr_is_set_like(e.left)
+                    or self._expr_is_set_like(e.right))
+        return False
 
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer.
@@ -5130,7 +5173,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if cap is None:
             _pop_scan()
             if why_no_room is not None:
-                self._emit_overflow_diagnostic(why_no_room)
+                self._emit_stop_diagnostic(why_no_room)
             self._emit_exit(1)
         else:
             # THE INSERT. `X1` = base and `X2` = count come off the scan's own
@@ -5158,7 +5201,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_b_to(end_label)
             self.asm.label(oob_label)
             _pop_scan()
-            self._emit_overflow_diagnostic(
+            self._emit_stop_diagnostic(
                 M.dict_store_overflow_message(
                     e.obj.name if isinstance(e.obj, F.IdentExpr) else "<expr>",
                     cap))
@@ -6867,7 +6910,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
-        self._emit_overflow_diagnostic(
+        self._emit_stop_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_exit(1)
@@ -6907,8 +6950,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(2, 1, 0))   # [X1+0] = X2
         self.asm.emit(encode_movz_wd_imm(0, 0))    # None
 
-    def _emit_overflow_diagnostic(self, text: str) -> None:
-        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+    def _emit_stop_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHAT was hit before stopping.
+
+        Named for what it is rather than for its first caller: it was
+        `_emit_overflow_diagnostic` while only the integer-overflow trap used
+        it, and by then six other bounded stops used it too — a dict with no
+        room for its key, a blob past its frame reservation, an int parse, a
+        division by zero — none of which is an overflow.  A name that
+        describes one of seven call sites is how the eighth gets its own copy,
+        and this one is the mechanism ALL of them share.
 
         The shared half of every bounded stop on this path, and it is a RAW
         SYSCALL rather than a call into the C library's `write`, which is the
@@ -7039,7 +7090,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         ok = f"{self.func_name}_{tag}ok{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 17))
         self.asm.emit_label_rel(ok, here_offset=-4)        # fits → skip the block
-        self._emit_overflow_diagnostic(
+        self._emit_stop_diagnostic(
             M.blob_growth_overflow_message(what, capacity))
         self._emit_exit(1)
         self.asm.label(ok)
@@ -7164,7 +7215,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         _emit_add_imm(self.asm, 31, 31, 32)
         self._emit_b_to(end)
         self.asm.label(trap)
-        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
+        self._emit_stop_diagnostic(M.int_parse_trap_message(base))
         self._emit_exit(M.SHIFT_TRAP_STATUS)
         self.asm.label(end)
 
@@ -7502,6 +7553,27 @@ ctor_field_value=self._ctor_field_value_for(name),
             untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
+        # `|` on a container is a SET UNION only between two SETS, and it must
+        # be asked HERE rather than at the concat branch below, because that
+        # branch recognises a dict blob by `_is_container_expr`, which does not
+        # list `F.DictExpr` — so `d | {"b": 2}` skipped it and reached the
+        # integer ALU's `ORR` on two addresses. Measured on this tree: reported
+        # 1 where CPython reports 2, and reported 0 for
+        # `{"a": 1, "b": 2} | {"c": 3}` where CPython reports 3. `_expr_str_kind`
+        # DOES classify both operands as blobs — a dict is a counted blob too —
+        # so this is the site that knows. `+` is deliberately not gated: a
+        # concatenation is exactly what CPython means by `+` on two lists and
+        # two tuples, and it is lowered below.
+        if op == "|" and (M.container_operand_is_blob(
+                self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            reason = M.container_union_refusal(
+                M.spelled(e.left), M.spelled(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
+                left_is_dict=self._is_dict_subscript(e.left),
+                right_is_dict=self._is_dict_subscript(e.right))
+            if reason is not None:
+                raise CodegenError(reason)
         # Comparisons
         cmp_conds = {
             "<=": ("ls", "le"),
@@ -7758,7 +7830,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(trap, here_offset=-4)
         self._emit_b_to(ok)
         self.asm.label(trap)
-        self._emit_overflow_diagnostic(M.int_overflow_trap_message(op))
+        self._emit_stop_diagnostic(M.int_overflow_trap_message(op))
         self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
         self.asm.label(ok)
         return ok
@@ -8664,6 +8736,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._refuse_scalar_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
         self._refuse_frame_slot_element("a membership test", right)
+        # A container NEEDLE is the one shape this scan gets wrong, and both
+        # architectures got it differently — `model.container_membership_
+        # refusal` holds the three-row measurement.  Asked before the RHS
+        # dispatch below because a string haystack is already answered above
+        # and `"ab" in s` has a blob-shaped needle only if `ab` is a name, in
+        # which case its kind is `str` and this does not fire.
+        reason = M.container_membership_refusal(
+            M.spelled(left), M.spelled(right), self._expr_str_kind(left))
+        if reason is not None:
+            raise CodegenError(reason)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
                                F.SliceExpr, F.Comprehension, F.SetExpr,
@@ -11715,15 +11797,42 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
         """`obj[a:b] = value` — same-length replace of the slice range.
 
-        Formal list blobs cannot change length without a compaction pass;
-        if len(value) != slice_len at runtime, Darwin exit(1). step must
-        be 1 (or None)."""
+        A formal list blob cannot change length without a compaction pass, so
+        this is a SAME-LENGTH replace and `len(value) != slice_len` stops the
+        program — with a DIAGNOSTIC, which is the second half of what used to
+        be wrong here. step must be 1 (or None).
+
+        **The exit was silent, and a silent exit is the worst outcome this path
+        has.** Measured on this tree before the gate: `a = [3, 1, 2]` then
+        `a[0:1] = [9, 9, 9]` built, ran and **exited 1 with nothing on stdout
+        and nothing on stderr** — a program that looks like it ran and did not,
+        where CPython's answer is `[9, 9, 9, 1, 2]`. The same source's
+        `a[0:1] = [9]` (equal lengths) answered 9 correctly, so the defect only
+        showed on the half of the construct this lowering does not implement.
+        x86-64 refuses the construct outright; that is a refusal at a wider
+        scope than this one, and it names the same reason, so the two are one
+        answer at two depths rather than two answers.
+
+        Two things now, and the second is what covers what the first cannot see:
+
+        * `model.slice_store_static_length_refusal` refuses AT BUILD TIME when
+          the receiver, the bounds and the value are all literal — the shape a
+          corpus writes, and the shape above;
+        * the run-time arm this method still needs, because the receiver's count
+          is a word read at run time and a store into a name-bound list cannot
+          be decided while emitting, now says WHICH bound it was before it
+          stops, through the same `write(2)` every other bounded stop on this
+          path uses (`_emit_blob_growth_guard`'s half).
+        """
         if target.step is not None:
             st = target.step
             if not (isinstance(st, F.IntLiteral) and st.value == 1):
                 raise CodegenError(
                     "slice assignment with step != 1 is not supported on "
                     "the formal arm64 path")
+        reason = M.slice_store_static_length_refusal(target, value)
+        if reason is not None:
+            raise CodegenError(reason)
         obj = target.obj
         self._if_counter += 1
         sid = self._if_counter
@@ -11808,6 +11917,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(done_label, here_offset=-4)
         self.asm.label(fail_label)
+        # SAY WHY before stopping.  A bare `exit(1)` here is what made
+        # `a[0:1] = [9, 9, 9]` look like a program that ran and did not, so the
+        # run-time arm gets the same `write(2)` every other bounded stop on this
+        # path uses.  The message names the CONSTRUCT and not the two counts,
+        # because turning X3 and X6 into decimal text is a division loop this
+        # emitter does not otherwise have, and a wrong-but-plausible pair of
+        # numbers in a diagnostic would be worse than none.
+        self._emit_stop_diagnostic(
+            "slice assignment: this path replaces the range IN PLACE, so the "
+            "replacement has to have exactly as many elements as the range; "
+            "this one does not.  Python resizes instead - xs[0:1] = [9, 9, 9] "
+            "on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
         self._emit_exit(1)
         self.asm.label(done_label)
         self.asm.emit(encode_ldp_sp_post(0, 31))

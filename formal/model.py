@@ -11647,29 +11647,318 @@ def blob_nodes_bound_to(fn, name: str) -> list:
     return out
 
 
+def slice_store_refusal() -> str:
+    """Why `xs[a:b] = v` is refused outright on the backend that has no slice
+    store at all.
+
+    The WIDER of the two answers to one question.  `slice_store_static_length_
+    refusal` beside it answers it for the cases a build can decide, and arm64 —
+    which does have a same-length in-place replace — asks that one; this backend
+    has no such replace (a slice here is a materialised copy, so writing through
+    one would have to write back into its source blob) and so refuses every
+    slice store, whatever the lengths.
+
+    One sentence for one reason, in one place, so the two architectures are not
+    two answers to the same question.  The measurement is arm64's, and it is
+    here because it is the argument against the narrow scope: `a = [3, 1, 2]`
+    then `a[0:1] = [9, 9, 9]` built, ran and exited 1 with nothing on stdout and
+    nothing on stderr, where CPython answers `[9, 9, 9, 1, 2]` — so a lowering
+    that implements half a construct still owes the other half a refusal, and
+    the honest place to put it is the build rather than a silent exit.
+    """
+    return (
+        "assignment to a slice target is not lowered on this path: a formal "
+        "list blob lives in the frame and cannot change length without a "
+        "compaction pass, so `xs[a:b] = v` is only answerable when `v` has "
+        "exactly as many elements as the range. Python resizes instead — with "
+        "`xs = [3, 1, 2]`, `xs[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]` and "
+        "`xs[0:1] = []` is `[1, 2]` — so a slice store that changes the length "
+        "is a different program from the one this path can emit. arm64 lowers "
+        "the same-length case; here a slice is a materialised copy, so writing "
+        "through one would have to write back into its source blob")
+
+
+def slice_store_static_length_refusal(target, value) -> str | None:
+    """Why `xs[a:b] = v` cannot keep the blob's length, or None when it can.
+
+    **The one question about a slice STORE that can be answered before anything
+    runs, and answering it is the difference between a diagnostic and a silent
+    wrong answer.** This path lowers `xs[a:b] = v` as a SAME-LENGTH in-place
+    replace — it copies `v`'s elements over the range and stops — so a `v` whose
+    length differs from the range's has nowhere to put the difference. CPython
+    resizes: `a = [3, 1, 2]; a[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]`, and
+    `a[0:1] = []` is `[1, 2]`. Measured on this tree, arm64, both of those
+    **exited 1 with no output and no message at all** — and that is the worst
+    outcome class there is, because the program looks like it ran. x86-64
+    refuses the whole construct at build time with a sentence that names the
+    reason, which is the right answer and the wrong SCOPE: a same-length
+    replace is a real lowering, and refusing every slice store would take it
+    away.
+
+    So this asks only what is statically decidable, and refuses only then:
+
+    * the receiver is a list/tuple/set LITERAL with no `*` splat, so its count
+      is a number this build can see;
+    * the bounds are integer literals or absent, and CPython's clamping is
+      applied to them the way `_emit_slice_store` applies it (`start` and
+      `stop` clamp into `[0, count]`, and `stop` at or below `start` makes an
+      empty range);
+    * the value is a LITERAL of known length.
+
+    Anything else answers None, which means "this build cannot tell" — not
+    "this build is satisfied". The run-time arm is a diagnostic plus `exit(1)`
+    rather than a bare exit, so the case this cannot see still says something.
+    Both facts are stated in `_emit_slice_store`'s docstring, which is where the
+    measurement behind them lives.
+    """
+    def literal_len(node):
+        """`len(node)` when the build can read it, else None."""
+        import fire_compiler as F
+        if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return None
+        if any(isinstance(el, F.UnaryOp) and el.op == "*"
+               for el in getattr(node, "elements", []) or []):
+            return None
+        return len(getattr(node, "elements", []) or [])
+
+    def bound(node, default, count):
+        if node is None:
+            return default
+        value = getattr(node, "value", None)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return max(0, min(value, count))
+
+    count = literal_len(getattr(target, "obj", None))
+    if count is None:
+        return None
+    vlen = literal_len(value)
+    if vlen is None:
+        return None
+    start = bound(getattr(target, "start", None), 0, count)
+    stop = bound(getattr(target, "stop", None), count, count)
+    if start is None or stop is None:
+        return None
+    if stop <= start:
+        stop = start
+    if stop - start == vlen:
+        return None
+    return (
+        f"slice assignment writes {vlen} element(s) over a range of "
+        f"{stop - start}, and this path lowers `xs[a:b] = v` as a SAME-LENGTH "
+        f"in-place replace — there is no room for the difference and no "
+        f"compaction pass to make room. Python resizes instead: with "
+        f"`xs = [3, 1, 2]`, `xs[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]` and "
+        f"`xs[0:1] = []` is `[1, 2]`. Measured on this tree, arm64 before the "
+        f"gate, both of those exited 1 with no output at all, which is a "
+        f"program that looks like it ran. Build the list at its final length "
+        f"instead — assign into it, or `append` into a literal sized for what "
+        f"the program needs — or split the shift out of this line")
+
+
+def container_membership_refusal(spelled_needle: str, spelled_haystack: str,
+                                 needle_kind) -> str | None:
+    """Why `needle in haystack` must not be lowered when the NEEDLE is a blob.
+
+    Its OWN function rather than an arm of `container_operator_refusal`, for the
+    reason the operator is not in that table either: `in` is ASYMMETRIC. The
+    scalar-needle case is a real and correct lowering — `1 in [3, 1, 2]` is a
+    linear scan and answers 1 on both backends — and a table keyed on "a blob is
+    an operand" would refuse that too. So the question is asked about the needle
+    alone, at the membership emitter, on both architectures.
+
+    **A container needle is compared by ADDRESS today, and that is wrong in both
+    directions and disagrees between the two architectures.** Measured on this
+    tree:
+
+    | program | arm64 | x86-64 | CPython |
+    |---|---|---|---|
+    | `a = [[1], [2]]`; `1 if [1] in a else 0` | 1 | **0** | 1 |
+    | `a = [[1], [2]]`; `b = [1]`; `1 if b in a else 0` | **0** | **0** | 1 |
+    | `a = [(1,), (2,)]`; `1 if (1,) in a else 0` | 1 | **0** | 1 |
+
+    Three rows and three different stories.  The first and third are RIGHT on
+    arm64 and wrong on x86-64, because arm64's membership emitter decomposes a
+    *literal* needle with `static_key_elements` and compares element by element
+    while x86-64's compares the needle's base address.  The second is wrong on
+    BOTH, because `b = [1]` is a NAME: the literal decomposition does not reach
+    it, so the comparison is of two addresses, and `[1]`'s block is not `a[0]`'s
+    block.  A row that is right for a literal and wrong for a name is not a
+    lowered membership test; it is a coincidence about which address the emitter
+    happened to compare, and the two architectures' disagreement on the same
+    line of source is the clearest possible statement that neither of them
+    answered the question.
+
+    **So this refuses rather than ports arm64's literal path.**  The reasoning
+    is `container_operator_refusal`'s and it is the same one: CPython's `in` on
+    a container needle is ELEMENT-WISE EQUALITY and then a length check, so it
+    needs the same per-element stride.  Porting a special case that happens to be
+    right when the needle is a literal of canonical elements — and wrong the
+    moment it is a name, a comprehension, or a literal with a computed element —
+    would buy the divergence's disappearance at the price of a second
+    implementation of an equality this path does not have.
+
+    **What this costs, stated plainly: arm64's literal-needle case answered 1
+    and now refuses.**  It is refused on x86-64 already, it was never reachable
+    for a name, and the answer it gave was a property of which address the
+    emitter compared rather than of the elements — but it is a capability that
+    existed on one architecture, and the row above is what it was worth.  The
+    dict SUBSCRIPT with a container key is a separate operator and is NOT
+    touched here; `d[(1, 2)]` is refused too, by the pre-existing
+    `multi_index_refusal_for`, which is a fact about this tree rather than
+    something this change took away.
+    """
+    if not container_operand_is_blob(needle_kind):
+        return None
+    return (
+        f"a container as the NEEDLE of `{spelled_needle} in {spelled_haystack}` "
+        f"is refused: this path's membership test compares a blob NEEDLE by its "
+        f"ADDRESS, and two blobs holding the same elements are two different "
+        f"blocks. Measured on this tree, `a = [[1], [2]]` then `[1] in a` "
+        f"answered 1 on arm64 and 0 on x86-64 where CPython answers 1 — and "
+        f"`b = [1]` then `b in a` answered 0 on BOTH, because the one case that "
+        f"decomposes a literal needle element-wise does not reach a NAME. Python "
+        f"compares the needle's ELEMENTS and then its length, so the answer "
+        f"needs the same per-element stride `==` does and does not exist here. "
+        f"Test membership of the elements instead — write the loop yourself "
+        f"with `for x in haystack:` and an element test, which is the same "
+        f"question and is answered")
+
+
+def is_set_expr(e) -> bool:
+    """True when `e` builds a SET literal or a set COMPREHENSION.
+
+    The twin of `is_dict_expr` above, for the same reason and with the same
+    comprehension half: `{x for x in ys}` is a `Comprehension` with
+    `kind == "set"`, so a `isinstance(e, F.SetExpr)` test misses it.
+
+    **Set-ness is a question nothing else asked, and the reason it has to be
+    asked is that the value model does not keep it.** A set lowers as a list
+    (`bugs/FORMAL_set_value_model.md` says so and `container_literal_elem_kind`
+    is why: a `SetExpr`, a `ListExpr` and a `DictExpr` all classify as
+    `list:<elem>`), so `_blob_vars` holds all three and `ValueKinds` cannot
+    tell them apart. The one operator that CAN tell them apart is `|`, because
+    Python defines it for exactly two of the three. Measured on this tree,
+    arm64, `{"a": 1} | {"b": 2}` reported 1 where CPython reports 2 and
+    `{"a": 1, "b": 2} | {"c": 3}` reported 0 where CPython reports 3 — and it
+    was NOT the union emitter that answered: this backend's `_is_container_expr`
+    does not list `F.DictExpr`, so a dict operand missed the concat/union branch
+    altogether and the integer ALU's `ORR` combined two ADDRESSES. Which is the
+    same defect `container_operator_refusal` was widened for, reached through
+    the one operator that had been left out of it, and it is why the union gate
+    is asked beside `string_binary_refusal` where the operand KINDS are known
+    rather than at the concat branch. `[1, 2] | [3]` reported 3 where CPython
+    raises `TypeError`, and that one DID reach the union emitter, because a list
+    literal is a container expression.
+
+    This predicate answers it for a LITERAL. A NAME bound to a set needs the
+    flow-sensitive half, which each backend keeps beside `_dict_vars` as
+    `_set_vars` and asks through `container_union_refusal` below — the same
+    split `is_dict_expr`'s docstring describes, for the same reason.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.SetExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "set")
+
+
+def container_union_refusal(left: str, right: str, left_is_set: bool,
+                            right_is_set: bool, left_is_dict: bool = False,
+                            right_is_dict: bool = False) -> str | None:
+    """Why `left | right` is not a SET UNION here, or None when it is one.
+
+    The question asked BEFORE the question "does this backend have a union
+    emitter", because it is the one that decides whether the emitter would be
+    answering the right program at all. Both backends ask it at the same site,
+    so a pair of operands cannot get one answer from one architecture and a
+    different one from the other.
+
+    Python defines `|` for two kinds and no others:
+
+    | operands | CPython | what this path would emit |
+    |---|---|---|
+    | `set` OR `set` | union, repeats dropped | **the same thing** |
+    | `dict` OR `dict` | a MERGE — the right value wins for a shared key | a union over key/value PAIRS |
+    | `list` OR `list` | `TypeError` | a union over list elements |
+    | `set` OR `dict` | `TypeError` | whichever the word-level scan made of it |
+
+    so only the first row is a union, and refusing the other three is not a
+    missing feature — it is the refusal that keeps a working emitter from
+    answering a different program. Measured on this tree, arm64, all three
+    wrong shapes: `{"a": 1} | {"b": 2}` reported 1 where CPython reports 2 and
+    `{"a": 1, "b": 2} | {"c": 3}` reported 0 where CPython reports 3 — the
+    integer ALU's `ORR` on two ADDRESSES, because this backend's
+    `_is_container_expr` does not list `F.DictExpr` and a dict operand missed
+    the concat branch altogether; and `[1, 2] | [3]` reported 3 where CPython
+    raises `TypeError`, which DID reach the union emitter, because a list
+    literal is a container expression and its dedup over words is a set
+    CPython never built.
+
+    **The message names what the source meant**, because "not supported" sends a
+    reader looking for a spec and the spec is the thing that makes the refusal
+    honest: a dict pair has to be built by assignment (`d["c"] = 3`, which is a
+    lowered dict store, and `d["a"] = 9` correctly overwrites) and a union has to
+    be written as a loop over membership tests.
+    """
+    if left_is_set and right_is_set:
+        return None
+    if left_is_dict or right_is_dict:
+        return (
+            f"{left} | {right} is not a SET UNION: `|` between two DICTS is a "
+            f"MERGE in Python, where the right-hand value wins for a key both "
+            f"sides hold, and this backend has no merge — it lowered the "
+            f"operator as a bitwise OR of the two blobs' ADDRESSES, which is "
+            f"not a merge and not a union either. Measured on this tree, arm64 "
+            f"before the gate: `{{\"a\": 1}} | {{\"b\": 2}}` reported 1 where "
+            f"CPython reports 2, and `{{\"a\": 1, \"b\": 2}} | {{\"c\": 3}}` "
+            f"reported 0 where CPython reports 3. Build the pair by assignment "
+            f"instead — `d[\"c\"] = 3` is a dict store and `d[\"a\"] = 9` "
+            f"overwrites the way CPython does — or write the merge as a loop "
+            f"over `for k in other:` with a membership test")
+    which = ("the left operand" if not left_is_set else
+             "the right operand" if not right_is_set else "an operand")
+    return (
+        f"{left} | {right} is refused because {which} is not established to "
+        f"be a SET. `|` is defined in Python for two sets and for two dicts and "
+        f"for nothing else — `[1, 2] | [3]` raises `TypeError` there — and "
+        f"this path lowers `|` on two containers as a union that deduplicates "
+        f"over element WORDS, which is only the right answer when both blobs "
+        f"hold elements of one set. Measured on this tree, arm64 with that "
+        f"emitter reached for a LIST: `[1, 2] | [3]` reported 3. Use `+` for a "
+        f"concatenation, which is what two lists mean here, or build the union "
+        f"with an explicit membership test")
+
+
 def set_union_refusal(left: str, right: str) -> str:
     """Why `{left} | {right}` is not lowered on the backend that asks.
 
-    `|` between two containers is a SET UNION in Python: the right-hand
-    elements the left already holds are dropped. One backend here has a union
-    emitter and the other does not, and the second one used to lower the
-    operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]` with
-    `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython says
-    6. Measured on the pre-change tree: it built, it ran, it exited 0, and it
-    was wrong, which is the outcome this file exists to replace with a refusal.
+    The SECOND question, asked only once `container_union_refusal` above has
+    said the operator really is a set union between two sets: it is CPython's
+    union, and this backend has no emitter for it. The second one used to lower
+    the operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]`
+    with `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython
+    says 6. Measured on the pre-change tree: it built, it ran, it exited 0, and
+    it was wrong, which is the outcome this file exists to replace with a
+    refusal.
 
     The message lives here, beside the other refusal texts, so the two backends
     cannot word it differently on the day the second one grows the emitter —
     and it says which backend does lower it, because "this is not supported" is
     the answer that sends a reader looking for a spec when the answer is an
-    emitter."""
+    emitter. That sentence names arm64's `_emit_set_union` FOR SETS ONLY, and
+    the qualification is the point: the same emitter is what answered
+    `{"a": 1} | {"b": 2}` with 1 before `container_union_refusal` above started
+    refusing a pair blob, so a claim that arm64 "lowers this operator correctly"
+    without the qualification was a false statement about this tree.
+    """
     return (
         f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
         f"containers as a concatenation: the result would keep every element "
         f"of both sides, repeats included, which is not a set and answers a "
         f"different program than the source writes. Use `+` if a "
         f"concatenation is what you want, or build the union with an explicit "
-        f"membership test. arm64 lowers this operator correctly")
+        f"membership test. arm64 lowers this operator correctly, for two SETS")
 
 
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
@@ -12727,8 +13016,8 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     | `a += [3]` | **0 on arm64, SIGSEGV on x86-64** | 3 |
     | `a = a * 3` | 3, both backends | 3 |
     | `a *= 3` | **SIGSEGV on both** | 3 |
-    | `s = {1, 2}; s \| {3}` | 3 on arm64, refused on x86-64 | 3 |
-    | `s \|= {3}` | **1 on arm64, 0 on x86-64** | 3 |
+    | `s = {1, 2}` then `s` union-assigned `{3}` | 3 on arm64, refused on x86-64 | 3 |
+    | `s` union-assigned `{3}` | **1 on arm64, 0 on x86-64** | 3 |
 
     which is the whole of it: the binary form is right where it is lowered at
     all, and the augmented form reached the integer ALU holding the receiver's
