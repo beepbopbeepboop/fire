@@ -1,29 +1,5 @@
 # FORMAL_pointer_value_model: what a pointer IS on the formal path, and why the 54-file group was never about that
 
-**Status 2026-10-06 (`work/formal113-docs`): the SUBSCRIPT spelling of a
-dereference now reads and writes at the pointee's width, which is what
-`p.value()` already did.** §1.2 says "a load is never emitted at a width the
-model has not established", and §6 says `p[i]` and `p.value()` are "the same
-instruction pair from the SAME reader" — but the emitter's `_emit_subscript_load`
-was `width == 1 ? LDRB : LDR`, so every 2- and 4-byte pointee subscript did a
-full 64-bit load and the next element bled into the high half. Measured on BOTH
-architectures, from a green build, the filed parity row `aug_through_int32_pointer`:
-
-    var q: Pointer[Int32] = malloc(16)
-    q[0] = 10
-    q[1] = 21
-    printf("%d", q[0])        ->  90194313226   (0x15_0000000A)
-
-where the source says 10, and `q[0] += 5` read and wrote eight bytes for the same
-reason. The fix is the width dispatch `_emit_dereference` already had, in the
-subscript's load, store and augmented-assignment arms of both backends, with the
-pointee's signedness carried from `model.subscript_base_lowering` (so
-`Pointer[Int8]`'s `-1` is not 255). Pinned by `test_formal_run.py`'s
-`deref_subscript_reads_at_the_pointee_width`,
-`deref_subscript_store_and_aug_write_at_the_pointee_width` and
-`deref_subscript_sign_extends_a_signed_pointee`, and by the two parity rows that
-were red on master (`aug_through_int32_pointer`, `aug_every_operator`).
-
 **§9 status, re-measured 2026-10-04 (`work/formal23-5-r2`): SIX of the eight
 items in "Also found, and NOT fixed" are now closed, and the two that remain are
 both named as another lane's question.** Closed: the `p + k` offset scale
@@ -162,10 +138,8 @@ function (`pointer_frame_bindings` is collected in the loop that already walks
 every function once, and asked from inside the fixpoint rather than beside it).
 The 2026-10-02 per-struct census is the body of work that says what a
 build-cost number has to be measured against (its doc is deleted with its fix,
-and so is the last member of that family — the one-word sole-field chain, which
-asked the field set once per FUNCTION; `one_field_struct_names` now publishes
-the field's NAME as its value, so `model.sole_field_answer` reads it off the
-partition instead of re-deriving it), and the
+and the one member of the family still open is
+`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`), and the
 honest reading of this one is that a fixpoint EDGE is not free even when it
 merges nothing: the walk is per function and there are a thousand functions.
 

@@ -240,18 +240,25 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
-    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
-    # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
-    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
-    # this tree returns NO SPEC for each, which is the rule at the top of this
-    # section applied: the object is missing from the target. `_gdbm` and
-    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
-    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
-    # leading underscore), so this moves the PUBLIC unclassified count by zero;
-    # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
-    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
+    # ── 2026-10-05: the SAME measurement, run over every name CPython ships ──
+    #
+    # `importlib.util.find_spec` on the interpreter that runs this tree answers
+    # NO SPEC for exactly five more of the names
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` leaves in no tier
+    # at all, and each is missing the object by name: `_winapi` and `_overlapped`
+    # are the Windows kernel32 entry points CPython itself cannot import on this
+    # host, `_wmi` is Windows' management interface, `_tkinter` is the Tk binding
+    # (so `tkinter` above needs it), and `_gdbm` is the GNU dbm binding — the
+    # C extension `dbm` picks when it is there, and it is not here.
+    #
+    # The rule is the one the four names above already state, applied by the
+    # oracle that decided them rather than by a reading: the target is a SUBSET
+    # of this host, so a name this host's own CPython cannot provide is a name
+    # the target cannot provide either, and there is nothing a Mojo-side
+    # implementation could be missing an object for. `tools/formal_stdlib_reach.py`
+    # prints the measurement for every CPython name in no tier, so the residue
+    # between these and the tables is visible rather than asserted.
+    "_winapi", "_overlapped", "_wmi", "_tkinter", "_gdbm",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -496,11 +503,9 @@ HOST_MODELLED = frozenset((
     #     the finding: the formal backends ERASE ANNOTATIONS, so a
     #     `from typing import Optional` resolves as soon as the module EXISTS
     #     and `Optional` need not be in its export table, because nothing ever
-    #     reads the name. `formal/elf.py:25` imports `Optional` and
-    #     `type_system.py:13` imports `Optional, Dict, Set, Tuple, Any` — six
-    #     imported names across the two files, five distinct, every one of the
-    #     six in an annotation or a parameter default — which is why the module
-    #     is one function long. `test_formal_small_hosts.py` pins that
+    #     reads the name. `formal/elf.py` and `type_system.py` put all seven of
+    #     their imported names in annotations or in a default, which is why the
+    #     module is one function long. `test_formal_small_hosts.py` pins that
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
@@ -545,36 +550,17 @@ HOST_MODELLED = frozenset((
     #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
     #     number, which is a status because there are no exceptions here
     #     (FORMAL.md phase 7).
-    #   `random`  — LEFT 2026-10-05 for `formal/hostmods/random.mojo`, and it is
-    #     the row the `--host` ranking measured as REACHABLE rather than
-    #     unreachable (`arc4random_buf` is already in `tempfile.mojo`, and
-    #     CPython's `Random` is a Mersenne Twister, which is integer arithmetic
-    #     over a 624-word state). Three names — `seed`, `getrandbits`,
-    #     `randrange` — checked against CPython's own `random` by
-    #     `test_formal_random.py` on both backends, over the two callers' own
-    #     seeds and ranges (`test_formal_time.py`'s 62-bit
-    #     `randrange(1, 4e18)` is the widest, and it is why `getrandbits` is
-    #     here rather than private).
-    #
-    #     WHAT THE MODULE DOES NOT MOVE is the other half of the row: a
-    #     `random.Random(n)` INSTANCE is an object with 624 words behind a
-    #     pointer, which is `formal/hostmods/random.mojo`'s own top section and
-    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
-    #     Two of the row's four files move and two stop on the instance rather
-    #     than on the import, which is the honest number.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     #
-    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`,
-    #     `getrandbits` and `randrange`, a Mersenne Twister over a 624-word
+    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`
+    #     and `randrange` only, a Mersenne Twister over a 624-word
     #     module-level state, every answer checked against CPython's own
     #     `random` by `test_formal_random.py` on BOTH backends: the two call
     #     sites in this repository verbatim (forty draws of
     #     `randrange(140, 5000)` after `seed(23)`, and a hundred and twenty
     #     draws of `randrange(1, 4_000_000_000 * 10**9)` after `seed(17)`),
-    #     the whole `getrandbits` width matrix (7 seeds x widths 1..64 = 448
-    #     answers, `k = 64` compared modulo `2**64` because its value can
-    #     carry the sign bit), 700 draws so the 624-word
+    #     one case per branch of `getrandbits`, 700 draws so the 624-word
     #     twist is inside the corpus, fifteen seeds of one, two and three key
     #     words in both signs, and seven widths just under a power of two so
     #     the rejection loop runs.
@@ -1107,6 +1093,123 @@ def is_frontend_provided(name: str) -> bool:
         or name.split(".")[0] in FRONTEND_PROVIDED_MODULES
 
 
+def _hand_kept_tier(name: str) -> str:
+    """The tier a name is IN, by table membership alone. `''` for no tier.
+
+    This is `host_module_tier` minus the one derived rule
+    (`capability_sibling_tier`), split out so the rule can ask the question
+    without asking itself: a derived answer must never be able to feed the
+    next derivation, or `_foo` → `foo` → … would be a cycle rather than a
+    derivation.
+    """
+    if not name:
+        return ""
+    top = name.split(".")[0]
+    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
+        return "unreachable"
+    if top in HOST_ADMITTED or name in HOST_ADMITTED:
+        return "admitted"
+    if top in HOST_MODELLED or name in HOST_MODELLED:
+        return "modelled"
+    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
+        return "not-a-module"
+    return ""
+
+
+# The two CLAIM tiers — the ones that assert something about the target rather
+# than about this tree's sources. They are what a derived answer is allowed to
+# pass on, and the pair is named rather than spelled twice so that a fifth tier
+# cannot be added without this rule having to say what it does with it.
+CLAIM_TIERS = ("modelled", "unreachable")
+
+
+def capability_sibling_tier(name: str) -> str:
+    """A private module's tier, DERIVED from the public module it accelerates.
+
+    **This is the one piece of the 216-name queue that is decidable without a
+    judgement about the target, and it is decidable from THIS repository.**
+    CPython splits a capability across a public module and a private C
+    accelerator for it — `hashlib` and `_hashlib`, `decimal` and `_decimal`,
+    `json` and `_json`, `struct` and `_struct`, `socket` and `_socket`,
+    `threading` and `_thread`. Implementing the private one is implementing the
+    public one's capability, so the tier that answers for the public name
+    answers for the private one, and there is nothing left to decide:
+
+    | the private name | the public one | why that is the whole argument |
+    |---|---|---|
+    | `_socket` | `socket` → `unreachable` | the socket is missing from the target, so the accelerator for it is too |
+    | `_locale` | `locale` → `unreachable` | ditto, and `locale` is already in the table for it |
+    | `_warnings` | `warnings` → `unreachable` | ditto |
+    | `_ctypes` | `ctypes` → `admitted` | a foreign-code loader this tree answers under declared contracts, so the capability is REACHABLE even though `ctypes` cannot be computed |
+    | `_hashlib` | `hashlib` → `written` | `formal/hostmods/hashlib.mojo` answers it here, so the capability needs no object at all |
+    | `_decimal` | `decimal` → `modelled` | arithmetic over a fixed decimal representation |
+
+    **The two rows at the bottom of that table are why this rule outranks the
+    EXTERNAL oracle, and they are measured rather than argued.** Read the dylib
+    a CPython extension happens to link and the answer flips:
+    `formal/stdlib`'s own measurement (`tools/formal_stdlib_reach.py`) says
+    `_hashlib` links `libcrypto.3.dylib` and `_decimal` links `libmpdec.4.dylib`,
+    neither of which is in libSystem — so a rule that read the dynamic
+    dependencies would call both `unreachable`, which contradicts what THIS TREE
+    already says (`hashlib` is answered by a source, `decimal` is
+    `HOST_MODELLED`) and what the tier means ("a Mojo-side implementation could
+    in principle provide this"). **A library outside libSystem is a fact about
+    CPython's packaging; an object the target does not have is a fact about the
+    target, and the tables already carry the second.** That is the whole reason
+    the rule reads the tables and not the interpreter, and the reason the
+    accelerator question is never asked.
+
+    Two deliberate restrictions, each because the obvious extension is wrong:
+
+    * **`'admitted'` and `'written'` become `'modelled'`, never themselves.**
+      `HOST_ADMITTED`'s own membership rule is "there is a `formal/hostmods/`
+      source" (`_admitted_tier_conflicts` asserts it in both directions against
+      the filesystem), and `_thread` has no source. Returning `admitted` for it
+      would claim a file that is not there; returning `written` would be worse,
+      because a consumer reading the verdict's detail would be handed `None` as
+      the path that answers the name. `modelled` is the honest reading of both:
+      the capability is reachable in principle, and nothing here implements it.
+    * **A public name derives nothing.** `host_module_tier` asks this only for a
+      name that is not in a tier, and the rule only fires on a leading-underscore
+      name, so `socket` never reaches it and can never answer with
+      `socket`'s own answer to something else.
+
+    `''` — nothing derived — is the answer for every other name, which is where
+    the rest of
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue lives. The
+    derivation is deliberately NOT applied to a name with a Mojo source: a name
+    this tree has written is answered by `host_module_verdict`'s own source arm,
+    and `host_module_tier`'s rule that "a name LEAVES a tier by being WRITTEN"
+    is about the hand-kept tables, which this does not touch.
+
+    **The resolver is asked with its DEFAULT search roots, deliberately, and
+    that is what keeps `host_module_tier` a function of the name.** Every caller
+    of this accessor — `tools/formal_sweep.py`, `tools/formal_sweep_causes.py`,
+    `tools/formal_host_import_wall.py`, `host_module_verdict` itself — calls it
+    without a base, and the rule has to give the same answer to all of them. The
+    question it asks the resolver is "does THIS TREE have a source for the
+    public name", which is the repository-root question, and asking it that way
+    is also the right one: a `hashlib.mojo` sitting beside one particular
+    importer is that importer's module and not a statement about the tree. If
+    that ever has to change it changes HERE, once, and not in four callers.
+    """
+    if not name or not name.startswith("_"):
+        return ""
+    public = name.lstrip("_")
+    if not public or public == name:
+        return ""
+    tier = _hand_kept_tier(public)
+    if tier in CLAIM_TIERS:
+        return tier
+    # `'admitted'`/`''` from the tables, and then the SOURCE — because a public
+    # module answered by a `formal/hostmods/` file has had its capability
+    # demonstrated, which is the strongest statement available here and is what
+    # `_hashlib` (via `hashlib`) is an instance of.
+    if tier == "admitted" or resolve_module_path(public):
+        return "modelled"
+    return ""
+
+
 def host_module_tier(name: str) -> str:
     """`'modelled'`, `'admitted'`, `'unreachable'`, `'not-a-module'`, or `''`.
 
@@ -1128,10 +1231,20 @@ def host_module_tier(name: str) -> str:
     all (`this`, `antigravity`, `turtledemo` — see `HOST_NOT_A_MODULE`). It is
     tested LAST and deliberately so: it is the weakest claim of the four (it
     asserts nothing about reachability), so a name that is in two tiers should
-    answer with the one that says something. `''` — no tier at all — remains the
-    answer for the CPython standard-library names nobody has judged, which is the
-    queue `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is, and the
-    tripwire that keeps it honest is
+    answer with the one that says something.
+
+    **A name in NO tier can still answer, and that is the fifth path: the
+    DERIVED one.** `capability_sibling_tier` above is asked last, after all four
+    tables, and it fires only on a private name whose public sibling this
+    repository has already classified — `_hashlib` answers `modelled` because
+    `hashlib` is answered here, `_socket` answers `unreachable` because `socket`
+    is in the table. It is a table of nothing and a rule, so a name it settles
+    is settled by the rule rather than remembered, and the 216-name queue in
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is 30 names shorter
+    for a reason no reader has to take on trust. What it deliberately does NOT
+    do is guess for the rest: `''` still means "CPython ships it and nothing
+    here says which of the two claim tiers it is", and the tripwire that keeps
+    that honest is
     `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
 
     `unreachable` is tested first, so a name in both tiers would resolve to the
@@ -1140,18 +1253,10 @@ def host_module_tier(name: str) -> str:
     `_admitted_tier_conflicts` doing the same for the admitted half plus its
     "has a source" rule.
     """
-    if not name:
-        return ""
-    top = name.split(".")[0]
-    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
-        return "unreachable"
-    if top in HOST_ADMITTED or name in HOST_ADMITTED:
-        return "admitted"
-    if top in HOST_MODELLED or name in HOST_MODELLED:
-        return "modelled"
-    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
-        return "not-a-module"
-    return ""
+    tier = _hand_kept_tier(name)
+    if tier:
+        return tier
+    return capability_sibling_tier(name)
 
 
 def _host_tier_conflicts() -> list:
@@ -1316,12 +1421,30 @@ def _is_host_module(name: str) -> bool:
     `is_cpython_stdlib`, and the two are different questions with different
     consumers. This one is `resolve_module_path`'s pass 2 and the tier tables'
     own membership test, so it answers "is this one of the names we have
-    CLASSIFIED", and a classified name includes every module with a
-    `formal/hostmods/` source, which is why `math`, `stat`, `shutil`, `fcntl`
-    and `platform` all answer False here and are pinned False by their own
-    suites: they are built here, so nothing refuses them.
+    CLASSIFIED", which includes every module with a `formal/hostmods/` source —
+    `math`, `stat`, `shutil`, `fcntl`, `platform` all answer False here and are
+    pinned False by their own suites: they are built here, so nothing refuses
+    them.
+
+    **A DERIVED tier counts as classified, and that is the only reason this
+    consults `host_module_tier` rather than the union.** `capability_sibling_tier`
+    settles 30 private names from the tables (see its docstring), and none of
+    them is in `HOST_MODULES`, so a predicate reading the union would report them
+    unclassified — and `unresolvable_import_error`'s arm for an unclassified name
+    says "no tier in `formal/imports.py` saying whether implementing it would
+    need an object this target does not have", which is then **false of a name
+    the tier accessor answers**. So the predicate asks the accessor, and
+    `_hashlib` gets the host-module sentence, which is true of it, instead of a
+    sentence about a tier it has.
+
+    **The OUTCOME does not change either way, and that is the property the tier
+    split rests on**: both arms of `unresolvable_import_error` REFUSE the
+    import, so what a derived name moves is the wording and the reach accounting
+    — the same two things the eleven names of 2026-10-05 moved, for the same
+    reason.
     """
-    return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+    return bool(host_module_tier(name)) or name in HOST_MODULES \
+        or name.split(".")[0] in HOST_MODULES
 
 
 def is_cpython_stdlib(name: str) -> bool:
@@ -1652,7 +1775,7 @@ def imported_modules(stmts) -> list:
     return out
 
 
-def imported_bindings(stmts) -> dict:
+def import_bindings(stmts) -> dict:
     """`{local name: (module as spelled, defining name)}` for this file.
 
     THE missing half of `imported_modules`. That function answers "which
@@ -1661,15 +1784,7 @@ def imported_bindings(stmts) -> dict:
     answer for `from m import f` and `from m import f as g`. This one answers
     "which name in THIS file means which export of which module", which is the
     question a call site asks, and the two are different questions about the
-    same statements. The names are parallel on purpose: one is which MODULES,
-    this is which NAMES.
-
-    NOT `model.import_bindings`, which is the per-STATEMENT reader this one
-    folds — `(bound, module, defined)` triples for one `import` line, a list
-    rather than a table, and a function of one statement rather than of a
-    file's. They were the same name for a while, which is one letter apart and
-    two different return shapes, and a reader inside this very body could have
-    swapped them without the type checker saying anything.
+    same statements.
 
     It exists because the answer was being reconstructed at the call site, from
     a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare
@@ -3097,7 +3212,7 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
 
     The alias is filtered by the SAME three rules as the original, applied to
     the alias's own spelling: a name this module defines wins over any import
-    (the precedence `imported_bound_names` and `imported_bindings` both state), a
+    (the precedence `imported_bound_names` and `import_bindings` both state), a
     private alias is not published, and an inert one is not either. The
     original name's own filters are unchanged, so a private definition brought
     in under a public alias stays out of the manifest exactly as before rather
@@ -3272,7 +3387,7 @@ def library_free_edges(importer_path: str, stmts: list,
         # BOTH spellings, and the reason is an ALIAS: `from x import f as g`
         # binds `g` here and the symbol the link line has to carry is `x`'s
         # `f`, because the export table is keyed by the DEFINING name
-        # (`reexported_names`' third element, and `imported_bindings`' "defining
+        # (`reexported_names`' third element, and `import_bindings`' "defining
         # name"). Judging the edge by the local spelling alone would exempt an
         # edge that binds `f` under another name — and the consumer that calls it
         # under either spelling then has no library to bind, which is measured:
@@ -3326,22 +3441,18 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    source_of = {}
-    for src, (bindings, _why) in (library_free or {}).items():
+    for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.  The
-            # SOURCE is the defining module's, which is the key this table is
-            # built under — the refusal reads it to name the rule that applied.
+            # neither has a callee, so the refusal has to reach either.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
-            source_of.setdefault(bound, src)
-            source_of.setdefault(defining, src)
     if not exempt:
         return
-    for scope, body in _enclosing_scopes(stmts):
-        for node in M.iter_nodes(body):
+    for st in stmts or []:
+        fn_name = st.name if isinstance(st, F.FunctionDef) else ""
+        for node in M.iter_nodes(getattr(st, "body", None) or [st]):
             if not isinstance(node, F.CallExpr):
                 continue
             callee = node.func
@@ -3351,70 +3462,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
-            rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
-                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
-
-
-def _enclosing_scopes(stmts: list) -> list:
-    """`[(name to print for a diagnostic, body to walk), …]` for `stmts`.
-
-    **The NAME is half of what this walk is for, and it was empty for every
-    call inside a struct's method.** The refusal this feeds is
-    `model.imported_callee_refusal`, whose whole value is that it names the
-    function the call is in, and the walk computed that name as
-    `st.name if isinstance(st, F.FunctionDef) else ""` over
-    `iter_nodes(getattr(st, "body", None) or [st])` — and a `StructDef` has no
-    `body` at all, so every one of its methods was walked under `""` through the
-    walker descending into them. Measured on the `sweep43:export-gate` row over
-    its own 148-file scope on `master` 2026-10-05: **133 of the 145 refusals
-    that gate produced named no function at all**, and the one file the reader
-    is then sent to is `std/memory/alloc.mojo`, which has four `write_to`
-    methods and three `FormatStruct(…)` sites in it.
-
-    So the walk is per FUNCTION, and a method is reached through its struct: the
-    diagnostic says `Allocation_1_T_1.write_to`, which is the spelling the
-    reader can search for and the name the symbol table carries — an
-    instantiated struct's methods are emitted under the mangled struct's name,
-    so the bare method name would be a name no reader of the image can find.
-
-    One reader, and it is `model.struct_methods` — the same one
-    `find_method_owner` and `structs_declaring_method` ask, because "the
-    methods a struct declares" is one question with one answer. A `TraitDef`'s
-    methods are reached the same way, with the trait's name: a trait method body
-    is compiled into whatever struct implements it, so naming the trait is the
-    only scope the source has.
-
-    **The struct itself is still yielded, LAST and under `""`, and that is a
-    coverage requirement rather than tidiness.** `iter_nodes` over a `StructDef`
-    reaches its FIELDS as well as its methods, and a field's declared type and
-    default are expressions like any other — so dropping the struct from the
-    walk would stop asking this gate about a bare call in a field initializer.
-    Yielding it last keeps that question asked (under the empty name, which is
-    the truth: a field initializer is in no function) while the per-method walks
-    come first, so the more specific scope is the one reported whenever both
-    could answer.
-
-    A top-level statement that is neither a function, a struct nor a trait is
-    walked under `""` — a module-level store is the one place there is no
-    enclosing function to name, and that is what the empty string then means
-    rather than "the walk did not look".
-    """
-    from formal import model as M                   # lazy — cycle
-    out = []
-    for st in stmts or []:
-        if isinstance(st, F.FunctionDef):
-            out.append((st.name, st.body))
-        elif isinstance(st, (F.StructDef, F.TraitDef)):
-            for m in M.struct_methods(st):
-                out.append((f"{st.name}.{m.name}", m.body))
-            out.append(("", [st]))
-        else:
-            out.append(("", [st]))
-    return out
+                M.imported_callee_refusal(callee.name, sym, fn_name))
 
 
 def own_module_identity(source_path: str, project_root: str = None) -> str:
