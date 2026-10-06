@@ -60,9 +60,8 @@ WHAT IS AND IS NOT A FINDING
                        no such bound and ran the same text.
   CPYTHON-TIMEOUT     the ORACLE did not finish the program, so nothing was
                        compared and nothing is claimed.  Its own verdict rather
-                       than a crash: `cpython_answer` answers `None` for BOTH
-                       non-answers — a timeout and a program CPython rejects —
-                       so a caller that read "not an error tuple" as "has an
+                       than a crash: `cpython_answer` answers `None` for it, and
+                       a caller that read "not an error tuple" as "has an
                        answer" died with `TypeError: cannot unpack non-iterable
                        NoneType object` — measured, in a `signed` sweep, on a
                        program whose recursion runs CPython past its own
@@ -232,9 +231,7 @@ the frame receiver), `globals` (module-level `__DATA` slots, read through a
 local and written by a helper through its own `global`), `generics` (`def
 f[T](x: T, …)` called at more than one type, which is what monomorphisation
 acts on), `environ` (`os.getenv` against a FIXED process environment,
-`FIXED_ENV`, drawn through the operations the foreign bytes support — `print`,
-`==`/`!=` and `is None`; `len` of them is the byte-vs-character refusal, so it
-is deliberately not drawn).
+`FIXED_ENV`).
 
 The value-model half: `strings` (binding, `len`, comparison, the byte
 subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
@@ -352,7 +349,6 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import NamedTuple
 
 # `tools/formal_sweep_parity.py`'s architecture-label fold, imported rather than
 # copied: it is the normaliser the sweep's parity tool settled by measurement
@@ -698,90 +694,24 @@ PY_DRIVER = (
 )
 
 
-#: What `cpython_answer` puts in its reason slot when the oracle ran out of time
-#: rather than rejecting the program.  A constant because `is_oracle_timeout` is
-#: asked of a free-text reason at three call sites, and a literal in each of
-#: them is three spellings of a fact that lives in one function.
-ORACLE_TIMEOUT_REASON = "CPYTHON TIMEOUT"
-
-
-class OracleAnswer(NamedTuple):
-    """What CPython answered for a program: its exit status and its stdout.
-
-    A TYPE rather than a bare `(exit, stdout)` tuple, and the reason is that
-    `cpython_answer` has TWO failure answers and one success answer, and a bare
-    tuple cannot tell them apart at the call site: a success is `OracleAnswer`,
-    and BOTH failures are `None` (the reason is the other half of the returned
-    pair). Measured, before this type existed: `has_oracle` applied to the
-    UN-unpacked return value — reading `ref[0] == "error"` one level too high —
-    answers **True for a program CPython rejects**, because there `ref[0]` is the
-    tuple `("error", …)` rather than the string. A reader who got that wrong
-    reported a disagreement on every program it was pointed at, including
-    `class H: … def main(): return 0`, and reduced a real miscompile to a
-    one-line `SyntaxError`. See `oracle_answer`, which is the accessor that
-    cannot be read the other way.
-    """
-    exit: int
-    stdout: str
-
-
-def is_oracle_timeout(reason) -> bool:
-    """Whether `cpython_answer`'s reason says it ran out of TIME.
-
-    The one distinction between the two non-answers, and it is a function rather
-    than `reason == "CPYTHON TIMEOUT"` at each of three call sites because the
-    reason is free text — `cpython_answer` puts a traceback there when CPython
-    REJECTS the program — so the only stable spelling is the sentinel
-    `cpython_answer` itself writes. Which is why that sentinel is a named
-    constant rather than a literal: the alternative is three copies of a string
-    that has to match a string in another function.
-    """
-    return reason == ORACLE_TIMEOUT_REASON
-
-
-def oracle_answer(ref):
-    """The `(exit, stdout)` CPython produced, or `None` when it produced none.
-
-    The accessor, because the convention used to live only in the shape: every
-    caller unpacked `ref, err = cpython_answer(...)` and then tested
-    `ref[0] == "error"`, which is correct on the unpacked half and silently
-    WRONG one level up, and nothing at the definition said so. Asking this
-    function has no wrong reading — there is no second element to reach for.
-
-    `None` covers all three non-answers now, which is a change of shape and not
-    only of naming: a rejected program used to come back as `("error", text)`
-    inside the first element and a TIMEOUT as `None`, so every caller had to
-    know both. One shape means one test, and `oracle_reason` is where the
-    distinction survives.
-    """
-    return ref if isinstance(ref, OracleAnswer) else None
-
-
 def has_oracle(ref):
-    """Whether `cpython_answer` produced an ANSWER rather than one of its
+    """Whether `cpython_answer` produced an ANSWER rather than one of its two
     non-answers.
 
-    Kept as a name because callers and this file's own prose both use it, and
-    now a one-liner over `oracle_answer` rather than a hand-rolled reading of a
-    tuple: the three answers used to be an `(exit, stdout)` tuple, a generator
-    error `("error", …)`, and a CPython TIMEOUT `None`, so "not an error tuple"
-    was not "has an oracle", and every caller that read it that way crashed on
-    the timeout with `TypeError: cannot unpack non-iterable NoneType object` —
-    measured in a `signed` sweep, minimising a program whose recursion runs
-    CPython past its own recursion limit.  A tool that dies on its own oracle
-    reports nothing about the backend, and its exit status says nothing either.
+    It has THREE, which is the whole reason this is a function: an answer is an
+    `(exit, stdout)` tuple, a generator error is `("error", …)`, and a CPython
+    TIMEOUT is `None`.  "not an error tuple" is therefore not "has an oracle",
+    and every caller that read it that way crashed on the timeout with
+    `TypeError: cannot unpack non-iterable NoneType object` — measured in a
+    `signed` sweep, minimising a program whose recursion runs CPython past its
+    own recursion limit.  A tool that dies on its own oracle reports nothing
+    about the backend, and its exit status says nothing either.
     """
-    return oracle_answer(ref) is not None
+    return bool(isinstance(ref, tuple) and ref and ref[0] != "error")
 
 
 def cpython_answer(text, tmpdir, name, args=""):
-    """`(OracleAnswer | None, reason)` for `text` + `main(args)`, run here.
-
-    The first element is an `OracleAnswer` when CPython ran the program and
-    `None` when it did not — and `oracle_answer` is how a caller asks, because
-    the two failure reasons (it REJECTED the program, it TIMED OUT) differ and
-    only the second element says which, which is why they are one shape and one
-    reason rather than two shapes.
+    """(exit, stdout) for `text` + `main(args)`, run by the interpreter here.
 
     `args` is the argument list the driver calls `main` with, spliced into the
     driver verbatim so a caller can pass one value (`"5"`), several (`"5, 7"`)
@@ -799,7 +729,7 @@ def cpython_answer(text, tmpdir, name, args=""):
         p = subprocess.run([sys.executable, py], capture_output=True, text=True,
                            timeout=PY_TIMEOUT, env=dict(FIXED_ENV))
     except subprocess.TimeoutExpired:
-        return None, ORACLE_TIMEOUT_REASON
+        return None, "CPYTHON TIMEOUT"
     m = _RC_RE.search(p.stderr or "")
     if m:
         # `& 0xFF` because a process exit status is EIGHT BITS wide and
@@ -807,16 +737,16 @@ def cpython_answer(text, tmpdir, name, args=""):
         # `test_formal_run.py`'s comment on its own expected values says so.
         # Without the mask a negative or wide return reads as a disagreement
         # that is really an arithmetic identity — `return -3` exits 253.
-        return OracleAnswer(int(m.group(1)) & 0xFF, p.stdout), ""
+        return (int(m.group(1)) & 0xFF, p.stdout), ""
     if p.returncode != 0:
         # A generated program that CPython rejects is a GENERATOR bug (a
         # ZeroDivisionError, say), not a finding about the backends.  Returned
         # with its stderr so the caller can say so rather than silently drop it.
-        return None, p.stderr.strip()[-400:]
+        return ("error", p.stderr.strip()[-400:]), ""
     # Exited 0 with no sentinel: `main` returned something that is not an int,
     # which the generator's own `return 0` cannot do and the minimiser's
     # sub-expression pass cannot reach.  Said rather than answered as 0.
-    return None, "the CPython driver printed no %s sentinel" % _RC_TAG
+    return ("error", "the CPython driver printed no %s sentinel" % _RC_TAG), ""
 
 
 # ── the refusal audit ───────────────────────────────────────────────────────
@@ -1004,7 +934,7 @@ def _identifiers_in(text):
     return set(IDENT_RE.findall(text))
 
 
-def audit_refusal(text, diag, cpython=None, reason=""):
+def audit_refusal(text, diag, cpython=None):
     """Is this refusal honest? `(verdict, detail)`; see the block comment above.
 
     Four verdicts, and the point of naming the unhelpful ones is that a sweep
@@ -1020,14 +950,9 @@ def audit_refusal(text, diag, cpython=None, reason=""):
                         here.  Counted, printed, never a finding: this verdict
                         is what keeps the other three honest.
 
-    `cpython` is `cpython_answer`'s answer-or-`None`, passed in rather than run
+    `cpython` is `cpython_answer`'s three-way answer, passed in rather than run
     again so a caller that already has it pays for it once — and so the audit has
-    no way to demand an oracle it did not get.  `reason` is that function's
-    second element, which is where the traceback is for a program CPython
-    rejected and where the TIMEOUT sentinel is for one it never finished; it is
-    a parameter rather than something re-derived from `cpython` because after
-    the one-shape change the answer and the reason are the ONLY two facts there
-    are, and re-deriving one from the other is what this change is about.
+    no way to demand an oracle it did not get.
     """
     # ── 1. does the message name something the program contains? ──
     prog = _identifiers_in(text)
@@ -1071,24 +996,17 @@ def audit_refusal(text, diag, cpython=None, reason=""):
         claim = pattern.search(diag)
         if not claim:
             continue
-        if oracle_answer(cpython) is None and (not reason
-                                              or is_oracle_timeout(reason)):
-            # A claim about CPython can only be checked against a program
-            # CPython RAN. `cpython` being `None` is not that test on its own
-            # any more — it is also what a program CPython REJECTED looks like,
-            # and that case is checkable, because the traceback in `reason` is
-            # what the claim is about. So the test is `None` AND no usable
-            # reason: the oracle was not run at all, or it ran out of time.
+        if cpython is None:
             return "no-predicate", (f"{claim.group(0)!r} makes a claim about "
                                     f"CPython and the oracle was not run")
-        ok, why = check(text, cpython, reason)
+        ok, why = check(text, cpython)
         if not ok:
             return "false", f"{claim.group(0)!r}: {why}"
     return "true", ", ".join(dict.fromkeys(named))
 
 
 #: Claims a refusal makes ABOUT CPython, and the check that refutes one.  Each
-#: row is (pattern, check) and the check is `(text, oracle, reason) -> (ok, why)`,
+#: row is (pattern, check) and the check is `(text, cpython_answer) -> (ok, why)`,
 #: because "the message promises something and the reference disagrees" is the
 #: only kind of falsehood this tool can decide on its own.
 #:
@@ -1096,9 +1014,8 @@ def audit_refusal(text, diag, cpython=None, reason=""):
 #: spells the promise out — "CPython raises UnboundLocalError for that program
 #: (NameError at module level)" — and a message that names the exception it
 #: cannot raise is checkable against the interpreter this tool already runs.
-#: `cpython_answer` answers `None` and puts the traceback in its REASON when
-#: CPython rejects the text, so the check reads the exception out of the
-#: oracle's own stderr.
+#: `cpython_answer` answers `("error", stderr)` when CPython rejects the text, so
+#: the check reads the exception out of the oracle's own traceback.
 #:
 #: BOTH classes are accepted rather than the one the first sentence names,
 #: because the message itself says which is which: demanding `UnboundLocalError`
@@ -1110,30 +1027,16 @@ def audit_refusal(text, diag, cpython=None, reason=""):
 #: row is reached from `--audit` on a saved program rather than from a sweep of
 #: `core`.  It is here because the row is TRUE and the alternative is an audit
 #: that silently skips the one claim it can check.
-def _cpython_raises_any(ref, reason, classes):
-    """(whether CPython raised one of `classes`, the last line) for a program
-    CPython REJECTED, or `(None, why-not)` for one it ran.
-
-    Asked for the REASON rather than for the first element, because that is
-    where `cpython_answer` puts the traceback now that both non-answers share
-    one shape — and the previous form of this test,
-    `isinstance(ref, tuple) and ref and ref[0] == "error"`, was the §4.14 defect
-    in its purest form: it reads the un-unpacked return value, where `ref[0]` is
-    the answer tuple rather than the string, so it answers "CPython raises
-    nothing" for a program that raised a `NameError`.
-    """
-    if oracle_answer(ref) is not None:
+def _cpython_raises_any(ref, classes):
+    """(`error`, stderr) from `cpython_answer`, and whether it raised one of them."""
+    if not (isinstance(ref, tuple) and ref and ref[0] == "error"):
         return None, f"CPython answers this program with {ref!r}, and raises nothing"
-    if is_oracle_timeout(reason):
-        return None, "the oracle TIMED OUT, so this program was never run"
-    return (any(c in reason for c in classes),
-            reason.strip().splitlines()[-1][:120])
+    return any(c in ref[1] for c in classes), ref[1].strip().splitlines()[-1][:120]
 
 
 REFUSAL_CLAIMS = [
     (re.compile(r"CPython raises (UnboundLocalError|NameError)"),
-     lambda text, ref, why: _cpython_raises_any(
-         ref, why, ("UnboundLocalError", "NameError"))),
+     lambda text, ref: _cpython_raises_any(ref, ("UnboundLocalError", "NameError"))),
 ]
 
 
@@ -1149,28 +1052,19 @@ def fold_arch(text):
     return _SWEEP_PARITY.fold_arch(text)
 
 
-def run_on(backend, text, tmpdir, name, test_input=None):
+def run_on(backend, text, tmpdir, name):
     """Everything ONE backend says about `text`: built? ran? printed what?
 
     Returns a dict whose `verdict` is one of `ok`, `refusal`, `codegen-internal`,
     `crash`, `timeout`; `ok` carries the exit status and stdout that the
     comparison needs, and every verdict carries enough text to reproduce the
     report line.
-
-    `test_input` is `build`'s, passed straight through, and it is a PARAMETER
-    rather than a second function because the input is baked into the image: a
-    caller that measures a program whose entry takes arguments must build it with
-    the input its oracle was given, and a wrapper would have to re-spell the build
-    command and the refusal classification below to do it — the two things
-    `tools/formal_proof_fuzz.py`'s docstring exists to prevent.  `None` is the
-    default and means "the image the CLI builds by default", which is what every
-    caller here measured before the parameter existed.
     """
     src = os.path.join(tmpdir, f"{name}.mojo")
     out = os.path.join(tmpdir, f"{name}.{backend}")
     with open(src, "w") as f:
         f.write(text)
-    rc, diag = build(src, out, backend, opt=OPT, test_input=test_input)
+    rc, diag = build(src, out, backend, opt=OPT)
     if rc != 0:
         # THREE shapes of build failure, and only the first two are the same
         # thing.  A crash is a traceback or a signal; a refusal is a sentence;
@@ -1382,7 +1276,7 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_none", 3), ("environ_cmp", 3),
+    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2011,7 +1905,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_none", "environ_cmp",
+"environ_get", "environ_len", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2118,7 +2012,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_none", "environ_cmp"):
+        elif kind in ("environ_get", "environ_len", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3052,22 +2946,10 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
-    #
-    # **`environ_len` was `len(os.getenv(k))` and is gone: the backend refuses
-    # that spelling, so every program this mix drew was refused and the harness
-    # (`test_formal_fuzz.py::check_mix_builds`) correctly reported a family that
-    # measured nothing.** `len` of a kernel-supplied `char *` is an honest
-    # refusal with a repair — `formal/model.py`'s `len(...)is len() of bytes the
-    # KERNEL supplied`, pinned by `test_formal_unicode.py` — because a byte count
-    # and a character count differ for every non-ASCII value and nothing in the
-    # source says which the kernel gave. What the optional CAN carry is the
-    # comparison the doc's own "what is expected" names, so the family draws
-    # `os.getenv(k) is None` instead: valid CPython, lowered on both backends,
-    # and it exercises the `Optional[String]` the environ model actually returns.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_none":
-            self.emit(indent, f"print(1 if os.getenv({key!r}) is None else 0)")
+        if kind == "environ_len":
+            self.emit(indent, f"print(len(os.getenv({key!r})))")
             return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
@@ -4191,55 +4073,28 @@ class Gen:
         self.loop_depth -= 1
         self.emit(indent, f"print({acc})")
         # The INNER lists, read into locals so a later family can walk them.
-        # The inner list's own `len` used to be a REFUSAL on both backends ("a
-        # subscript of a list of lists has no element kind on this path — the
-        # outer list's elements are LISTS and the table does not say what a
-        # list's elements are"), so this family read the row through a second
-        # local and left the length unmeasured; a family that is a third
-        # refusals measures the refusal, which was the right trade while the
-        # construct was genuinely unanswerable two other ways. It is answered
-        # now (`formal/model.py::_list_literal_elem_kind`), so both spellings
-        # are emitted below and the length is measured rather than routed
-        # around.
+        # There is deliberately NO `len(inner)` here: a subscript of a list of
+        # lists has no element kind on this path — the outer list's elements are
+        # LISTS and the table does not say what a list's elements are — so
+        # `len(inner)` is REFUSED on both backends with "classified as 'int'"
+        # (filed as `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int`).
+        # A family that is a third refusals measures the refusal, so the inner
+        # read is here as an ALIAS for the nested-data question and the element
+        # read is the observable.
         #
         # The name holding the inner list does NOT join `words`: it holds a blob,
         # and the trailing observation prints every word in one `print` — a blob
         # there is either a refusal or an address, and the family is not about
         # either. It joins `lists`, so a later `star_splice` or `comp_walk` can
         # walk it, which is the nested-data question one step further.
-        #
-        # Each name is declared ONCE, with its real initialiser, and the reads
-        # are emitted at `indent`. The earlier spelling pre-declared `inner` to
-        # `[]` and then REBOUND it (`w = []` in the preamble, `w = R[i]` in the
-        # body), and a name bound two ways is a conflict in `ValueKinds` — so
-        # even with the element kind answerable the `len` below was refused,
-        # about the CORPUS's rebinding rather than about the rule under test.
         for i in range(min(2, nrows)):
-            inner = self.declare(self.fresh("w"), f"{name}[{i}]")
-            # `len` of the INNER list, which REFUSED on both backends until
-            # `formal/model.py::_list_literal_elem_kind` landed (2026-10-05) and
-            # is the row that family was written not to generate: the kind table
-            # flattened a blob layout it nests, so `R[0]`'s element kind was
-            # `list_elem_kind("list")` = None and the name was classified as "a
-            # word is an integer". With the element kind read off the literal it
-            # is a count-field read, and the answer is `ncols` — so this is
-            # emitted rather than avoided, which is what
-            # `bugs/FORMAL_fuzz_ledger.md` §5 listed as the next thing to
-            # generate and what no generator could measure until the rule
-            # existed.
-            self.emit(indent, f"print(len({inner}))")
-            elem = self.declare(self.fresh("w"), f"{inner}[{col}]")
+            inner = self.declare(self.fresh("w"), "[]")
+            self.emit(indent, f"{inner} = {name}[{i}]")
+            elem = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{elem} = {inner}[{col}]")
             self.emit(indent, f"print({elem})")
-            # …and the NESTED subscript straight into `print`, the other of the
-            # two spellings measured as refused while the rule was missing
-            # ("cannot tell whether
-            # SubscriptExpr is a string or a number"). It is here because the
-            # same rule made it answerable and a family that keeps routing
-            # around a construct measures the routing rather than the construct.
-            self.emit(indent, f"print({name}[{i}][{col}])")
             self.words.append(elem)
             self.lists.append((inner, ncols))
-
 
     def star_splice_stmt(self, indent):
         """`[*xs]` and `[*d]` — the other one-thing-per-count walk.
@@ -5035,7 +4890,7 @@ class Gen:
             # `__init__` takes parameters (`define_ctor_class`), and spelling
             # `K1()` for one is a TypeError in the oracle — a generator error
             # on every program the mix produced, which is the shape
-            # `cpython_answer` returns `None` for and which a sweep
+            # `cpython_answer` returns `("error", …)` for and which a sweep
             # would report as a generator error rather than as a finding.
             ctor = self.ctor_args(name)
             self.declare(var, f"{name}({ctor})")
@@ -5251,20 +5106,17 @@ def check_one(index, args, tmpdir, lock=None):
                 "text": text}
     ref, err = cpython_answer(text, tmpdir, name)
     results = {}
-    answer = oracle_answer(ref)
-    if answer is None:
-        # ONE shape for both non-answers, so this is one test and the verdict
-        # below is the only place that has to tell them apart — by the REASON,
-        # which is the second element, rather than by the shape of the first.
-        # A CPython TIMEOUT is not a generator error: it is the oracle being
+    if isinstance(ref, tuple) and ref and ref[0] == "error":
+        return {"index": index, "verdict": "generator-error",
+                "detail": ref[1], "text": text}
+    if not has_oracle(ref):
+        # A CPython TIMEOUT is not a generator error — it is the oracle being
         # unable to finish a program that is about to be handed to two
         # compilers, and it gets its own verdict rather than a crash or a
         # `generator-error` that names a traceback it never produced.
-        return {"index": index,
-                "verdict": ("CPYTHON-TIMEOUT" if is_oracle_timeout(err)
-                            else "generator-error"),
-                "detail": err, "text": text}
-    want_exit, want_out = answer
+        return {"index": index, "verdict": "CPYTHON-TIMEOUT", "detail": err,
+                "text": text}
+    want_exit, want_out = ref
     for backend in args.backends:
         results[backend] = run_on(backend, text, tmpdir, name)
     finding = classify(results, want_exit, want_out, args)
@@ -5280,7 +5132,7 @@ def check_one(index, args, tmpdir, lock=None):
         for backend, r in results.items():
             if r.get("verdict") != "refusal":
                 continue
-            verdict, detail = audit_refusal(text, r["diag"], ref, err)
+            verdict, detail = audit_refusal(text, r["diag"], ref)
             audits[backend] = (verdict, detail)
         rec["audit"] = {b: {"verdict": v, "detail": d} for b, (v, d) in audits.items()}
         rec["construct"] = {b: refusal_construct(results[b]["diag"])
@@ -5369,23 +5221,16 @@ def record_reduction(rec, original, small, args, tmpdir, name):
     as such rather than as an empty answer.
     """
     rec["original_text"] = original
-    ref, why = cpython_answer(small, tmpdir, name)
-    answer = oracle_answer(ref)
-    if answer is not None:
-        rec["reduced_want"] = {"exit": answer.exit, "stdout": answer.stdout}
+    ref, _err = cpython_answer(small, tmpdir, name)
+    if has_oracle(ref):
+        rec["reduced_want"] = {"exit": ref[0], "stdout": ref[1]}
         results = {b: run_on(b, small, tmpdir, name) for b in args.backends}
         rec["reduced_results"] = results
-        rec["reduced_verdict"] = classify(results, answer.exit, answer.stdout,
-                                          args)
+        rec["reduced_verdict"] = classify(results, ref[0], ref[1], args)
     else:
-        # Both non-answers are `None`, so the verdict is the REASON's to say —
-        # which is why `why` is not `_err` here. Getting this backwards is not a
-        # cosmetic mix-up: a reduction CPython REJECTS is a finding about the
-        # shrinker, and a reduction that merely timed out is a budget problem,
-        # and a reader told the wrong one loses the reproducer to chase.
         rec["reduced_want"] = None
         rec["reduced_results"] = None
-        rec["reduced_verdict"] = ("CPYTHON-TIMEOUT" if is_oracle_timeout(why)
+        rec["reduced_verdict"] = ("CPYTHON-TIMEOUT" if ref is None
                                   else "generator-error")
 
 
@@ -5455,14 +5300,6 @@ def classify(results, want_exit, want_out, args):
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
-        # Counted apart from the mismatches on purpose: `trapped` is the
-        # stack-floor guard refusing, and the guard bounds a BYTE budget
-        # (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`) against frames that are
-        # 128 KiB on arm64 and 16 KiB on x86-64 — so the same program runs 8x
-        # deeper on x86-64 (`model.stack_floor_depth`: 60 vs 480), and a pair
-        # where one machine answers and the other traps is that budget, not two
-        # backends disagreeing about the language. Reporting it as an ordinary
-        # parity finding would file the frame size on every sweep.
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend
@@ -5650,13 +5487,11 @@ def audit_program(text, args):
     tmpdir = tempfile.mkdtemp(prefix="formalaudit.", dir=args.work)
     try:
         ref, err = cpython_answer(text, tmpdir, "audit")
-        answer = oracle_answer(ref)
-        print(f"CPython: {' '.join(str(answer).split())[:200] if answer
-                      else err}")
-        if answer is None and is_oracle_timeout(err):
+        print(f"CPython: {' '.join(str(ref).split())[:200]}")
+        if ref is None:
             print("         the oracle TIMED OUT; a claim about CPython cannot "
                   "be checked against nothing")
-        elif answer is None:
+        elif not has_oracle(ref):
             print("         CPython rejects this program, which is what a "
                   "claim about the exception it raises is checked against")
         bad = []
@@ -5667,9 +5502,9 @@ def audit_program(text, args):
                   + (f" exit={r['rc']} {shorten(r.get('stdout', ''), 80)!r}"
                      if r["verdict"] == "ok" else ""))
             if r["verdict"] == "ok":
-                if answer is not None and r["stdout"] != answer.stdout:
+                if has_oracle(ref) and r["stdout"] != ref[1]:
                     print(f"          MISMATCH: CPython prints "
-                          f"{shorten(answer.stdout, 120)!r}")
+                          f"{shorten(ref[1], 120)!r}")
                     bad.append("answer")
                 continue
             if r["verdict"] != "refusal":
@@ -5677,7 +5512,7 @@ def audit_program(text, args):
                 bad.append(r["verdict"])
                 continue
             folded[backend] = fold_arch(r["diag"])
-            verdict, detail = audit_refusal(text, r["diag"], ref, err)
+            verdict, detail = audit_refusal(text, r["diag"], ref)
             print(f"          construct: {refusal_construct(r['diag'])}")
             print(f"          audit: {verdict}: {detail[:240]}")
             print(f"          said: {' '.join(r['diag'].split())[:240]}")
@@ -6031,10 +5866,9 @@ def _every_engine_agrees(text, args, tmpdir, name):
     docstring calls erring towards one extra report rather than one hidden bug.
     """
     ref, _err = cpython_answer(text, tmpdir, name)
-    answer = oracle_answer(ref)
-    if answer is None:
+    if not has_oracle(ref):
         return False
-    want_exit, want_out = answer
+    want_exit, want_out = ref
     for backend in args.backends:
         r = run_on(backend, text, tmpdir, name)
         if r["verdict"] != "ok":
@@ -6219,9 +6053,8 @@ def _still_fails(text, args, want=None):
     diags = {}
     with tempfile.TemporaryDirectory(dir=args.work) as td:
         ref, _err = cpython_answer(text, td, name)
-        answer = oracle_answer(ref)
-        have_oracle = answer is not None
-        want_exit, want_out = answer if have_oracle else (None, None)
+        have_oracle = has_oracle(ref)
+        want_exit, want_out = ref if have_oracle else (None, None)
         for backend in args.backends:
             if kind == "x86" and backend != "x86_64":
                 continue

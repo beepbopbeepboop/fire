@@ -246,23 +246,6 @@ def _range_args(iterable):
     return None
 
 
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
-
-
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
 
@@ -370,7 +353,7 @@ def _collect_var_names(f: F.FunctionDef) -> list:
                 for c in g.conditions or []:
                     walk_compr(c, depth + n, acc)
             walk_compr(node.element, depth + n, acc)
-            walk_compr(node.value, depth + n, acc)
+            walk_compr(node.key, depth + n, acc)
             return
         if hasattr(node, "__dataclass_fields__"):
             for fname in node.__dataclass_fields__:
@@ -598,22 +581,6 @@ def _binds_name(target, name: str) -> bool:
     return False
 
 
-def _for_tree_leaves(tree) -> list:
-    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
-
-    A star leaf keeps its `*`, so the caller's identifier check refuses it —
-    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
-    the reason the for-loop's target validation is a leaf walk rather than
-    `_lbn_target_names` (which strips the star and would pass a `*rest`
-    through to a store under a name nothing allocated)."""
-    if isinstance(tree, list):
-        out = []
-        for child in tree:
-            out.extend(_for_tree_leaves(child))
-        return out
-    return [tree]
-
-
 def _dotted(func) -> str:
     """`recv.method` as written, for a diagnostic that quotes the source."""
     name = _callee_symbol(func)
@@ -763,11 +730,6 @@ class X86_64Codegen:
         # the arm64 backend's `_sub_width`, and the decision is
         # `model.subscript_base_lowering` so the two cannot drift.
         self._sub_width = 8
-        # …and whether that element is SIGNED, which picks the extending load
-        # (`MOVSX`/`MOVSXD` versus `MOVZX`/`MOV r32`) for a sub-word element.
-        # Set from the same tuple that gives the width; defaulted `True` because
-        # width 8 has no extension to choose.
-        self._sub_signed = True
         self._while_counter = 0
         self._var_regs = {}
         self._var_spills = {}
@@ -845,14 +807,6 @@ class X86_64Codegen:
         # Nesting depth of for-in (blob iteration) loops; selects the
         # `_fi{d}`/`_fb{d}` temps. Reset per function.
         self._for_depth = 0
-        # …and the BLOB-walk depth beside it, which counts ONLY
-        # `for x in <container>`.  `_for_depth` above counts a
-        # `for … in range(...)` as well, and `del d[k]` inside a range loop is
-        # legal CPython, so the two are different questions —
-        # `model.del_during_walk_refusal` needs the second one and must not be
-        # given the first.  arm64's twin is `_for_list_depth`; two names for one
-        # fact is the drift this change is about, so it is stated here.
-        self._for_blob_depth = 0
         # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
         # so a comprehension nested in a for-list cannot alias its temps.
         self._compr_depth = 0
@@ -867,12 +821,6 @@ class X86_64Codegen:
         # Enclosing try-finally bodies, outermost first. Flushed before a
         # return/break/continue so the finally runs on those paths too.
         self._pending_finally = []
-        # The `fin` lists currently being emitted by a flush, and those already
-        # emitted for the exit path being unwound. Identity-keyed re-entrancy
-        # guards that replace the old destructive truncation (see
-        # `_flush_pending_finally`; the same fix on arm64).
-        self._emitting_finally = set()
-        self._finished_finally = set()
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -880,16 +828,6 @@ class X86_64Codegen:
         # Names bound to a dict pair-blob pointer, whose subscript is a key
         # lookup rather than an index. Mutually exclusive with the above.
         self._dict_vars = set()
-        # Names bound to a SET, which `_blob_vars` cannot distinguish
-        # from a list because a set lowers as one.  arm64's twin carries the
-        # same table, and the same question — `a | b` is a union only when
-        # both sides are sets, and Python defines `|` for nothing else.
-        self._set_vars = set()
-        # Names bound to a TUPLE, for the same reason as the set
-        # above and for the same missing fact — a tuple lowers as a
-        # list here — but asked by a different question: a tuple is
-        # IMMUTABLE, so a subscript store into one is refused.
-        self._tuple_vars = set()
         # Names bound to a list/tuple/set blob. This is what makes `a + b`
         # on two LOCALS a concatenation: without it, two bare idents are
         # indistinguishable from two integers, and the operator silently
@@ -1021,28 +959,6 @@ class X86_64Codegen:
         first_func_name = functions[0].name
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
-            # **The stack floor is read FIRST, before anything else in the
-            # startup stub.** Both halves of that placement are load-bearing and
-            # neither is visible in the emitted text:
-            #
-            #   * BEFORE `push rbp`, so RSP is the value the ABI guarantees —
-            #     16-byte aligned at process entry, with no return address on
-            #     the stack — and SysV wants RSP 16-byte aligned AT a `call`.
-            #     After the `push rbp` it is 8 mod 16 and a `callq` from there is
-            #     misaligned, which faults inside the callee's own SSE prologue.
-            #     Measured: SIGSEGV inside `getrlimit` on every program,
-            #     `def main(): printf("hi")` among them.
-            #   * BEFORE the argument materialisation below, because the read
-            #     needs RDI and RSI for the `getrlimit(RLIMIT_STACK, &rlim)`
-            #     call and RDI is where argument 0 goes. Emitted after it, the
-            #     stub handed `main` the resource SELECTOR as its first
-            #     argument: measured as `deep(0..5000)` all refusing with the
-            #     trap, the tell being that every depth tripped at once instead
-            #     of at its own budget.
-            #
-            # It is also the only place a `call` can live that no path tree
-            # walks; see `_emit_stack_floor_init`.
-            self._emit_stack_floor_init()
             # Save/restore RBP around the call so the kernel's return lands
             # with RAX still holding the entry function's value: that value
             # becomes the process exit status, which is what makes a formal
@@ -1062,38 +978,6 @@ class X86_64Codegen:
                 for _ai, _av in enumerate(
                         self.entry_args[:len(functions[0].params)]):
                     self._emit_mov_imm(ARG_REGS[_ai], _av)
-            # The stack floor, read ONCE, HERE — before the entry function is
-            # called and outside every function body.
-            #
-            # This is where the runtime read belongs on this backend, and the
-            # reason is the WALKER rather than taste. `getrlimit` is a `call`, and
-            # `formal/x86_64_endtoend_test.py::_tree` treats a call that leaves
-            # the image as a LEAF — the run is proved to reach the call and stops
-            # there. A `getrlimit` inside the guard's own prologue therefore ends
-            # every guarded function's path tree at 11 instructions, and the whole
-            # 45-example corpus drops from 69 leaves / 2718 steps to 49 / 539:
-            # `bittest` loses the three leaves its own conditional produces, which
-            # is not a step-count move but a loss of proof coverage.
-            #
-            # The startup stub is emitted before any function body and is not
-            # part of any `_body` (`_plan` decodes from `info["func_offset"]`,
-            # which is `first_func_name`), so nothing walks it. The floor is in
-            # `__DATA` and outlives the stub, so every guarded prologue reads it
-            # with four already-proven instructions and no call of its own.
-            #
-            # RSP is 8 mod 16 here — a `call` has just been made, so this is a
-            # callee frame — and SysV wants RSP 16-byte aligned AT a call, so the
-            # `sub rsp, #8` / `add rsp, #8` pair is what makes the `callq` below
-            # aligned. Measured without it: `def main(): printf("hi")`, three
-            # lines and no recursion, SIGSEGV at every depth with every emitted
-            # instruction individually correct.
-            #
-            # Nothing is saved: this runs before any argument is materialised
-            # into an argument register below, and after it the four
-            # `entry_arg_values` MOVs set whatever the entry takes. So there is
-            # no caller-saved register to protect and no callee-saved one to
-            # borrow — which is why this needs no `push`/`pop`, and so why
-            # `lib/X86.lean` needs no `pop` lemma for it.
             self.asm.emit(encode_call_rel32(0))
             self.asm.emit_label_rel32(first_func_name, here_offset=-4)
             self.asm.emit(encode_pop_r64(Reg.RBP))
@@ -1163,13 +1047,6 @@ class X86_64Codegen:
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
-            # The EXCEPTION KIND TABLE — the same publisher, the same key and
-            # the same reason as arm64's copy: the word an unwinder writes on one
-            # side has to mean the same integer on the other, and `info` is how
-            # both proof generators are handed one list instead of each
-            # recomputing it. Nothing reads it yet
-            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
-            "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
             # literal's value is the address of its bytes, and the label
@@ -1406,19 +1283,11 @@ class X86_64Codegen:
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._for_depth = 0
-        # …and the BLOB-walk depth beside it, which counts only
-        # `for x in <container>`.  `_for_depth` above counts a
-        # `for … in range(...)` as well, and a `del d[k]` inside a
-        # range loop is legal CPython, so the two are different
-        # questions — arm64's twin is `_for_list_depth`.
-        self._for_blob_depth = 0
         self._compr_depth = 0
         self._compr_scopes = []
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
-        self._set_vars = set()
-        self._tuple_vars = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -1438,8 +1307,6 @@ class X86_64Codegen:
         self._comptime_vals: dict = {}
         self._comptime_list_asts: dict = {}
         self._pending_finally = []
-        self._emitting_finally = set()
-        self._finished_finally = set()
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
@@ -1453,24 +1320,15 @@ class X86_64Codegen:
         # callee-saved registers this function borrows into the frame's tail
         # (they hold locals, so the CALLER's values have to survive a
         # recursive or nested call), then move each incoming argument home.
-        #
-        # **The stack-floor guard goes FIRST, before the `sub` below, and that
-        # position is load-bearing rather than tidy** — the same fix and the same
-        # reasoning as arm64's (`_emit_stack_floor_guard` there, and
-        # `model.stack_floor_charge` for the measurement). It used to be emitted
-        # immediately after `sub rsp, _frame_bytes`, so by the time it compared
-        # anything this function's frame had been reserved and the frame pointer
-        # pushed: the frame that crossed the real stack limit had already TOUCHED
-        # the memory below it, and no arithmetic in the guard could have saved
-        # the process. Only visible where the usable stack is a whole number of
-        # frames, which is why it survived — the default macOS stack is 8 MiB and
-        # this backend's frame is 16 KiB plus spills, so `8192*1024/16640` is not
-        # an integer and the extra frame lands in `STACK_FLOOR_MARGIN_BYTES`.
-        if self.func_name in self._guarded_names:
-            self._emit_stack_floor_guard()
         self.asm.emit(encode_push_r64(Reg.RBP))
         self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
         self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
+        # The stack-floor guard, immediately after the subtraction it guards, and
+        # only in a function a call chain can re-enter: see
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches.
+        if self.func_name in self._guarded_names:
+            self._emit_stack_floor_guard()
         # The module-global initializer, LAZILY — the x86-64 twin of arm64's,
         # emitted at the same point in the prologue for the same reason. See
         # `_emit_global_init` and `model.initialization_is_lazy`.
@@ -1799,203 +1657,116 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "the register allocator collected no home for it, so the emitter "
             "and the allocation walk disagree about this function's locals")
 
-    def _emit_stack_floor_init(self) -> None:
-        """Read `RLIMIT_STACK` once and park the floor in `__DATA`.
-
-        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
-        before the entry function is called and outside every function body —
-        and that placement is the whole reason this is its own method. See the
-        note at the call site: a `getrlimit` inside a guarded prologue ends that
-        function's path tree at the call, because
-        `formal/x86_64_endtoend_test.py::_tree` proves a call that leaves the
-        image as a leaf.
-
-        The arithmetic is `model.stack_floor_budget_for_limit`, and it is
-        `budget = min(BUDGET, max(limit - MARGIN - frame, MIN))` clamped with
-        two taken-or-not branches rather than two `cmov`. The `cmov` is one
-        instruction shorter and branchless, and it is what this emitter reached
-        for first; `lib/X86.lean` has no `cmov` arm at all, so a `cmov` here
-        costs a new model arm, a new theorem and a new `_FORMS` row, and two
-        branches cost none of that. This is also where
-        `formal/x86_64.py::encode_cmov_r64_r64`'s operand order matters and was
-        got wrong: Intel's `CMOVcc r, r/m` puts the DESTINATION in the ModRM
-        reg field, the opposite of every `_alu_rr` encoder beside it, so the
-        first version clamped the wrong register and every depth exited 139 with
-        the guard plainly present in the disassembly.
-
-        RSP is not touched, which is what `stack_scratch_offset` and
-        `stack_scratch_offset` is for: the 16-byte `struct rlimit` goes in
-        `__DATA` because every stack answer corrupts the program. There is no
-        argument to park here at all — this runs before the startup stub
-        materialises any, which is the other half of why it runs there.
-        """
-        if self._globals_base is None:
-            return
-        scratch = M.stack_scratch_address(self._globals_base)
-        limit_word = M.stack_limit_address(self._globals_base)
-        floor = M.stack_floor_address(self._globals_base)
-        clamp1 = "sfinit_c1"
-        clamp2 = "sfinit_c2"
-        self._lea_abs(Reg.R11, limit_word)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        # `mov` does not set flags, so without this `test` the `jne` would read
-        # whatever the CALLER last compared.
-        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
-        self.asm.emit(encode_jne_rel32(0))
-        self.asm.emit_label_rel32("sfinit_done", here_offset=-4)
-        # `getrlimit(RLIMIT_STACK, &rlim)`: RDI is the resource and RSI the
-        # `struct rlimit`, whose FIRST word is `rlim_cur` on both targets this
-        # emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
-        # `unsigned long`). `rlim_max` is not read.
-        self._lea_abs(Reg.RSI, scratch)
-        self._emit_mov_imm(Reg.RDI, M.RLIMIT_STACK)
-        self._emit_mov_imm(Reg.RAX, 0)      # AL = 0, not varargs
-        self._emit_extern_call("getrlimit")
-        # **RSI is caller-saved, so it does NOT still point at the struct** after
-        # the call — reading `(%rsi)` reads whatever the callee left there. Both
-        # addresses are re-derived from their link-time constants for that
-        # reason; reading the returned `rlim_cur` through a register the callee
-        # was free to destroy is how `def main(): printf("hi")` died with SIGSEGV
-        # at every depth with every emitted instruction individually correct.
-        self._lea_abs(Reg.RSI, scratch)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSI, 0))
-        self._lea_abs(Reg.R11, limit_word)
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-        # budget = limit - (MARGIN + frame). The frame is charged here because
-        # the floor is an ABSOLUTE SP and every caller after this one is deeper
-        # than this one: a floor that ignored its own frame would let one more
-        # frame through than the budget allows. That is the same correction
-        # `model.stack_floor_charge` makes on the arm64 side.
-        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MARGIN_BYTES + self._frame_bytes)
-        self.asm.emit(encode_sub_r64_r64(Reg.R10, Reg.R10, Reg.R9))
-        # MAX with MIN: `cmp r10, r9` computes `r10 - r9`, so carry is set
-        # exactly when `r10 < r9` and `JAE` is its complement.
-        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MIN_BUDGET_BYTES)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R9))
-        self.asm.emit(encode_jcc_rel32(COND_AE, 0))
-        self.asm.emit_label_rel32(clamp1, here_offset=-4)
-        self._emit_mov_imm(Reg.R10, M.STACK_FLOOR_MIN_BUDGET_BYTES)
-        self.asm.label(clamp1)
-        # MIN with BUDGET: carry set when `r10 < BUDGET`, so `JB` skips the
-        # assignment and the fall-through is the clamp.
-        self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_BUDGET_BYTES)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R9))
-        self.asm.emit(encode_jcc_rel32(COND_B, 0))
-        self.asm.emit_label_rel32(clamp2, here_offset=-4)
-        self._emit_mov_imm(Reg.R10, M.STACK_FLOOR_BUDGET_BYTES)
-        self.asm.label(clamp2)
-        # floor = SP - budget.
-        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RSP))
-        self.asm.emit(encode_sub_r64_r64(Reg.R9, Reg.R9, Reg.R10))
-        self._lea_abs(Reg.R11, floor)
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R9))
-        self.asm.label("sfinit_done")
-
     def _emit_stack_floor_guard(self) -> None:
-        """The x86-64 twin of arm64's `_emit_stack_floor_guard`.
+        """Refuse instead of dying when the frame just taken crosses the floor.
 
-        Four instructions, all of them forms `lib/X86.lean` already has a step
-        lemma for, and that constraint is the design rather than a coincidence:
-        the WALKED sequence of a guarded function is what the corpus decoder has
-        to name, and the floor is a `__DATA` word this backend's startup stub
-        filled once (`_emit_stack_floor_init`), so the guard only has to LOAD it
-        and compare. Every instruction the first attempt at a runtime-derived
-        floor put here — `mov r64, imm64` for the `__DATA` addresses, `pop r64`
-        for the parked argument, `alu_ri8:add`/`sub` for the alignment pair,
-        `cmov` for the clamp, and the `call getrlimit` itself — was an
-        instruction in EVERY prologue of EVERY image, and each one is a form the
-        model had no step lemma for, so the whole corpus stopped building trees.
-        None of them is here.
+        The x86-64 twin of arm64's `_emit_stack_floor_guard`, and the same
+        sequence: the sequence and every decision in it are
+        `model.stack_floor_address`'s, so neither backend can spell the guard
+        twice and the two machines cannot come to disagree about when a stack
+        overflow is. What differs is only the instruction selection, because
+        the two machines have different ones:
 
-        The trap is the same as arm64's: STATUS 2 after a message, never a
-        silent SIGSEGV, and the same `STACK_FLOOR_BUDGET_BYTES` cap so the two
-        backends refuse at the same depth on the same program.
+            LEA R11, [rip+&floor] ; MOV R10, [R11]   the floor word
+            TEST R10, R10 ; JNE done                 already stored
+            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
+        done:
+            MOV R11, RSP ; CMP R11, R10
+            JAE ok                                    SP >= floor: carry clear
+            exit(2)                                   SP < floor
+        ok:
 
-        So: **the floor is derived from the running process's real stack limit,
-        but the derivation is a fact about the emitted text here and not
-        something `x86_program` proves.** arm64's half keeps its read in the
-        prologue where the walker sees it; this one moved it into the startup
-        stub, which is emitted before any function body and is not part of any
-        `_plan`'s decode range. That asymmetry is the price, and it is recorded
-        rather than hidden.
+        Two things about this backend's half that are worth stating rather than
+        leaving to the reader:
+
+        * **`encode_cmp_r64_r64(a, b)` computes `a - b`**, not `b - a`. That is
+          the encoder's own docstring and the shape `_alu_rr` gives it, and it
+          is the opposite of the Intel-syntax reading of `cmp a, b`, so the
+          operand order here is `CMP sp, floor` — the same subtraction the arm64
+          half makes, and the reason both arms then use a "below" branch.
+        * **RSP is a first-class register in the model** (index 4 is `s.rsp` in
+          `lib/X86.lean`), so `MOV R10, RSP` needs no workaround here. It is
+          still a separate instruction rather than a memory operand because the
+          compare is register-to-register: the model has no `CMP r/m64, r64`
+          case, and an instruction the model cannot decode is one the per-
+          instruction certificates in `x86_64_proof_gen.py` would have nothing
+          to say about.
+
+        R10 and R11 are the pair `_emit_global_init` and the frame paths already
+        use, so nothing here borrows a register.
+
+        **The trap's `exit` is recorded as a COMPILER call, not a program call.**
+        `_emit_call_exit` goes through `_emit_extern_call`, so the trap puts an
+        `extern_calls` entry in EVERY image with an entry — and since `e11f066d`
+        put the guard in every such prologue, that entry was in every image.
+        `formal/x86_64_proof_gen.py::_run_tests_section` suppresses the whole run
+        test for an image with any extern call, on the true ground that the model
+        has no memory for a `__TEXT,__stubs` trampoline; measured, that
+        suppression then fired on every program on this backend, so x86-64
+        emitted ZERO run tests and ZERO termination obligations.
+        So the trap's address goes into `_compiler_trap_addrs` and is published as
+        `info["compiler_traps"]`, and the generator subtracts those addresses from
+        the list it refuses on.  The unreachability the subtraction rests on is
+        this function's own emitted sequence, and it needs nothing but "a load
+        from unmapped memory reads 0":
+
+            MOV R10, [R11] ; TEST R10, R10 ; JNE done
+              -> the load reads 0, so `JNE` is NOT taken and control falls into
+                 the "first caller sets it" half
+            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
+            done: MOV R11, RSP ; CMP R11, R10 ; JAE ok
+              -> R10 = SP - BUDGET and R11 = SP, so SP >= SP - BUDGET, the carry
+                 is clear and `JAE` IS taken: control lands on `ok`, which is the
+                 body's first instruction
+
+        which holds for every input and every function.  arm64 needs none of this
+        because its trap is a raw `svc`, which is IN the image and which
+        `lib/ProofLib.lean` decodes.
         """
         if self._globals_base is None:
+            # No `__DATA`, so no word to keep the floor in. `formal/build.py`
+            # always hands a base over — the data segment is unconditional
+            # since the floor word landed — so this is the `_emit_global_init`
+            # shape rather than a live case.
             return
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        done_label = f"{fn}_sf{sid}_done"
+        trap_label = f"{fn}_sf{sid}_trap"
         ok_label = f"{fn}_sf{sid}_ok"
         floor = M.stack_floor_address(self._globals_base)
         self._lea_abs(Reg.R11, floor)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # `test` is load-bearing for the same reason `_emit_global_init`'s is:
+        # `mov` does not set flags, so without it the `jne` would read whatever
+        # the CALLER last compared — the push/mov/sub above touch none.
+        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
+        self.asm.emit(encode_jne_rel32(0))
+        self.asm.emit_label_rel32(done_label, here_offset=-4)
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RSP))
+        # BUDGET fits an imm32, so this is one instruction where arm64 needed
+        # the shifted pair.
+        self.asm.emit(encode_sub_r64_imm32(Reg.R10, M.STACK_FLOOR_BUDGET_BYTES))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self.asm.label(done_label)
         # RSP into R11 and the same `SP - floor` the arm64 half computes. The
         # stack grows DOWN, so having spent the budget is `SP < floor`, which is
-        # the subtraction BORROWING and so carry SET; `JAE` is the complement, and
-        # it branches OVER the trap so the trap is the fall-through and the
+        # the subtraction BORROWING and so carry SET; `JAE` is the complement,
+        # and it branches OVER the trap so the trap is the fall-through and the
         # body's first instruction is the branch target — the same shape as
-        # arm64's `B.HS` and the same shape as the divide-by-zero arm's.
+        # arm64's `B.HS` above and the same shape as the divide-by-zero arm's.
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RSP))
         self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R10))
         self.asm.emit(encode_jcc_rel32(COND_AE, 0))
         self.asm.emit_label_rel32(ok_label, here_offset=-4)
-        # The MESSAGE, before the exit — `model.stack_trap_message`, the
-        # `*_message` member that was missing here, because this trap used to be
-        # the only bounded stop on the path that said nothing at all: a status, no
-        # output on either stream, and nothing to say which of the program's
-        # bounds it hit.
-        #
-        # `_emit_overflow_diagnostic_call` rather than a hand-rolled sequence
-        # because it returns the call site's ADDRESS, which the exit does not need
-        # but the proof layer does. **Both calls are recorded as compiler traps**,
-        # so `_program_externs` subtracts them and the run tests come back; a
-        # `write` left unrecorded reads as a call the PROGRAM makes and suppresses
-        # every run test on this backend, which is the failure
-        # `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall`
-        # exists to prevent.
-        #
-        # RSP is 8 mod 16 here — the guard runs before the prologue's `push rbp` —
-        # and SysV wants 16 at a `call`, so the diagnostic aligns it the same way
-        # the startup stub does.
-        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 8))
-        self._compiler_trap_addrs.append(
-            self._emit_overflow_diagnostic_call(M.stack_trap_message()))
+        self.asm.label(trap_label)
         self._compiler_trap_addrs.append(
             self._emit_call_exit(M.STACK_TRAP_STATUS))
         # `label`, not `emit_label_rel32`: this DEFINES where the branch above
         # goes, and it lands on the first instruction of the BODY. Recording a
         # relocation here would be a second branch to a label nothing defines.
         self.asm.label(ok_label)
-
-    def _emit_overflow_diagnostic_call(self, text: str) -> int:
-        """`write(2, text, len)`, returning the call site's address.
-
-        `_emit_overflow_diagnostic` is the same sequence and returns nothing,
-        because every other caller wants nothing — the trap wants the ADDRESS so
-        it can record it in `_compiler_trap_addrs`. Two spellings of one sequence
-        would be two implementations to keep equal, so this delegates:
-
-            RDI = fd            RSI = text           RDX = length
-            RAX = 0 (not varargs)  call write
-
-        RSP is 16-byte aligned at the call — the guard runs after `push rbp` on
-        this backend's current placement, and SysV AMD64 wants RSP 0 mod 16 there.
-        The interned label is a `__TEXT` address reached by the RIP-relative LEA
-        `_emit_overflow_diagnostic` already emits, so the string needs no
-        relocation.
-        """
-        before = len(self.asm.extern_refs)
-        self._emit_stop_diagnostic(text)
-        if len(self.asm.extern_refs) == before + 1:
-            return self.asm.extern_refs[-1][1]
-        # No extern was recorded, which means the call did not go through
-        # `_emit_extern_call`; a trap address that is not in `extern_calls`
-        # cannot be subtracted by `_program_externs` and would silently read as a
-        # program call, so say so here rather than returning a stale address.
-        raise CodegenError(
-            "internal: the stack trap's write(2) emitted no extern call, so its "
-            "address cannot be recorded in info['compiler_traps']. Without it the "
-            "x86-64 proof generator treats the compiler's own diagnostic as a call "
-            "the PROGRAM makes and suppresses every run test on this backend.")
 
     def _emit_global_init(self, skip_label: str = None) -> None:
         """Fill every address-valued module-global slot, and set the flag.
@@ -2214,23 +1985,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
+            elif self._returns_frame is not None:
+                self._emit_frame_return(stmt.value)
             else:
-                # A double returned under an INTEGER annotation. Asked before
-                # the value is emitted, because the answer is about the
-                # FUNCTION's declaration rather than about the return
-                # instruction — and `func_kind` reads that declaration first, so
-                # a caller asking what this produces is right to believe it is
-                # an integer and wrong about what it is holding.
-                # `model.return_annotation_kind_refusal`, shared with arm64.
-                self._refuse_return_annotation_kind_mismatch(stmt.value)
-                if self._returns_frame is not None:
-                    self._emit_frame_return(stmt.value)
-                else:
-                    self._emit_expr(stmt.value)
+                self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-            if not self._flush_pending_finally():
-                self._emit_epilogue()
+            self._flush_pending_finally()
+            self._emit_epilogue()
             return
 
         if isinstance(stmt, F.ExprStmt):
@@ -2533,8 +2295,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # condition did not fold, and this backend then emits the ordinary
             # runtime branch — the same degradation the gimple path makes, so
             # all three agree on the observable behaviour.
-            which = comptime_eval.resolve_if(
-                stmt, self._comptime_vals, call_hook=self._comptime_hook)
+            which = comptime_eval.resolve_if(stmt, self._comptime_vals)
             if which == "then":
                 for s in stmt.then_body:
                     self._emit_stmt(s)
@@ -2617,17 +2378,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         one that named a shape the author never wrote. Sharing the resolver
         removes the drift by construction rather than by keeping the two
         wordings in step by hand.
-
-        **The `call_hook` is part of sharing it, and omitting it was the same
-        drift one argument in.** arm64 passed `self._comptime_hook`; x86-64 did
-        not, so `comptime var a = square(6)` folded on arm64 and was refused here
-        — and the same omission was in `resolve_if` and `_comptime_iterable`.
-        All three now pass it. `test_formal_x86_64_parity.py`'s
-        `comptime_binding_initialized_by_a_call` is the row.
         """
         name = stmt.target
-        resolved = comptime_eval.resolve_var(
-            stmt, self._comptime_vals, self._comptime_hook)
+        resolved = comptime_eval.resolve_var(stmt, self._comptime_vals)
         if resolved is None:
             raise CodegenError(M.comptime_fold_refusal(name))
         kind, val = resolved
@@ -2662,7 +2415,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         at compile time, else None (→ emit the ordinary runtime loop)."""
         return comptime_eval.resolve_for_iterable(
             iterable, self._comptime_vals, self._comptime_list_asts,
-            self.COMPTIME_UNROLL_CAP, self._comptime_hook)
+            self.COMPTIME_UNROLL_CAP)
 
     def _emit_comptime_target(self, target, value) -> None:
         """Bind a `comptime for` target for one iteration, as an ordinary local
@@ -2711,57 +2464,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._str_intern[s] = label
         return label
 
-    def _flush_pending_finally(self, depth: int = 0) -> bool:
+    def _flush_pending_finally(self, depth: int = 0) -> None:
         """Emit the pending try-finally frames from `depth` inward.
 
         `depth` is 0 for a return (every enclosing finally runs) and the
         enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). RAX (the return value being built) is saved
-        across the flush in a 16-byte slot.
-
-        Returns whether the flushed bodies ENDED the path (an unconditional
-        `return` inside one of them), so the caller does not emit a second
-        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
-        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
-
-        The frames are KEPT. The old code `del`'d them to stop a `return` in a
-        `finally` re-entering its own body, but that also removed the frame for
-        every LATER exit site in the same `try`, so a second `return` emitted no
-        cleanup at all (pinned by
-        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
-        Re-entrancy is an identity question, answered by
-        `_emitting_finally`/`_finished_finally` without destroying the stack.
-        x86-64 never crashed on the double epilogue, but it was right by
-        accident rather than by design; the same fix applies.
-        """
-        if not self._emitting_finally:
-            self._finished_finally = set()
-        fins = [f for f in self._pending_finally[depth:]
-                if id(f) not in self._emitting_finally
-                and id(f) not in self._finished_finally]
-        if not fins:
-            return False
-        run = []
-        terminated = False
+        opened INSIDE that loop). The list is truncated first, so a return
+        inside a finally does not re-enter the same body. RAX (the return
+        value being built) is saved across the flush in a 16-byte slot."""
+        if len(self._pending_finally) <= depth:
+            return
+        fins = self._pending_finally[depth:]
+        del self._pending_finally[depth:]
+        self._push_slot(Reg.RAX)
         for fin in reversed(fins):
-            run.append(fin)
-            if _always_returns(fin):
-                terminated = True
-                break
-        saved = not terminated
-        if saved:
-            self._push_slot(Reg.RAX)
-        for fin in run:
-            self._emitting_finally.add(id(fin))
-            try:
-                for s in fin:
-                    self._emit_stmt(s)
-            finally:
-                self._emitting_finally.discard(id(fin))
-            self._finished_finally.add(id(fin))
-        if saved:
-            self._pop_slot(Reg.RAX)
-        return terminated
+            for s in fin:
+                self._emit_stmt(s)
+        self._pop_slot(Reg.RAX)
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -2811,7 +2530,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit_extern_call(name)
         return self.asm.extern_refs[-1][1]
 
-    def _emit_call_exit(self, status: int, computed: bool = False) -> int:
+    def _emit_call_exit(self, status) -> int:
         """Call the C library's `exit(status)`.
 
         The extern path (a stub the loader binds) rather than a raw syscall,
@@ -2819,30 +2538,35 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         and the formal x86-64 path emits the same code for both — the binary
         format, not the instruction stream, is what differs per platform.
 
-        Returns the call site address; see `_emit_extern_call`.  Every caller
+        `status` is an `int` to materialise as an immediate, or **`None` to mean
+        the word is at `[rsp]`** — pushed there by `_emit_diverge` before the
+        finally flush. The stack is the only storage the C library cannot reuse,
+        and this is the one place the emitter cannot know what the `exit` call
+        itself did to a scratch register. Symmetry with arm64's `_emit_exit` is
+        the point: the two machines deliver a status through different
+        instructions and the only thing that may differ between them is how the
+        word got to it.
+
+        Returns the call site's address; see `_emit_extern_call`.  Every caller
         must decide for ITSELF whether that call is reachable — the difference
         is the whole of `info["compiler_traps"]`, and `_emit_diverge` (a
         `raise`, which the program really does reach) must never claim one.
 
-        **`computed` says the status is ALREADY in RAX** rather than being an
-        immediate, and it is a flag on this method rather than a second exit so
-        that the `mov rax, 0` this needs for the varargs convention cannot drift
-        away from the `mov rdi` beside it. No stack is needed here, which is why this
-        backend's half of the computed-`SystemExit` fix is shorter than arm64's:
-        the only thing between the value and the argument
-        register is the mask, and SysV's first integer argument is written LAST
-        — so `raise SystemExit(code())` is `mov rax, <code()>`; `and rax, 0xff`;
-        `mov rdi, rax`; `mov rax, 0`; `call exit`.
-
-        The mask is HERE for the reason it is on arm64's `_emit_exit`: a
-        computed value does not exist until the point of delivery, and
-        `exit(3)` truncates to a byte, so a `code()` returning -1 must leave 255
-        and not 2^64-1. Measured both ways on this backend; the row is
-        `systemexit_with_a_computed_status` in `test_formal_exceptions.py`.
+        **The mask is on both paths and it is on this side for a reason.** The
+        C library's `exit` is what truncates CPython's status to a byte, and
+        that is the rule (`M.EXIT_STATUS_BITS`) rather than an accident of this
+        library; arm64's raw `svc` does not truncate, so arm64 masks explicitly
+        in `_emit_exit`. Emitting it here as well is what makes the two agree by
+        construction rather than by one of them happening to.
         """
-        if computed:
-            self.asm.emit(encode_and_r64_imm32(Reg.RAX, 0xFF))
-            self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        if status is None:
+            # SysV's first integer argument register is written LAST, so the
+            # value has to be in RDI after everything else has run. `imm32` and
+            # not `imm8`: the mask is 0xFF, which does not fit a sign-extended
+            # byte field.
+            self._pop_slot(Reg.RDI)
+            self.asm.emit(encode_and_r64_imm32(Reg.RDI,
+                                                (1 << M.EXIT_STATUS_BITS) - 1))
         else:
             self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
@@ -2935,45 +2659,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._flush_pending_finally()
             self._emit_call_exit(1)
             return
-        status = M.raise_exit_status(exc_name, value,
-                                     argument_is_int=self._sys_exit_status_is_int(
-                                         value))
+        status = M.raise_exit_status(exc_name, value)
         if status is None:
-            # COMPUTED: the status is not in the text, so it has to be a VALUE,
-            # and RAX is where an expression leaves one on this backend (the
-            # section header says so). The FIRST argument is emitted for its
-            # value and the rest for their effects rather than every argument
-            # being emitted twice, so `raise SystemExit(code())` runs `code()`
-            # once — which is what the source says and what the loop below does
-            # for the non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
-                self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_call_exit(None, computed=True)
+            # A COMPUTED status: the argument is the status, so it is evaluated
+            # once and carried, not evaluated for its effects and then discarded.
+            self._emit_diverge_computed(value)
             return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
         self._flush_pending_finally()
         self._emit_call_exit(status)
-
-    def _sys_exit_status_is_int(self, value) -> bool:
-        """Is `raise SystemExit(value)`'s argument an INTEGER this build can
-        compute — `model.raise_exit_status`'s gate, asked with this function in
-        hand.
-
-        The one reader of it in this backend, and the mirror of
-        `formal/arm64_codegen.py`'s method of the same name: it needs
-        `self._vkinds` because a callee's result kind is this backend's
-        question, and the RULE is `model.py`'s — two copies of a gate is a gate
-        that can disagree about what it means.
-        """
-        args = M.raise_arg_exprs(value) if value is not None else []
-        if not args:
-            return False
-        return bool(M.raise_status_argument_is_an_integer(
-            args[0], getattr(self, "_vkinds", None)))
 
     def _frame_member_slot(self, node):
         """The frame slot `node` names, or None having refused the access.
@@ -3119,22 +2814,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._store_var(name, Reg.RAX)
             return
         ttype = self._ttype(stmt.target)
-        # `a += [3]` IS `a = a + [3]`, and the binary form is already lowered on
-        # this backend, so this desugars onto it rather than growing a second
-        # copy of the concat.  Asked after the divide-ops delegation above has
-        # returned, so what reaches it is the pure-ALU set, and the operators
-        # with no container lowering have already been refused by the shared
-        # gate.  `model.aug_assign_operands_are_blobs` is the one question and
-        # both backends ask it; the measurements that make it necessary — `a +=
-        # [3]` was 0 on arm64 and a SIGSEGV here, `a *= 3` a SIGSEGV on both —
-        # are in that function's docstring.
-        if M.aug_assign_operands_are_blobs(
-                self._expr_str_kind(stmt.target),
-                self._expr_str_kind(stmt.value)):
-            self._emit_binop(F.BinaryOp(op=op, left=stmt.target,
-                                        right=stmt.value))
-            self._store_var(name, Reg.RAX)
-            return
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
         # one, and RAX is holding the right one. R11 is written as the left
@@ -3626,62 +3305,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         offset = self._list_cursor
         self._list_cursor += nbytes
         return offset
-
-    def _refuse_an_element_blob(self, element, cap: int, bytes_: int) -> None:
-        """Refuse a comprehension whose ELEMENT allocated a frame blob.
-
-        Asked with the delta the caller measured across the element's own
-        emission, and raised only when it is non-zero — so the question is
-        "did this element allocate", which the ledger answers, rather than a
-        predicate over node types that would be a second list of `_reserve_blob`'s
-        callers to keep in step. The arm64 backend asks the same question of its
-        own ledger in its own leaf; the MESSAGE is `model`'s, so the two
-        architectures cannot refuse this differently.
-        """
-        if not bytes_ or cap <= 1:
-            return
-        raise CodegenError(M.comprehension_element_blob_refusal(
-            f"a comprehension in {self.func_name or '<module>'}", element,
-            cap, bytes_))
-
-    def _materialize_compr_element(self, element, res_offset: int, cap: int,
-                                   before: int) -> None:
-        """Give the element its OWN container per iteration, or refuse.
-
-        The x86-64 twin of arm64's method over the same shared predicate
-        (`M.comprehension_element_is_flat_container`) and the same message, so
-        the two architectures cannot materialise — or refuse — an element
-        differently. RAX on entry holds the element's blob and on exit the
-        per-iteration copy `_compr_append_elem` appends.
-
-        `i` is the result blob's count word (elements appended so far), the
-        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
-        which returns the destination in RAX for free. `before` is the ledger
-        position as the element's emission began, so `bytes_` is the element's
-        own footprint, measured BEFORE the array below steps the same ledger.
-        """
-        bytes_ = self._list_cursor - before
-        if not bytes_ or cap <= 1:
-            return
-        if not M.comprehension_element_is_flat_container(element):
-            raise CodegenError(M.comprehension_element_blob_refusal(
-                f"a comprehension in {self.func_name or '<module>'}", element,
-                cap, bytes_))
-        array_off = self._reserve_blob(cap * bytes_,
-                                       "comprehension element array")
-        # count = result element count so far (= this iteration's ordinal).
-        self._emit_blob_base(res_offset, Reg.R11)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        # dest = array_base + count * bytes_
-        self._emit_blob_base(array_off, Reg.R11)
-        self._emit_mov_imm(Reg.RDI, bytes_)
-        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
-        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
-        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
-        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
-        self._emit_mov_imm(Reg.RDX, bytes_)
-        self._emit_extern_call("memcpy")            # returns dest in RAX
 
     # ── how many times the code being emitted runs ────────────────────
     #
@@ -4251,21 +3874,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         from `open` in an earlier statement of this function and its aliases.
 
         A frame slot is not covered (proving a field holds a descriptor is
-        cross-field flow).
-
-        **A CALL RESULT is covered, and the note that said it was not was
-        WRONG about the consequence.** It read "`open(p, "w").write(s)` refuses,
-        because a method on a call result is not a value receiver on this path at
-        all" — it did not refuse. `_is_value_receiver` answered False, the method
-        arm was never taken, and the chain reached the extern path as a call to
-        the C library's `write(2)` on whatever the argument registers held:
-        measured on both architectures the program built, exited 0, printed its
-        next line and **wrote nothing**. `_is_value_receiver` now answers True
-        for a `CallExpr` (its own docstring has the measurement), so the method
-        call reaches here at all, and `model.is_open_call` is what makes this arm
-        fire rather than refuse. arm64's copy carries the same arm."""
-        if isinstance(expr, F.CallExpr):
-            return M.is_open_call(expr)
+        cross-field flow), and neither is a CALL RESULT — `open(p, "w").write(s)`
+        refuses, because a method on a call result is not a value receiver on
+        this path at all (`_is_value_receiver`), which is a separate pre-existing
+        gap the arm64 docstring records in full."""
         if isinstance(expr, F.IdentExpr):
             return expr.name in self._fd_vars
         if isinstance(expr, F.MemberExpr):
@@ -4389,71 +4001,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
-    def _printf_arg_container_kind(self, arg):
-        """The operand's own KIND, or None — the evidence `printf_container_
-        conversion_refusal` reads.
-
-        The fourth hook of `model.printf_format_refusal`, and the one fact it
-        needs that the model cannot derive: this function's `ValueKinds`. A
-        container's kind is what says its one word is a blob's ADDRESS, so the
-        decision about which conversions may not read it as a number is the
-        model's, and this method is the same two lines arm64 and x86-64 both
-        write. None when there is no `ValueKinds` to ask, which is the
-        permissive direction the other hooks take and never refuses.
-        """
-        return None if self._vkinds is None else self._vkinds.kind_of(arg)
-
-    def _refuse_word_position_kind_mismatch(self, name, e) -> None:
-        """Raise when an argument's kind contradicts the callee's OWN annotation.
-
-        Delegation, and nothing else: the callee's declared parameters, the
-        receiver that is dropped rather than counted (`method_function_name`
-        lifts `Box.put` to one flat name and its `params` still carry `self`),
-        the three-way evidence and the words are all
-        `model.call_argument_kind_refusal`, shared with arm64. The RECEIVER is
-        the reason it is not a bare copy of the arm64 body: a method call's
-        `args` do not include the receiver while the lifted method's `params`
-        do, and a misalignment there would compare an argument against the
-        wrong parameter — which can refuse a correct program. A no-op for a
-        callee this image does not declare, and for every argument position the
-        callee's parameter list cannot be lined up with.
-        """
-        callee = self._functions.get(name)
-        if callee is None:
-            return
-        params = list(getattr(callee, "params", None) or [])
-        if params and params[0][0] == "self":
-            params = params[1:]
-        if not params:
-            return
-        reason = M.call_argument_kind_refusal(
-            name, list(e.args or ()), [p[1] for p in params],
-            self._printf_arg_conversion_class, TYPE_NAMES)
-        if reason is not None:
-            raise CodegenError(reason)
-
-    def _refuse_return_annotation_kind_mismatch(self, value) -> None:
-        """Raise when this function returns a double under an integer annotation.
-
-        Delegation, and the same words arm64 reads: `func_kind` reads a
-        callee's DECLARED return type first, so `def f() -> Int: return h()`
-        looks like an integer producer to every consumer of the call and is
-        holding a bit pattern — measured on both architectures as 3.9 printed
-        as a decimal. **The annotation is the only evidence**, so an
-        unannotated `return h()` claims nothing, and
-        `model.return_annotation_kind_refusal` is where the rule is written.
-        """
-        fn = self._cur_fn
-        ann = getattr(fn, "return_type", None)
-        if not ann:
-            return
-        reason = M.return_annotation_kind_refusal(
-            fn.name, ann, value, self._printf_arg_conversion_class, TYPE_NAMES)
-        if reason is not None:
-            raise CodegenError(reason)
-
     def _refuse_unusable_printf_format(self, name, e) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
+        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
         Delegation, and nothing else: the callee sets, the format-argument
         index, the conversion scan, the three-way narrowing and the messages are
@@ -4470,8 +4019,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class,
-            self._printf_arg_container_kind)
+            self._printf_arg_conversion_class)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -4583,35 +4131,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         to be extended rather than left to find it by accident; without it the
         chain falls to the extern path and becomes a call against a symbol
         spelled after the chain. arm64's copy of this function says the same
-        thing about the same shape, and the two have to keep agreeing.
-
-        **A CALL RESULT is a value too, and leaving it out was a SILENT WRONG
-        ANSWER rather than a refusal** — measured on both architectures, which
-        is where the two backends found it at the same time:
-
-            def main(n) -> Int:
-                open("/tmp/fw.txt", "w").write("hello\\n")
-                printf("done\\n")
-                return 0
-
-        built green, exited 0, printed `done`, and **wrote nothing**: this arm
-        answered False, so the method arm was never taken, `_callee_symbol`
-        flattened the chain to the bare name `write`, and the extern path called
-        the C library's `write(2)` on a register holding the address of the path
-        string. The identical program with the descriptor bound to a NAME writes
-        the file on both machines. "Runs, writes nothing, exits 0" is the outcome
-        `VALUE_METHOD_RECEIVERS`'s own comment describes for a descriptor this
-        path cannot establish.
-
-        A call returns one — `model.receiver_shape`'s table says exactly that
-        ("a call result is whatever that call was declared to produce") and both
-        backends read it, so this is a shared decision rather than one emitter's.
-        arm64's copy of this function carries the same arm and the same
-        measurement; they have to agree because the alternative is a program that
-        writes a file on one machine and not on the other."""
+        thing about the same shape, and the two have to keep agreeing."""
         if isinstance(obj, F.StringLiteral):
-            return True
-        if isinstance(obj, F.CallExpr):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
@@ -5357,7 +4878,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
         self._emit_jmp(ok)          # in range: skip the exit
         self.asm.label(oob)
-        self._emit_stop_diagnostic(
+        self._emit_overflow_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
@@ -5519,7 +5040,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_jmp_rel8(0))
         self.asm.emit_label_rel8(endl, here_offset=-1)
         self.asm.label(trap)
-        self._emit_stop_diagnostic(M.int_parse_trap_message(base))
+        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
         self._emit_call_exit(M.SHIFT_TRAP_STATUS)
         # ONCE, and the arm64 twin is the reason to say so: this carried a
         # second, identical `self.asm.label(endl)` from the commit that added the
@@ -5533,16 +5054,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # `test_formal_x86_64_parity.py`'s `int_parse_*` rows are the pin.
         self.asm.label(endl)
 
-    def _emit_stop_diagnostic(self, text: str) -> None:
-        """`write(2, text, len)` — say WHAT was hit before stopping.
+    def _emit_overflow_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHICH bound was hit before stopping.
 
-        Named for what it is: it was `_emit_overflow_diagnostic` while only the
-        integer-overflow trap used it, and six other bounded stops use it too —
-        a dict with no room for its key, a blob past its frame reservation, an
-        int parse, a division by zero — none of which is an overflow.  A name
-        describing one of seven call sites is how the eighth gets its own copy.
-
-        The arm64 twin of this (`ARM64Codegen._emit_stop_diagnostic`), on
+        The arm64 twin of this (`ARM64Codegen._emit_overflow_diagnostic`), on
         the same message from `formal/model.py`, and for the same reasons: the
         two architectures printing two different sentences for one limit is how
         a reader ends up looking for a construct one of them invented, and a
@@ -5604,7 +5119,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         allows and the immediate form's range would make the guard silent for
         every large reservation — exactly the programs whose estimate is most
         likely to be low. R11 is free here (the copy loops use R10 and RAX) and
-        `_emit_stop_diagnostic` below sets up its own argument registers.
+        `_emit_overflow_diagnostic` below sets up its own argument registers.
 
         `total_reg` holds the element total the caller computed — `nL + nR` for
         a concatenation, `nL * count` for a repetition — and the caller computes
@@ -5620,7 +5135,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._while_counter += 1
         ok = f"{self.func_name}_{tag}ok{self._while_counter}"
         self._emit_jcc(COND_BE, ok)                     # fits → skip the block
-        self._emit_stop_diagnostic(
+        self._emit_overflow_diagnostic(
             M.blob_growth_overflow_message(what, capacity))
         self._emit_call_exit(1)
         self.asm.label(ok)
@@ -5973,7 +5488,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_scalar_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
-        self._sub_signed = True
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
             # has no parent, so `M.multi_index_refusal_for` cannot tell a
@@ -6052,7 +5566,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # first would compute base+base.
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             self._sub_width = 1
-            self._sub_signed = False          # a string byte is a UInt8
             return
         # A FRAME-valued FIELD, asked HERE — after the dict and string readings
         # above and before `subscript_base_lowering`'s blob fallback, which is
@@ -6076,7 +5589,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # `base + 8 + 8*count`.  See
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count.
             self._sub_width = width
-            self._sub_signed = signed
             if width != 1:
                 # The scale is emitted rather than assumed: `base + i` is right
                 # for a one-byte element and is the SECOND element for any
@@ -6086,78 +5598,53 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                                            width))
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             return
-        obj_kind = self._expr_str_kind(e.obj)
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))    # count
-        # The base's KIND is read ONCE and both readers below take it from this
-        # local — the stride and the word the diagnostic calls the container —
-        # so a diagnostic cannot name a different container than the one whose
-        # element width was emitted.  The message is handed to the check rather
-        # than emitted beside it, because `bad_label` is inside the check: the
-        # arm that stops is the check's, and a diagnostic emitted after the fact
-        # would have to reproduce the branch to reach it.
-        self._emit_bounds_check(
-            Reg.RAX, Reg.R11,
-            M.subscript_out_of_range_message(
-                M.spelled(e), M.subscript_container_name(e.obj, obj_kind)))
+        self._emit_bounds_check(Reg.RAX, Reg.R11)
         # The blob's OWN element stride, and `_sub_width` from the same number:
         # a byte blob steps one byte per element and loads a byte, and a
         # right address with a word load would read seven bytes of whatever
         # follows — a wrong answer rather than a crash, which is why the two
         # come from one line rather than from two decisions.
-        stride = M.blob_elem_stride(obj_kind)
+        stride = M.blob_elem_stride(self._expr_str_kind(e.obj))
         self._sub_width = stride
-        # A byte blob's element is a `UInt8`; a word blob's width is 8, where
-        # the extension choice does not arise.
-        self._sub_signed = False
         self._emit_elem_addr(Reg.R10, Reg.RAX, Reg.RAX,
                              header=M.BLOB_HEADER_BYTES,
                              scale=M.walk_shift(False, stride))
 
-    def _emit_bounds_check(self, index_reg: Reg, count_reg: Reg, message: str):
-        """Stop with `message` unless `index_reg` is a valid element index.
+    def _emit_bounds_check(self, index_reg: Reg, count_reg):
+        """Exit(1) unless `index_reg` is a valid element index.
 
-        A negative index counts from the end, Python-style: it is added to
-        `count`, and only then range-checked, so an index below `-count` stays
-        negative and is rejected by the same unsigned comparison. The count
-        register is left intact — the caller needs it for the address arithmetic
-        that follows.
+        A negative index counts from the end, Python-style: it is negated and
+        `count` added, and only then range-checked, so an index below `-count`
+        stays negative and is rejected by the same unsigned comparison. The
+        count register is left intact — the caller needs it for the address
+        arithmetic that follows.
 
-        **`message` is required and is the reason the stop is not silent.** This
-        arm used to be a bare `exit(1)`: `a[3]` on a three-element list printed
-        its two in-range lines and then stopped with nothing on stdout or stderr,
-        which is the worst of the three answers this backend can give and the
-        one thing every other bounded stop here (`_emit_blob_growth_guard`'s, the
-        dict store's, `int()`'s) does not do. It is also invisible to a
-        stdout/exit-status oracle by construction, so the memcheck sweep reported
-        the row `MATCH` and the silence survived. The text comes from
-        `model.subscript_out_of_range_message` so this architecture and arm64's
-        say the same sentence about the same limit.
-
-        **A string has no count header and no check**, so the caller does not
-        reach here for one: reading to the NUL terminator is the answer a
-        NUL-terminated read gives, and `_emit_subscript_addr` returns above the
-        check for that case. That is why `count_reg` is a register and not an
-        optional."""
+        `count_reg` None means a string, which has no count header: its
+        elements run to a NUL, so there is nothing to check the index against
+        and the read stops at the terminator."""
         self._if_counter += 1
         bid = self._if_counter
         fn = self.func_name
         ok_label = f"{fn}_bnds{bid}_ok"
         bad_label = f"{fn}_bnds{bid}_bad"
         wrapped_label = f"{fn}_bnds{bid}_wrapped"
-        self.asm.emit(encode_cmp_r64_imm8(index_reg, 0))
-        self._emit_jcc(COND_GE, wrapped_label)
-        # Python: a negative index counts from the end, i.e. it is ADDED
-        # to the count (-1 + 3 == 2), not subtracted from it as an
-        # absolute value (3 - 1 == 2 coincides, 3 - |−1| == 4 does not).
-        # An index below -count stays negative and fails the check below.
-        self.asm.emit(encode_add_r64_r64(index_reg, count_reg))
-        self.asm.label(wrapped_label)
-        self.asm.emit(encode_cmp_r64_r64(index_reg, count_reg))
+        if count_reg is None:
+            return
+        if True:
+            self.asm.emit(encode_cmp_r64_imm8(index_reg, 0))
+            self._emit_jcc(COND_GE, wrapped_label)
+            # Python: a negative index counts from the end, i.e. it is ADDED
+            # to the count (-1 + 3 == 2), not subtracted from it as an
+            # absolute value (3 - 1 == 2 coincides, 3 - |−1| == 4 does not).
+            # An index below -count stays negative and fails the check below.
+            self.asm.emit(encode_add_r64_r64(index_reg, count_reg))
+            self.asm.label(wrapped_label)
+            self.asm.emit(encode_cmp_r64_r64(index_reg, count_reg))
         self._emit_jcc(COND_AE, bad_label)     # index >= count
         self._emit_jmp(ok_label)
         self.asm.label(bad_label)
-        self._emit_stop_diagnostic(message)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
 
@@ -6171,53 +5658,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                    e.index.step)
             return
         self._emit_subscript_addr(e)
-        self._emit_subscript_load(Reg.RAX)
-
-    def _emit_subscript_load(self, dst: Reg) -> None:
-        """Load one element through X{dst}-as-address into `dst`, at
-        `_sub_width` and `_sub_signed`.
-
-        ONE place, because the read, the augmented assignment's own read and
-        the store's read-modify each used to spell this choice separately. The
-        four loads mirror arm64's `_emit_subscript_load` and
-        `_emit_dereference`'s table, so the two backends read an element the
-        same width and with the same extension.
-
-        **`_sub_width == 1` used to be the whole of this test after an
-        unconditional 64-bit `MOV`.** A `Pointer[Int32]` element is four bytes,
-        so `q[0]` read `q[1]`'s bytes as its high half; the write side of
-        `aug_through_int32_pointer` clobbered the next element. Both backends
-        had it and neither gate could see it until Rosetta ran the x86-64 half
-        of the parity differential.
-        """
+        # The address is in RAX; the element has to be LOADED before any
+        # extension — MOVZX of the address itself would yield the low byte of a
+        # pointer.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
         if self._sub_width == 1:
-            self.asm.emit((encode_movsx_r64_rm8 if self._sub_signed
-                           else encode_movzx_r64_rm8)(dst, dst, 0))
-        elif self._sub_width == 2:
-            self.asm.emit((encode_movsx_r64_rm16 if self._sub_signed
-                           else encode_movzx_r64_rm16)(dst, dst, 0))
-        elif self._sub_width == 4:
-            self.asm.emit((encode_movsx_r64_rm32 if self._sub_signed
-                           else encode_mov_r32_rm32)(dst, dst, 0))
-        else:
-            self.asm.emit(encode_mov_r64_rm64(dst, dst, 0))
-
-    def _emit_subscript_store_at(self, base: Reg, value: Reg) -> None:
-        """Store the low `_sub_width` bytes of `value` at [base].
-
-        The store half, and the same bug lived here: `_sub_width == 1` was the
-        whole test, so a 2- or 4-byte element was written with a full 64-bit
-        `MOV` and the bytes after it were overwritten. A store has no
-        signedness to consult — it truncates to the width.
-        """
-        if self._sub_width == 1:
-            self.asm.emit(encode_mov_rm8_r8(base, 0, value))
-        elif self._sub_width == 2:
-            self.asm.emit(encode_mov_rm16_r16(base, 0, value))
-        elif self._sub_width == 4:
-            self.asm.emit(encode_mov_rm32_r32(base, 0, value))
-        else:
-            self.asm.emit(encode_mov_rm64_r64(base, 0, value))
+            # Unsigned: a `UInt8` element is a byte, and a formal value is one
+            # 64-bit word holding an integer, so `200` has to read back as 200.
+            # The signed form is the same two-instruction pair with a different
+            # mnemonic, chosen from the pointee the model established.
+            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
     def _blob_est(self, e, exact: bool = False) -> int:
         """Static upper bound on a blob expression's element count.
@@ -6561,16 +6011,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_scalar_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
         self._refuse_frame_slot_element("a membership test", right)
-        # A container NEEDLE is the one shape this scan gets wrong, and arm64
-        # got a different wrong for the same source — `model.
-        # container_membership_refusal` holds the three-row measurement, and it
-        # is asked here as well as there so the two architectures cannot keep
-        # disagreeing about `in`.  A SCALAR needle is a linear scan and is
-        # answered below, which is why the question is about the needle alone.
-        reason = M.container_membership_refusal(
-            M.spelled(left), M.spelled(right), self._expr_str_kind(left))
-        if reason is not None:
-            raise CodegenError(reason)
         # The dict question, asked here for the same reason the `for`-in walk
         # asks it and for the same reason `model.walk_stride` exists: a dict is
         # a PAIR blob, so at the element stride this scan compares half the
@@ -6646,7 +6086,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         advances — the same contract the range loop has."""
         d = self._for_depth
         self._for_depth += 1
-        self._for_blob_depth += 1
         try:
             it = stmt.iterable
             if not isinstance(it, (F.IdentExpr, F.ListExpr, F.TupleExpr,
@@ -6667,49 +6106,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_frame_slot_element("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
-            # The SHAPE, not the flattened names: a nested group is itself a
-            # blob, and `_emit_for_unpack` has to unpack it as one. Passing
-            # `_lbn_target_names` (leaves flattened) checked the OUTER blob's
-            # count against the flattened arity, so `for a, (b, c) in [(1, (2,
-            # 3))]` compared an element count of 2 against a target count of 3
-            # and exited(1) with nothing printed, where arm64 and CPython both
-            # answer. arm64 reads the same tree through the same `M` reader.
-            ttree = M.for_target_tree(stmt.target) \
-                if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
-            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
-            if not leaves or any(not n.isidentifier() for n in leaves):
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The target as a TREE, not the flattened leaf list: a nested
-            # group is a second unpack against the element at that position,
-            # and comparing the outer blob's count against the number of
-            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
-            # and exit 1 with nothing printed, where arm64 and CPython answer
-            # 21. `M.for_target_tree` is the one builder both backends ask.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The TARGET AS A TREE, not the flattened name list: a nested group
-            # `a, (b, c)` must stay a nested group so the arity check counts 2
-            # against the element's blob and recurses, exactly as arm64's
-            # `_emit_for_unpack` does.  Flattening it (the old
-            # `_emit_for_unpack(tnames, …)` here) compared the blob's count of
-            # 2 against a target count of 3 and exited 1 with nothing printed,
-            # where arm64 and CPython both answer.  `M.for_target_tree` is the
-            # one parser both backends now use, so the two cannot disagree
-            # about what a target's shape is.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
+            from mojo.middle.boundnames import _lbn_target_names
+            tnames = _lbn_target_names(stmt.target) \
+                if isinstance(stmt.target, str) else []
+            if not tnames or any(not n.isidentifier() for n in tnames):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -6779,10 +6179,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if isinstance(ttree, str):
-                    self._store_var(ttree, Reg.RAX)
+                if len(tnames) == 1:
+                    self._store_var(tnames[0], Reg.RAX)
                 else:
-                    self._emit_for_unpack(ttree, Reg.RAX,
+                    self._emit_for_unpack(tnames, Reg.RAX,
                                           f"{fn}_flt{wid}")
 
                 for s in stmt.body:
@@ -6802,7 +6202,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._loops.pop()
         finally:
             self._for_depth -= 1
-            self._for_blob_depth -= 1
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """A dict literal → its pair-blob address in RAX.
@@ -6958,31 +6357,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
         if cap is None:
-            # A bounded stop NAMES its bound, and this one had nothing to name
-            # it with: the three dict STORE messages all need a capacity, and a
-            # READ's base has no reservation to know one by.  Measured on this
-            # tree, both backends, `d = {"a": 1}` then `d["z"]` exited 1 with
-            # nothing on stdout and nothing on stderr, which a reader cannot
-            # tell from an assert, a divide by zero or a crash.  arm64's twin
-            # arm says the same thing from the same message.
-            self._emit_stop_diagnostic(
-                why_no_room if why_no_room is not None else M.dict_lookup_miss_message(
-                    M.spelled(getattr(e, "obj", None)),
-                    M.spelled(getattr(e, "index", None))))
+            if why_no_room is not None:
+                self._emit_overflow_diagnostic(why_no_room)
             self._emit_call_exit(1)
         else:
-            # The INSERT arm of a dict store, and it is the one that answers
-            # `dict changed size during iteration`: whether the miss happens at
-            # all is a RUN-TIME question, so this cannot be a build-time
-            # refusal the way `del_during_walk_refusal` is for `del`, and the
-            # BLOB-walk depth is read here while emitting.  Only reached when
-            # the emitter is inside a `for … in <container>`, so a program that
-            # does not do this pays one branch on an arm it never takes.
-            if self._for_blob_depth > 0:
-                self._emit_stop_diagnostic(M.dict_walk_mutation_message(
-                    "`d[k] = v`",
-                    "INSERTS a pair that was not there"))
-                self._emit_call_exit(1)
             oob_label = f"{fn}_dl{wid}_oob"
             self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
             self._emit_setcc_bool(Reg.R8, "setae")
@@ -6999,7 +6377,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_mov_imm(Reg.RAX, 0)       # the assignment's None
             self._emit_jmp(end_label)
             self.asm.label(oob_label)
-            self._emit_stop_diagnostic(
+            self._emit_overflow_diagnostic(
                 M.dict_store_overflow_message(base_name or "<expr>", cap))
             self._emit_call_exit(1)
         self.asm.label(end_label)
@@ -7509,45 +6887,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
-        # `|` on a container is a SET UNION only between two SETS, and it has
-        # to be asked HERE rather than at the concat branch below: that branch
-        # recognises a container by `_is_container_expr`, which on this backend
-        # does list `F.DictExpr` but still misses a NAME bound to a dict when
-        # nothing else in the function is a container expression, so the two
-        # architectures' gates would cover different shapes. `_expr_str_kind`
-        # classifies every blob — a dict is a counted blob too — so this is the
-        # one site that knows, and `model.container_union_refusal` is the one
-        # decision, so a pair of operands cannot get one answer from one
-        # architecture and a different one from the other. Measured on this
-        # tree, arm64 before the gate: `{"a": 1} | {"b": 2}` reported 1 where
-        # CPython reports 2, and `[1, 2] | [3]` reported 3 where CPython raises
-        # TypeError. `+` is deliberately not gated: a concatenation is exactly
-        # what CPython means by `+` on two lists and two tuples.
-        if op == "|" and (M.container_operand_is_blob(
-                self._expr_str_kind(e.left))
-                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
-            reason = M.container_union_refusal(
-                M.spelled(e.left), M.spelled(e.right),
-                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                left_is_dict=self._is_dict_subscript(e.left),
-                right_is_dict=self._is_dict_subscript(e.right))
-            if reason is not None:
-                raise CodegenError(reason)
-        # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
-        # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
-        # both the two-set case (which arm64 lowers) and the not-two-sets case
-        # (a CPython `TypeError`).  Without this the deferral would let the
-        # operands reach the integer ALU as two blob ADDRESSES, which is the
-        # measured bug the gate exists for (`s & {2}` answered 2 on arm64 and
-        # 163061056 here; `s - {2}` SIGSEGVed on both).
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(e.left))
-                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(e.left), M.spelled(e.right),
-                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                backend_has_emitter=False))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -7589,13 +6928,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                  or self._is_container_expr(e.left)
                                  or self._is_container_expr(e.right)):
             if op == "|":
-                # This backend has no union emitter, and it used to lower the
-                # operator as a plain CONCATENATION — answering `[1, 2] | [2, 3]`
-                # with `[1, 2, 2, 3]`, a list with a repeat, which sums to 8
-                # where CPython says 6. Measured on the pre-change tree, exit 0
-                # and the wrong number, so this was a wrong answer rather than a
-                # refusal. arm64 lowers it correctly FOR TWO SETS, which is what
-                # makes the refusal an answer rather than a shrug.
+                # `|` on two containers is a SET UNION: the elements of the
+                # right that the left already has are dropped.  This backend
+                # has no union emitter, and lowering it as a concatenation
+                # answers `[1, 2] | [2, 3]` with `[1, 2, 2, 3]` — a list with
+                # a repeat, which is not a set and sums to 8 where CPython says
+                # 6.  Measured on the pre-change tree, exit 0 and the wrong
+                # number, so this was a wrong answer rather than a refusal.
+                # arm64's `_emit_set_union` does lower it; saying so here is
+                # what makes the refusal an answer rather than a shrug.
                 raise CodegenError(M.set_union_refusal(
                     M.spelled(e.left), M.spelled(e.right)))
             self._emit_list_concat(e.left, e.right)
@@ -8498,13 +7839,6 @@ preference.
         ADDRESS is what gets written. That failure is invisible in any program
         that does not read the element back.
         """
-        # A STORE INTO A TUPLE is a TypeError in CPython and this gate is what
-        # stops it being one here.  Asked FIRST, before the value is pushed and
-        # before the address is computed, because the refusal costs nothing and
-        # the push is not free.  The question is about the BASE, so it is asked
-        # before the dict/sequence split rather than inside the sequence arm: a
-        # dict store is correct and a dict is not a tuple.
-        self._refuse_tuple_store(target)
         self._push_slot(src)                       # value
         if self._is_dict_subscript(target.obj):
             # The one subscript whose store is not "compute an address and
@@ -8518,14 +7852,20 @@ preference.
             return
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
-        # A width-aware store, and the two-branch form it replaces had one bug
-        # twice: both branches of the old `if` were a 64-bit `MOV` for anything
-        # but a one-BYTE element, so `p[0] = 65` on a `Pointer[UInt8]` and
-        # `q[0] += 5` on a `Pointer[Int32]` both overwrote the bytes after the
-        # element. It was unreachable over a POINTER until `_sub_width` followed
-        # the pointee, so the overwrite became a silent corruption of a
-        # `malloc`'d buffer rather than a fault on a read-only `__TEXT` page.
-        self._emit_subscript_store_at(Reg.RAX, Reg.R11)
+        if self._sub_width == 1:
+            # A BYTE store, and this used to be a full 64-bit store into a
+            # one-byte element: both branches of the old `if` were the same
+            # instruction, so `p[0] = 65` on a `Pointer[UInt8]` overwrote the
+            # seven bytes after it. It was unreachable over a POINTER (the
+            # subscript took the blob path and exited 1 first) and reachable
+            # over a `char *` in a string literal, which is a read-only
+            # __TEXT page, so nothing noticed. Widening `_sub_width` to the
+            # pointee made it reachable over a `malloc`'d buffer, where the
+            # overwrite is a silent corruption rather than a fault, so the two
+            # branches have to differ.
+            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
 
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
@@ -8569,28 +7909,11 @@ preference.
             # on this one.
             raise CodegenError(reason)
         target = stmt.target
-        # `&`/`-`/`^` between two BLOBS are set algebra and the shared gate now
-        # DEFERS them, but a subscript TARGET is an element, not a whole set
-        # variable, and this backend has no fresh-blob lowering to store back
-        # here either: without this the deferral would let `a[0] &= b` reach the
-        # ALU as two blob addresses.
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(target))
-                or M.container_operand_is_blob(self._expr_str_kind(stmt.value))):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(target), M.spelled(stmt.value),
-                self._expr_is_set_like(target),
-                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
         self._emit_subscript_addr(target)             # RAX = address
-        # The element's width belongs to the TARGET, and the RHS below can
-        # itself be a subscript (`q[0] += r[1]`) whose address computation
-        # overwrites `_sub_width`. The store at the end would then write at the
-        # RHS's width — eight bytes into a `Pointer[Int32]` — so it is captured
-        # here, after the target's address is decided and before anything else
-        # can run, and restored before the store.
-        width = self._sub_width
         self._push_slot(Reg.RAX)                      # [rsp] = address
-        self._emit_subscript_load(Reg.RAX)            # old element, at its width
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # old element
+        if self._sub_width == 1:
+            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
         self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
         self._emit_expr(stmt.value)                   # RAX = value
         self._pop_slot(Reg.R11)                       # R11 = old
@@ -8624,23 +7947,16 @@ preference.
         # happens, the function returns, and the damage only shows up as a
         # number that is a pointer. arm64's twin uses X9 for the same reason.
         self._pop_slot(Reg.R10)                       # R10 = address
-        self._sub_width = width                       # the TARGET's, not the RHS's
-        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
+        if self._sub_width == 1:
+            self.asm.emit(encode_mov_rm8_r8(Reg.R10, 0, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 0, Reg.RAX))
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
-        # The same construct arm64 lowers as a SAME-LENGTH in-place replace,
-        # and the reason is the same one stated there: a formal blob cannot
-        # change length without a compaction pass, so there is nowhere for the
-        # difference between the range and the replacement to go.  This backend
-        # refuses the WHOLE construct rather than the half it cannot implement,
-        # because a slice here is a materialised copy and writing through one
-        # would have to write back into its source blob — so the refusal is
-        # wider, the reason is one sentence, and `model.slice_store_static_
-        # length_refusal` is the narrower arm arm64 asks for the decidable
-        # cases of the same question.  Measured on this tree, arm64 before that
-        # narrower arm: `a = [3, 1, 2]` then `a[0:1] = [9, 9, 9]` exited 1 with
-        # no output at all.
-        raise CodegenError(M.slice_store_refusal())
+        raise CodegenError(
+            "assignment to a slice target is not lowered on the formal "
+            "x86-64 path: a slice is a materialized copy here, so writing "
+            "through one would have to write back into its source blob")
 
     # ── `del` ───────────────────────────────────────────────────────────────
     #
@@ -8679,19 +7995,6 @@ preference.
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "
                     "on the formal x86-64 path")
-            # A `del` from a DICT inside a walk over it changes the size
-            # unconditionally, so whether CPython would accept the program is
-            # decidable while emitting — unlike the store's INSERT arm, which
-            # asks the same rule at run time (`dict_walk_mutation_message`).  A
-            # `del` from a LIST inside the walk is not refused: CPython permits
-            # it and this path agrees.
-            if isinstance(target, F.SubscriptExpr):
-                walk = M.del_during_walk_refusal(
-                    M.spelled(target.obj),
-                    self._is_dict_subscript(target.obj),
-                    self._for_blob_depth)
-                if walk is not None:
-                    raise CodegenError(walk)
             why = M.del_refusal(
                 target,
                 self._is_string_subscript(target.obj)
@@ -8863,12 +8166,6 @@ preference.
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RCX))
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
-        # LOUD, for the same reason the READ's miss is: one rule ("that key is
-        # not in that dict") said in one place, at both sites.  Measured on this
-        # tree, both backends, `del d["a"]` twice — the second of which misses —
-        # exited 1 with nothing on stdout and nothing on stderr.
-        self._emit_stop_diagnostic(M.dict_lookup_miss_message(
-            M.spelled(target.obj), M.spelled(target.index)))
         self._emit_call_exit(1)
         self.asm.label(end_label)
 
@@ -9267,7 +8564,7 @@ preference.
         reverse) cannot alias a loop's.
 
         A dict comprehension stores its KEY in `.element` and its VALUE in
-        `.value` — the parser's swap, which the arm64 backend also relies on."""
+        `.key` — the parser's swap, which the arm64 backend also relies on."""
         is_dict = (getattr(expr, "kind", "list") == "dict")
         gens = expr.generators or []
         elem_size = 16 if is_dict else 8
@@ -9327,28 +8624,14 @@ preference.
         """
         gens = expr.generators
         if gi >= len(gens):
-            # The ELEMENT's own footprint, measured on the ledger this emitter
-            # already keeps. A container's blob is reserved by the `_reserve_blob`
-            # family through `_list_cursor`, so a non-zero delta across the
-            # element's emission IS "this element allocated something", with no
-            # list of allocating constructs to keep in step with them — and the
-            # comprehension runs that same element `cap` times, so one blob is
-            # every iteration's blob and each one overwrites the last.
-            # `model.comprehension_element_blob_refusal` has the measurement;
-            # the arm64 backend's leaf is the same shape.
-            _before = self._list_cursor
             if is_dict:
-                self._emit_expr(expr.element)          # KEY
+                key_copies = self._emit_compr_element(expr.element, cap)  # KEY
                 self._push_slot(Reg.RAX)
-                self._emit_expr(expr.value)            # VALUE
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
-                self._compr_append_pair(res_offset, cap)
+                val_copies = self._emit_compr_element(expr.key, cap)     # VALUE
+                self._compr_append_pair(res_offset, cap, key_copies, val_copies)
             else:
-                self._emit_expr(expr.element)
-                self._materialize_compr_element(
-                    expr.element, res_offset, cap, _before)
-                self._compr_append_elem(res_offset, cap)
+                copies = self._emit_compr_element(expr.element, cap)
+                self._compr_append_elem(res_offset, cap, copies)
             return
 
         gen = gens[gi]
@@ -9399,21 +8682,17 @@ preference.
                                      self._is_dict_subscript(gen.iterable)))
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
 
-            # The SHAPE, not the flattened names, for the same reason the
-            # for-loop asks for it — arm64's `_emit_compr_gen` reads the same
-            # `M.for_target_tree`.
-            ttree = M.for_target_tree(gen.target) \
-                if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
-            if not leaves or any(not n.isidentifier() for n in leaves):
+            from mojo.middle.boundnames import _lbn_target_names
+            tnames = _lbn_target_names(gen.target) \
+                if isinstance(gen.target, str) else []
+            if not tnames or any(not n.isidentifier() for n in tnames):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if isinstance(ttree, str):
-                self._store_var(ttree, Reg.RAX)
+            if len(tnames) == 1:
+                self._store_var(tnames[0], Reg.RAX)
             else:
-                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
+                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next
@@ -9444,8 +8723,101 @@ preference.
         finally:
             self._loops.pop()
 
-    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+    def _emit_compr_element(self, element, cap: int):
+        """RAX = the element's value, and `(base, span)` when it needs a COPY.
+
+        The x86-64 twin of arm64's `_emit_compr_element`, over the same two
+        shared decisions (`model.comprehension_element_borrowes_inner_container`
+        for the refusal and the frame ledger for the span) and the same
+        `container_returned_blob_sites` blocks, so one source decides what is
+        copied on both machines rather than two emitters each answering.
+
+        THE element site is reserved ONCE, at the element's own place in the
+        source, so a container the element BUILDS is rewritten in place on every
+        iteration of the generator — and the append copies the ADDRESS, which is
+        the same address every time. Every element of the result is then one
+        container holding the LAST iteration's contents:
+        `for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]` answered 93
+        where CPython answers 63, on both architectures, with exit 0 and nothing
+        on stderr.
+
+        **So the question is not "is the element a container" but "did the
+        element reserve anything here"**, and the frame ledger already answers
+        it: `_list_cursor` moves only when something was reserved, and a name, an
+        arithmetic expression and the generator's own target all reserve nothing.
+        That distinction is the language's, not a convenience: `[one for y in
+        ys]` is three references to ONE list in CPython too, so aliasing a name's
+        container is right and only a container the element BUILDS is the bug.
+        """
+        if M.comprehension_element_borrowes_inner_container(element):
+            raise CodegenError(M.comprehension_element_shared_inner_message(element))
+        before = self._list_cursor
+        self._emit_expr(element)
+        # A container the element BUILDS moved the blob cursor; one a CALL
+        # handed back did not, because `container_returned_blob_sites` parks
+        # those blocks above the blob region up front. Same per-site aliasing
+        # (`[mk(y) for y in ys]` answered 90 where CPython answers 60), so the
+        # span is the sum of the two and RAX is the block either way.
+        span = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            span += ret[0]
+        if not span:
+            return None
+        return (self._reserve_blob(span * cap, "a comprehension's own copy of "
+                                   "its element"), span)
+
+    def _emit_compr_element_copy(self, base: int, nbytes: int) -> None:
+        """RAX = THIS iteration's own copy of the element blob, in slot R10.
+
+        The x86-64 twin of arm64's `_emit_compr_element_copy`. R10 is the result
+        blob's count — the index the append is about to write at — so the copy
+        lands in the slot the append fills, and the capacity guard that ran
+        before this has already answered an out-of-range iteration with
+        `exit(1)` rather than with a write one slot past the reservation.
+
+        The copy is over the element's whole RESERVED SPAN, not over its blob
+        alone: a nested comprehension also reserves its iterable and a display's
+        capacity scan can enlarge its own, so the element's blob is only ever a
+        PART of what `span` words. The count word at a blob's head is what every
+        reader goes by, so the words past the live elements are never read.
+
+        R10 (count), RDI (the destination address `_emit_elem_addr` already
+        built) and RSP are live across this, and R12-R15 are callee-saved and
+        hold locals, so the loop's own registers are R8/R9/RCX/RSI/RDX/RAX/R11.
+        """
+        nwords = nbytes // 8
+        self._emit_mov_imm(Reg.R9, nbytes)                # R9 = the span
+        self._emit_blob_base(base, Reg.R11)               # R11 = copies base
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.R11))
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R10))
+        self.asm.emit(encode_imul_r64_r64(Reg.R11, Reg.R9))   # R11 = count*span
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.RSI))   # R11 = this slot
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RAX))    # R8 = the element
+        self.asm.emit(encode_mov_r64_imm32(Reg.R9, 0))        # R9 = i = 0
+        self._emit_mov_imm(Reg.RCX, nwords)
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_cecp{wid}"
+        self.asm.label(loop)
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.RSI, header=0, scale=3)
+        self._emit_elem_addr(Reg.R8, Reg.R9, Reg.RDX, header=0, scale=3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.RCX))
+        self._emit_jcc(COND_B, loop)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))   # RAX = the copy
+
+    def _compr_append_elem(self, res_offset: int, cap: int,
+                           copies=None) -> None:
         """Append RAX to the list result; exit(1) past the reserved capacity.
+
+        `copies` is `_emit_compr_element`'s `(base, span)` for an element that
+        reserved a container of its own; `None` for every other caller and for
+        every element that reserved nothing, which is what keeps `[one for y in
+        ys]` aliasing, as CPython does.
 
         Registers: R11 the result blob, R10 the count, RDI the element's
         address. RDI rather than R11 because `_emit_elem_addr` builds the
@@ -9469,17 +8841,27 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI)
         self._pop_slot(Reg.RAX)
+        if copies is not None:
+            self._emit_compr_element_copy(*copies)
         self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
 
-    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+    def _compr_append_pair(self, res_offset: int, cap: int,
+                           key_copies=None, val_copies=None) -> None:
         """Append a (key, value) pair to a dict result.
 
         The caller leaves the KEY in a pushed slot and the VALUE in RAX, so
         the VALUE is pushed here to complete the pair; the pop order below
-        unwinds it in the opposite order."""
+        unwinds it in the opposite order.
+
+        `key_copies`/`val_copies` are `_emit_compr_element`'s `(base, span)` for
+        a key or a value that reserved a container of its own; a dict
+        comprehension's key and value are two independent element positions and
+        each gets its own region. Both copies are emitted after BOTH pops, so
+        each reads the word its own pop just put in RAX.
+        """
         self._push_slot(Reg.RAX)                     # VALUE above KEY
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # npairs
@@ -9497,9 +8879,19 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI, header=8, scale=4)
         self._pop_slot(Reg.R8)                       # VALUE
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
+        if val_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*val_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
         self._pop_slot(Reg.R8)                       # KEY
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        if key_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*key_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -9540,8 +8932,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
-            deref_kind=lambda e: M.pointer_deref_kind(
-                fn, e, self._structs, self._functions),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
@@ -10018,10 +9408,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                                       self._dylib_by_module,
                                       self._dylib_forwarded,
                                       self._import_aliases, name),
-                M.callee_declaration(
-                    {}, self._dylib_by_name, self._dylib_by_module,
-                    self._dylib_forwarded, self._import_aliases,
-                    self._extern_decls, name),
+                self._extern_decl_for(name),
                 int_names=TYPE_NAMES, string_names=STRING_TYPE_NAMES)
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
@@ -10178,99 +9565,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
             self._blob_var_est.pop(name, None)
-        # SET-NESS is its OWN block rather than a fourth arm of the chain above,
-        # because it is not one of the mutually exclusive kinds: a set lowers as
-        # a list here (`model.is_set_expr`'s docstring says why), so
-        # `_blob_vars` holds a set and a list alike and this is the only record
-        # of which one a name is.  arm64's twin carries the same table and the
-        # same reader — `model.container_union_refusal` — so the two
-        # architectures cannot disagree about whether `a | b` is a union.
-        if self._expr_is_set_like(value):
-            self._set_vars.add(name)
-        else:
-            self._set_vars.discard(name)
-        # And TUPLE-NESS, for the same reason and asked by one consumer: a tuple
-        # is the same blob as a list, and the one question that needs telling
-        # them apart is whether a subscript may be WRITTEN — a tuple is
-        # immutable in CPython, so `t[0] = 9` is a TypeError there.
-        if self._expr_is_tuple_like(value):
-            self._tuple_vars.add(name)
-        else:
-            self._tuple_vars.discard(name)
-
-    def _expr_is_set_like(self, e) -> bool:
-        """True when `e` is a set literal, a set comprehension, or a NAME this
-        function has bound to one.
-
-        The flow-sensitive half of `model.is_set_expr`, beside `_dict_vars` and
-        for the reason `_note_binding`'s docstring gives for that one: a name
-        gets its kind from the assignment it is bound by, and the assignment is
-        not at the use.  `_blob_vars` cannot answer it — a set and a list are
-        the same blob on this path, which is exactly why `|` needs this and `+`
-        does not.
-        """
-        if M.is_set_expr(e):
-            return True
-        if isinstance(e, F.IdentExpr):
-            return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
-            return (self._expr_is_set_like(e.left)
-                    or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are.
-            return (self._expr_is_set_like(e.left)
-                    and self._expr_is_set_like(e.right))
-        return False
-
-
-    def _expr_is_tuple_like(self, e) -> bool:
-        """True when `e` is a tuple literal, a tuple comprehension, or a NAME
-        this function has bound to one.
-
-        The flow-sensitive half of `model.is_tuple_expr`, beside `_set_vars` and
-        for the same reason: a name gets its kind from the assignment it is
-        bound by, and a tuple is the SAME blob as a list here, so nothing but
-        this table can tell `t = (1, 2, 3)` from `a = [1, 2, 3]`.  It has one
-        consumer — `model.container_store_refusal`, at the subscript STORE — and
-        that is why it is this narrow: nothing else in the value model needs to
-        know, because a tuple reads and walks and concatenates exactly as a list
-        does and CPython agrees on every one of those.
-        """
-        if M.is_tuple_expr(e):
-            return True
-        if isinstance(e, F.IdentExpr):
-            return e.name in self._tuple_vars
-        if isinstance(e, F.BinaryOp) and e.op == "+":
-            # `+` between two tuples is a tuple, so a tuple survives a
-            # concatenation; anything else about `+` is another operator's
-            # question.
-            return (self._expr_is_tuple_like(e.left)
-                    and self._expr_is_tuple_like(e.right))
-        if isinstance(e, F.SliceExpr):
-            return self._expr_is_tuple_like(e.obj)
-        return False
-
-    def _refuse_tuple_store(self, target) -> None:
-        """Raise when `target`'s base is a TUPLE — a write CPython forbids.
-
-        The emitter half of `model.container_store_refusal`, which holds the
-        message and the measurement; asked from this one site on both
-        architectures so a subscript store gets the same answer from each.  A
-        dict subscript is not a tuple and is not refused, which is why this is
-        asked before the dict/sequence split rather than inside the sequence arm
-        — the question is about the BASE, and the base is what carries the kind.
-        """
-        base = getattr(target, "obj", None)
-        reason = M.container_store_refusal(
-            M.spelled(base), self._expr_is_tuple_like(base),
-            M.spelled(getattr(target, "index", None)))
-        if reason is not None:
-            raise CodegenError(reason)
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a blob pointer rather than an
@@ -10465,9 +9759,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # itself are the same code either way, and the call is `CALL r64`
         # through R11 instead of `CALL rel32` through a label.
         through_value = (not is_extern_call and name not in self._functions
-                         and (M.callee_is_a_bound_value(self._cur_fn, name)
-                              or M.callee_is_a_module_slot_function(
-                                  name, self._functions)))
+                         and M.callee_is_a_bound_value(self._cur_fn, name))
         # …and the name has to be a BARE one. `_callee_symbol` flattens a
         # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
         # and `a[i](x)` as `a`; only the first of those is a name the function
@@ -10565,22 +9857,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `is_extern_call`, so `external_call["printf", Int32](fmt, n)` is asked
         # the same question.
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, each of which the format's conversions
-        # turn into TEXT.  A return-less call here is the same value this path
-        # cannot carry that `_print_call` refuses for `print`, at the other
-        # spelling of "render this word" — see
-        # `model.returnless_printf_argument_refusal` for why it is one reader and
-        # not a second copy of `_print_call`'s loop.
-        reason = M.returnless_printf_argument_refusal(
-            name, list(e.args or []), self._vkinds.no_value_callee_of)
-        if reason is not None:
-            raise CodegenError(reason)
-        # …and the same call's ARGUMENTS against the callee's own parameter
-        # types. Beside the line above for the same reason — this is the last
-        # point where the resolved callee and its arguments are both in hand —
-        # and a different rule: that one reads the FORMAT, this one reads the
-        # DECLARATION. `model.call_argument_kind_refusal`, shared with arm64.
-        self._refuse_word_position_kind_mismatch(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -11166,24 +10442,44 @@ ctor_field_value=self._ctor_field_value_for(name),
         except ValueError as exc:
             raise CodegenError(str(exc))
 
+    def _extern_decl_for(self, name: str):
+        """The declaration of an IMPORTED callee `name`, or None.
+
+        Keyed by the SYMBOL the call binds, and the entry is found by
+        `model.dylib_callee_export` — the one resolution, in the same order as
+        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
+        always the one whose parameter list the call is actually being checked
+        against. Asking by bare name instead would be a way to hand a call the
+        signature of a same-named function in a different library.
+
+        The `forwarded` table reaches this through that shared resolution, and
+        that is load-bearing rather than tidiness: a re-exported callee
+        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
+        published by the PACKAGE's manifest and nowhere else, so a lookup that
+        left it out found no declaration, and a call with no declaration is a
+        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
+        the third and `pkg.f(1)` read the second out of an uninitialized
+        register, printing two different numbers on the two architectures. It
+        is the same defect `test_formal_cross_module.py` pins for the bare
+        spelling, reached by the dotted one.
+        """
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
+        if entry is None:
+            return None
+        return self._extern_decls.get(entry.get("symbol"))
+
     def _callee_decl(self, name: str):
         """The FunctionDef a callee `name` was declared by, or None.
 
         This module's own functions first — a local definition always wins —
         and then the linked libraries', read from their own source. None means
         the callee is not a function this image can see a declaration for, and
-        the caller falls back to passing the arguments as written.
-
-        The DECISION is `model.callee_declaration`, which the arm64 backend
-        reads too, so the two cannot disagree about which declaration a call is
-        bound against. What is left here is the binding of this emitter's own
-        state to it, and nothing else."""
-        return M.callee_declaration(self._functions, self._dylib_by_name,
-                                    self._dylib_by_module,
-                                    self._dylib_forwarded,
-                                    self._import_aliases, self._extern_decls,
-                                    name)
-
+        the caller falls back to passing the arguments as written."""
+        fn = self._functions.get(name)
+        return fn if fn is not None else self._extern_decl_for(name)
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
 
@@ -11601,24 +10897,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_nested_frame_defaults(child,
                                               child_off + self._blob_base)
 
-    def _emit_frame_bringup(self, st, base: int) -> None:
-        """Bring ONE frame up: its slots at their class-level defaults, then its
-        own constructor's stores.
-
-        **Both halves are one method because a frame bring-up IS a construction,
-        and before this was one method the second half did not happen.** Mojo
-        `T(...)` calls `T.__init__`; the placement walk here wrote field DEFAULTS
-        and stopped, so a struct whose sole field holds a frame whose own struct
-        declares `__init__` came up at its class-level values. Measured, both
-        architectures, `Box()` over `struct Box: var inner: Opt` printing
-        `b=0` where CPython prints `b=41` — building, running, exiting 0, nothing
-        on stderr. The order is the language's: default-initialize, then run
-        `__init__`.
-
-        `nested_frame_constructor_stores` is the ONE reader of "which fields does
-        this `__init__` store" — `struct_construction_plan` asked with a
-        synthesized zero-argument call — so this backend and arm64's cannot
-        answer it differently."""
+    def _emit_frame_defaults(self, st, base: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
         for slot, (kind, payload) in enumerate(
                 M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
@@ -11627,10 +10907,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._emit_mov_imm(Reg.RAX, int(payload or 0))
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
-        self._emit_frame_constructor_stores(st, base)
 
     def _emit_nested_frame_defaults(self, st, base: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first, then its stores.
+        """`st`'s nested subtree: defaults first, deepest first, then `__init__`.
 
         The x86-64 twin of arm64's, over the same `struct_block_direct_children`
         rows.  It replaces a loop that unpacked FOUR values out of
@@ -11639,40 +10918,46 @@ ctor_field_value=self._ctor_field_value_for(name),
         architectures, the 3-value unpack raised `ValueError` from the
         constructor of exactly such a struct.
 
-        **The constructor's stores come after this level's defaults and before
-        the level above's**, which is the language's order: default-initialize,
-        then run `__init__`.  Before this they were never emitted for a frame
-        brought up this way, so `Box()` whose `inner: Opt` has an `__init__`
-        wrote 0 where CPython writes 41 — on both architectures, silently.  They
-        come from `model.nested_frame_constructor_stores`, the ONE reader of
-        "which fields does this `__init__` store", so this backend and arm64
-        cannot answer it differently.
+        **And then the frame's own CONSTRUCTOR runs**, for arm64's reason and by
+        arm64's reader (`model.nested_frame_init_stores`): a nested field is
+        default-constructed, in Mojo that calls `__init__`, and writing the
+        defaults and stopping was a silent wrong answer on both machines.
+
+        **`base` is ABSOLUTE and STAYS absolute through the recursion, which is
+        `_emit_nested_frame_addresses`'s rule and it is the one this walk was
+        violating.** `struct_block_direct_children` is asked with the base and
+        each row's offset is already absolute, so the `+ self._blob_base` this
+        recursion used to apply added it a SECOND time and placed every frame
+        from the third level down at `blob_base + blob_base + …`. It was
+        invisible while the defaults were all zeros, because a store to the
+        wrong address of zeros is indistinguishable from a store to the right
+        address of zeros — and it became visible the moment a constructor wrote
+        something else there. Measured on master, before this fix, the same three
+        structs with `Deep2.__init__` writing `x = 70`: arm64 printed `q=0` and
+        x86-64 printed `q=5`, and CPython prints 70. Two machines, two different
+        wrong numbers, nothing refused. `_emit_nested_frame_addresses`'s own
+        docstring records the same double-add being fixed there for the same
+        reason, which is what makes this the second half of one rule rather than
+        a second rule.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, base):
-            self._emit_nested_frame_defaults(child, child_off + self._blob_base)
-        self._emit_frame_bringup(st, base)
+            self._emit_nested_frame_defaults(child, child_off)
+        self._emit_frame_defaults(st, base)
+        self._emit_nested_ctor_stores(st, base)
 
-    def _emit_frame_constructor_stores(self, st, base: int) -> None:
-        """This frame's own constructor's stores, at `base + 8·slot`.
+    def _emit_nested_ctor_stores(self, st, base: int) -> None:
+        """`st`'s own `__init__` stores at `base`, or nothing.
 
-        The register discipline is `_emit_frame_defaults`' and not
-        `_emit_block_store`'s, and the difference is the base: a construction
-        SITE's block is one fixed RBP-relative address while a nested frame's is
-        `base`, a distance INTO that block.  The store itself is the same two
-        instructions.
+        The x86-64 twin of arm64's, over the same reader and the same refusal:
+        a nested struct whose constructor this path cannot lower would leave its
+        frame at defaults, which is the failure the call exists to remove.
         """
-        stores, refusal = M.nested_frame_constructor_stores(
-            st, self._structs, self._frame_candidates, self._return_types)
+        stores, refusal = M.nested_frame_init_stores(st, self._structs)
         if refusal is not None:
             raise CodegenError(refusal)
         for _field, slot, value in stores:
-            if isinstance(value, int):
-                self._emit_mov_imm(Reg.RAX, value)
-            else:
-                self._emit_expr(value)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
+            self._emit_block_store(base, slot, value)
 
     def _emit_frame_nested_addresses(self, base: int, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -11817,8 +11102,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `def __init__` printing `b=0` where CPython prints 41, with
             # nothing refused. The addresses go in after, below.
             base = self._blob_base + site[1]
-            self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_bringup(nested, base)
+            self._emit_nested_frame_defaults(nested, base)
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the

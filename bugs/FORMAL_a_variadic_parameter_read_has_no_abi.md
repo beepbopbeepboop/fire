@@ -20,7 +20,7 @@ largest one with no document and no claim.**
 
 ## Why this was filed
 
-the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3 ranks it **7 files, 2 of them in-file**, and
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3 ranks it **7 files, 2 of them in-file**, and
 §4.4 records that **no claim existed**. That is the whole reason for the file: an unowned row in
 a queue is not a smaller row, it is a row nobody is going to pick up, and this one is the only
 row in the top ten that is neither claimed nor documented. `…_b9.md` did not have it (the
@@ -194,4 +194,4 @@ $ python3 -c 'def f(x,*r): return len(r); print(f(1,2,3))'             # 2, and 
 
 Both arms' logs are committed (`bugs/sweeps/sweep-arm-10.txt`,
 `bugs/sweeps/sweep-x86-10.txt`), and the map that ranks the row is
-the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3 and §4.4.
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3 and §4.4.

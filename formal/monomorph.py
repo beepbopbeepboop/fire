@@ -16,7 +16,7 @@ of any kind and was refused by the dylib export gate with
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either".  That refusal is correct about the file and it is also
 the second wall behind the 165-file row in
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1: past every codegen refusal
 in `binary_heap.mojo`, the module-dylib build still failed there.
 
 THE SHAPE OF THE ANSWER, and why it is a generated source file rather than a
@@ -199,57 +199,6 @@ def template_names(src: str) -> list:
     return list(_derived_from_source("template_names", src, lambda: tuple(sorted(
         name for name, why in reflect.export_exclusions(src).items()
         if why == reflect.EXCL_GENERIC))))
-
-
-def without_template_bodies(stmts: list, src: str, keep=()) -> list:
-    """`stmts` with this source's GENERIC TEMPLATE declarations removed.
-
-    **A template's own body is not in any image, so compiling it is work with no
-    consumer and a refusal waiting at the end of it.** The instantiated bodies
-    are: `instantiate_all` writes each one out (`publish_source`) and both paths
-    compile those instead — `formal/imports.py::_instantiated_sources` hands them
-    to `compile_formal_dylib` as extra sources, and its `_own_instantiations`
-    appends their statements to the executable's own. What is left over is the
-    declaration itself, and that is the thing this drops.
-
-    The measurable cost of not dropping it, and it is a REFUSAL rather than a
-    wasted pass: the template body is analysed with no instantiation in scope, so
-    a read of a bracket parameter has no value behind it. Measured on this tree,
-    both architectures, `struct Box[T: AnyType, keys: List[T]]` with
-    `def total(self) -> Int: return self.first + len(Self.keys)`:
-
-        build: len(Self.keys) — the source does not say what this operand holds,
-        and on this path the two things len() can answer are told apart by what
-        the operand IS …
-
-    — and `std/collections/type_dict.mojo`'s `comptime length = len(Self.values)`
-    is the same shape and is the reason this is not a two-line curiosity.
-
-    **The set of names comes from `template_names`, which is the EXPORT RULE's own
-    answer** (`reflect.EXCL_GENERIC`), not from a second reader of the source. So
-    "a template is not an API" is asked before the body is compiled rather than
-    after, which is the order the export table already implied: the name was never
-    going to be exported, and now its body is never going to be analysed either.
-
-    `keep` names to leave alone, and the one caller that has one is the module
-    path: a library's manifest records the instantiations it published, and that
-    is computed from the source rather than from this list, so nothing here needs
-    an escape hatch today. It exists so a future caller that DOES have one says
-    which name rather than reaching around this function.
-
-    A fresh list, never the caller's, for the reason `_rewritten_own_statements`
-    gives about the memoised parse: these nodes are shared with every other reader
-    in the process, and a template removed from one build's view of them would be
-    gone from the next build's too.
-    """
-    import fire_compiler as F                        # lazy — the AST classes
-    drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
-    if not drop:
-        return stmts
-    return [s for s in stmts
-            if not (isinstance(s, F.StructDef)
-                    and getattr(s, "name", None) in drop)]
 
 
 def template_kind(src: str, name: str) -> str:
@@ -888,69 +837,25 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
 
     The position copied onto the replacement is the SUBSCRIPT'S BASE's, not the
     subscript's: `fire_compiler.Parser` leaves `SubscriptExpr.line`/`col` at 0
-    (measured — the whole expression is positioned by its `obj`), so copying
-    the subscript's own position would report every rewritten call at line 0.
+    (measured — the whole expression is positioned by its `obj`), so copying the
+    subscript's own position would report every rewritten call at line 0.
 
     The bracket is read through the same scope-aware `_bracket_type_args` the
     demand walk uses, for the same reason and with the same consequence: a call
     site whose bracket names a VALUE (`Pair[t]()` with `var t = Float64`) has no
     entry in `demap`, so it is left alone and keeps its brackets to be refused
     with the sentence that is true of it.  Reading the bracket differently here
-    than in `all_instantiation_calls` would be the one way a rewrite could name
-    a definition the library was never asked for.
-
-    **A `Base.<member>` READ is rewritten too, and it is the same rewrite
-    because it is the same fact.**  `TypeDict.length` names a class attribute of
-    a struct TEMPLATE, and the value that answers it lives in the class BODY —
-    which is only published per instantiation, so the template's own copy still
-    reads the unsubstituted `len(Self.values)`.  That was a refusal: the
-    consumer's read found the bare `TypeDict` while the consumer's struct table
-    held the mangled instantiation, and the sentence it got described the class
-    BODY of the template rather than the read the source wrote.  Rewriting the
-    OBJECT rather than answering the read is what makes the declaration and the
-    rewrite one table: the substituted attribute is in the same `demap` the
-    constructor came out of.
-
-    **Only when the base has exactly ONE instantiation.**  `demap` carries the
-    arguments the consumer WROTE, and a consumer that asks for `TypeDict` at two
-    lengths and then reads `TypeDict.length` has asked an ambiguous question
-    that has no answer in this table — the read keeps its brackets-free spelling
-    and is refused, which is the same refusal the value-model answer would have
-    been replaced by and is now a refusal for a reason that is TRUE of the
-    source.  Two rows pin both directions.
-
-    The base name is checked against what the SCOPE binds by value, and the
-    check is deliberately not the one the call-site arm uses: `TypeDict` is
-    routinely a module-level IMPORT, and `collect_module_symbols` reports an
-    import, so using that set whole would exempt the one spelling the rewrite
-    exists for.  `imported` is excluded from it (`_shadowed_here`) and a name a
-    function binds by assignment is excluded as well, so a local
-    `TypeDict = 5` cannot have its `TypeDict.length` rewritten into a class
-    attribute read — which would replace today's refusal with a plausible
-    number.
+    than in `all_instantiation_calls` would be the one way a rewrite could name a
+    definition the library was never asked for.
     """
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
-    uniq = _unique_instantiation(demap)
+    module_level = set(M.collect_module_symbols(stmts) or {})
     n = 0
     for st in stmts:
-        if isinstance(st, F.FunctionDef):
-            values = _names_bound_in(st)
-            shadowed = values
-        else:
-            syms = M.collect_module_symbols(stmts) or {}
-            values = set(syms)
-            shadowed = _shadowed_here(syms)
+        values = _names_bound_in(st) \
+            if isinstance(st, F.FunctionDef) else module_level
         for node in M.iter_nodes(st):
-            if isinstance(node, F.MemberExpr) \
-                    and isinstance(node.obj, F.IdentExpr):
-                mangled = uniq.get(node.obj.name)
-                if mangled is None or node.obj.name in shadowed:
-                    continue
-                node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
-                                       col=node.obj.col)
-                n += 1
-                continue
             if not isinstance(node, F.CallExpr):
                 continue
             base = _callee_base(node)
@@ -967,38 +872,6 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     return n
 
 
-def _unique_instantiation(demap: dict) -> dict:
-    """`{base: mangled}` for the bases `demap` holds EXACTLY ONE
-    instantiation of — the bases a bare `Base.<member>` read can be answered
-    from.
-
-    The filter is the whole of the rule and it is a filter rather than a choice:
-    `demap` is keyed `(base, args)` and holds every argument spelling the
-    consumer wrote, so a base with two entries is a question with two answers and
-    a base with none is a question this build never instantiated.  Both are left
-    out, and the read that needed them keeps the refusal it has today.
-    """
-    counts: dict = {}
-    for base, _args in demap:
-        counts[base] = counts.get(base, 0) + 1
-    return {base: mangled for (base, _args), mangled in demap.items()
-            if counts.get(base) == 1}
-
-
-def _shadowed_here(syms: dict) -> set:
-    """The module-level names bound to a VALUE here, `imported` ones excluded.
-
-    `collect_module_symbols` is about what a module PROVIDES, and one of its
-    four sites is an import — `from sizelib import TypeDict` reports `TypeDict`.
-    A local-shadow check has to see through that, because `TypeDict.length` read
-    straight after that import is the spelling the rewrite exists for, and using
-    the whole set would leave it unrewritten at module level while rewriting it
-    inside a function: one construct with two answers depending on where it is
-    written.  The three remaining sites (`assigned`, `rebound`, `declared`) are
-    all bindings, which is what a shadow is.
-    """
-    return {n for n, sym in (syms or {}).items()
-            if getattr(sym, "site", None) != "imported"}
 def _consumer_statements(consumer_src: str) -> list:
     """`consumer_src`'s top-level statements, from ONE parse.
 

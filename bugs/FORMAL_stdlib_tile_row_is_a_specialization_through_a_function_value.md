@@ -359,7 +359,7 @@ has no variadic ABI. …
 ```
 
 So the 4 files of this row — and the 8-in-10 that
-the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 measured landing here once
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 measured landing here once
 the export gate lifts — now stop at the next construct, in this order:
 
 1. **`*tile_size_list` — a variadic parameter** (`tile.mojo:99`, and

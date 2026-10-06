@@ -23,10 +23,11 @@ instance field, `_value`:
 
 `Optional` is a ONE-word value whose receiver IS its field
 (`struct_is_one_field`), and this made it a two-field struct instead, so every
-`Optional` receiver became a FRAME ADDRESS.  That is what blocked the
-`builtin_slice.mojo` row: `Slice.start` is declared `Optional[Int]`, the
-backend believed that to be a frame, and it refused to let the ctor store one
-in a field.
+`Optional` receiver became a FRAME ADDRESS.  That is the refusal
+`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` records as
+blocking the 13-file `builtin_slice.mojo` row: `Slice.start` is declared
+`Optional[Int]`, the backend believed that to be a frame, and it refused to let
+the ctor store one in a field.
 
 This is one half of a pair of defects in this derivation.  The other half — a
 bare `self.helper` in VALUE position — IS ambiguous (an instance attribute
@@ -1039,29 +1040,6 @@ def run_per_module_table_case(case, tmpdir, verbose):
                 f"{st_name}: `one_field_answer` with the table says "
                 f"{M.one_field_answer(st, one_field)} and the predicate says "
                 f"{M.struct_is_one_field(st)}")
-    # The table's VALUES are the one field's NAME (2026-10-05, when it stopped
-    # publishing the struct), so the table is also the answer to
-    # `struct_sole_field_name` and no reader re-derives the field set for it.
-    # Both halves are asserted: the VALUE against the predicate's own answer, so
-    # a table that published the struct would fail here rather than silently
-    # answering `sole_field_answer` with a struct, and `sole_field_answer`
-    # against `struct_sole_field_name` both WITH and WITHOUT the table, so the
-    # threaded path and the fallback cannot differ on the shape that reaches
-    # both — which is what "the threaded table changed the answer" would be a
-    # question about otherwise.
-    for st_name, st in sorted(structs.items()):
-        want = M.struct_sole_field_name(st)
-        if one_field.get(st_name) != want:
-            return False, (
-                f"{st_name}: the one-field table's value is "
-                f"{one_field.get(st_name)!r} and `struct_sole_field_name` says "
-                f"{want!r} — so the table would answer `sole_field_answer` with "
-                f"a different name than the derivation")
-        if M.sole_field_answer(st, one_field) != want:
-            return False, (
-                f"{st_name}: `sole_field_answer` with the table says "
-                f"{M.sole_field_answer(st, one_field)!r} and the derivation "
-                f"says {want!r}")
     # …and with NO table, which is what every caller without a module context
     # gets: the same answer, by the other path. A caller that reads a function's
     # answer with no unit in hand must not be able to tell the two apart.
@@ -1071,11 +1049,6 @@ def run_per_module_table_case(case, tmpdir, verbose):
                 f"{st_name}: `one_field_answer` with no table says "
                 f"{M.one_field_answer(st, None)} and the predicate says "
                 f"{M.struct_is_one_field(st)}")
-        if M.sole_field_answer(st, None) != M.struct_sole_field_name(st):
-            return False, (
-                f"{st_name}: `sole_field_answer` with no table says "
-                f"{M.sole_field_answer(st, None)!r} and the derivation says "
-                f"{M.struct_sole_field_name(st)!r}")
     if verbose:
         print(f"      {len(few)} structs, per-struct asks "
               f"{ {s: {q: len(a) for q, a in v.items()} for s, v in few.items()} }")

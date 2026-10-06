@@ -9,11 +9,7 @@ declaration `listdir` no longer has, now asserts the ANSWER — the contrast wit
 `os_blob_untyped`, which is the same three lines through a callee whose
 declaration says nothing a manifest signature can carry, is the half worth
 having. Items 2 and 3 below are unchanged and remain Phase 6's tagged-value
-convergence — and, re-measured 2026-10-05, item 2 is now ONE piece rather
-than two: its `malloc` half and its caller-side copy are measured working on BOTH
-architectures (see the last section), so what is left is a blob whose length is
-only known at RUN time. Everything under this line is the history the document
-grew.**
+convergence. Everything under this line is the history the document grew.**
 
 **Status: the directory half is fixed, the sequence half is MOSTLY fixed — items
 1 and 4 of "What is still missing" landed 2026-10-02 (`work/formal8-7`) and items
@@ -333,37 +329,12 @@ copied into the caller's own frame right after the call, or refused, and
   `returned_container_blob_bytes` copy replaced: a callee that `malloc`s its own
   copy needs no block from the caller, which is the difference between this being
   an ABI change and it being two pieces in the callee.
-* **What this section said was still open — x86-64, and nothing else — is
-MEASURED FALSE on the tree as it stands (2026-10-05, `work/formal40-5`).** The
-document holding the three candidates and the three encoder traps was deleted
-with its bug (`FORMAL_a_returned_container_read_after_a_call_is_a_frame_reuse`,
-commit `7aaf56b0`), so the measurement was taken again from the design rather
-than from the note. Four shapes, both architectures, every one built with
-`--formal --no-prove` and RUN, against CPython asked the same question in the
-same process:
-
-| shape | arm64 | x86-64 | CPython |
-|---|---|---|---|
-| `return [11, 22, 33]`, read after an intervening call | `11 22 33` twice | `11 22 33` twice | `11 22 33` twice |
-| 36 appends into one list, returned by name, read after an intervening call | all 36, in order | all 36, in order | all 36 |
-| two-level: `outer()` returns `inner()`'s blob, both in this image | `1..6` before and after | `1..6` before and after | `1..6` |
-| **seven** call sites in one function, three interleaved calls afterwards | `706`, seven lengths of 3, every list intact | `706`, the same | `706`, seven lengths of 3 |
-
-The fourth row is the one the claim should have been measured on and was not: it
-is what makes the per-site block OFFSET grow (`container_returned_blob_sites`
-accumulates `offset += nbytes` in walk order), so a copy that "loses the tail"
-would lose it for the seventh site before the third call, and neither machine
-does. **So the three candidates — length register, source completeness,
-symbol — were each chasing a defect that is not in the tree**, and
-`git log -S _emit_returned_blob_copy -- formal/x86_64_codegen.py` returns one
-commit, `399269c6`, which is the commit that ADDED the copy: the x86-64 stream
-has not been touched since.
-
-**Which leaves this document with ONE item, and it is not an architecture**:
-item 2's other half, a blob whose length is only known at RUN time — a list
-built by a loop in the callee, which has no compile-time constant for
-`_blob_est` to size the copy with, so the `malloc` has to come first. Every
-other half of items 2 and 3 is measured working on both machines.
+* **What is still open is x86-64 and nothing else.** The arm64 copy is correct;
+  the x86-64 copy is a correct instruction stream that loses the tail of the
+  blob, and the three candidates were each tested (length register, source
+  completeness, symbol). That measurement, and the three encoder traps it turned
+  up on the way, are in that document's section — a next attempt starts there and
+  not at the design.
 
 **The refusal stays on both architectures until then**, which is worth saying
 because it is the one decision in that section a reader might otherwise expect to
@@ -372,10 +343,7 @@ have been made the other way: arm64 could have shipped alone, and
 container is refused on both machines with the SAME sentence. A fix on one backend
 would make `formal/x86_64_codegen.py` and `formal/arm64_codegen.py` answer one
 construct differently, which is the outcome every "one recogniser, two backends"
-argument in this repository is about. **Measured 2026-10-05: there is nothing
-left to make asymmetric.** The copy fires and is correct on both machines for
-every shape a hand-written program reaches, so the next change here is the
-`malloc` item and it will be one change on both.
+argument in this repository is about.
 
 **Item 2's OTHER half is unchanged and is not this.** A list built by a loop in
 the SAME frame (`xs = []` then `xs.append(…)` inside a `while`) still has nowhere
@@ -383,46 +351,3 @@ to put the elements, because the frame reserve is the number of append SITES and
 the loud overflow of step 1 is what says so. A returned blob is copied at the
 return; a blob that grows inside the callee needs a heap blob that grows, which is
 a different piece of work and is not implied by the copy.
-
-**2026-10-05 (`formal25-4`): the capability is still the open item, and the
-MESSAGE that reports it was naming a repair that does not work — which is this
-document's own subject one layer out, and it is measured on both architectures.**
-
-`model.list_append_overflow_message` ended with "…or move the appends into a
-function of their own so the capacity each one sees is its own", and the
-capacity IS counted per function, so moving the appends moves the loop with
-them:
-
-    def fill() -> List[Int]:
-        var ys = []
-        var i = 0
-        while i < 3:
-            ys.append(i)      # overflows HERE; the capacity is still 1
-            i = i + 1
-        return ys
-
-A reader who followed the sentence reached the identical message with a
-different function's name on it — the outcome a loud run-time stop exists to
-prevent, and the same one `formal/model.py`'s `refuse_none_comparisons` calls
-out for a fold that cannot observe the difference. It now names the two
-spellings that compute the same list, both measured on both architectures:
-
-  * **SITES rather than EXECUTIONS.** `xs.append(1); xs.append(2); xs.append(3)`
-    outside any loop is capacity 3; one site in a `while i < 3` is capacity 1.
-    Same three elements, same `[1, 2, 3]`.
-  * **`for i in range(3)`, whose compile-time trip count is COUNTED**
-    (`model.walk_stmt_trips`), so the loop is the ANSWER rather than the cause
-    — which is worth naming because it is the shape a reader reaches for first,
-    and a `while` with the same literal bound differs for a reason that is a
-    property of the language (`range` has a length this path can read).
-
-Two rows in `test_formal_run.py`: one asserts the message says this and REDS
-without the change, one BUILDS AND RUNS both repairs and requires
-`sites=1 counted=1|` — a message naming two repairs where one silently did not
-work is a promise a reader cannot check, and this is the check.
-
-**What this does NOT close.** Item 2 stands exactly as the paragraph above says
-it does: the list whose length is only known at run time is still refused, and
-the two spellings above are the honest workarounds rather than the capability. A
-`malloc`'d blob that GROWS is still the missing piece, and a message that says
-which two spellings fit today is not that piece.

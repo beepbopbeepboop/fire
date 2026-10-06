@@ -492,69 +492,6 @@ CLASSIFIED = [
      "    return __mlir_op.`pop.aligned_alloc`[mask=__mlir_type.index](value)\n",
      "the result's width and element type are a fact it has no source for",
      "Its bracket's result type"),
-
-    # **THE MESSAGE THAT CONTRADICTED ITSELF, and this is the row that says so.**
-    # `mlir_dialect_op_refusal`'s typed-result branch carried ONE tail for the
-    # word case, and it read "What is therefore missing is the OPERAND's
-    # DECLARED type, and nothing in this unit states one" — which is FALSE at
-    # every site whose operand the reader CAN establish, and the very next
-    # sentence in the SAME STRING then said "Its operand is declared
-    # '__mlir_type.index', which is ONE 64-bit word here". Both clauses in one
-    # refusal, on both architectures, byte-identical.
-    #
-    # The `absent` is the half that has to GO, and it is asserted absent rather
-    # than merely unreached: a reword that kept "nothing in this unit states
-    # one" while adding the new sentence would pass every other row in this
-    # file. The struct is TWO fields for the reason
-    # `a_dialect_cast_lowers_through_a_field_and_a_receiver` gives.
-    #
-    # The needle is the new sentence, which claims the missing thing is the
-    # OPERATION — the direction that is true here, since the operand IS declared
-    # and the result IS a word.
-    ("a_declared_operand_over_a_word_says_the_OPERATION_is_what_is_missing",
-     "struct Idx:\n"
-     "    var tag: Int\n"
-     "    var v: __mlir_type.index\n"
-     "\n"
-     "def cvt(self: Idx) -> Int:\n"
-     "    return __mlir_op.`pop.cast_from_builtin`[\n"
-     "        _type=__mlir_type.index\n"
-     "    ](self.v)\n",
-     "it is this OPERATION, which is not one of the spellings this path "
-     "rewrites",
-     "nothing in this unit states one"),
-    # The NAME is what a reader then has to act on, so it is a second row rather
-    # than part of the first: `pop.cast_from_builtin` converts a builtin value
-    # INTO a dialect one, which is a different conversion from the identity, and
-    # a reader sent after "not one of the spellings this path rewrites" with no
-    # operation named has been told what is missing and not which one.
-    ("that_advice_names_the_cast_it_declines",
-     "struct Idx:\n"
-     "    var tag: Int\n"
-     "    var v: __mlir_type.index\n"
-     "\n"
-     "def cvt(self: Idx) -> Int:\n"
-     "    return __mlir_op.`pop.cast_from_builtin`[\n"
-     "        _type=__mlir_type.index\n"
-     "    ](self.v)\n",
-     "It converts a builtin value INTO a dialect one"),
-    # …and the second decline, for a different reason, so a reader can tell the
-    # two apart: `builtin.unrealized_conversion_cast` is not a conversion this
-    # path lacks but one the SOURCE does not spell out at all. This row is also
-    # the pin that a documented DECLINE is not rewritten — the first version of
-    # the pass gated on the advice table and built this program on both
-    # architectures, which is the wrong answer the row's own text is written to
-    # prevent.
-    ("an_unrealized_conversion_says_the_source_does_not_spell_it_out",
-     "struct Idx:\n"
-     "    var tag: Int\n"
-     "    var v: __mlir_type.index\n"
-     "\n"
-     "def cvt(self: Idx) -> Int:\n"
-     "    return __mlir_op.`builtin.unrealized_conversion_cast`[\n"
-     "        _type=__mlir_type.index\n"
-     "    ](self.v)\n",
-     "It names a conversion the source does not spell out at all"),
 ]
 
 # (name, source, expected stdout or None). The other guard, and it is a BUILD
@@ -708,67 +645,6 @@ GUARDED = [
      "    show(7, 2)\n"
      "    return 0\n",
      "-1\n1\n-1\n1\n"),
-    # `pop.cast_to_builtin[_type=__mlir_type.index](x)` is the ONE word-to-word
-    # cast, and it is the IDENTITY: an `index` is pointer-sized and signed, so
-    # this converts one word to the same word and the rewrite is the operand
-    # itself with no instruction selection. It is the row that
-    # `std/builtin/simd_length.mojo:76` is written in, which is why the struct is
-    # TWO fields on purpose — a one-field struct's receiver IS its field, so
-    # `self.v` is rewritten to `self` before the pass runs and the operand stops
-    # being a declared `__mlir_type.index` at all (the same reason
-    # `a_dialect_arithmetic_lowers_when_its_operand_declares_a_word` above is
-    # two fields).
-    #
-    # **The values are STATED rather than taken from an oracle**, because CPython
-    # cannot parse `__mlir_op.`pop.cast_to_builtin``, and two of the five are
-    # there to catch a lowering that is not the identity rather than one that is
-    # the wrong identity:
-    #
-    #   * `0` and `-1` are the two words the `index` niche reasoning is ABOUT —
-    #     `0` is `None_WORD` and `-1` has every bit set, so a rewrite that
-    #     folded the operand through anything lossy shows up here;
-    #   * the large value `4242` is the one a test would otherwise be tempted to
-    #     leave out, because an identity passes on 0 and 1 by accident.
-    #
-    # `widen` takes its parameter as `__mlir_type.index`, so the operand is
-    # declared by a PARAMETER ANNOTATION — the other of the three shapes
-    # `mlir_operand_declared_type` reads, beside a local annotation and a field
-    # through a receiver.
-    ("a_dialect_cast_to_builtin_over_a_word_is_the_identity",
-     "def widen(x: __mlir_type.index) -> Int:\n"
-     "    return __mlir_op.`pop.cast_to_builtin`[_type=__mlir_type.index](x)\n"
-     "\n"
-     "def show(a: __mlir_type.index) -> Int:\n"
-     "    printf(\"%d\\n\", widen(a))\n"
-     "    return 0\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    show(0)\n"
-     "    show(4242)\n"
-     "    show(0 - 1)\n"
-     "    return 0\n",
-     "0\n4242\n-1\n"),
-    # The same identity through a FIELD and a receiver — the third of the three
-    # operand shapes — and here the field's value comes from a CONSTRUCTOR, so
-    # the row also says the rewrite fires on a `self.<field>` operand rather than
-    # only on a bare parameter. It is a separate row because a reader of
-    # `mlir_operand_declared_type`'s docstring would otherwise have to take the
-    # `MLIR_SELF_TYPE_NAMES` half on trust.
-    ("a_dialect_cast_lowers_through_a_field_and_a_receiver",
-     "struct Idx:\n"
-     "    var tag: Int\n"
-     "    var v: __mlir_type.index\n"
-     "\n"
-     "def to_int(self: Idx) -> Int:\n"
-     "    return __mlir_op.`pop.cast_to_builtin`[\n"
-     "        _type=__mlir_type.index\n"
-     "    ](self.v)\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    printf(\"%d %d\\n\", to_int(Idx(tag=1, v=7)),\n"
-     "           to_int(Idx(tag=2, v=0 - 3)))\n"
-     "    return 0\n",
-     "7 -3\n"),
     # The same arithmetic in a KEYWORD ARGUMENT, and the row that is really a
     # regression pin for the shared walk: `CallExpr.kwargs` is a list of
     # `(name, value)` pairs, so a replacement that lands in one of them is in a

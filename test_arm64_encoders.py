@@ -731,17 +731,12 @@ def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
     `blr` was named until a lowering emitted it, and `tbz`/`tbnz`/`strh` were
     named until theirs did.
 
-    * `tst` and `cmn` must be EMITTED, and they are named here for the opposite
-      reason they were named when this was first written. They were the two the
-      proof layer's model arms reference, and the whole defect was that a
-      reference from `arm64_proof_gen.py` used to count, so they were asserted
-      UNWIRED — and the assertion said what to do when a lowering landed: drop
-      the claim, do not work around it. `formal/arm64_codegen.py`'s
-      `_emit_branch_unless_and_test` and `_emit_branch_unless_sum_zero` are that
-      lowering (`if x & y:` and `(x + y) == 0`), so the claim is dropped and
-      replaced by the positive direction: an encoder this backend now emits must
-      not read as uncovered, which is the over-reporting half of the same defect
-      and the one a green run cannot notice.
+    * `tst` and `cmn` must be in the unwired set. This one DOES name two
+      encoders, deliberately: they are the two the proof layer's model arms
+      reference, and the whole defect is that a reference from
+      `arm64_proof_gen.py` used to count. An encoder named here is a claim that
+      no lowering emits it, and the way that claim goes stale — a lowering
+      landing — is a green run rather than a false one.
     * Every mnemonic in `ASSEMBLER_EMITTED` must have an emitter that is NOT an
       encoder call, because the entry's claim is precisely that. `adrp` is the
       live one and it is 3.45% of every instruction a real compiler emits:
@@ -757,10 +752,12 @@ def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
     spec.loader.exec_module(audit)
     unwired = set(audit.unwired_encoders())
     for name in ("encode_tst_xn_xm", "encode_cmn_xn_xm"):
-        check(name not in unwired,
-              f"{name} is reported as unemitted, so the lowering that emits it "
-              f"is gone: `if x & y:` and `(x + y) == 0` are TST and CMN and "
-              f"nothing else. Current unwired set: {sorted(unwired)}")
+        check(name in unwired,
+              f"{name} is no longer reported as unemitted, so either a "
+              f"lowering emits it now — in which case this test's claim about "
+              f"it is stale and should be dropped, not worked around — or the "
+              f"search is reading a reference from somewhere that cannot emit an "
+              f"instruction again. Current unwired set: {sorted(unwired)}")
     # The narrower search is the one that has to hold, and it is stated as a
     # property of the FUNCTION rather than of the two names above, so a third
     # proof-layer reference cannot slip in unnoticed.
@@ -770,8 +767,7 @@ def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
           f"the files the survey treats as lowerings are {audit.lowering_files()}"
           f", which is not the set this test was written against: a file that "
           f"renders Lean about instructions must not be one of them, or "
-          f"`cmn` and `tst` are covered by a reference that cannot emit an "
-          f"instruction again")
+          f"`cmn` and `tst` are covered again")
     arm64_py = open(os.path.join(HERE, "formal", "arm64.py")).read()
     # The CODE of `arm64.py`, by the tool's own rule: prose and `def` lines
     # dropped. Asking "is `encode_adrp(` called?" of the raw text is answered by

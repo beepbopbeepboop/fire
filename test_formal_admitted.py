@@ -396,7 +396,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.
@@ -1139,9 +1139,11 @@ def _exit_status_claims():
 # native reduction is deprecated; assert native evaluations with axioms
 # instead") and each USE of either tactic elaborates to a fresh axiom named after
 # the declaration that used it — `work_step_mov._native.native_decide.ax_1_1`.
-# Measured, with `test_formal_axioms.py` as the instrument.  So a census that
-# matched `Lean.ofReduceBool` would have read a library that reaches an axiom at
-# every one of these sites as CLEAN, and the census below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
+# Measured, with the before/after sets in `bugs/FORMAL_native_decide_axiom.md`.
+# So `bugs/FORMAL_native_decide_axiom.md`'s "Expected output: …
+# `Lean.ofReduceBool` appearing is the confirmation" would have read a library
+# that reaches an axiom at every one of these sites as CLEAN, and the census
+# below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
 # that is actually matched.
 
 
@@ -1230,14 +1232,7 @@ LIBRARY_TRUST = {
     # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
-    # **1585, not 1518: +67 arrived in the merge** (2026-10-06).  The formal
-    # branches merged here modelled more of arm64 in `lib/ProofLib.lean` — the
-    # `SMULH`/`SMULL`/`STUR`/`TST` step arms among them — and each new
-    # `work_step_*` lemma is proved by `bv_decide` over a quantified word, which
-    # is the right tool for that shape and still an axiom in the closure of every
-    # theorem proved with it.  The per-module census moved with the source, so
-    # this is the sanctioned "record new debt" raise, not a replacement.
-    "ProofLib": (0, 0, 1585, 1585),
+    "ProofLib": (0, 0, 1518, 1518),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
@@ -1315,8 +1310,8 @@ LIBRARY_TRUST = {
 #: prefix, so 98 attributed declarations were never asked about at all (31 in
 #: `ProofLib`, 66 in `X86`, 1 in `work`) and every one of them was filed as
 #: `clean`. The old numbers were `375 asked / 53 reaches` over five modules, and
-#: the module set was missing `IEEE754` entirely; both are what
-#: `test_formal_axioms.py` re-derives on every run.
+#: the module set was missing `IEEE754` entirely. See
+#: `bugs/FORMAL_native_decide_axiom.md`.
 #:
 #: `of_reduce_bool` is 0 everywhere, and is the row that corrects the name.
 #:
@@ -1351,28 +1346,9 @@ AXIOM_CLOSURE = {
     # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
     # which is the assertion that makes this a measurement rather than a number
     # somebody typed.
-    # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
-    # declaration added by one of the merged branches rests on a decide axiom.
-    # The partition still closes (312 = 61 + 243 + 0 + 8).
-    "ProofLib": (312, 61, 243, 0, 8, 0),
+    "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
-    # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
-    # `imul` successor rows began to need (`x86_set_reg_narrow_mem`,
-    # `x86_set_flag4_mem`), the two overflow helpers the multiply arms read
-    # (`x86_imul_ovf`, `x86_mul_ovf`), the byte-wise `and`/`or` step
-    # (`x86_step_alu_r8`) and the four step lemmas that came with the three
-    # forms this branch made decodable. All six are `rfl` or one `simp` over a
-    # record update or a `match` on a literal, which is the same proof the five
-    # `_mem` facts beside them already carry, and a fall in `clean` is the
-    # direction this column is watched in: a wrapper that did not leave memory
-    # alone would put `rdi` into a term the closing read has to evaluate.
-    #
-    # **And +1 more from `work/formal43-x86-endtoend-red`**, whose `x86_shift_post`
-    # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
-    # reaches no decide axiom, so `asked` and `clean` both move by one. The
-    # partition still closes (151 = 2 + 148 + 0 + 1).
-    "X86": (151, 2, 148, 0, 1, 0),
+    "X86": (144, 2, 141, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
@@ -1394,13 +1370,7 @@ AXIOM_CLOSURE = {
     # `test_the_axiom_names_are_classified_not_guessed`; `library_theorems` had
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
-    # 2026-10-08: 26 declarations, not 24.  `negative_values_order_by_value_not_by_magnitude`
-    # and `an_infinity_is_ordered` (f4e905eb) are pure `UInt64`/`Bool` comparison
-    # facts, so they are proved with `decide` and are KERNEL-CHECKED: `reaches`
-    # stays 19 and `clean` rises 5 -> 7.  They first landed as `native_decide`,
-    # which silently moved this row to (26, 21, 5) and made
-    # `formal-sweep-truth` red on any tree with the Lean library built.
-    "IEEE754": (26, 19, 7, 0, 0, 0),
+    "IEEE754": (24, 19, 5, 0, 0, 0),
     # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
     # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
     # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
@@ -1523,7 +1493,7 @@ NATIVE_DECIDE_ALLOWED = {
 # fact over `UInt32` literals (61 of 63), `rfl` for `(1 : UInt64).toNat = 1` and
 # its `2` sibling, which are definitional and which `decide` also closes — `rfl`
 # because it reaches NO axiom at all where `decide` reaches `propext` and
-# `Quot.sound`.  Measured per shape by `test_formal_axioms.py`.
+# `Quot.sound`.  Measured per shape in `bugs/FORMAL_native_decide_axiom.md`.
 NATIVE_DECIDE_REPLACED = {
     "ProofLib": 61,      # 34 `absurd h`, 17 `absurd t`, 3 `absurd h_opc`,
                          # 5 closed `have`s, 2 `.toNat` facts
@@ -1786,7 +1756,7 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
                          f"the ceiling is {ceiling} (+{got_tactic - ceiling}). "
                          f"Each one is an axiom in the transitive closure of "
                          f"every theorem proved with it "
-                         f"(FORMAL.md section 7, row 10).")
+                         f"(bugs/FORMAL_native_decide_axiom.md).")
         elif got_tactic < ceiling:
             shrank.append(f"{mod}: {got_tactic} native_decide/bv_decide site(s) "
                           f"and the ceiling says {ceiling}. Sites were replaced "
@@ -2069,9 +2039,10 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
 
     `LIBRARY_TRUST` above pins a count per FILE, and a file-level ceiling is the
     right shape for a debt several branches pay down at once — but it is not the
-    shape the WORK has: "for each top-level `theorem`/`lemma` in `lib/`, the
-    number of axiom-carrying tactic sites in its own proof, so the ceiling can be
-    lowered per theorem rather than per file". That is
+    shape the WORK has. `bugs/FORMAL_native_decide_axiom.md` item 2 asks for
+    "for each top-level `theorem`/`lemma` in `lib/`, the number of
+    axiom-carrying tactic sites in its own proof, so the ceiling can be lowered
+    per theorem rather than per file", and that is
     `formal/admitted.py::declaration_tally`.
 
     Three things are asserted, in the order they can fail:
@@ -2164,8 +2135,8 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
     # every one of them has a measured reason `decide` cannot go, so counting
     # them made the list report 22 items of which 22 were justified and the next
     # reader would have had to re-derive that.  This is the list
-    # The one-site `native_decide` work list, and it is short enough to read
-    # — which is the point of a work list.
+    # `bugs/FORMAL_native_decide_axiom.md` item 3 asks for by another name, and
+    # it is short enough to read — which is the point of a work list.
     replaceable = sorted(r[0] for mod, rows in by_decl.items() for r in rows
                          if r[2]["axiom_tactic"] == 1
                          and r[2].get("native_decide", 0) == 1
@@ -2205,8 +2176,9 @@ ONE_SITE_THEOREMS = 36
 
 # How many theorems may carry exactly one site AND that site be a `native_decide`
 # that `NATIVE_DECIDE_ALLOWED` does not already name with a reason.  This is
-# The sharpest version of the one-site `native_decide` list.  **0 on this tree,
-# and that is the outcome it asked for**: the last four were `@[simp] theorem x86_mask_{one,two,four,eight}` and
+# `bugs/FORMAL_native_decide_axiom.md` item 3's list by another name, and it is
+# the sharpest version.  **0 on this tree, and that is the outcome item 3 asked
+# for**: the last four were `@[simp] theorem x86_mask_{one,two,four,eight}` and
 # `decide` closed them, so every one-site `native_decide` in `lib/` is now either
 # kernel-checked or justified by name — `IEEE754`'s 19 ground binary64
 # arithmetic theorems (measured: `decide` cannot reduce `Float.ofBits`, which is
@@ -3707,8 +3679,8 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     nothing here knows what the tree spells.
 
     The failure it is aimed at is the one the `subprocess` row of the host-import
-    ranking recorded (measured over all 143 importing files, zero of them worth a
-    build): a module that is "modelled" for nobody, green in
+    ranking records (`bugs/FORMAL_subprocess_row_measured_b7.md`, measured over
+    all 143 importing files): a module that is "modelled" for nobody, green in
     every differential test, and callable by zero of its callers.  A keyword the callers
     use and the model does not declare is exactly that, and it is invisible until
     somebody counts the call sites — which is what this does.

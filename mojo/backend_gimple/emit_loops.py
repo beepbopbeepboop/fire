@@ -31,11 +31,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_names, target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -772,10 +767,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             and it.func.index.name in gen._comptime_list_asts):
         list_ast = gen._comptime_list_asts[it.func.index.name]
         var0 = node.target
-        if for_target_is_tuple(var0):
-            tgt_names = target_slots(var0[1:-1].strip())
+        if gimple_ctypes.for_target_is_tuple(var0):
+            tgt_names = gimple_ctypes.target_slots(var0[1:-1].strip())
         else:
-            tgt_names = for_target_names(var0)
+            tgt_names = gimple_ctypes.for_target_names(var0)
         for el in list_ast.elements:
             el_args = el.args if isinstance(el, gimple_ctypes.CallExpr) else [el]
             if len(el_args) < len(tgt_names):
@@ -824,7 +819,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
             and itc.cursor_for(gen, gen._cname(it.name)) is not None
-            and isinstance(var, str) and not for_target_is_tuple(var)
+            and isinstance(var, str) and not gimple_ctypes.for_target_is_tuple(var)
             and not getattr(node, 'else_body', None)):
         _gen_for_iter_cursor(gen, node, var)
         return
@@ -879,7 +874,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # loop target's C variable gets overwritten with), and force a fresh,
     # non-colliding C declaration for the loop target (see
     # `_declare_var(force=True)`).
-    target_names = for_target_names(var)
+    target_names = gimple_ctypes.for_target_names(var)
     shadow_name = None
     if (isinstance(it, gimple_ctypes.IdentExpr) and it.name in target_names
             and it_val == gen._c_names.get(it.name, it.name)):
@@ -1105,7 +1100,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and isinstance(node.iterable.func, gimple_ctypes.MemberExpr)
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
-                    and not for_target_is_tuple(var))
+                    and not gimple_ctypes.for_target_is_tuple(var))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
@@ -1137,18 +1132,14 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
 
 
 #: The ABSENT fill each slot type selects, keyed by `TypeLattice.list_suffix`.
-#: Only a slot the fill can never be SELECTED into reads a `double` entry (see
-#: `_zip_longest_reaches` and `_gen_for_zip_longest`): its select arm still has
-#: to compile, and `(double)0` types the `double` arm. A `double` slot that CAN
-#: be padded is a refusal instead, because no double means `absent`. (This entry
-#: used to be `None`, "patched to `(double)0` below"; the patch was lost in a
-#: merge and the literal word `None` was emitted into the C.) The integer-ish
-#: arms share the `(int64_t)0` the select is typed in, and a string slot's 0 is
-#: the NULL that `mojo_print` already renders as `None`. It is ONE table rather
-#: than three literals in three arms because two copies of "what absent means
-#: here" is how the two would come to disagree.
-_ZIP_LONGEST_ABSENT = {'double': '(double)0', 'str': '(int64_t)0',
-                       'int': '(int64_t)0'}
+#: `None` is the `double` arm's marker for "patched to `(double)0` below", which
+#: is the pre-existing spelling for it; the two integer-ish arms share the
+#: `(int64_t)0` the select is typed in, and a string slot's 0 is the NULL that
+#: `mojo_print` already renders as `None`. It is ONE table rather than three
+#: literals in three arms because a slot that the fill cannot reach uses it too
+#: (see `_gen_for_zip_longest`), and two copies of "what absent means here" is
+#: how the two would come to disagree.
+_ZIP_LONGEST_ABSENT = {'double': None, 'str': '(int64_t)0', 'int': '(int64_t)0'}
 
 
 def _zip_longest_fill_refusal(fill_ctype: str, slot_domain: str):
@@ -1239,22 +1230,6 @@ def _gen_for_zip_longest(gen, node):
     `TypeLattice.slot_kind_byte` already names) is the precedent, and a loop
     target would have to carry that kind alongside its value.
 
-    A padded slot the model cannot FILL faithfully is REFUSED rather than
-    handed a value, and it is refused AT BUILD TIME: a float slot has no
-    absent value (0.0 is a number, and CPython answers None), and a
-    `fillvalue` outside the slot's own domain is a value the slot cannot
-    carry. Both are decided in the per-slot loop below, against
-    `_zip_longest_reaches`, so a slot the fill can never be selected into is
-    not asked the question — which is what keeps a program that does not pad
-    that slot building (`zip_longest([1.5, 2.5], [9.0, 8.0])`). **The refusal
-    is a build refusal and not a raise emitted into the loop body**, because a
-    program that builds and then exits 1 on the padded row is the shape this
-    path calls a wrong answer wearing a runtime error's clothes;
-    `ZipLongestFillRefusal` is re-raised by `_gen_stmt_ForStmt` for exactly
-    that reason. `test_gimple_runner.py` pins both directions: the three
-    refusals by message, and the unpadded float slot as a program that still
-    matches CPython.
-
     Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
     boxed-iterable fallback, where `itertools` is an opaque module global:
     the call itself stubbed to a bare int64_t and the loop targets fell to
@@ -1284,18 +1259,10 @@ def _gen_for_zip_longest(gen, node):
             fill_node = kwv
         else:
             raise ValueError(f"unsupported zip_longest argument {kwn}=...")
-    if gen._is_none_literal(fill_node):
-        # `fillvalue=None` IS the default, spelled out — CPython's own
-        # signature says so — so it asks for the same absent value rather
-        # than for a fill, and not for one in the domain of `None`'s own
-        # lowered type (an int64_t 0), which a string slot used to refuse.
-        # `gen._is_none_literal` is the predicate the rest of the backend
-        # asks (`None` parses as a bare `IdentExpr`, not a literal node).
-        fill_node = None
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
-    if not for_target_is_tuple(target):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip_longest lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != 2:
@@ -1447,7 +1414,8 @@ def _gen_for_zip_longest(gen, node):
                 'double' if raw_ct == 'double' else ('char *' if raw_ct == 'str' else 'int64_t'),
                 read_fn())
             if raw_ct == 'double':
-                sel = gen._new_val('double', f"{in_t} ? {raw} : {fills[si]}")
+                fill_v = fills[si] if fills[si] is not None else "(double)0"
+                sel = gen._new_val('double', f"{in_t} ? {raw} : {fill_v}")
             elif raw_ct == 'str':
                 sel = gen._new_val('int64_t', f"{in_t} ? (int64_t){raw} : {fills[si]}")
             else:
@@ -1636,7 +1604,7 @@ def _gen_for_zip(gen, node):
     # fire_compiler.py's own `for op, operand in zip(node.ops,
     # node.operands[1:]):`, silently dropping the rest of `emit`).
     target = _as_str(node.target)
-    if not for_target_is_tuple(target):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip() lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
@@ -2055,7 +2023,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # comma that the parser now keeps (fire_compiler.py's "Unpacking-target
     # representation"). Reading the parens alone treated both as unpack, so
     # `for (a,) in [(1,)]` printed `1` where CPython prints `(1,)`.
-    is_tuple = for_target_is_tuple(var)
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
         # Bracket-aware split (a naive `inner.split(',')` turned a nested
@@ -2628,7 +2596,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # separately. `for_target_is_tuple`, so the 1-tuple `for (k,) in d.items()`
     # unpacks and the parenthesised single name `for (k) in d` does not; see
     # _gen_for_list's note.
-    is_tuple = for_target_is_tuple(var)
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
@@ -3155,18 +3123,6 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen._seed_addressed_locals(node.body)
     gen._emit_mut_local_box_allocs()
 
-    # A lifted closure is an ordinary function and owes the same per-function
-    # local-type pre-pass a top-level `def` gets (`gen_module`'s Pass 1.3b,
-    # which populates `_inferred_var_types`). Without it, a nested `def`'s
-    # locals were typed by the FIRST assignment alone: `info = None` declares
-    # the slot `int` (`_lower_IdentExpr`'s None case), and a later
-    # `info = table[key]` (a boxed `MojoDict *`) is then emitted as
-    # `info = (int)_tN;` — the pointer truncated to 32 bits on arm64.
-    # `_gen_stmt_AssignStmt` already consults
-    # `_inferred_var_types[current_func_name]` to widen such a slot before the
-    # first `_declare_var`; this just makes that table exist for a closure.
-    gen._inferred_var_types[ci.lifted_name] = gen._infer_local_var_types(node)
-
     gen._emit_label("bb_2")
     # `{mut}`-capture-spec names (ClosureInfo.mut_names): the env
     # struct field is a POINTER (see the struct-typedef emission's own
@@ -3312,7 +3268,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
-    is_tuple_target = (for_target_is_tuple(var)
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(var)
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
@@ -3326,27 +3282,12 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     else:
         var_names = None
         # `for x, in gen():` binds ONE name and `var` is the literal string
-        # `'(x,)'`. A real multi-slot target over a generator whose yield
-        # arity was never recorded is a different mismatch, refused below.
+        # `'(x,)'`. A multi-slot target over a generator whose yield arity was
+        # never recorded is a different mismatch — filed as
+        # bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md.
         _one = _single_loop_target_name(var)
         if _one is not None:
             var = _one
-        elif gimple_ctypes.for_target_is_tuple(var):
-            # A real MULTI-slot target (`for a, b in g():`) over a generator
-            # that yields ONE value per resume: `tuple_slot_ctypes` is None
-            # because the generator's yields are not tuple literals. There is
-            # no lowering — this scalar model has no iterator protocol, so
-            # unpacking the value is not something it can do — and the old
-            # fall-through declared the target STRING `(a, b)` as a variable
-            # name, which is not C (`gcc: expected ')' before ',' token`).
-            # Refuse by name rather than emit that, matching this project's
-            # "fall back to interpreting the module from source" convention.
-            raise RuntimeError(
-                "cannot compile a multi-slot `for` target over a generator "
-                f"whose yield arity is not a tuple (`for {var} in "
-                f"{api.get('base')}(...)`): the generator yields one value per "
-                "resume, and unpacking that value needs a runtime iterator "
-                "protocol this scalar generator model does not have")
         gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()

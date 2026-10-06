@@ -1,12 +1,17 @@
 # FORMAL_arm64_instruction_coverage: the arm64 encoder survey, and what wiring the new instructions actually bought
 
-**Status: the survey is current as of 2026-10-05 and `TST`/`CMN` are the second
-pair WIRED (encoder, machine model, proof tables, and now a lowering) — after
-`TBZ`/`TBNZ`, and by the same four-things rule. `ccmp` (13,842) is the top of
-the gap list and the `CSEL` neighbours are the rest of what this target has a
-use for. The file stays a survey, for the reason below.** One ENCODING CLASS was
-added to the model's vocabulary on 2026-10-04, and §"The one class the census
-cannot see" says which and why it is not a mnemonic row.
+**Status: the survey is current as of 2026-10-05 and the METHOD changed a third
+time — and this time the change moved the number DOWN, which is the direction
+every previous change moved it. `TBZ`/`TBNZ` are WIRED (encoder, machine model,
+proof tables, and a lowering that emits them), and so are `CMN`/`TST` in the
+machine model while remaining UNREACHABLE in any image, which is the
+distinction §"Re-measured 2026-10-05" is about and the reason this file's own
+next-unit-of-work line had to be rewritten. `ccmp` (13,842) and the `CSEL`
+neighbours are what is left that this target has a use for. The file stays a
+survey, for the reason below; the latest numbers are in §"Re-measured
+2026-10-05".** One ENCODING CLASS was added to the model's vocabulary on
+2026-10-04, and §"The one class the census cannot see" says which and why it is
+not a mnemonic row.
 
 Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
@@ -17,101 +22,8 @@ and the loop-exit bugs, `FORMAL_arm64_known_proof_gaps.md` for the three
 unproved examples, and `FORMAL_arm64_bit_test_branch_is_not_provable.md` for the
 one gap the TBZ/TBNZ wiring left behind.
 
-## Re-measured 2026-10-05 (later), and the "modelled, unwired" pair is now
-## WIRED: `TST` and `CMN`
-
-`python3 tools/arm64_insn_audit.py`, unchanged corpora, unchanged tool:
-
-```
-encoders in formal/arm64.py : 88 (69 base mnemonics)
-emitted by a lowering       : 78 (64 base mnemonics)   [was 76 (62)]
-disassembled               : 4026231 instructions over 420 distinct mnemonics, 200 binaries
-covered by an encoder      : 3710214 (92.2%)           [was 3683266 (91.5%)]
-excluded by decision       : 96044                     [was 122992]
-genuinely uncovered        : 219973 (5.5%)             [unchanged]
-
-encoders no lowering emits (10), by name:
-  encode_adrp (excluded separately, see ASSEMBLER_EMITTED)  encode_br_xn  (br)
-  encode_cset_wd_cond  (cset)    encode_csinc_xd_xm_cond  (csinc)
-  encode_csinv_xd_xm_cond  (csinv)   encode_csneg_xd_xm_cond  (csneg)
-  encode_ldp_xt1_xt2_rn  (ldp)    encode_ldr_xt_sp_imm  (ldr)
-  encode_movn_wd_imm  (movn)    encode_str_xt_sp_imm  (str)
-```
-
-**The 26,948 is `tst` 16,345 + `cmn` 10,603 exactly, and `genuinely uncovered`
-does not move — this file's invariant, holding for the fourth measurement.** So
-the wiring moved a classification and not a capability, which is what every
-wiring in this file has done: coverage up, the excluded column down by the same
-number, the gap list's tail unmoved. `tst` and `cmn` are gone from the top-30
-entirely and `ccmp` (13,842) is now rank 1.
-
-**What "wired" meant for these two, and it was one thing.** Every other piece was
-already in place and had been for weeks: the encoders are byte-exact against
-`as` in `test_arm64_encoders.py`; `lib/ProofLib.lean`'s `arm64_step` has both
-arms with `arm64_logic_flags` and `arm64_adds_flags` and `work_step_tst` /
-`work_step_cmn`; and `formal/arm64_proof_gen.py` has `_STEP_CONDS` 67 and 66,
-both `_step_rhs` rows, both `_regs_written` empty sets and the block-scanner
-entries. What was missing was the lowering —
-`grep -c encode_tst_xn_xm formal/arm64_codegen.py` was 0 — and that is now
-`_emit_branch_unless_and_test` (`if x & y:`) and `_emit_branch_unless_sum_zero`
-(`(x + y) == 0` / `!= 0`), with `_flag_test_pair` and `_sum_against_zero` as
-their recognisers. **So the §"Re-measured 2026-10-05" entry above was right
-about the order and right that this row is "not a `ProofLib` change at all".**
-
-**Three shapes are declined, and the declines are the interesting half.**
-A single-bit mask stays `TBZ`/`TBNZ`; an **immediate** mask stays `_emit_binop`'s
-one-instruction AND-immediate, because putting the immediate in a register to
-spend it on a `TST` is three instructions either way; and `x - y == 0` is the
-`CMP` this path already emits, so there is nothing there to save. `a + b == 5`
-is declined too and that one is not an optimisation at all: the flags of a sum
-do not carry the sum, so only a comparison against ZERO is a flag question.
-
-**The polarity is the TBZ/TBNZ argument again.** These branch on the FALSE case,
-so `x & y` is `b.eq`, `not (x & y)` is `b.ne`, `(x + y) == 0` is `b.ne` and
-`(a + b) != 0` is `b.eq` — out of one instruction each, and a branch that got
-it backwards would build, run and answer the other way round.
-
-**The bug this wiring shipped with is the sharpest thing in this file, and it is
-a NEW lesson rather than a repeat of an old one.** X0 is this backend's
-universal intermediate, so evaluating the right operand of a two-register test
-AFTER the left one overwrites the left: `if x & y:` became `TST Xy, Xy`, true
-for every non-zero `y`. It built, it ran, it was byte-exact, and it was wrong —
-and `_is_pure_expr` did not prevent it, because **purity is about observability
-and this was about which registers an expression touches.** The fix is
-`_is_word_load` (a bare name, whose evaluation is `_load_var`: one move, one
-load, or an ADRP+ADD+load, writing its destination and at most X17) and the
-right operand emitted FIRST. So the file's third test-design lesson gets a
-companion: *comparing instruction bytes is not comparing instructions* has a
-twin, and the twin is **an operand pair is not an operand**. Both are invisible
-to `test_arm64_encoders.py`, which is why
-`test_arm64_emission.py::test_flag_tests_emitted_and_correct` asserts the ANSWER
-for every case and opens with `x = 0, y = 40`, which is the case that
-distinguishes `TST Xy, Xy` from `TST Xx, Xy`.
-
-Per program, both backends, CPython as the oracle, thirteen condition shapes
-(`a & b`, `not (a & b)`, `a & b & c`, `(a+b)==0`, `0==(a+b)`, `(a+b)!=0`,
-`(a+b)<5`, `(a+0)==0`, `(a*b)==0`, `(a-b)==0`, `a & 0xff`, `s == t`,
-`(a+b) & 3`): every answer CPython's, and two probe files went from 321 to 299
-and from 443 to 408 arm64 instructions with every answer unchanged.
-
-**And the strongest check available without the gate, with its number.** A
-lowering is not behaviour-preserving by default, so the question is whether any
-proof's INPUT moved — and the inputs are the images of `formal/examples/*.mojo`.
-All **52** built on arm64 with and without the two new arms and every one of the
-52 images is **byte-identical** (`cmp`, one file per example). Not "the tests
-pass": not one byte of not one proof input moved, which is the measurement that
-says this is a new lowering rather than a perturbation of the proof corpus, and
-it is why `formal-call-proofgen` and `formal` need nothing from this change.
-
 ## Re-measured 2026-10-05, and the METHOD changed again: a reference from
 ## something that cannot EMIT is not a reference
-
-**The `tst`/`cmn` rows of the table below are SUPERSEDED by the section above:
-both are emitted now.** The measurement in this section was right about the
-METHOD and right that `tst` and `cmn` were not in any image; the lowering that
-makes them reachable landed after it, and the numbers above are the
-re-measurement. The rest of the section stands — the two things that are not
-lowerings are still not lowerings, and `br` is still a genuine gap.
 
 `python3 tools/arm64_insn_audit.py`, unchanged corpora, and the tool's second
 exclusion — "an encoder no lowering emits" — was asking its question over every
@@ -168,8 +80,7 @@ nobody can see is not one. `BR` is deliberately **not** in it — `encode_br_xn`
 really is uncalled, and `br`'s 359 occurrences are a genuine gap this change is
 what makes visible.
 
-What the gap list looked like at this measurement, top of it (the `tst` and `cmn`
-rows are the two the section above closed):
+What the gap list looks like now, top of it:
 
 | occurrences | mnemonic | why |
 |---|---|---|
@@ -186,21 +97,18 @@ result discarded)". `CMN` is `ADDS`, not `SUBS` — the flags of a sum — and
 `lib/ProofLib.lean`'s `arm64_adds_flags` is what models it, so the model is
 right and the survey's one-line gloss on it was wrong. `tst` is larger, and both
 need the same thing to become reachable: **a lowering that emits them**, which
-is not a `ProofLib` change at all, unlike every row behind them. — and that
-lowering is what the section above landed, so the sentence's prediction held.
+is not a `ProofLib` change at all, unlike every row behind them.
 
 **The test that pins all three classes**, in `test_arm64_encoders.py`, and each
 assertion was verified to FAIL against the tree it replaces:
-`test_a_reference_from_something_that_cannot_emit_is_not_a_caller`. It named
-`tst` and `cmn` deliberately — they were the two the proof layer references, and
+`test_a_reference_from_something_that_cannot_emit_is_not_a_caller`. It names
+`tst` and `cmn` deliberately — they are the two the proof layer references, and
 the way that claim goes stale (a lowering landing) is a green run rather than a
-false one. **It now states the positive direction for those two**, which is what
-its own message said to do when the lowering landed rather than working around
-it. The other two are directions and are unchanged: the files treated as
-lowerings must be `arm64_codegen.py` and `arm64.py` and nothing that renders
-Lean, and `ASSEMBLER_EMITTED` must not claim a mnemonic whose encoder is now
-CALLED (asked of the tool's own prose-stripped text, because the `def` line
-answers the naive version of that question).
+false one. The other two are directions: the files treated as lowerings must be
+`arm64_codegen.py` and `arm64.py` and nothing that renders Lean, and
+`ASSEMBLER_EMITTED` must not claim a mnemonic whose encoder is now CALLED (asked
+of the tool's own prose-stripped text, because the `def` line answers the naive
+version of that question).
 
 ## Method
 
@@ -489,12 +397,6 @@ was one of them until 2026-10-03 and no longer is; `CSEL`'s three neighbours
   NEGATIVE displacement a scaled-offset load cannot express. This is the
   instruction whose emission carried a real bug; the sign writeup is in the
   companion doc.
-- **`TST` / `CMN`** (~27k) — a flag-setting test of two WORDS with no result:
-  `if x & y:` and `(x + y) == 0`. **BOTH EMITTED as of 2026-10-05** — the † is
-  gone, and §"Re-measured 2026-10-05 (later)" above is what replaced it: the
-  lowering, the machine model (`arm64_logic_flags`, `arm64_adds_flags`) and the
-  proof tables (`_STEP_CONDS` 66/67, `work_step_cmn`, `work_step_tst`) were all
-  already there, so this one cost a lowering and a lesson.
 
 ## What it bought, measured rather than assumed
 
@@ -505,28 +407,23 @@ A benchmark mixing a ternary, `and`, `or` and fourteen spilled locals:
 - Large immediates (>4095) fold into one shifted add rather than a chain of
   33: `mov` + `sub` + access became one instruction. This was the single
   largest codegen win in the project.
-- `TST`/`CMN` (2026-10-05): on a thirteen-condition probe, two arm64 images went
-  from **321 to 299** and from **443 to 408** instructions with every answer
-  CPython's unchanged. Per site, `if x & y:` was `add`/`add`/`mov`/`and`/`cmp`/
-  `cbz` — six — and is now `mov`/`mov`/`tst`/`b.cond`, four, of which the last
-  two are the whole question.
 
 The part that is **not** a win is in the companion doc: the scratch-base
 register, measured and rejected.
 
-## Four test-design lessons from this work
+## Three test-design lessons from this work
 
-All four cost real time, and all four are the kind of gap a green suite hides.
+All three cost real time, and all three are the kind of gap a green suite hides.
 
 1. **Comparing instruction bytes is not comparing instructions.**
    `test_arm64_encoders.py` proves every encoder byte-for-byte against
-   `as -arch arm64` (424/424 as of 2026-10-03, 817/817 as of 2026-10-05). It
-   therefore *cannot* see a missing **relocation** — and `Assembler.resolve()`
-   had no `B.cond` case, so `imm19` stayed 0 and every conditional branch
-   pointed at itself. A fully green encoder suite coexisted with a compiler
-   that hung on any false comparison. `test_arm64_emission.py` now asserts that
-   no branch resolves to its own address, and that check was verified to fail
-   when the fix is removed, so it is not vacuous.
+   `as -arch arm64` (424/424 as of 2026-10-03). It therefore *cannot* see a
+   missing **relocation** — and `Assembler.resolve()` had no `B.cond` case, so
+   `imm19` stayed 0 and every conditional branch pointed at itself. A fully
+   green encoder suite coexisted with a compiler that hung on any false
+   comparison. `test_arm64_emission.py` now asserts that no branch resolves to
+   its own address, and that check was verified to fail when the fix is removed,
+   so it is not vacuous.
 2. **Every expected value must fit in a byte.** A process exit status is 8
    bits. Comparing one against a wider sum produced a convincing phantom
    "14+ simultaneously-spilled locals are miscompiled" bug, complete with a
@@ -545,19 +442,6 @@ All four cost real time, and all four are the kind of gap a green suite hides.
    encoders something references) rather than a count, because landing an
    encoder before its lowering is the ordinary order of work here. That check
    was verified to fail against a copy of the audit that read the table again.
-4. **An OPERAND PAIR is not an operand**, which is the 2026-10-05 addition and
-   the twin of lesson 1 rather than a repeat of it. `TST Xy, Xy` is
-   byte-exact — it is `TST` with both fields naming the same register — and it
-   answers a question about one word where the source asked about two. So is a
-   `CMN` of the wrong pair, and so is the `CMP` the same mistake produced before
-   any of this. What makes it a lesson rather than a mishap is **what did not
-   catch it**: not the encoder suite (byte-exact), and not `_is_pure_expr`,
-   which gates on whether an expression can be *observed* and this was about
-   which *registers* it touches — X0 is this backend's universal intermediate, so
-   the operand evaluated second overwrites the first. The gate that catches it is
-   a value assertion on a case whose two words disagree, which is why
-   `test_arm64_emission.py::test_flag_tests_emitted_and_correct` asserts the
-   exit status for all eleven of its cases and opens with `x = 0, y = 40`.
 
 ## Landed alongside: `dylib_syms` on the arm64 constructor
 

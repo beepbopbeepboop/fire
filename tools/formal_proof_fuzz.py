@@ -611,23 +611,12 @@ def proof_verdict(arch, work, timeout, check=True):
                                    test_input=_JOB.input, prove=True,
                                    check=False, arch=arch)
     except (FB.CodegenError, FB.FormalBuildError) as e:
-        # The generator's own refusal RE-WRAPS into this arm — `formal/build.py`
-        # catches the `NotImplementedError` and re-raises it as a
-        # `FormalBuildError`, so `fire.py` prints `build: <message>` rather than
-        # a traceback — and it was therefore filed as a CODE GENERATOR refusal
-        # here as well as in `tools/formal_proof_breadth.py`. Both tools now ask
-        # `formal.build.proof_refused`, which is the one reader of the flag and
-        # documents why it cannot be a `NotImplementedError` again.
-        if FB.proof_refused(e):
-            return out("proof-refused", e)
         return out("refused-import" if _refused_import(str(e)) else
                    "codegen-refused", e)
     except NotImplementedError as e:
         # Only the proof generators raise this — the x86-64 one CATCHES it and
         # emits its documented placeholder — so which frame it came out of is
-        # what separates `proof-refused` from a build crash. Unreachable for the
-        # generators `compile_formal` calls itself (they are re-wrapped above);
-        # it stays because a caller may hand `decide` one directly.
+        # what separates `proof-refused` from a build crash.
         return out("proof-refused" if getattr(_PHASE, "generate_entered", False)
                    else "build-crash", e)
     except Exception as e:                      # noqa: BLE001 — a class here
@@ -709,30 +698,28 @@ def behaviour(arch, text, inputs, proven_input, nparams, tmpdir, name):
         words = ", ".join([str(value)] + ["0"] * (nparams - 1))
         ref, rerr = F.cpython_answer(text, tmpdir, f"{name}.{value}",
                                      args=words)
-        answer = F.oracle_answer(ref)
-        if answer is None and not F.is_oracle_timeout(rerr):
-            # CPython REJECTED the program, which is a generator bug and not a
-            # finding about the backends.  The reason carries its traceback.
+        if isinstance(ref, tuple) and ref and ref[0] == "error":
             info["verdict"] = "generator-error"
-            info["detail"] = rerr
+            info["detail"] = ref[1]
             verdict = "generator-error"
             per[value] = info
             continue
-        if answer is None:
+        if not F.has_oracle(ref):
             # The oracle could not finish, which is not the same as the oracle
-            # saying the generator is wrong — and it is the REASON that tells
-            # the two apart now that both non-answers are `None`. These programs
-            # are RECURSIVE by construction (`--stmts` grows the recursion
-            # depth), so a CPython recursion-limit or wall-clock timeout is
-            # reachable here and not hypothetical.
+            # saying the generator is wrong — `has_oracle` is the one reader of
+            # the three answers, and reading it any other way unpacks the
+            # timeout's `None` three lines below. These programs are RECURSIVE
+            # by construction (`--stmts` grows the recursion depth), so a
+            # CPython recursion-limit or wall-clock timeout is reachable here
+            # and not hypothetical.
             info["verdict"] = "CPYTHON-TIMEOUT"
             info["detail"] = rerr
             if verdict == "match":
                 verdict = "CPYTHON-TIMEOUT"
             per[value] = info
             continue
-        info["want_exit"], info["want_stdout"] = answer
-        if exit_code != answer.exit or stdout != answer.stdout:
+        info["want_exit"], info["want_stdout"] = ref
+        if exit_code != ref[0] or stdout != ref[1]:
             info["verdict"] = "MISMATCH"
             # A mismatch at ANY input is a disagreement; the record says which
             # of them the proof was generated for, because that is what decides

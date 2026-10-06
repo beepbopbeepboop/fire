@@ -1710,79 +1710,10 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # flush cannot be done from a worktree (the CAS is machine-wide and shared), and
 # a version bump retires exactly the entries whose key cannot tell the two runs
 # apart.
-#
-# v5 is the same argument about the OTHER half of `LEAN_PATH`, which v4 left
-# out and which is now the whole of the search path `_run_lean` builds: the
-# proof's own DIRECTORY, which comes FIRST. `_run_lean` puts it there and runs
-# `lean` with `cwd` set to it, so a sibling `.lean`/`.olean` beside the proof can
-# satisfy an import and — first on the path — can even shadow `ProofLib` itself.
-# The key recorded the proof's bytes and the library's `.olean` digests and
-# neither of them says what else that directory held, so one directory's verdict
-# replayed for another's. Keyed on the directory's CONTENTS
-# (`_proof_search_digest`) rather than on its path: see that function for why
-# hashing the path would be worse than the hole.
-_VERDICT_VERSION = b"formal-proof-verdict-v5"
+_VERDICT_VERSION = b"formal-proof-verdict-v4"
 # -1 in the `lib_sorries` field, distinct from 0: "not measured" and "measured,
 # no holes" are different facts and the report prints them differently.
 _LIB_UNMEASURED = -1
-
-
-# What a file beside the proof can be to `lean`, and nothing else: an import is
-# resolved to a module name, and Lean looks for exactly these two suffixes.
-PROOF_SEARCH_SUFFIXES = (".lean", ".olean")
-
-
-def _proof_search_digest(proof_path: str) -> bytes:
-    """A digest of everything the proof's OWN DIRECTORY can supply to `lean`.
-
-    `_run_lean` hands `LEAN_PATH` the proof's own directory FIRST and runs the
-    elaborator with `cwd` there, so what that directory holds is part of what the
-    verdict MEANS and not part of where the file happens to sit. Two properties
-    make it load-bearing, and both are silent:
-
-      * a sibling module can satisfy an `import` the library cannot, so the same
-        proof bytes elaborate against different sources in two directories;
-      * because the directory comes FIRST, a sibling named `ProofLib.lean`
-        SHADOWS the library whose `.olean` digests this key does hash — so the
-        key could record the library and still be about a different `ProofLib`.
-
-    A key that cannot see any of this publishes one directory's answer under
-    every directory's name, and the loser is a red no edit to the proof can
-    clear, which is the shape `CLAUDE.md`'s `checked_run.py` rule exists to
-    prevent for the ordinary result cache.
-
-    **CONTENT, and never the directory's path.** `scratch_dir` above is
-    `mkdtemp`, and `formal/build.py` writes each proof beside its own output
-    into a per-run temporary directory — so hashing the path would give every run
-    a fresh key and retire the cache for every caller that uses one
-    (`tools/formal_proof_census.py` would re-elaborate all 52 examples from
-    scratch on every invocation). What can change the verdict is the SET of
-    modules this directory offers and what is in them, so that is what is
-    hashed: each name, plus the content of the file under it. The proof itself
-    is included, which is redundant with the bytes `proof_verdict_key` already
-    appends and is left in on purpose — the listing is "everything here", and an
-    exclusion is one more thing to keep in step.
-
-    An unreadable directory is a digest that says so, rather than an empty one:
-    "I could not see what was beside the proof" and "there was nothing beside the
-    proof" are different facts and only the second is a clean bill of health.
-    """
-    directory = os.path.dirname(os.path.abspath(proof_path))
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError:
-        return b"\0unreadable:" + directory.encode("utf-8", "replace")
-    parts = []
-    for name in names:
-        if not name.endswith(PROOF_SEARCH_SUFFIXES):
-            continue
-        entry = os.path.join(directory, name)
-        try:
-            body = _digest(entry)
-        except OSError:
-            body = b"\0unreadable"
-        parts.append(name.encode("utf-8", "replace") + b"\0" + body)
-    return b"\0".join(parts) + b"\0"
 
 
 def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
@@ -1794,7 +1725,6 @@ def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
         parts.append(_digest(olean) if os.path.isfile(olean) else b"\0missing")
     with open(proof_path, "rb") as f:
         parts.append(f.read())
-    parts.append(_proof_search_digest(proof_path))
     return "proof/" + cas.hash_parts(*parts)
 
 
@@ -2180,17 +2110,13 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     #     No directory 'ProofLib' or file 'ProofLib.olean' in the search path
     #     entries: <proofdir>  ./lib  <toolchain>
     #
-    # **which was a verdict about the PROOF and not about the program.** It is
+    # **which is a verdict about the PROOF and not about the program.** It is
     # reported at `1:0`, before the theorem that was to be checked is read at
-    # all, so every measurement taken that way was a measurement of a broken
-    # search path. Two things about that are now closed and both are visible in
-    # the key: the entries published while this path was relative were retired by
-    # `_VERDICT_VERSION` v4 (the CAS is machine-wide, so a version bump and not a
-    # flush is the only way a worktree can retire them), and the OTHER half of
-    # this `LEAN_PATH` — the proof's own directory, which is FIRST and which
-    # `proof_verdict_key` could not see at all — is keyed on its CONTENTS by
-    # `_proof_search_digest`. The absolute path below is the half that fixes the
-    # run; the key is the half that stops the wrong answer from outliving it.
+    # all, so every measurement taken that way is a measurement of a broken
+    # search path — and it is CACHED, because `proof_verdict_key` hashes the
+    # proof's bytes and the library's `.olean`s and neither of them records how
+    # the run found the library, so one caller's relative root replays the same
+    # false failure for every later caller with the same file.
     env["LEAN_PATH"] = os.pathsep.join(
         (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,

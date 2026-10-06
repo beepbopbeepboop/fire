@@ -1368,22 +1368,8 @@ def test_private_only_module_rejected(tmpdir, shared):
 # `std/reflection/function.mojo` and `std/utils/_select.mojo` are the real
 # stdlib instances, and they are four different answers.)
 NO_API_SHAPES = [
-    # A constants-only module whose values DO NOT FOLD is still refused, and the
-    # reason it is refused is not the one that used to be given for every
-    # constants-only module. Before 2026-10-05 this row read
-    # `comptime stdin = 0` — a folded literal — and expected a refusal, which
-    # made it a test FOR the gap `a_constants_only_module_is_importable`
-    # closed: a module whose whole API is a value a manifest can carry is a
-    # module with a complete API, and building it is the fix, so a test cannot
-    # ask for the refusal any more. What is still refused is the half with no
-    # way across the boundary at all — `FileDescriptor(0)` is a struct
-    # CONSTRUCTION, `fold_module_value` has no arm for it, so there is no value
-    # to publish and no symbol either — and that is `std/sys/_io.mojo`, which
-    # is 23 of the 59 files on the row
-    # (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4).
-    ("constants only, and no value this build can fold",
-     "comptime stdin = FileDescriptor(0)\ncomptime stdout = FileDescriptor(1)\n",
-     "no function and no type"),
+    ("constants only, no function and no type",
+     "comptime stdin = 0\ncomptime stdout = 1\n", "no function and no type"),
     ("every public function is a generic template",
      "def pick[T: Copyable](a: T, b: T, c: Bool) -> T:\n  return a\n",
      "GENERIC template"),
@@ -1406,13 +1392,6 @@ def test_refusal_names_the_real_reason(tmpdir, shared):
     constants-only module is not a gap in anything. A refusal that is wrong
     about the file is worse than a bare error, because it sends the reader
     looking for a struct that is not there.
-
-    The constants-only row is the one whose SUBJECT changed under it: a module
-    whose every name folds to a literal now builds (see
-    `a_constants_only_module_is_importable`), so the row asks about the
-    constants-only module that cannot build — `std/sys/_io.mojo`'s shape — and
-    the two are told apart by whether a value can cross the boundary at all,
-    which is the whole of the difference between them.
     """
     for label, body, expected in NO_API_SHAPES:
         src = os.path.join(tmpdir, "noapi.mojo")

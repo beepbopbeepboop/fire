@@ -8,7 +8,7 @@ answer to "what is the FIRST thing this file cannot build" and the wrong answer
 to "what is wrong with this file", and the sweep's own work map says so in one
 line — *"FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the first
 refusal its build walk reaches, so fixing one moves the file to the next with the
-count unchanged"* (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3). This tool
+count unchanged"* (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3). This tool
 measures the rest of the chain, one link per round.
 
 WHAT IT DOES, per round

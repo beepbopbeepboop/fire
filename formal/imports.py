@@ -240,18 +240,6 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
-    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
-    # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
-    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
-    # this tree returns NO SPEC for each, which is the rule at the top of this
-    # section applied: the object is missing from the target. `_gdbm` and
-    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
-    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
-    # leading underscore), so this moves the PUBLIC unclassified count by zero;
-    # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
-    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -496,11 +484,9 @@ HOST_MODELLED = frozenset((
     #     the finding: the formal backends ERASE ANNOTATIONS, so a
     #     `from typing import Optional` resolves as soon as the module EXISTS
     #     and `Optional` need not be in its export table, because nothing ever
-    #     reads the name. `formal/elf.py:25` imports `Optional` and
-    #     `type_system.py:13` imports `Optional, Dict, Set, Tuple, Any` — six
-    #     imported names across the two files, five distinct, every one of the
-    #     six in an annotation or a parameter default — which is why the module
-    #     is one function long. `test_formal_small_hosts.py` pins that
+    #     reads the name. `formal/elf.py` and `type_system.py` put all seven of
+    #     their imported names in annotations or in a default, which is why the
+    #     module is one function long. `test_formal_small_hosts.py` pins that
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
@@ -545,36 +531,17 @@ HOST_MODELLED = frozenset((
     #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
     #     number, which is a status because there are no exceptions here
     #     (FORMAL.md phase 7).
-    #   `random`  — LEFT 2026-10-05 for `formal/hostmods/random.mojo`, and it is
-    #     the row the `--host` ranking measured as REACHABLE rather than
-    #     unreachable (`arc4random_buf` is already in `tempfile.mojo`, and
-    #     CPython's `Random` is a Mersenne Twister, which is integer arithmetic
-    #     over a 624-word state). Three names — `seed`, `getrandbits`,
-    #     `randrange` — checked against CPython's own `random` by
-    #     `test_formal_random.py` on both backends, over the two callers' own
-    #     seeds and ranges (`test_formal_time.py`'s 62-bit
-    #     `randrange(1, 4e18)` is the widest, and it is why `getrandbits` is
-    #     here rather than private).
-    #
-    #     WHAT THE MODULE DOES NOT MOVE is the other half of the row: a
-    #     `random.Random(n)` INSTANCE is an object with 624 words behind a
-    #     pointer, which is `formal/hostmods/random.mojo`'s own top section and
-    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
-    #     Two of the row's four files move and two stop on the instance rather
-    #     than on the import, which is the honest number.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     #
-    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`,
-    #     `getrandbits` and `randrange`, a Mersenne Twister over a 624-word
+    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`
+    #     and `randrange` only, a Mersenne Twister over a 624-word
     #     module-level state, every answer checked against CPython's own
     #     `random` by `test_formal_random.py` on BOTH backends: the two call
     #     sites in this repository verbatim (forty draws of
     #     `randrange(140, 5000)` after `seed(23)`, and a hundred and twenty
     #     draws of `randrange(1, 4_000_000_000 * 10**9)` after `seed(17)`),
-    #     the whole `getrandbits` width matrix (7 seeds x widths 1..64 = 448
-    #     answers, `k = 64` compared modulo `2**64` because its value can
-    #     carry the sign bit), 700 draws so the 624-word
+    #     one case per branch of `getrandbits`, 700 draws so the 624-word
     #     twist is inside the corpus, fifteen seeds of one, two and three key
     #     words in both signs, and seven widths just under a power of two so
     #     the rejection loop runs.
@@ -1652,7 +1619,7 @@ def imported_modules(stmts) -> list:
     return out
 
 
-def imported_bindings(stmts) -> dict:
+def import_bindings(stmts) -> dict:
     """`{local name: (module as spelled, defining name)}` for this file.
 
     THE missing half of `imported_modules`. That function answers "which
@@ -1661,15 +1628,7 @@ def imported_bindings(stmts) -> dict:
     answer for `from m import f` and `from m import f as g`. This one answers
     "which name in THIS file means which export of which module", which is the
     question a call site asks, and the two are different questions about the
-    same statements. The names are parallel on purpose: one is which MODULES,
-    this is which NAMES.
-
-    NOT `model.import_bindings`, which is the per-STATEMENT reader this one
-    folds — `(bound, module, defined)` triples for one `import` line, a list
-    rather than a table, and a function of one statement rather than of a
-    file's. They were the same name for a while, which is one letter apart and
-    two different return shapes, and a reader inside this very body could have
-    swapped them without the type checker saying anything.
+    same statements.
 
     It exists because the answer was being reconstructed at the call site, from
     a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare
@@ -2054,7 +2013,7 @@ def module_templates_by_path(path: str, project_root: str = None) -> dict:
     the demand belongs to the module that owns the definition, not to the one
     whose name the importer happened to import. `std/collections/__init__.mojo`
     re-exporting `BinaryHeap` is the measured case, and it is 162 of the 165
-    files in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1.
+    files in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1.
 
     Which declared names are templates is `formal/monomorph.py`'s question and is
     answered there by `reflect.export_exclusions` — the same rule the export
@@ -3097,7 +3056,7 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
 
     The alias is filtered by the SAME three rules as the original, applied to
     the alias's own spelling: a name this module defines wins over any import
-    (the precedence `imported_bound_names` and `imported_bindings` both state), a
+    (the precedence `imported_bound_names` and `import_bindings` both state), a
     private alias is not published, and an inert one is not either. The
     original name's own filters are unchanged, so a private definition brought
     in under a public alias stays out of the manifest exactly as before rather
@@ -3169,7 +3128,7 @@ def library_free_edges(importer_path: str, stmts: list,
     `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
     swept files their build, because `build_module_dylib` refused the library
     whether or not the importing chain wanted it
-    (the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1).
+    (`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1).
 
     **Which names are templates is read from `reflect.export_exclusions`**, by
     `formal/monomorph.py::template_names`, which is the SAME rule
@@ -3272,7 +3231,7 @@ def library_free_edges(importer_path: str, stmts: list,
         # BOTH spellings, and the reason is an ALIAS: `from x import f as g`
         # binds `g` here and the symbol the link line has to carry is `x`'s
         # `f`, because the export table is keyed by the DEFINING name
-        # (`reexported_names`' third element, and `imported_bindings`' "defining
+        # (`reexported_names`' third element, and `import_bindings`' "defining
         # name"). Judging the edge by the local spelling alone would exempt an
         # edge that binds `f` under another name — and the consumer that calls it
         # under either spelling then has no library to bind, which is measured:
@@ -3326,22 +3285,18 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    source_of = {}
-    for src, (bindings, _why) in (library_free or {}).items():
+    for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.  The
-            # SOURCE is the defining module's, which is the key this table is
-            # built under — the refusal reads it to name the rule that applied.
+            # neither has a callee, so the refusal has to reach either.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
-            source_of.setdefault(bound, src)
-            source_of.setdefault(defining, src)
     if not exempt:
         return
-    for scope, body in _enclosing_scopes(stmts):
-        for node in M.iter_nodes(body):
+    for st in stmts or []:
+        fn_name = st.name if isinstance(st, F.FunctionDef) else ""
+        for node in M.iter_nodes(getattr(st, "body", None) or [st]):
             if not isinstance(node, F.CallExpr):
                 continue
             callee = node.func
@@ -3351,70 +3306,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
-            rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
-                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
-
-
-def _enclosing_scopes(stmts: list) -> list:
-    """`[(name to print for a diagnostic, body to walk), …]` for `stmts`.
-
-    **The NAME is half of what this walk is for, and it was empty for every
-    call inside a struct's method.** The refusal this feeds is
-    `model.imported_callee_refusal`, whose whole value is that it names the
-    function the call is in, and the walk computed that name as
-    `st.name if isinstance(st, F.FunctionDef) else ""` over
-    `iter_nodes(getattr(st, "body", None) or [st])` — and a `StructDef` has no
-    `body` at all, so every one of its methods was walked under `""` through the
-    walker descending into them. Measured on the `sweep43:export-gate` row over
-    its own 148-file scope on `master` 2026-10-05: **133 of the 145 refusals
-    that gate produced named no function at all**, and the one file the reader
-    is then sent to is `std/memory/alloc.mojo`, which has four `write_to`
-    methods and three `FormatStruct(…)` sites in it.
-
-    So the walk is per FUNCTION, and a method is reached through its struct: the
-    diagnostic says `Allocation_1_T_1.write_to`, which is the spelling the
-    reader can search for and the name the symbol table carries — an
-    instantiated struct's methods are emitted under the mangled struct's name,
-    so the bare method name would be a name no reader of the image can find.
-
-    One reader, and it is `model.struct_methods` — the same one
-    `find_method_owner` and `structs_declaring_method` ask, because "the
-    methods a struct declares" is one question with one answer. A `TraitDef`'s
-    methods are reached the same way, with the trait's name: a trait method body
-    is compiled into whatever struct implements it, so naming the trait is the
-    only scope the source has.
-
-    **The struct itself is still yielded, LAST and under `""`, and that is a
-    coverage requirement rather than tidiness.** `iter_nodes` over a `StructDef`
-    reaches its FIELDS as well as its methods, and a field's declared type and
-    default are expressions like any other — so dropping the struct from the
-    walk would stop asking this gate about a bare call in a field initializer.
-    Yielding it last keeps that question asked (under the empty name, which is
-    the truth: a field initializer is in no function) while the per-method walks
-    come first, so the more specific scope is the one reported whenever both
-    could answer.
-
-    A top-level statement that is neither a function, a struct nor a trait is
-    walked under `""` — a module-level store is the one place there is no
-    enclosing function to name, and that is what the empty string then means
-    rather than "the walk did not look".
-    """
-    from formal import model as M                   # lazy — cycle
-    out = []
-    for st in stmts or []:
-        if isinstance(st, F.FunctionDef):
-            out.append((st.name, st.body))
-        elif isinstance(st, (F.StructDef, F.TraitDef)):
-            for m in M.struct_methods(st):
-                out.append((f"{st.name}.{m.name}", m.body))
-            out.append(("", [st]))
-        else:
-            out.append(("", [st]))
-    return out
+                M.imported_callee_refusal(callee.name, sym, fn_name))
 
 
 def own_module_identity(source_path: str, project_root: str = None) -> str:

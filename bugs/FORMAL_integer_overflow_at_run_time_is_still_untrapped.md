@@ -127,65 +127,6 @@ only on the paths that pass it") and turned the TWO-call version into a named
 refusal; the ONE-call-on-a-untaken-path version is not yet named and is a
 crash-shaped failure.
 
-## Status, 2026-10-05: step 1 LANDED, and it is narrower than "not reachable on
-## the concrete test input" — the filter is the emitter's own `cond_branches`
-
-The obstacle below is named rather than proved past. That is all step 1 asks
-for, and it is worth having on its own: it converts `exit 1` plus eleven Lean
-errors into one sentence that names the two facts a reader needs.
-
-**What landed** is `formal/arm64_proof_gen.py::_reached_without_a_condition`,
-asked where `_calls` is computed, and a refusal when it answers False:
-
-```
-build: no proof was generated: … The generator's own word for it: universal
-theorem: the call at 0x100000448 -> 0x100000468 is the halt address, and it is
-behind a CONDITIONAL, so whether the run reaches it is a fact about the test
-input rather than about the CFG. …
-```
-
-**The filter is `info["cond_branches"]`, and that is not a detail — it is the
-whole of what keeps the check the right SIZE.** The doc's step 1 says "not
-reachable on the concrete test input", which is the question about the RUN; the
-generator cannot evaluate a condition, so the question is approximated with
-"reachable on a path that crosses no SOURCE conditional", and the difference is
-measured both ways:
-
-| program | source conditionals | before | after |
-|---|---:|---|---|
-| `if n > 100: printf("hi"); return 0` | 1 | exit 1, eleven Lean errors | **refused by name** |
-| `printf("hi"); return 0` | 0 | **proves** (exit 0, proof checked) | proves |
-| `a // b` (the div0 rows' own program) | 0 | **proves** | proves |
-
-The two controls are why a wider filter is wrong. `printf` with no `if` is five
-`cbz`-kinded blocks wide — the `printf` expansion's own structure — so blocking
-on every conditional would refuse a program that proves. And `a // b` puts its
-`__div0` call on the TAKEN edge of the guard's own `CBZ Xb`, which is not a
-source conditional at all and whose proof
-`test_formal_call_proof_gen.py`'s `TestTheZeroDivisorGuardAgainstLean` READS; a
-filter that cannot tell the two removes a measurement other rows depend on. So
-an emitter-internal branch is followed down BOTH edges (the over-approximating
-answer, and the right one for a question whose failure mode is a false
-refusal), and only a branch the emitter recorded as testing an `if`/`while`/
-ternary refuses.
-
-**Corpus: nothing moved.** All 52 `formal/examples/*.mojo` regenerate to the
-same verdict (`compile_formal(prove=True, check=False)`, no Lean): 48 generated,
-the same 4 refused as before, because **no example in the corpus has an
-unfollowable call at all** except `floordiv` and `udivmod`, and both already
-refuse on the TWO-call rule above.
-
-**What is still missing is step 2, and this change does not touch it.** A trap
-BLOCK the walk treats as terminal — so a `BL` in a block that cannot return is
-not an unfollowable call — is what would let a call behind a condition be
-DISCHARGED rather than refused, and the trap block also has to be excluded from
-the source-condition mapping (the mis-attribution `_cfg_blocks`' own
-`either`/`both` comment warns about). Only after that is step 3 — flipping
-`M.int_overflow_traps` from `refuse-if-foldable` to `emit` — a real fix rather
-than a better diagnostic. The `test_variable_operands_are_still_untrapped` row
-in `test_formal_int_semantics.py` still asserts the current (wrong) answer, and
-it is still the row that has to change.
-
 ## The next step, in order
 
 1. **Name the limit, so it is a refusal rather than a Lean error.** In

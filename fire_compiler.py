@@ -562,7 +562,7 @@ class Module:
 class Comprehension:
     kind: str     # list / set / dict
     element: object
-    value: object = None     # dict VALUE (element holds the dict key)
+    key: object = None     # dict key
     generators: list = field(default_factory=list)
     line: int = 0
     col: int = 0
@@ -1148,60 +1148,6 @@ def for_target_names(target: object) -> list[str]:
     return [name] if isinstance(name, str) and name else []
 
 
-def for_target_tree(target: object):
-    """A for/comprehension target string parsed into its leaf/nesting tree.
-
-    `'i'` -> `'i'`; `'(a, b)'` -> `['a', 'b']`; `'a, b'` (the comprehension
-    `Generator.target` spelling, no surrounding parens) -> `['a', 'b']`;
-    `'(a, (b, c))'` -> `['a', ['b', 'c']]`; `'*rest'` -> `'*rest'` (a starred
-    leaf keeps its star, the same contract `for_target_names` gives). Returns
-    None when a leaf is not a plain identifier.
-
-    This is the NESTED companion to `for_target_names`, which flattens: the
-    consumers that only need the leaf NAMES want the flat list, but a codegen
-    that UNPACKS each group needs the shape, and recovering it from the flat
-    list is impossible. The top-level comma split is `target_slots`, so a
-    nested group's commas are not torn (`for a, (b, c)` is two slots, not
-    three). Both formal backends read this one function, so a `for` target
-    cannot be nested on one architecture and flat on the other.
-    """
-    if not isinstance(target, str):
-        return None
-    t = target.strip()
-    # Only PARENS are peeled here, matching the emitter this replaced: a
-    # comprehension's list-pattern target `for [a, b] in ...` is the parser's
-    # `[a, b]` spelling and is not unwrapped into a tuple target by this
-    # function (the record of that being a real distinction is
-    # `_lbn_split_commas`'s docstring, which has the bug it fixed).
-    if t.startswith("(") and t.endswith(")"):
-        parts = target_slots(t[1:-1])
-        tree = []
-        for p in parts:
-            child = for_target_tree(p)
-            if child is None:
-                return None
-            tree.append(child)
-        return tree if tree else None
-    if "," in t:
-        parts = target_slots(t)
-        if len(parts) > 1:
-            tree = []
-            for p in parts:
-                child = for_target_tree(p)
-                if child is None:
-                    return None
-                tree.append(child)
-            return tree if tree else None
-    if t.startswith("*"):
-        rest = t[1:].strip()
-        if rest.isidentifier():
-            return "*" + rest
-        return None
-    if t.isidentifier():
-        return t
-    return None
-
-
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 
@@ -1268,16 +1214,9 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
     needs to know whether a newline inside the literal is content, and whether
     the literal has to be collapsed to a placeholder). The second of those was
-    a bug of its own, and it is named by what it did rather than by a doc
-    path: `fire_compiler.py` refused a PEP 701 f-string whose replacement
-    field spans **lines**, which `test_formal_libc_symbol.py` was the one
-    file in the 2026-10-04 sweep to meet (its refusal read `unterminated
-    string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
-    and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
-    there. With no shared predicate the scanner asked "is there a line end
-    here?" without ever asking "am I inside code?", and CPython's rule for
-    a replacement field is that it MAY span lines.
+    the defect `cca2a17f` fixed: with no shared predicate the scanner asked "is
+    there a line end here?" without ever asking "am I inside code?", and
+    CPython's rule for a replacement field is that it MAY span lines.
 
     Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
     `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
@@ -1511,16 +1450,6 @@ class Token:
     value: str
     line: int = 0
     col: int = 0
-
-
-def format_token(tok: Token) -> str:
-    """One token's line in the `.tok` dump. A typed, top-level function (and
-    not a nested `def format_token(tok)` inside `fire.py`'s `--dump` handler):
-    with `tok` untyped, `tok.kind` was a dynamic read of a word, and the
-    self-hosted binary printed it as a DECIMAL (`Token(kind=4382844720, ...)`)
-    into every `.tok` it wrote, so no stage2 `.tok` could equal stage1's."""
-    val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
-    return f"Token(kind={tok.kind}, value={val_repr}, line={tok.line}, col={tok.col})"
 
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
@@ -2279,11 +2208,9 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # per multi-line f-string. What makes such a literal
                     # possible at all is `_scan_string_end`'s replacement-field
                     # depth; without that this branch is dead code, which is the
-                    # shape the bug had — the first of the two halves was
-                    # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
-                    # §3.1's `b13` row), and held by
-                    # `test_string_literal_lexing.py`.
+                    # shape of the bug
+                    # `cca2a17f` fixed — the first of the two halves was missing
+                    # and this is the second.
                     interpolated = _prefix_is_interpolated(src[start:i])
                     end = _scan_string_end(src, i, c, False, interpolated)
                     if end < 0:
@@ -2971,7 +2898,7 @@ def _collect_free_names(node, bound: set, out: list):
             _target_names(gen.target, nested_bound)
         if node.kind == 'dict':
             _collect_free_names(node.element, nested_bound, out)
-            _collect_free_names(node.value, nested_bound, out)
+            _collect_free_names(node.key, nested_bound, out)
         else:
             _collect_free_names(node.element, nested_bound, out)
         for gen in node.generators:
@@ -3082,7 +3009,7 @@ class _GenexpDesugarer:
         free: list = []
         if node.kind == 'dict':
             _collect_free_names(node.element, bound, free)
-            _collect_free_names(node.value, bound, free)
+            _collect_free_names(node.key, bound, free)
         else:
             _collect_free_names(node.element, bound, free)
         for i, gen in enumerate(gens):
@@ -3105,7 +3032,7 @@ class _GenexpDesugarer:
         receivers: set = set()
         if node.kind == 'dict':
             _collect_receiver_names(node.element, receivers)
-            _collect_receiver_names(node.value, receivers)
+            _collect_receiver_names(node.key, receivers)
         else:
             _collect_receiver_names(node.element, receivers)
         for i, gen in enumerate(gens):
@@ -6007,7 +5934,7 @@ class Parser:
             if self._is_kw("for"):
                 gens = self._parse_generators()
                 self._expect("RBRACE")
-                return Comprehension(kind="dict", element=first, value=val, generators=gens)
+                return Comprehension(kind="dict", element=first, key=val, generators=gens)
             pairs = [(first, val)]
             while self._peek().kind == "COMMA":
                 self._advance()
@@ -8334,7 +8261,7 @@ def emit(node, indent: int = 0) -> str:
         gens = " ".join(f"for {g.target} in {emit(g.iterable)}" + "".join(f" if {emit(c)}" for c in g.conditions) for g in node.generators)
         if node.kind == "list": return f"[{emit(node.element)} {gens}]"
         if node.kind == "set":  return "{" + f"{emit(node.element)} {gens}" + "}"
-        if node.kind == "dict": return "{" + f"{emit(node.element)}: {emit(node.value)} {gens}" + "}"
+        if node.kind == "dict": return "{" + f"{emit(node.element)}: {emit(node.key)} {gens}" + "}"
         return f"({emit(node.element)} {gens})"
     if isinstance(node,ExprStmt): return f"{pad}{emit(node.value, 0)}"
     if isinstance(node,AssignStmt): return f"{pad}{emit(node.target)} = {emit(node.value, 0)}"

@@ -155,40 +155,6 @@ TILE_CALL_CPYTHON = "18"                # (0+3) + (3+3) + (6+3), tile(0, 10, wor
 TWO_BRACKET_CALL_CPYTHON = "7"           # add(2, 5) — the 10 is a third argument
 BARE_AND_VIA_LOCAL_CPYTHON = "406\n107"  # bare: 100+101+102+103; local: 7+100
 
-# `functools.reduce`'s own shape, which is the ONE host-module function in
-# `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`'s census that a
-# first-class callable plus a LIST PARAMETER would make writable — and which was
-# refused until 2026-10-05 on the second half alone:
-#
-#     build: len(xs) is len() of a value classified as 'int', and an integer
-#     has no length: there is no count to read at offset 0 …
-#
-# about a list the same function SUBSCRIPTS.  The two-argument call through the
-# parameter is the part that already worked (a function value is a code
-# address), so this row is the pinning of the `len` half reaching it.
-#
-# One call site per parameter, because the evidence for a parameter's kind is
-# UNANIMITY over every call site of the name
-# (`formal/model.py::parameter_kinds_by_call_site`).
-REDUCE_SHAPE = """\
-def reduce(func, xs, initial):
-    var acc = initial
-    var i = 0
-    while i < len(xs):
-        acc = func(acc, xs[i])
-        i = i + 1
-    return acc
-
-def add2(a: Int, b: Int) -> Int:
-    return a + b
-
-def main():
-    print(reduce(add2, [1, 2, 3], 0))
-    return 0
-"""
-
-REDUCE_SHAPE_CPYTHON = "6"
-
 # `func(i)` where `func` arrived as a parameter: the whole body of
 # `stdlib/std/algorithm/backend/cpu/map.mojo`, which is what the 2026-10-02
 # sweep classified `not-answerable/unresolved-extern` on BOTH architectures
@@ -329,227 +295,6 @@ def main(n: Int) -> Int32:
     var f = 17
     return f(n)
 """
-
-# A module global whose module-level value is a FUNCTION, called BY NAME. The
-# `__DATA` slot holds the entry address the module body stored, so `g(...)` has
-# to branch through that word. `callee_is_a_bound_value` deliberately excludes a
-# `global` name (`global f; f()` is a call to the module's function), so before
-# `model.callee_is_a_module_slot_function` this emitted a `BL g` against a symbol
-# nothing provides — refused by the bind audit four stages later, while
-# `fire.py run` answers 42. The top-level `main()` is required: the module has a
-# body, so the body is the entry and `main` runs only because the source calls it.
-MODULE_GLOBAL_FUNCTION_CALLED = """\
-def dbl(x: Int) -> Int:
-    return x * 2
-
-var g = dbl
-
-def main() -> Int32:
-    global g
-    print(g(21))
-    return 0
-
-main()
-"""
-
-# §5b's site shapes: the three ways a statement writes a value into a name (or
-# into the container the name holds) that the reader did not see, plus the two
-# it saw but read backwards. Each was a wrong answer on both architectures
-# before `formal/model.py::_container_element_writes` existed, and they are
-# here as one table because they are one defect — see
-# `test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see`.
-#
-# The `apply_arg` preamble is shared by all of them, which is the point: the
-# reader is reached only where a callee actually branches through a parameter,
-# so every shape below is the SAME call and only the way the value was written
-# differs.
-NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME = (
-    # A SUBSCRIPT STORE. CPython runs this and answers 6 — the store put a
-    # function at element 0 — and this path used to REFUSE it, because the walk
-    # saw only the literal and claimed unanimity over an element the source had
-    # replaced.
-    ("passing/element-store", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def dbl(x: Int) -> Int:
-    return x * 2
-
-def main() -> Int32:
-    var xs = [10, 20, 30]
-    xs[0] = dbl
-    print(apply_arg(3, xs[0]))
-    return 0
-"""),
-    # A MIXED literal. The function is element 0. This path used to REFUSE it:
-    # `caller_local_element_holds` discarded the phrase it could not classify
-    # (`dbl`) and then found the rest unanimous ("an integer"), which is the one
-    # thing a reader in this position must not do — an unclassified value is the
-    # evidence that says STOP.
-    ("passing/element-mixed", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def dbl(x: Int) -> Int:
-    return x * 2
-
-def main() -> Int32:
-    var xs = [dbl, 17]
-    print(apply_arg(3, xs[0]))
-    return 0
-"""),
-    # A dict STORE of a function. Same shape as the first row in the other
-    # container, and it is here because the two spellings got two different
-    # answers: the list store was refused and this one was not.
-    ("passing/dict-store", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def dbl(x: Int) -> Int:
-    return x * 2
-
-def main() -> Int32:
-    var d = {"k": 17}
-    d["k"] = dbl
-    print(apply_arg(3, d["k"]))
-    return 0
-"""),
-    # A dict LITERAL of a function. Never refused, and still not — the control
-    # for the dict row below.
-    ("passing/dict-literal", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def dbl(x: Int) -> Int:
-    return x * 2
-
-def main() -> Int32:
-    var d = {"k": dbl}
-    print(apply_arg(3, d["k"]))
-    return 0
-"""),
-)
-
-# The three shapes that are a REFUSAL, and the two that are an ANSWER, with the
-# `holds` phrase each is expected to be refused for. Separate from the table
-# above because a `refuse:` row cannot say that a build SUCCEEDS, so these are
-# run and checked against the exit status the interpreter gives on the same text.
-NOT_AN_ADDRESS_MISSING_WRITES = (
-    # An `append` is the element the reader could not see at all: `xs = []`
-    # states no element, so the reader was silent and the image was emitted.
-    # Measured SIGBUS 138 on arm64 and SIGSEGV 139 on x86-64.
-    ("passing/append", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def main() -> Int32:
-    var xs = []
-    xs.append(17)
-    return apply_arg(3, xs[0])
-""", "holds an element read out of a container literal"),
-    # The same append, but the index is 0 and every literal holds more than one
-    # element — so the append landed at index 2 and `xs[0]` is still the `10`.
-    # This is the row that says the reader reads POSITION and not just the set
-    # of values: the container here really does hold a function.
-    ("passing/append-past-the-index", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def dbl(x: Int) -> Int:
-    return x * 2
-
-def main() -> Int32:
-    var xs = [10, 20]
-    xs.append(dbl)
-    return apply_arg(3, xs[0])
-""", "holds an element read out of a container literal"),
-    # A dict literal of a non-address, subscripted by a literal key. This is the
-    # doc's "a subscript of a DICT name", and the reason it is decidable is that
-    # the VALUES of a dict literal are as visible as a list's elements.
-    ("passing/dict-literal-of-an-int", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def main() -> Int32:
-    var d = {"k": 17}
-    return apply_arg(3, d["k"])
-""", "holds an element read out of a container literal"),
-    # A `global` slot. The value is bound by the MODULE's statement, which the
-    # function's own walk cannot see at all, so before `_global_slot_value` this
-    # built and trapped on both architectures. It is the one row here that needs
-    # a reader nobody had, and it is a refusal rather than an answer because the
-    # shape it pins is the slot holding something the source says is not an
-    # address — see the row's own note in the method below for why the
-    # function-valued global is NOT here.
-    ("passing/global-slot", """\
-var g = 17
-
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def main() -> Int32:
-    global g
-    return apply_arg(3, g)
-""", "holds an integer"),
-    # A subscript store of a NON-address: element 0 is replaced by an integer,
-    # and the reader must still see that the literal's `10` is not the whole
-    # story. This is `passing/element-store`'s mirror and it is what says the
-    # reader is not simply refusing anything with a subscript in it.
-    ("passing/element-store-of-an-int", """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def main() -> Int32:
-    var xs = [10, 20]
-    xs[0] = 17
-    return apply_arg(3, xs[0])
-""", "holds an element read out of a container literal"),
-)
 
 # The same fact as `CALL_THROUGH_A_PARAMETER`, one position out: a function of
 # THIS UNIT read as a WORD rather than called by name. It is this program's
@@ -951,17 +696,16 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
           f"something other than the export rule, which is the fact that "
           f"decides it: {text.strip()[-300:]}")
     check("a name with a leading `_` is private" in text,
-          f"the refusal does not say WHICH exclusion keeps this name off the "
-          f"boundary, and it is the private one: {text.strip()[-300:]}")
+          f"the refusal does not say WHICH of the four exclusions keeps this "
+          f"name off the boundary, and it is the private one: "
+          f"{text.strip()[-300:]}")
     check("doc/ABI.md" in text or "export rule" in text,
           f"the refusal does not name the rule that keeps the name off the "
           f"boundary: {text.strip()[-300:]}")
-    # …and it names the ONE rule that applied. `model.export_rule_for` reads
-    # `lib.mojo`'s own source through `reflect.export_exclusions`, so a private
-    # name no longer drags the generic-template clause along with it.
-    check("one per instantiation" not in text and "libSystem" not in text,
-          f"the refusal enumerates the rules that did NOT apply instead of the "
-          f"one that did: {text.strip()[-300:]}")
+    check("one per instantiation" in text or "monomorph" in text
+          or "instantiation is the boundary symbol" in text,
+          f"the refusal does not say WHY a name is not one boundary symbol: "
+          f"{text.strip()[-300:]}")
 
 
 def test_a_cross_module_specialization_of_a_published_name_says_brackets(tmpdir):
@@ -1249,42 +993,11 @@ def test_a_call_through_a_parameter_runs_on_both_architectures(tmpdir):
               f"not reach the function")
 
 
-def test_the_reduce_shape_runs_on_both_architectures(tmpdir):
-    """`functools.reduce`'s own three lines, both machines, against CPython.
-
-    The host-module doc's census says `reduce` is "two small steps from
-    writable" and names the second step — `len(seq)` over a list PARAMETER — as
-    the one `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_
-    parameter_subscripts.md` owned.  That step landed
-    (`formal/model.py::parameter_kinds_by_call_site`), so this row is what the
-    claim is now measured by: a two-argument call through an unannotated
-    parameter, over a list parameter whose length the callee asks for.
-
-    It is here rather than in a host-module suite because no `functools` module
-    exists and may not until decorator application lands
-    (`bugs/COMPILE_FAIL_decorator_application_dropped.md`), so without a row
-    nothing would notice the capability this doc's census is waiting on
-    regressing.
-    """
-    for arch in ARCHES:
-        root = os.path.join(tmpdir, f"reduce_{arch}")
-        os.makedirs(root)
-        with open(os.path.join(root, "prog.mojo"), "w") as f:
-            f.write(REDUCE_SHAPE)
-        build(root, arch=arch)
-        code, out = run_image(root, arch)
-        check(code == 0, f"[{arch}] the image exited {code}: {out[:300]}")
-        check(out == REDUCE_SHAPE_CPYTHON,
-              f"[{arch}] printed {out!r}, not {REDUCE_SHAPE_CPYTHON!r} — a "
-              f"two-argument call through a value over a list parameter whose "
-              f"len() this path could not read")
-
-
 def test_a_specialization_through_a_value_runs_on_both_architectures(tmpdir):
     """THE ROW: `workgroup_function[tile_size](offset)`, both machines, CPython.
 
     `std/algorithm/backend/tile.mojo:83`, and the shape the 163-file chain in
-    the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 lands on: a
+    `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 lands on: a
     specialization whose CALLEE is a word. Three things have to be true at once
     and none of them is implied by the other two, which is why this is one case
     and not three:
@@ -1581,203 +1294,6 @@ def test_a_list_of_functions_is_still_an_address_to_subscript(tmpdir):
               f"OF FUNCTIONS stopped reaching the function")
 
 
-def test_a_module_global_holding_a_function_is_called_through_its_slot(tmpdir):
-    """`var g = dbl` + `global g` + `g(21)`: builds, runs, answers 42.
-
-    A module global holding a FUNCTION, called by name. `callee_is_a_bound_value`
-    subtracts a `global` name on purpose (`global f; f()` is a call to the
-    module's function), so `g(21)` took the extern path and emitted a call
-    against a symbol named `g` that nothing provides. The second reader,
-    `model.callee_is_a_module_slot_function`, claims the call when the slot's
-    OWN module-level statement binds the name to a function of this unit, and
-    then the callee is loaded out of the `__DATA` slot and branched through.
-    The oracle is `fire.py run`, which answers 42 on the same text.
-    """
-    for arch in ARCHES:
-        root = os.path.join(tmpdir, f"gvfn_{arch}")
-        os.makedirs(root)
-        write_tree(root, {"prog.mojo": MODULE_GLOBAL_FUNCTION_CALLED})
-        build(root, arch=arch)
-        code, out = run_image(root, arch)
-        check(code == 0, f"[{arch}] the image exited {code}: {out[:300]}")
-        check(out == "42",
-              f"[{arch}] printed {out!r}, not '42' — a module global holding a "
-              f"function stopped being callable by name")
-
-
-def test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see(tmpdir):
-    """A store INTO a container, and a `global` slot: BOTH answers, both arches.
-
-    The five shapes of one defect, and they are here together because they are
-    one defect: `formal/model.py::_binding_values` recorded the statements that
-    BIND a name and nothing else, so every reader built on it was reasoning
-    about an incomplete set of the sites that decide what a word holds.
-
-    Two of these are ANSWERS, and they are the half that matters most — a
-    refusal of a correct program is worse than a build of a wrong one, because
-    it blocks code that works:
-
-      * `xs = [10, 20, 30]; xs[0] = dbl; …xs[0]` was REFUSED. The walk saw the
-        literal `[10, 20, 30]`, did not see the store, and claimed unanimity
-        over an element the source had replaced with a function.
-      * `xs = [dbl, 17]; …xs[0]` was REFUSED too, and for a sharper reason:
-        `caller_local_element_holds` did `phrases.discard(None)`, so the one
-        element it could not classify — the function — was thrown away and the
-        remaining "an integer" read as agreement. An unclassified value is
-        exactly the evidence that says STOP.
-
-    Four are refusals that used to be silence, and each built and trapped:
-    `xs = []; xs.append(17)` (SIGBUS 138 arm64 / SIGSEGV 139 x86-64), a module
-    `global g` bound at module level, a dict literal subscripted by key — which
-    is decidable because a dict's VALUES are as visible as a list's elements, and
-    no spelling of the SUBSCRIPT distinguishes `d[k]` from `xs[i]` while the
-    spelling of the BINDING does — and a subscript store of a non-address.
-
-    **The oracle is CPython and it is checked per program, not assumed**: a
-    `refuse:` row cannot say a build succeeds, so the five that build are run
-    and compared with the interpreter's own exit status on the same text. The
-    `global`-slot row is the one that needed a reader nobody had — the value is
-    bound by the MODULE's statement, which the function's own walk cannot see,
-    so it is asked of the slot table (`_global_slot_value`) as a site BESIDE the
-    function's own writes rather than instead of them.
-
-    `passing/dict-literal` is the boundary this whole table is measured against:
-    the same subscript of a dict literal holding a FUNCTION builds and answers 6,
-    which is what says the reader reads the values and not the spelling.
-
-    **The `global` row is here for the integer slot and NOT for the function
-    one, and the function one is now a passing case of its own.** `var g = dbl`
-    at module level with `global g` in `main` gives `g` a `__DATA` slot; a READ
-    of it as a value is the address the MODULE BODY stored, which the
-    `passing/element-store`-style rows below already cover, and a direct `g(21)`
-    was refused by the bind audit until `model.callee_is_a_module_slot_function`
-    claimed it — see
-    `test_a_module_global_holding_a_function_is_called_through_its_slot` below.
-    The integer slot stays here because `apply_arg(3, g)` on it is still the
-    passing-end refusal this table exists to pin.
-    """
-    for label, src in NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME:
-        root = os.path.join(tmpdir, f"wtan_{label.replace('/', '_')}")
-        write_tree(root, {"prog.mojo": src})
-        oracle = interpreter(root)
-        check("TypeError" not in oracle and "Error" not in oracle,
-              f"[{label}] the interpreter refused a program this row says is "
-              f"correct: {oracle.strip()[:200]!r}")
-        expected = oracle
-        for arch in ARCHES:
-            arch_root = os.path.join(root, arch)
-            os.makedirs(arch_root)
-            write_tree(arch_root, {"prog.mojo": src})
-            build(arch_root, arch=arch)
-            code, out = run_image(arch_root, arch)
-            check(code == 0, f"[{arch}] the {label} image exited {code}: "
-                             f"{out[:200]!r}")
-            check(out == expected,
-                  f"[{arch}] the {label} image printed {out!r}, not "
-                  f"{expected!r} — `fire.py run` is the oracle for this row")
-    # The four that must be REFUSED rather than built, each with the `holds`
-    # phrase it is refused FOR, so a reader that stopped classifying by the
-    # spelling would be caught here rather than by a build that happens to work.
-    for label, src, needle in NOT_AN_ADDRESS_MISSING_WRITES:
-        root = os.path.join(tmpdir, f"missing_{label.replace('/', '_')}")
-        os.makedirs(root)
-        write_tree(root, {"prog.mojo": src})
-        oracle = interpreter(root)
-        check("TypeError" in oracle or "not callable" in oracle,
-              f"[{label}] the interpreter answered {oracle.strip()[:200]!r} on "
-              f"a program whose only wrongness is calling a word that is not a "
-              f"function, so the oracle for this row is not saying what the row "
-              f"is about")
-        seen = {}
-        for arch in ARCHES:
-            arch_root = os.path.join(root, arch)
-            os.makedirs(arch_root)
-            write_tree(arch_root, {"prog.mojo": src})
-            text = text_of(build(arch_root, expect_ok=False,
-                                 arch=arch)).strip()
-            check("is called as a FUNCTION and the source says it holds" in text,
-                  f"[{arch}] the {label} case did not refuse with the "
-                  f"not-an-address message: {text[-300:]}")
-            check(needle in text,
-                  f"[{arch}] the {label} case refused without naming what the "
-                  f"element holds ({needle!r}): {text[-300:]}")
-            seen[arch] = text
-        check(seen["arm64"] == seen["x86_64"],
-              f"the two architectures refused the {label} case differently:\n"
-              f"  arm64:  {seen['arm64'][:200]}\n"
-              f"  x86-64: {seen['x86_64'][:200]}")
-
-
-def test_a_value_call_reader_cycle_is_a_refusal_not_a_hang(tmpdir):
-    """`var a = b; var b = a` must terminate, and terminate SILENTLY.
-
-    The three readers `value_argument_is_not_an_address`,
-    `caller_local_holds` and `caller_local_element_holds` are MUTUALLY
-    recursive: asking what `xs[0]` holds asks what each of its elements holds,
-    which asks what those names hold, which asks what THEIR bindings hold. A
-    two-name cycle in one function (`var a = b` and `var b = a`) is that
-    recursion with no base case.
-
-    It was reachable from the build, not only from a test harness: driving the
-    reader over every `.py` and `.mojo` in this repository with the
-    `parameters_called_through_a_value` conjunct dropped — the over-approximating
-    corpus check the subject doc's discipline requires — hit `RecursionError` on
-    real files before `_asked` existed. A hang in a build is worse than a wrong
-    answer, so this is a row and not a comment.
-
-    **The guard's contract is silence, not a verdict, and this row says so.**
-    A question already on the stack has no smaller instance of itself to reduce
-    to, so `a` cannot be decided from `b` and `b` cannot be decided from `a` —
-    the reader answers `None`, and `None` at this position means "this walk
-    cannot say", which is what makes a caller stay quiet. The BUILD therefore
-    still emits the image, and on this program the image traps — that is the
-    missed-write residual the subject doc states, not something the guard
-    claims to have fixed, and asserting a refusal here would be asserting a
-    capability the guard does not have. What is pinned is that the reader
-    answers, and that both architectures reach a verdict.
-
-    The guard's key is the `(function, name)` QUESTION rather than the function
-    alone, because asking two different names of one function is not a cycle and
-    a depth bound would refuse both.
-    """
-    cyclic = """\
-def apply_arg(size: Int, f):
-    var t = 0
-    var i = 0
-    while i < size:
-        t += f(i)
-        i += 1
-    return t
-
-def main() -> Int32:
-    var a = 17
-    var b = a
-    a = b
-    return apply_arg(3, a)
-"""
-    # The reader itself, asked directly: this is the precise assertion, and it
-    # is what fails (with RecursionError) if the guard is ever removed.
-    import fire_compiler as F
-    import formal.model as M
-    tree = F.Parser(F.py_tokenize(cyclic)).parse_module()
-    fns = {f.name: f for f in tree if isinstance(f, F.FunctionDef)}
-    check(M.caller_local_holds(fns["main"], "a") is None,
-          "a two-name cycle in one function did not read as silence")
-    check(M.caller_local_holds(fns["main"], "b") is None,
-          "a two-name cycle in one function did not read as silence")
-    # And the build reaches a verdict on both architectures rather than hanging.
-    for arch in ARCHES:
-        root = os.path.join(tmpdir, f"cycle_{arch}")
-        write_tree(root, {"prog.mojo": cyclic})
-        # `expect_ok=True` is the honest expectation: silence at this position
-        # emits the image, and the row above is what pins the SILENCE.
-        text = text_of(build(root, arch=arch)).strip()
-        check("RecursionError" not in text and "maximum recursion" not in text,
-              f"[{arch}] the two-name cycle came back as a RecursionError "
-              f"rather than an answer: {text[-300:]}")
-
-
-
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -1803,8 +1319,6 @@ TESTS = [
      test_a_local_shadowing_a_function_is_still_read_as_the_local),
     ("a call through a parameter runs, on both",
      test_a_call_through_a_parameter_runs_on_both_architectures),
-    ("functools.reduce's own shape runs, on both",
-     test_the_reduce_shape_runs_on_both_architectures),
     ("a specialization through a value runs, on both",
      test_a_specialization_through_a_value_runs_on_both_architectures),
     ("…and it reaches into a linked module, on both",
@@ -1815,12 +1329,6 @@ TESTS = [
      test_a_word_the_source_says_is_not_an_address_is_refused),
     ("…and a list of FUNCTIONS is still one, on both",
      test_a_list_of_functions_is_still_an_address_to_subscript),
-    ("a module global holding a function is called through its slot, on both",
-     test_a_module_global_holding_a_function_is_called_through_its_slot),
-    ("a write THROUGH a name is a site, on both",
-     test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see),
-    ("a two-name cycle is an answer, not a hang",
-     test_a_value_call_reader_cycle_is_a_refusal_not_a_hang),
     ("the two remaining refusals of a value call",
      test_the_two_remaining_refusals_of_a_value_call),
     ("a `global`-shadowed name is still a call to the C library",

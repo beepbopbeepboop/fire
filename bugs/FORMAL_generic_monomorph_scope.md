@@ -218,7 +218,7 @@ reason it is upstream of the library half.
 
 **The construct.** `std/algorithm/backend/tile.mojo`'s four `def tile[…]`
 overloads, called with a bracket of VALUES. This is the `uses:` row in
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1: 4 files, all of them using
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1: 4 files, all of them using
 `tile`.
 
 **Why it is a different feature with a different ABI.** A `T` is a type and the

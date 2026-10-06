@@ -22,7 +22,7 @@ which is the list every frame table is keyed by (`formal/model.py`'s
 WHY IT WAS REFUSED, AND WHY THE REASON WAS FALSE.  The terminal message was
 "a method call on a value receiver is dispatched by NAME, so `recv.m(x)` carries
 no type" — about a callee that is a plain name with no receiver, no method and
-no dispatch in it.  Six of the 25 files the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md`
+no dispatch in it.  Six of the 25 files `bugs/FORMAL_sweep_work_map_2026-09-30.md`
 blocks on that message have a comptime specialization at the callee
 (`std/algorithm/reduction.mojo`, `std/builtin/string_literal.mojo`,
 `std/collections/bitset.mojo`, `std/collections/string/format.mojo`,
@@ -609,21 +609,22 @@ DIFF_CASES = [
      '    sys.stdout.write("v=%d" % Box().set_get(41))\n'
      "    return 0\n\n"
      "main()\n"),
-# **THE SAME ROW WITH A CONSTRUCTOR ON `Opt`, and it is here rather than in
-    # `REFUSALS` because the refusal it used to carry is no longer true.** This
-    # is `Box().get()` lifted, with `Opt.__init__` writing 41 into the frame the
-    # bring-up allocates; before `model.nested_frame_constructor_stores` the
-    # bring-up wrote field DEFAULTS and the lift read a frame of zeros, so the
-    # build refused with "does not run a constructor" rather than answering 0.
-    # Both are fixed now — a bring-up runs the constructor, and
-    # `construction_bringup_is_complete` asks that same reader rather than
-    # restating the rule — so the case is an ORACLE row: 41, on both machines.
+    # THE SAME LIFT over a struct whose NESTED frame declares a constructor,
+    # and it used to be the one row below that said it could not be done.  The
+    # refusal's diagnosis was "the bring-up writes each field's class-level
+    # DEFAULT and does not run a constructor" — which is FALSE now, because
+    # `formal/model.py::nested_frame_init_stores` inlines the nested
+    # constructor's stores at the bring-up and both emitters ask it.  So this is
+    # a differential row now, against CPython, and the needle it used to assert
+    # is gone.
     #
-    # The control is `a_method_call_on_a_construction_receiver` above, whose
-    # `Opt` declares no `__init__` and so still answers the defaults: together
-    # they say the lift agrees with whatever the bring-up wrote, rather than that
-    # it answers a constant.
-    ("a_method_call_on_a_construction_receiver_whose_nested_constructor_runs",
+    # **It is a `get()` with no write because the failure it guards is a MISSING
+    # store, not a bad address.** The row above writes 41 through the receiver
+    # because a read cannot distinguish "no frame" from "a frame of zeros"; here
+    # the constructor's own `self.v = 41` is the value, so a bring-up that did
+    # not run it answers 0 and one that did answers 41, and no write can hide
+    # the difference.
+    ("a_method_call_on_a_construction_whose_nested_constructor_runs",
      "struct Opt:\n"
      "    var v: Int\n"
      "    var has: Int\n\n"
@@ -1105,58 +1106,6 @@ REFUSALS = [
      "    l.k = 5\n"
      "    return l.make().take()\n",
      "is a `Widget`, and that IS established"),
-    # …and the THIRD receiver spelling, which used to be refused here and now
-    # is refused ONE ROW DOWN with a different reason, because the reason it was
-    # refused for turned out to be FALSE.  `Box()` is a CONSTRUCTION of a struct
-    # this module declares, so its type was never in question; the refusal said
-    # the construction "in an argument position never builds" the frame a
-    # one-word struct's receiver IS, and since 2026-10-03 it does: both backends'
-    # `_emit_fresh_one_word` bring the nested frame up at a site the prologue
-    # reserved and hand back its address (`model.struct_construction_yields_frame_
-    # address` is the one reader of that, and
-    # `model.construction_bringup_is_complete` is what decides whether the
-    # bring-up wrote every slot it reserved).  The differential row
-    # `a_method_call_on_a_construction_receiver` is the lift, and this is the
-    # case where lifting it would read a frame of zeros.
-    #
-    # What is refused is not the construction but the CONSTRUCTOR: a nested
-    # struct with a declared `__init__` was not run by a bring-up, which wrote
-    # each field's class-level default.  Measured with the stores in `Opt`:
-    # `var b = Box(); b.get()` answered 0 where CPython answers 41, so lifting
-    # the call would move a wrong answer rather than create one.
-    #
-    # **BOTH HALVES OF THAT ARE NOW FIXED, so this row is an ORACLE row and the
-    # refusal is deleted rather than reworded.** A frame bring-up runs the nested
-    # struct's constructor (`model.nested_frame_constructor_stores`, asked by
-    # both emitters' `_emit_frame_bringup`), so `Box()` leaves 41 in the frame
-    # and lifting the method call over it reads the value the source wrote. A
-    # `refuse:` row here would be a row asserting the defect, and
-    # `construction_bringup_is_complete` — the reader this refusal came from —
-    # now asks `nested_frame_constructor_stores` instead of restating the rule,
-    # so the two cannot answer differently about what a bring-up writes.
-    #
-    # This is the row that says the LIFT agrees with the bring-up, and the
-    # differential pair above (`a_method_call_on_a_construction_receiver`, whose
-    # `Opt` has no `__init__` and so still answers the defaults) is its control.
-    # …and the shape the gate STILL refuses, which is what keeps
-    # `construction_bringup_is_complete` a reader rather than a constant: a
-    # constructor that REQUIRES parameters cannot run at a bring-up (there is no
-    # call to supply them), so the frame stays at its defaults and lifting a
-    # method call over it would claim a frame the source never wrote.
-    ("refuse_a_method_call_on_a_construction_whose_nested_constructor_needs_arguments",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n\n"
-     "    def __init__(out self, seed: Int):\n"
-     "        self.v = seed\n"
-     "        self.has = 1\n\n"
-     "struct Box:\n"
-     "    var inner: Opt\n\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v\n\n"
-     "def main() -> int:\n"
-     "    return Box().get()\n",
-     "a frame bring-up has no arguments for"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

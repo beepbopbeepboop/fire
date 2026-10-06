@@ -35,16 +35,10 @@ export probe dead on any module with a dataclass field carrying a default.
 ## Two open items in the arm64 per-export-contract work (agent [3])
 
 Not part of the sweep families above, and not re-measured by this audit. Both
-were **true** claims. **The first is FIXED** — `lib/Contracts.lean` compiles
-clean with 0 holes, `bodyCert`/`agrees_of_body`/`hreg` are emitted, and
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 carries the
-measurement and what landed. **The second is `OPUS-4`** in
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`, which names the write set
-(`lib/ProofLib.lean`'s `exportFuel`, `formal/arm64_proof_gen.py`) and the two
-questions with no answer in the code (superclass matching, and what
-`except A as e` binds). The handoff document that used to sit between them —
-`FORMAL_contract_work_handoff.md`, deleted 2026-10-05 — was a finished task's
-notes, not a third owner.
+are **true** claims, both unfinished; the single home for their full state —
+every measurement, every trap hit on the way, and the exact next step — is:
+
+> **`FORMAL_contract_work_handoff.md`** — read §1 and §3 of it to start.
 
 | item | measured | is the claim true? | what closes it |
 |---|---|---|---|
@@ -328,7 +322,7 @@ other direction: the walk got FURTHER (the `List[Self.T]()` and then the
 `len(self._data)` refusals are both gone as of 2026-10-03,
 `work/formal12-binary-heap`) and the family is still this size, because the
 export gate is waiting behind both of them. The re-measurement is
-the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md` §3.2, and it notes what is NOT
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
 available: with the 35 files behind it, this family is now the largest single
 cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
 bug.
@@ -630,13 +624,9 @@ What it refuses, and why, is the half that was right:
 
 **Measured effect on the sweep: no file moved.** `std/sys/info.mojo` is still a
 direct finding, now on its `_TargetType` **type** binding rather than on an
-attribute — the same module, one message corrected. **The residue behind it is
-this table's own last three rows and nothing else**: `_TargetType`'s type
-binding, `current_target` as a value, and `target_has_feature` — the first a
-type where this path has no value, the second a target description read as a
-64-bit word, the third a per-CPU question with no per-CPU input. All three are
-permanent by the arguments given above, so a reader planning `info.mojo` should
-plan against them rather than look for a fourth.
+attribute — the same module, one message corrected. The next terminal behind it
+is a different construct entirely and is filed as
+**`FORMAL_target_query_evaluator.md`**, with the measurement.
 
 Two builds of the two spellings and the two nesting positions a query reaches
 (`formal/build.py:_fold_target_queries`, `model.fold_module_value`) are the
@@ -873,9 +863,8 @@ behind it are refused on it. **That is the correct end state for them, not a
 gap.** The module's entire purpose is inline assembly, there is no MLIR in a
 freestanding image for an MLIR operation to become, and nothing about the
 `_get_kgen_string` import it also fails on can change that: the body is fatal
-whether or not the import resolves. The cycle behind that import is
-`string_slice.mojo` → `std.sys` → `_assembly.mojo` → `string_slice.mojo`, and
-`formal/imports.py`'s dylib build resolves it by refusing the second visit. The diagnostic it produces
+whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
+Blocker 2 for the cycle that is behind that import. The diagnostic it produces
 is `model.imported_callee_refusal`, which **now also covers the BARE spelling**
 — the defect was that an imported generic reached the LINK AUDIT when called as
 `widen(5)` rather than `widen[Int](5)`, because the bare callee was exempt from
@@ -919,7 +908,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 684
+standing in for a shape, and the shape answers the same question for all 683
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -930,17 +919,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 684 |
-| every type crossing the boundary is one word | **273** |
+| entry points declared | 683 |
+| every type crossing the boundary is one word | **272** |
 | a box in an argument or the return | 411 |
-| of the 273, refused only for want of a linked library | 273 |
+| of the 272, refused only for want of a linked library | 272 |
 
-**273 of 684 is what a link line converts into working code with no backend
+**272 of 683 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 684
-entry points, 273 word-shaped, 411 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 683
+entry points, 272 word-shaped, 411 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -956,7 +945,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 684 / 511 / 173 by return type alone, and 273
+1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -1002,10 +991,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 273 are refused *for want of a
+library on its link line at all. So today the 272 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 273 and working code.
+registry; it is the only thing between the 272 and working code.
 
 ---
 
@@ -1325,7 +1314,7 @@ transferable lesson:
 | **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
 | **4** | ~~`env.mojo`'s message, rewritten to name a template application~~ | ~~0~~ **55** | **done 2026-09-29** | The reword was never needed: the message was replaced by a **lowering** (§6.2.1). Listed here struck through because a ranking that still carries it would send the next reader to edit text that no longer exists |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
-| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for both halves; the query half's residue is §2.0's own last three rows, not a separate list |
+| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for the attributes; `FORMAL_target_query_evaluator.md` for what the query half still does not reach |
 | — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
 
 **So: the biggest remaining lever is Stage 5 monomorphization, and the numbers

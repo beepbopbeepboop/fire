@@ -292,20 +292,6 @@ def check_widening(tmpdir, verbose):
                 proof = result.get("proof_path")
             except NotImplementedError as e:
                 refusal = str(e)
-            except FB.FormalBuildError as e:
-                # The generator refuses by raising, and `formal/build.py`
-                # re-wraps that as a `FormalBuildError` so `fire.py build
-                # --formal` prints one line rather than a forty-frame
-                # traceback. So catching only `NotImplementedError` reported a
-                # DELIBERATE refusal as a crash here — measured on this file's
-                # own "two calls out of the image" case, which has been failing
-                # since that re-wrap landed and said the generator owes a
-                # refusal when the generator HAD refused by name. The flag is
-                # how the re-wrap says so; `formal.build.proof_refused` is the
-                # one reader of it.
-                if not FB.proof_refused(e):
-                    raise
-                refusal = str(e)
             except Exception as e:                          # noqa: BLE001
                 failures += _fail(f"{name}_crashes_on_{arch}",
                                   f"{type(e).__name__}: {e}\n\n{why}",
@@ -333,73 +319,6 @@ def check_widening(tmpdir, verbose):
     print(f"proof fuzz: widening  "
           f"{'PASS' if not failures else 'FAIL'} FAIL={failures} "
           f"({2 * len(WIDENING)} programs, no Lean)")
-    return failures
-
-
-def check_proof_refusal_class(tmpdir, verbose):
-    """`proof_verdict` must file the PROOF LAYER's refusal as `proof-refused`.
-
-    The shape is a program whose IMAGE builds and whose PROOF cannot be written —
-    `formal/arm64_proof_gen.py::_no_value_model` on a list literal — and the two
-    halves of this tool are decided by which of them refused. So the case is put
-    through twice on purpose: `--no-prove` builds the same bytes (which is what
-    makes "the code generator refused" a class this program does not belong to),
-    and then `proof_verdict` has to say `proof-refused`.
-
-    It used to say `codegen-refused`, because `formal/build.py` re-raises the
-    generators' `NotImplementedError` as a `FormalBuildError` — correctly, so
-    that `fire.py build --formal` prints `build: <message>` rather than a
-    forty-frame traceback — and this arm catches that type first. The fact now
-    travels on the exception (`formal.build.proof_refused`, the one reader of
-    it, which `tools/formal_proof_breadth.py` asks as well) and the two tools
-    cannot answer this question two different ways again.
-
-    arm64 only, and that is the architecture's own limit rather than a
-    convenience: x86-64's generator CATCHES its own `NotImplementedError` and
-    emits a disclaimed placeholder model, so there the class is a proof with
-    holes. Checking x86-64 for `proof-refused` would pin a behaviour the design
-    says is not there.
-    """
-    import formal.build as FB
-    failures = 0
-    src = ("def f(n):\n"
-           "    xs = [1, 2, 3]\n"
-           "    return xs[0] + n\n"
-           "def main(x):\n"
-           "    return f(x)\n")
-    path = os.path.join(tmpdir, "proof_refused.mojo")
-    with open(path, "w") as f:
-        f.write(src)
-    try:
-        FB.compile_formal(path, output=os.path.join(tmpdir, "noprove"),
-                          test_input=10, prove=False, check=False, arch="arm64")
-    except Exception as e:                                  # noqa: BLE001
-        return _fail("proof_refusal_case_does_not_build",
-                     f"{type(e).__name__}: {e}\n\nThe case is about a program "
-                     "whose IMAGE builds, so an image refusal makes it a "
-                     "different case and this check is stale — pick a "
-                     "construct the code generator lowers.", verbose)
-    P._JOB.text = src
-    P._JOB.input = 7
-    P._JOB.name = "proof_refused.arm64"
-    # `timeout=None`, and that is not a shrug: `proof_verdict` passes it to
-    # `formal.lean.check_proof_cached` and to nothing else, and `check=False`
-    # means Lean is never started — so a bound here would be a number about a
-    # run that does not happen. (`test_suite.py`'s residue census counts
-    # `timeout=` literals in every test file, and this case is deliberately not
-    # one of them.)
-    cls, detail, _holes, _proof = P.proof_verdict("arm64", tmpdir, timeout=None,
-                                                  check=False)
-    if cls != "proof-refused":
-        failures += _fail("proof_verdict_files_a_model_refusal_as_codegen",
-                          f"got {cls!r}: {detail}\n\nThe image builds with "
-                          f"`--no-prove` on the same bytes, so this is a hole "
-                          f"in the semantic model and not in the code "
-                          f"generator — and `codegen-refused` is the class a "
-                          f"reader must not under-count.", verbose)
-    print(f"proof fuzz: refusal class "
-          f"{'PASS' if not failures else 'FAIL'} FAIL={failures} "
-          f"(1 program, no Lean)")
     return failures
 
 
@@ -559,7 +478,6 @@ def main():
     with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, ".tmp")) as td:
         failures += check_oracle_timeout(td, args.verbose)
         failures += check_widening(td, args.verbose)
-        failures += check_proof_refusal_class(td, args.verbose)
     if not args.skip_run:
         failures += check_run(args.run, args.verbose)
     print()

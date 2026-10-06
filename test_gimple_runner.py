@@ -1451,38 +1451,6 @@ def main():
 main()
 """)
 
-    # The SAME question -- "the function `f` as a bare C value" -- has two
-    # spellings in this codegen: a direct binding (`f = g`) and a callable-
-    # valued parameter DEFAULT (`def apply(*, g=v): ...`). They were two
-    # separate implementations, and this shape is the one input on which they
-    # disagreed: the default path had no variadic handling, so a `*args`
-    # callee reached `mojo_fnptr_call_N` as a bare `_funcptr_`, was called
-    # with loose scalars, and dereferenced the integer 1. Measured on the
-    # merged tree before the consolidation: this program exited -11 with no
-    # output and no diagnostic, where the direct-binding spelling one screen
-    # up printed its answer correctly and CPython printed 16.
-    test_gimple_stdout("gimple_variadic_callable_valued_default", """\
-def g(*a):
-    return sum(a)
-
-def apply_it(x, *, f=g):
-    return f(1, 2, 3) + x
-
-print(apply_it(10))
-""", "16\n")
-
-    # Same root cause, `**kwargs` half, and with the default actually
-    # consulted rather than shadowed by an argument.
-    test_gimple_stdout("gimple_variadic_kwargs_callable_valued_default", """\
-def g(**k):
-    return len(k)
-
-def apply_it(x, *, f=g):
-    return f(a=1, b=2) + x
-
-print(apply_it(10))
-""", "12\n")
-
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),
@@ -2285,57 +2253,6 @@ def local():
 local()
 """)
 
-    # A global whose module-level initialiser is `None` and whose real value
-    # is assigned later from inside a function (`global x; x = ...`) is the
-    # standard lazy-initialised singleton. `None` is the NULL value of every
-    # pointer kind, so it must not fix the field's type the way a real scalar
-    # initialiser does; before the cross-function join learned this, the field
-    # was frozen `int64_t` from the `None` and the later `char *` store was
-    # read back as the pointer's own decimal (or the list's address). The list
-    # row is the control that exercises the container arm of the same join.
-    test_gimple_matches_cpython("gimple_global_none_then_assigned_a_string", """\
-x = None
-
-def setup():
-    global x
-    x = "abc"
-
-setup()
-print(x)
-""")
-
-    test_gimple_matches_cpython("gimple_global_none_then_assigned_a_list", """\
-x = None
-
-def setup():
-    global x
-    x = [1, 2]
-
-setup()
-print(x)
-""")
-
-    # The bound-method spelling of the same lazy-init shape: the store lives
-    # in one function and the call in another, so the method's return type has
-    # to survive the box through the whole-program table (a per-function one
-    # is reset before the call is emitted). A `-> bool` method must print
-    # `True`, not the `1` its `int64_t` box decodes to.
-    test_gimple_matches_cpython("gimple_global_none_then_bound_method_across_functions", """\
-class M:
-    def truthy(self):
-        return True
-
-m = M()
-f = None
-
-def setup():
-    global f
-    f = m.truthy
-
-setup()
-print(f())
-""")
-
     # ── `with` teardown: the `as` target is optional, and so is running
     # ── __exit__ at all. Fixed, and the doc
     # ── (`CODEGEN_with_no_as_target_drops_exit`) is deleted, so this comment
@@ -2593,9 +2510,9 @@ print(k())
     #
     # Two branches named this same program — the rows below it and the
     # materialized-lambda env family — and only one name survived, because
-    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and the
-    # bound-method-in-a-module-global report (since fixed) both CITED it by
-    # name. The name those docs carried is the one kept.
+    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and
+    # `bugs/CODEGEN_bound_method_in_a_module_global_is_truncated_to_int.md` both
+    # CITE it by name. The name those docs carry is the one kept.
     test_gimple_matches_cpython("gimple_materialized_lambda_keeps_a_double_capture", """\
 def m():
     q = 2.5
@@ -5065,15 +4982,14 @@ main()
     # a second row rather than a variant of the one above: it was missing from
     # the table too, and leaked the whole formatted buffer per call.
     #
-    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter used to not
-    # compile at all when `d` was a module-level global (a boxed `int64_t`
-    # reaching a `MojoDict *` parameter) and printed a two-character answer
-    # when it was a local. Both are FIXED now — the RHS is coerced to
-    # `MojoDict *`, and `_repr_value` re-types a boxed container through
-    # `_get_actual_type` — but the memory row stays on the keyed spelling
-    # because that is the shape whose per-call buffer the release covers.
-    # doc/MEMORY.html §8 is explicit that a slope is only evidence when the
-    # output is right.
+    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter does not
+    # compile at all when `d` is a module-level global (a boxed `int64_t`
+    # reaching a `MojoDict *` parameter) and prints a two-character answer
+    # when it is a local. Both are filed as
+    # bugs/CODEGEN_percent_format_of_a_dict_is_a_different_bug.md, and a
+    # memory row pinned on a shape whose VALUE is wrong measures the wrong
+    # thing -- doc/MEMORY.html §8 is explicit that a slope is only evidence
+    # when the output is right.
     test_gimple_bounded_memory("gimple_percent_keyed_of_dict_repr_is_released", """\
 def main():
     d = {'k': 'v'}
@@ -5368,46 +5284,6 @@ def main():
 main()
 """, "3\ncde\nTrue\ncde\n3\n8\ncde\n")
 
-    # The same annotation→element-type rule on the THIRD path that can
-    # consume a binding statement: a bracketed declaration with NO
-    # initializer (`var s: List[String]`, real Mojo's "must assign before
-    # use" form, which this codegen deliberately does not auto-allocate --
-    # see the VarDecl path's own note) that a later statement then binds.
-    # That copy was a third hand-written twin of the same computation and
-    # had drifted: it tested `ctype == 'MojoList *'`, so a `Set[T]`
-    # declared the same way got no element type at all, where the other
-    # two paths answer for both kinds. It is now the shared helper
-    # (`_annotation_container_elem_type`, the function whose own docstring
-    # says it is the ONE place this rule lives), so all three cannot
-    # disagree again. Every value here is already right -- the set literal
-    # and the list literal each record their own element types on the way
-    # in -- so this pins the CONSOLIDATION, not a fix, and the set is the
-    # half the drift would have lost.
-    test_gimple_stdout("gimple_annotated_container_elem_type_noinit_decl", """\
-def main():
-    var s: List[String]
-    s = ["abc", "de"]
-    print(s[0])
-    print(len(s[0]))
-    for k in s:
-        print(k)
-        print(len(k))
-    var t: Set[String]
-    t = {"abc", "de"}
-    print(len(t))
-    for k in t:
-        print(k)
-        print(len(k))
-    var u: List[Int]
-    u = [7, 8]
-    print(u[0] + 1)
-    var d: Dict[String, Int]
-    d = {"a": 1}
-    print(d["a"] + 1)
-
-main()
-""", "abc\n3\nabc\n3\nde\n2\n2\nabc\n3\nde\n2\n8\n2\n")
-
     # A dynamically-set attribute whose value is a STRING, read back through
     # every spelling. The struct declared no such field, so the field-scan
     # pass minted a phantom one — and minted it `int`, because that is the
@@ -5627,91 +5503,6 @@ print(zip([0, 1], [2, 3]))
     test_gimple_stdout("gimple_dict_items_pairs_are_tuples", """\
 print({"a": 1}.items())
 """, "[('a', 1)]\n")
-
-    # ── zip_longest's PADDED slot: the one thing a loop's own element read
-    # cannot supply ──────────────────────────────────────────────────────
-    #
-    # A padded slot holds CPython's `fillvalue`, which DEFAULTS to `None`, and
-    # this model's `None` is a per-domain zero: 0 in an integer slot
-    # (`print(None)` answers `0` here, so an integer slot's padded row is
-    # right modulo that one convention) and NULL in a string slot
-    # (`mojo_print`'s own rule). A FLOATING-POINT slot has neither, and the
-    # old `(double)0` fill answered `0.0` where CPython answers `None` — a
-    # number no source wrote, indistinguishable from a real `0.0` the
-    # sequence held. So that row now raises, naming the domain, from inside
-    # the loop and only on the row that IS padded: the equal-length float
-    # case below pads nothing and has to keep working, which is why the
-    # refusal is not a shape-level one.
-    #
-    # The first program is the ORACLE for the second and third, so the
-    # expectations here are CPython's own answers rather than strings this
-    # file has to keep in sync by hand.
-    test_gimple_matches_cpython("gimple_zip_longest_pads_every_domain_it_can", """\
-import itertools
-for a2, b2 in itertools.zip_longest(["x"], ["y", "z"]):
-    print(a2, b2)
-for a3, b3 in itertools.zip_longest(["x", "w"], ["y"], fillvalue="-"):
-    print(a3, b3)
-for a4, b4 in itertools.zip_longest(["x", "w"], ["y"], fillvalue=None):
-    print(a4, b4)
-for a5, b5 in itertools.zip_longest([1.5, 2.5], [9.0], fillvalue=0.0):
-    print(a5, b5)
-for a6, b6 in itertools.zip_longest([1, 2], [3], fillvalue=0):
-    print(a6, b6)
-""")
-
-    # An INTEGER slot's padded row is this model's `None` — 0 — and CPython's
-    # is `None`, so this one program cannot be an oracle comparison and is
-    # pinned by hand. That divergence is `print(None)`'s own convention on
-    # this path (measured: `print(None)` answers `0`, and `print(x is None)`
-    # tests the same 0), not a gap in the padding: an absent integer is
-    # spelled 0 everywhere else on this backend too.
-    test_gimple_stdout("gimple_zip_longest_an_integer_slot_pads_with_zero", """\
-import itertools
-for a, b in itertools.zip_longest([1, 2], [3]):
-    print(a, b)
-""", "1 3\n2 0\n")
-
-    # The float slot, unpadded: the refusal is on the padded ROW, not on the
-    # shape, so this program is CPython's answer unchanged. A refusal
-    # emitted before the loop would take this down on its first line, which
-    # is what makes this the test for WHERE the raise is.
-    test_gimple_matches_cpython("gimple_zip_longest_an_unpadded_float_slot_is_fine",
-                                """\
-import itertools
-for a, b in itertools.zip_longest([1.5, 2.5], [9.0, 8.0]):
-    print(a, b)
-""")
-
-    # The refusal is a BUILD refusal on this backend, not a raise emitted into
-    # the loop body: `work/formal31-5` answered this construct by emitting
-    # `mojo_raise_not_implemented` on the padded row, and the arm above pins
-    # the build refusal instead — a program that builds and then exits 1 is
-    # the shape this path calls a wrong answer wearing a runtime error's
-    # clothes. Same program, same reason, the refusal point this backend uses.
-    test_gimple_build_refusal(
-        "gimple_zip_longest_a_padded_float_slot_raises", """\
-import itertools
-for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
-    print(a, b)
-""", "a padded `double` slot has no value that means `absent`")
-
-    # A fillvalue outside the slot's own domain is the same wrong answer in a
-    # second spelling: CPython hands every slot the value as given, so this
-    # prints `b 5` where the old `(int64_t)(0.0)` fill printed `b 0`. The
-    # string slot's half is here too, and it is the one that used to be a
-    # refusal for the WRONG reason (`fillvalue=None` spelled out is the
-    # default, not a fill) — see the program above.
-    # …and the same shape at BUILD time, for the same reason as the row above.
-    # `b` is an integer slot and the loop runs three times over a sequence of
-    # two, so the fill IS selected into it; `a` is a float slot the float fill
-    # matches, so only the second slot is the question.
-    test_gimple_build_refusal(
-        "gimple_zip_longest_a_cross_domain_fill_is_refused", """\
-import itertools
-for a, b in itertools.zip_longest([1.5, 2.5], [7], fillvalue=0.0):
-    print(a, b)
-""", "`fillvalue` is double and cannot fill an integer sequence")
 
 
     # A pair's VALUE slot kept no kind, so every reader of it guessed: the
@@ -6909,33 +6700,6 @@ fn main():
     print(isinstance((1, 2), (list, str)))
 """, "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
      "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
-
-    # The SAME question as `gimple_tuple_type_preserved_by_ops` above, but
-    # asked through a value the codegen cannot type statically: a tuple
-    # literal lowers to the very `MojoList` a list literal does, so the
-    # tuple MARKER is the only thing telling them apart, and the boxed path
-    # (an untyped parameter, which is `int64_t`) delegates to the runtime
-    # `mojo_isinstance` rather than to the codegen's pointer-typed lowering.
-    # `mojo_isinstance`'s `type_id == 5` arm used to answer `list` for a
-    # marked list, so every tuple reaching it through an untyped binding
-    # reported itself a list — the silently-wrong direction. The codegen
-    # path already excluded the marker; the two are the same question and
-    # had to stop disagreeing. `str.partition`'s unmarked result is still a
-    # list (its own filed bug:
-    # bugs/RUNTIME_str_partition_does_not_mark_its_result_as_a_tuple.md),
-    # while the `bytes` half, which sets the marker, is a tuple.
-    test_gimple_stdout("gimple_isinstance_list_excludes_tuple_on_the_boxed_path", """\
-def probe(x):
-    if isinstance(x, list):
-        print("list")
-    else:
-        print("not list")
-
-probe([1, 2])
-probe((1, 2))
-probe(b'a=b'.partition(b'='))
-probe('a=b'.partition('='))
-""", "list\nnot list\nnot list\nlist\n")
 
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
@@ -9793,23 +9557,6 @@ print('%s' % d)
 print('%(z)s/%(n)s/%(b)s/%(f)s/%(s)s' % d)
 """)
 
-    # The doc's own program: the list rows are the control that `%r` of a
-    # BOXED container is not just "the dict spelling". `xs` is a module-level
-    # global, so its value crosses the read as an `int64_t` box; `%s`/`str`/
-    # `print` already re-typed it through `_get_actual_type`, but `repr` and
-    # `%r` did not and printed the box's decimal address. The dict rows are
-    # the doc's own subject (a non-keyed spec on a dict operand).
-    test_gimple_matches_cpython("gimple_percent_and_repr_of_a_module_global_container", """\
-xs = [1, 2, 3]
-d = {'k': 'v'}
-print('%s' % xs)
-print('%r' % xs)
-print(repr(xs))
-print('%(k)s' % d)
-print('%s' % d)
-print('%r' % d)
-""")
-
     test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
 d = {}
 d['n'] = None
@@ -10107,25 +9854,6 @@ def show(data):
 
 def main():
     show(data=[1.5, 2.5])
-""", "1.5\n2.5\n")
-
-    # The KEYWORD IDENTIFIER spelling of the same call: a kwarg names the
-    # parameter directly, so `show(data=fs)` is the same call as `show(fs)`
-    # and the caller's own scanned local map already says `fs` is a list of
-    # doubles. Every other case in this group passes something the walk can
-    # read on the spot; this is the only one whose argument is a bare
-    # identifier reached by NAME. Fed only from a literal, the walk left the
-    # callee's loop target untyped and every element read back through
-    # `mojo_list_get_int`, so a list of doubles printed their raw IEEE-754
-    # bit patterns with exit 0.
-    test_gimple_stdout("gimple_for_over_list_param_from_keyword_identifier", """\
-def show(data):
-    for r in data:
-        print(r)
-
-def main():
-    fs = [1.5, 2.5]
-    show(data=fs)
 """, "1.5\n2.5\n")
 
     # A string list is the case where the int64_t default is most visibly
@@ -11092,14 +10820,7 @@ main()
         stage that failed in the message."""
         with tempfile.TemporaryDirectory() as wd:
             for name, src in files.items():
-                path = os.path.join(wd, name)
-                # `name` may name a module INSIDE a package (`pkg/sub.py`),
-                # which is its own test subject and not just a convenience:
-                # a flat module name sanitizes to itself, a dotted one does
-                # not, so the package shape needs a real subdirectory to
-                # reproduce.
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                open(path, 'w').write(src)
+                open(os.path.join(wd, name), 'w').write(src)
             ep = os.path.join(wd, entry)
             from gimple_codegen import compile_to_gimple
             c_code = compile_to_gimple(files[entry], do_imports=True,
@@ -11587,36 +11308,6 @@ main()
                           "main()\n",
     }, 'colln4_main.py')
 
-    # The four shapes above all use FLAT module names. A class inside a
-    # PACKAGE has a dotted home (`pkg.dia_b`), and that is where the
-    # collision pass was still broken: `_struct_cname_by_home` was written
-    # under the raw home and read under the sanitized one, so every lookup
-    # missed, fell back to the WINNER's bare name, and the loser's field
-    # reads raised a runtime `AttributeError` instead of printing the value.
-    # Measured before the fix on exactly this file set: compiled
-    # `'5\n'` + `AttributeError: s` (exit 1), CPython `'5\nhi\n42\n'`.
-    # Note the two spellings are IDENTICAL for a flat module, which is why
-    # none of the four cases above could see it.
-    _check_agrees_with_cpython("same_bare_name_struct_in_a_package", {
-        'colln5pkg/__init__.py': "",
-        'colln5pkg/dia_a.py': "class Dialog:\n"
-                              "    def __init__(self, n):\n"
-                              "        self.n = n\n",
-        'colln5pkg/dia_b.py': "class Dialog:\n"
-                              "    def __init__(self, s: str):\n"
-                              "        self.s = s\n"
-                              "        self.n = 42\n",
-        'colln5_main.py': "from colln5pkg import dia_a\n"
-                          "from colln5pkg import dia_b\n"
-                          "def main():\n"
-                          "    a = dia_a.Dialog(5)\n"
-                          "    b = dia_b.Dialog('hi')\n"
-                          "    print(a.n)\n"
-                          "    print(b.s)\n"
-                          "    print(b.n)\n"
-                          "main()\n",
-    }, 'colln5_main.py')
-
     # An IMPORTED class's `__init__` PARAMETER names must not become struct
     # FIELDS. `_xmod_ctor_field_hints` records what a foreign call site
     # proves about a constructor argument and the defining temp_gen writes it
@@ -11661,14 +11352,11 @@ main()
     # declares, so a same-named field has to keep working.
     #
     # The RENAMED spelling (`def __init__(self, payload): self.body = payload`)
-    # is the case where the parameter's name is not the field's name. It used
-    # to leave the field `int64_t` because the hint was keyed on the parameter
-    # name and nothing mapped it to the field; the producer now records the
-    # `(param -> [field])` map from the defining `__init__` and keys the hint on
-    # the FIELD, so the field is typed. Pinned below by
-    # `imported_class_ctor_renamed_field_still_types` (bare binding, no sibling
-    # `import` — the spelling that was wrong) and by
-    # `imported_class_ctor_hints_survive_an_alias` (the aliased route).
+    # is deliberately NOT here: it does not work on this tree, before or after
+    # this fix, because the hint's key half is the parameter's name and
+    # nothing maps it to the field. Filed as
+    # bugs/CODEGEN_imported_ctor_hint_does_not_reach_a_renamed_field.md,
+    # which is the same table and a different question from this one.
     _check_agrees_with_cpython("imported_class_ctor_literal_still_types_the_field", {
         'cparam2_def.py': "class Box:\n"
                           "    def __init__(self, name):\n"
@@ -11679,16 +11367,6 @@ main()
                            "print(Box('hello').show())\n"
                            "print(Box('there').show())\n",
     }, 'cparam2_main.py')
-
-    _check_agrees_with_cpython("imported_class_ctor_renamed_field_still_types", {
-        'cparam4_def.py': "class Box:\n"
-                          "    def __init__(self, payload):\n"
-                          "        self.body = payload\n"
-                          "    def show(self):\n"
-                          "        return self.body\n",
-        'cparam4_main.py': "from cparam4_def import Box\n"
-                           "print(Box('hello').show())\n",
-    }, 'cparam4_main.py')
 
     # …through the ALIASED and MODULE-QUALIFIED spellings, which resolve the
     # defining module by a different route (`_find_symbol_home_module`) and

@@ -1,37 +1,23 @@
 #!/usr/bin/env python3
-"""The model-fuzz harness's two UNREAD steps: its ENTRY path, and its VERDICTS.
+"""The model-fuzz harness's ENTRY path, which nothing else reads back.
 
-`formal/x86_64_model_fuzz.py` is not a gate job — it is a tool. Until
-2026-10-07 it carried a `HARNESS` verdict for a disagreement "no x86-64 CPU can
-produce", for `mul`/`imul` flags and `setcc` into `rbp`/`rsi`/`rdi`. **Both were
-wrong**: the `setcc` bytes were an encoder that omitted a REX prefix (so the CPU
-was right to read `setbe ch`), and the flags were SF/ZF, which the SDM leaves
-UNDEFINED after a multiply. The verdict is gone; what decides a row is now
-`WRONG` (a model bug) or `AGREE`, with undefined flags skipped.
-
-**The entry path.** The entry stub installs the register file out of
-`init_block` with real `mov` instructions, and if those loads did not land every
-field of every program would be a false disagreement. `--entry-probe` is that
-read-back, and the first class here is its pins.
-
-**The verdicts.** A row is `WRONG` (a model bug), `AGREE`, `NORUN` or `FAULT`,
-and which one it gets is decided in Python from the program's bytes and the
-list of differing fields. The rules were wrong, and silent in the worst way: a
-random program containing one `setcc` into RBP was reported as a `WRONG` model
-bug (the encoder's fault, not the model's), and `minimise` handed back a prefix
-that agreed when run on its own. The second class here is Lean-free and
-native-free on purpose — it is about which verdict a row gets, so it can be
-asked without either half.
+`formal/x86_64_model_fuzz.py` is not a gate job — it is a tool, and its two
+`HARNESS` verdict rows (`mul`/`imul` flags, `setcc` into `rbp`/`rsi`/`rdi`) are
+the ones a reader must NOT go looking for in `lib/X86.lean`. Deciding them needs
+the one step of the harness that nothing reads: the entry stub installs the
+register file out of `init_block` with real `mov` instructions, and if those
+loads did not land every field of every program would be a false disagreement.
+`--entry-probe` is that read-back, and these are its pins.
 
 **Not registered in `tools/suite.py`** (this session's rules forbid registering
 without being asked), so run it directly:
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_x86_64_model_fuzz.py
 
-The text cases are Lean-free and take no native run. One compiles the harness
-`clang -arch x86_64` and runs it `arch -x86_64`, and SKIPS where that is not
-available rather than passing quietly — on a host that cannot run x86-64 code
-there is no entry register file to check.
+The three text cases are Lean-free and take no native run. The fourth compiles
+the harness `clang -arch x86_64` and runs it `arch -x86_64`, and SKIPS where
+that is not available rather than passing quietly — on a host that cannot run
+x86-64 code there is no entry register file to check.
 """
 import os
 import random
@@ -248,201 +234,6 @@ class TestEntryProbe(unittest.TestCase):
 def shutil_which(name):
     import shutil
     return shutil.which(name)
-
-
-class TestTheVerdictIsAboutTheModel(unittest.TestCase):
-    """The reporter's rules, which decide a row's verdict from the program's
-    bytes and the differing fields alone — no Lean, no native run.
-
-    The `HARNESS` verdict is gone (see the module docstring): the `setcc` class
-    was an encoder bug — the CPU was right about `0f 96 c5` — and the
-    `mul`/`imul` class was undefined flags. What is left to pin is
-    `undefined_flags`, because a flag it names must NOT be compared and a flag
-    it does not name must be.
-    """
-
-    # ── minimisation ────────────────────────────────────────────────────
-    def test_a_prefix_is_not_the_same_program_as_its_parent(self):
-        """`minimise` hands back a PREFIX, and a prefix needs its own NAME.
-
-        The name is the `index`, which is what the generated Lean file declares
-        (`code_N`, `init_N`) and what `run_model` keys its answers by. Sharing
-        it does not merge two programs politely: Lean rejects the second
-        `def code_N` and still evaluates every `#eval!` against the FIRST, so
-        `run_model` returns N copies of one program's answer and `evaluate`
-        pairs each prefix's hardware dump with the FULL program's model result.
-
-        Measured on the pre-fix tree (`-n 16 --ninstr 6 --seed 5`): six `WRONG`
-        rows, every one minimised to a two-instruction prefix that AGREES when
-        it is run on its own. The pin is on the generated text, because that is
-        the whole of the mechanism and it is what a reader has to trust.
-        """
-        prog = _program([("nop", F.X.encode_nop()),
-                         ("mov RAX, 1", F.X.encode_mov_r64_imm32(F.R.RAX, 1)),
-                         ("add RAX, RCX", F.X.encode_add_r64_r64(F.R.RAX,
-                                                                 F.R.RCX))])
-        cands = [prog.prefix(k) for k in (1, 2, 3)]
-        self.assertEqual(len(set(c.index for c in cands)), 3,
-                         "three prefixes of one program are three programs, "
-                         "and each needs its own index")
-        src = F.lean_source(cands, 0x7FFF00000000)
-        import re as _re
-        decls = _re.findall(r"^def (\w+)", src, _re.M)
-        self.assertEqual(len(decls), len(set(decls)),
-                         "the generated Lean file declares a name twice, which "
-                         "Lean rejects while still answering every `#eval!` "
-                         "against the first: %s"
-                         % sorted(n for n in set(decls)
-                                  if decls.count(n) > 1))
-        self.assertEqual([n for n in decls if n.startswith("code_")],
-                         ["code_%d" % c.index for c in cands])
-
-    def test_lean_source_refuses_two_programs_with_one_index(self):
-        """The generator raises rather than emitting a file that half
-        elaborates.
-
-        A warning would be the wrong shape: the failure this prevents is not
-        visible in the file (it elaborates and prints), it is visible only in
-        the ANSWERS, which is the thing nobody reads.
-        """
-        prog = _program([("nop", F.X.encode_nop())])
-        twin = F.Program(prog.index, [("mov RAX, 2",
-                                       F.X.encode_mov_r64_imm32(F.R.RAX, 2))],
-                         prog.regs, prog.xmm, prog.flags, prog.mem)
-        with self.assertRaises(ValueError) as cm:
-            F.lean_source([prog, twin], 0x7FFF00000000)
-        self.assertIn(str(prog.index), str(cm.exception))
-
-    def test_a_prefix_keeps_the_initial_state_and_the_bytes(self):
-        """Everything else about a prefix is unchanged — only the name moves."""
-        prog = _program([("nop", F.X.encode_nop()),
-                         ("mov RAX, 1", F.X.encode_mov_r64_imm32(F.R.RAX, 1))])
-        one = prog.prefix(1)
-        self.assertEqual(one.code, prog.items[0][1])
-        self.assertIs(one.regs, prog.regs)
-        self.assertIs(one.mem, prog.mem)
-        self.assertEqual(one.flags, prog.flags)
-
-    # ── which flags are undefined ────────────────────────────────────────
-    def test_a_multiply_leaves_sf_and_zf_undefined(self):
-        """`MUL`/`IMUL` define CF/OF (does the product fit) and leave SF, ZF, AF
-        and PF undefined, so a program whose LAST flag-writer is a multiply must
-        skip exactly SF and ZF.
-
-        This is the whole of what the old `HARNESS` "this host mislabels SF" row
-        was: the model sets SF from the low word and Rosetta leaves it clear, and
-        neither is wrong — the architecture promises nothing about it.
-        """
-        for text, enc in (
-                ("imul RAX, RCX",
-                 F.X.encode_imul_r64_r64(F.R.RAX, F.R.RCX)),
-                ("imul RAX", F.X.encode_imul_r64_1op(F.R.RAX)),
-                ("imul RAX, RCX, 4",
-                 F.X.encode_imul_r64_r64_imm(F.R.RAX, F.R.RCX, 4)),
-                ("mul RAX", F.X.encode_mul_r64(F.R.RAX))):
-            self.assertEqual(F.undefined_flags(_program([(text, enc)])),
-                             {"zf", "sf"}, text)
-
-    def test_a_divide_leaves_all_four_undefined(self):
-        """Intel SDM: "CF, OF, SF, ZF, AF, and PF are undefined" after DIV."""
-        p = _program([("mov RCX, 7", F.X.encode_mov_r64_imm32(F.R.RCX, 7)),
-                      ("cqo", F.X.encode_cqo()),
-                      ("idiv RCX", F.X.encode_idiv_r64(F.R.RCX))])
-        self.assertEqual(F.undefined_flags(p), {"zf", "sf", "cf", "of_"})
-
-    def test_a_shift_leaves_of_undefined_unless_the_count_is_one(self):
-        """`OF` is undefined for a shift count that is neither 0 nor 1, and a
-        count of 0 moves NO flag at all — so with nothing undefined before it,
-        a count of 0 leaves nothing undefined either."""
-        for count, want in ((1, set()), (3, {"of_"}), (0, set()),
-                            (64, {"of_"})):
-            p = _program([("<< RAX, %d" % count,
-                           F.X.encode_shift_r64_imm8("<<", F.R.RAX, count))])
-            self.assertEqual(F.undefined_flags(p), want, "count %d" % count)
-
-    def test_only_the_last_flag_writer_decides(self):
-        """An earlier undefined-flag instruction does not taint a later defined
-        one, and vice versa: the flags a run ends with are its last writer's."""
-        p = _program([("idiv RCX", F.X.encode_idiv_r64(F.R.RCX)),
-                      ("add RAX, RCX",
-                       F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX))])
-        self.assertEqual(F.undefined_flags(p), set(),
-                         "the `add` redefines all four flags")
-        p2 = _program([("add RAX, RCX",
-                        F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX)),
-                       ("mul RCX", F.X.encode_mul_r64(F.R.RCX))])
-        self.assertEqual(F.undefined_flags(p2), {"zf", "sf"},
-                         "the multiply is last and leaves SF/ZF undefined")
-
-    def test_a_shift_by_zero_does_not_redefine_an_undefined_flag(self):
-        """The measured seed-3 row: `... ; idiv rcx ; >>signed R9, 0` ends with
-        the divide's undefined CF/SF/ZF, because a count of 0 moves no flag and
-        the divide left all four undefined."""
-        p = _program([("idiv RCX", F.X.encode_idiv_r64(F.R.RCX)),
-                      (">>signed R9, 0",
-                       F.X.encode_shift_r64_imm8(">>signed", F.R.R9, 0))])
-        self.assertEqual(F.undefined_flags(p), {"zf", "sf", "cf", "of_"})
-
-    def test_an_undefined_flag_reaches_the_setcc_destination_and_beyond(self):
-        """A `setcc` after a multiply reads an undefined SF, so its result is
-        undefined, and a later copy of it is undefined too.
-
-        This is why `undefined_fields` is a dataflow pass and not a flag set:
-        the measured `imul R10, RBP, 4 ; setge R11` differs in R11 alone, and a
-        `mov` of that R11 into another register would differ there too.
-        """
-        p = _program([("imul RAX, RCX",
-                       F.X.encode_imul_r64_r64(F.R.RAX, F.R.RCX)),
-                      ("setge R11", F.X.encode_setge(F.R.R11)),
-                      ("mov RSI, R11",
-                       F.X.encode_mov_r64_r64(F.R.RSI, F.R.R11))])
-        uf = F.undefined_fields(p)
-        for field in ("sf", "r11", "rsi"):
-            self.assertIn(field, uf)
-        # …and a `setge` after an `add` is NOT undefined: the `add` defines SF.
-        p2 = _program([("add RAX, RCX",
-                        F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX)),
-                       ("setge R11", F.X.encode_setge(F.R.R11))])
-        self.assertEqual(F.undefined_fields(p2), set())
-
-    def test_not_does_not_write_flags(self):
-        """`NOT` writes no flag, so a program whose only flag-shaped instruction
-        is a `not` has no flag-writer and nothing undefined."""
-        self.assertEqual(
-            F.undefined_flags(_program([("not RAX",
-                                         F.X.encode_not_r64(F.R.RAX))])),
-            set())
-
-    def test_a_differing_undefined_flag_is_not_compared(self):
-        """`diff` with `undefined_flags` drops exactly the flags it names, and
-        the counter-direction is the one that matters: a flag the program DID
-        define is still compared and a difference there is still a model bug."""
-        p = _program([("mul RAX", F.X.encode_mul_r64(F.R.RAX))])
-        hw = {"regs": [0] * 16, "xmm": [0] * 8,
-              "memq": [0] * (F.DATA_N // 8),
-              "flags": {"zf": False, "sf": False, "cf": True, "of_": True}}
-        mdl = {"regs": [0] * 16, "xmm": [0] * 8,
-               "memq": [0] * (F.DATA_N // 8),
-               "flags": {"zf": True, "sf": True, "cf": True, "of_": True}}
-        self.assertEqual(F.diff(hw, mdl, F.undefined_flags(p)), [],
-                         "SF and ZF are undefined after a multiply")
-        mdl["flags"]["cf"] = False
-        d = F.diff(hw, mdl, F.undefined_flags(p))
-        self.assertEqual([f for f, _a, _b in d], ["cf"],
-                         "CF is defined by the multiply and a difference IS a "
-                         "model bug")
-
-
-def _program(items, regs=None):
-    """One `Program` with a distinguishable initial register file."""
-    if regs is None:
-        regs = [0x1111111111111111 * (j + 1) for j in range(16)]
-        regs[F.R.RSP.value] = F.STACK_TOP_ABS
-        regs[F.R.R13.value] = F.MEMBASE_ABS
-        regs[F.R.R14.value] = F.MEMBASE_ABS
-    return F.Program(0, items, regs, [0x2222222222222222] * 8,
-                     {"cf": True, "zf": False, "sf": False, "of_": False},
-                     [0] * F.DATA_N)
 
 
 if __name__ == "__main__":

@@ -24,9 +24,9 @@ THE COUNT IS AN UPPER BOUND, and this tool says so rather than implying
 otherwise. A file's terminal cause is the FIRST refusal the build's walk
 reaches, so a module is typically behind a stack of two to four of them, and
 fixing one moves the file to the next with the count unchanged. Two causes were
-measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see the
-`2026-09-30` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1. The current
-map, which every number below comes from, is that document's §1.
+measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. The current map, which every
+number below comes from, is `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`.
 Nothing here can tell you a cause's real value; only re-sweeping the files it
 blocks can.
 
@@ -404,7 +404,7 @@ CAUSES = (
     # what is left in that second arm is a member whose VALUE is not a literal
     # — a true refusal about a value this path cannot materialise. So the label
     # still claims neither: the per-file split is in
-    # the `b3` round of `bugs/FORMAL_sweep_work_map.md`, and a reader who trusts
+    # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.
     ("a field the struct does not declare (missing, or a comptime member)",
@@ -603,27 +603,6 @@ CAUSES = (
     # lands in the unclassified bucket.
     ("a repetition whose count this path cannot read",
      (("is a REPETITION",),)),
-    # A comprehension whose ELEMENT opens a container. Its own row because the
-    # construct is one this backend LOWERS — the comprehension is built, run and
-    # correct whenever its element is a single word — and the one thing it will
-    # not do is hand every iteration the same object, which is what one
-    # compile-time frame reservation for a site that runs N times would do.
-    # Measured on both architectures: `[[y, y + 1] for y in [10, 20, 30]]`
-    # printed `31 31 31` where CPython prints `11 21 31`, and the nested
-    # comprehension printed `93` and exited 1 where CPython prints `63`. So a
-    # file refused here is refused by a decision with a stated remedy (build the
-    # containers in an explicit loop, whose `append` allocates per iteration),
-    # not by a missing feature — which is the distinction `other refusal`
-    # cannot express and the reason this row exists.
-    #
-    # TWO markers, and the reason is the same one the `a printed value that is
-    # not a value` row above gives: the FACT and the CONSTRUCT are in two
-    # clauses of `formal/model.py::comprehension_element_blob_refusal`'s own
-    # f-string, and `test_refusal_taxonomy.py`'s samples are cut from there, so
-    # a reword fails a test instead of emptying this row into `other refusal`.
-    ("a comprehension element that opens a container",
-     (("has one frame blob for it",),
-      ("opens a container",))),
     ("len() of a value that has no length",
      (("is len() of a value classified as",),)),
     # A `with` whose CONTEXT this build cannot type. `formal/model.py`'s
@@ -914,7 +893,7 @@ CAUSES = (
     # DOCSTRINGS, whose bytes nothing can name, so six lines of em-dash in one
     # hostmod's prose made this refusal fire over the whole corpus. That is
     # `formal/model.py::is_docstring_statement`, and
-    # the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.2 has the measurement.
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b12.md` §3.2 has the measurement.
     # The row STAYS, because the refusal is CORRECT for a real non-ASCII value —
     # `s[i]` on `"héllo"` would read a continuation byte, and `len` would answer
     # 5 where the byte count is 6 — and a queue that emptied this row by deleting
@@ -1916,8 +1895,8 @@ def main():
           "first refusal reached,\nso fixing one usually moves it to the "
           "next. Measure a cause's real value by\nre-sweeping the files it "
           "blocks — the census is "
-          "`bugs/FORMAL_sweep_work_map.md` §1, which supersedes every "
-          "per-round map.")
+          "bugs/FORMAL_sweep_work_map_2026-09-30_r2.md, which replaced "
+          "§3 of the 2026-09-30 original.")
 
     # THE UNCLASSIFIED BUCKET, LOUDLY, and it is `formal_sweep.py`'s alarm
     # rather than a second one: its `unclassified_report` owns the shape

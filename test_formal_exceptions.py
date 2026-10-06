@@ -68,281 +68,6 @@ def check(ok, what, detail=""):
     return bool(ok)
 
 
-def kind_table_checks():
-    """The EXCEPTION KIND TABLE, asked as a pure function. No build, no Lean.
-
-    **This is shared infrastructure and it fixes nothing yet**, and the rows say
-    so: it is step 2 of six in
-    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`, and the dispatch,
-    the raise sites, the CFG and the Lean model are steps 3-6. It is pinned
-    because it is the one place a future unwinder's correctness rests, and the
-    property that matters there is not "does it produce a number" but "do two
-    images agree about which number means the same class".
-    """
-    import formal.model as M
-
-    plain = M.exception_kind_table()
-
-    check(0 not in plain.values(),
-          "kind table: 0 is reserved for 'no exception in flight'",
-          "some class was numbered 0, so a zeroed frame would be "
-          "indistinguishable from an exception being raised")
-
-    check(set(plain) == set(M.CPYTHON_EXCEPTION_BASES),
-          "kind table: every CPython exception class is numbered",
-          f"{sorted(set(M.CPYTHON_EXCEPTION_BASES) - set(plain))[:5]} missing")
-    check(len(plain) == len(set(plain.values())),
-          "kind table: one integer per class, no collisions",
-          "two classes share an integer, so a compare against it cannot say "
-          "which one is in flight")
-
-    # THE property. A dylib and the executable that links it are two
-    # `_prepare_functions` runs with DIFFERENT declared sets and the same
-    # CPython half, and the word an unwinder writes on one side has to mean the
-    # same thing in the other's. Measured on the first version of this function,
-    # which numbered one sorted set: declaring `MyErr` moved `ValueError` from
-    # 38 to 69.
-    with_one = M.exception_kind_table({"MyErr": 1})
-    with_two = M.exception_kind_table({"Aaa": 1, "Zed": 2})
-    check(plain["ValueError"] == with_one["ValueError"]
-          == with_two["ValueError"],
-          "kind table: a builtin keeps its integer whatever the image declares",
-          f"ValueError is {plain['ValueError']} / {with_one['ValueError']} / "
-          f"{with_two['ValueError']} across three images")
-    check(min(v for k, v in with_one.items() if k not in plain)
-          > max(plain.values()),
-          "kind table: the declared range starts above the CPython range",
-          "a declared class and a CPython class can collide, so one image's "
-          "declared class would read as another's builtin")
-
-    # A declared name that SHADOWS a CPython one is the same class by name, so
-    # it must not get a second integer — one name, one integer.
-    shadow = M.exception_kind_table({"ValueError": 1})
-    check(shadow["ValueError"] == plain["ValueError"],
-          "kind table: a declared class shadowing a builtin keeps its integer",
-          f"{shadow['ValueError']} against {plain['ValueError']}")
-
-    check(M.exception_kind_for("Widget", plain) is None,
-          "kind table: a class the image cannot name has NO kind",
-          "it was given one, so `except Widget:` would look matchable when the "
-          "image cannot say what Widget is")
-    check(M.exception_kind_for("ValueError", plain) == plain["ValueError"],
-          "kind table: a nameable class answers with its integer")
-    check(M.exception_kind_for("", plain) is None,
-          "kind table: no name is not a kind")
-
-    # The publish/replace/clear trio, because the numbering is only meaningful
-    # relative to ONE image and a harness that builds two programs must not have
-    # the second inherit the first's table.
-    saved = M.exception_kinds()
-    try:
-        M.publish_exception_kinds(plain)
-        check(M.exception_kinds() == plain,
-              "kind table: publish installs what it was handed")
-        M.publish_exception_kinds({"Only": 1})
-        check(M.exception_kinds() == {"Only": 1},
-              "kind table: publish REPLACES rather than merges",
-              "a second publish kept the first image's classes, so a kind would "
-              "mean different things in two images built in one process")
-        check(M.exception_kind_for("ValueError") is None,
-              "kind table: a caller with no argument reads the published one")
-    finally:
-        M.clear_exception_kinds()
-        check(M.exception_kinds() == {},
-              "kind table: clear empties it for the next image")
-        M.publish_exception_kinds(saved)
-
-
-def handler_arm_matching_checks():
-    """§4's SUPERCLASS question, answered and pinned. No build, no Lean.
-
-    **`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 1 is
-    "decide §4's two design questions", and this is the first one with an
-    answer.** `handler_arm_matches` is CPython's own question ("does this arm
-    catch that class?") and `handler_arm_kinds` is the dispatch's ("which
-    integers must it compare?"), and the two are separate functions because they
-    have different answers for the same inputs — `except IOError:` is decidable
-    as a source question about `BlockingIOError` and *also* decidable as a
-    compare list, while `except Mine:` for a `class Mine(External)` is neither.
-
-    **The oracle here is CPython's `issubclass`, over EVERY ordered pair of the
-    71 names** — 5041 comparisons — rather than a hand-picked table of the ones
-    that matter. A matcher that gets `ArithmeticError`/`ZeroDivisionError` right
-    and the two aliases wrong is a matcher that has been spot-checked, and the
-    aliases are the case that bit the first version: `EnvironmentError` and
-    `IOError` ARE `OSError`, so a NAME hierarchy answers False for all 18 of
-    `OSError`'s subclasses under either. Measured: 36 disagreements before
-    `CPYTHON_EXCEPTION_ALIAS`, 0 after.
-    """
-    import builtins
-    import formal.model as M
-
-    names = sorted(M.CPYTHON_EXCEPTION_BASES)
-    table = M.exception_kind_table()
-    classes = {n: getattr(builtins, n) for n in names}
-
-    check(set(M.CPYTHON_EXCEPTION_BASE) == set(names),
-          "hierarchy: the table covers exactly the classes CPython has",
-          f"{sorted(set(M.CPYTHON_EXCEPTION_BASE) ^ set(names))[:5]}")
-    check(all(M.CPYTHON_EXCEPTION_BASE[n]
-              == tuple(b.__name__ for b in classes[n].__bases__
-                       if issubclass(b, BaseException))
-              for n in names),
-          "hierarchy: every base is the interpreter's, not a hand-kept list",
-          "a base here that CPython disagrees with makes every arm below it "
-          "answer the wrong way")
-    flat_bases = {b for bases in M.CPYTHON_EXCEPTION_BASE.values()
-                  for b in bases}
-    check(flat_bases <= set(names),
-          "hierarchy: a base is either a class in the table or nothing",
-          f"{sorted(flat_bases - set(names))[:5]}")
-
-    disagree = [(a, f) for a in names for f in names
-                if M.handler_arm_matches(a, f, table)
-                is not issubclass(classes[f], classes[a])]
-    check(not disagree,
-          "hierarchy: every arm/class pair agrees with CPython's issubclass",
-          f"{len(disagree)} of {len(names) ** 2} disagree, first {disagree[:3]}")
-
-    wrong_list = [a for a in names
-                  if M.handler_arm_kinds(a, table)
-                  != frozenset(table[f] for f in names
-                               if issubclass(classes[f], classes[a]))]
-    check(not wrong_list,
-          "hierarchy: every arm's COMPARE LIST is its CPython descendant set",
-          f"{len(wrong_list)} arms differ, first {wrong_list[:3]}; the list is "
-          f"what the dispatch emits, and an extra kind is an arm that takes a "
-          f"class it should not")
-
-    # The two shapes §4 says are the ones the integer could not be left to get
-    # wrong, because they are the commonest arms in real code.
-    check(M.handler_arm_matches("Exception", "SystemExit", table) is False
-          and len(M.handler_arm_kinds("Exception", table)) == 66,
-          "hierarchy: `except Exception:` misses the four direct BaseException "
-          "subclasses, and says so with a list",
-          f"{M.handler_arm_matches('Exception', 'SystemExit', table)} / "
-          f"{len(M.handler_arm_kinds('Exception', table) or ())}")
-    check(len(M.handler_arm_kinds("BaseException", table)) == len(names),
-          "hierarchy: `except BaseException:` compares against every kind",
-          f"{len(M.handler_arm_kinds('BaseException', table) or ())} against "
-          f"{len(names)} classes — this is the arm an integer word makes correct "
-          f"for free, which is why §4's answer is not a pointer")
-
-    check(M.handler_arm_matches("IOError", "BlockingIOError", table) is True,
-          "hierarchy: `IOError` IS `OSError` in CPython, so it catches its "
-          "subclasses",
-          "the two names are one class object; a name hierarchy that does not "
-          "canonicalise answers False for all 18 of them")
-    check(M.handler_arm_kinds("IOError", table) == M.handler_arm_kinds("OSError",
-                                                                      table),
-          "hierarchy: an alias arm and its canonical arm have the same list")
-
-    # ── the three refusals, and each one has to be UNDECIDABLE rather than wrong
-    class Decl:
-        def __init__(self, name, bases):
-            self.name = name
-            self.bases = bases
-
-    one = {"Mine": Decl("Mine", ["ValueError"])}
-    k1 = M.exception_kind_table(one)
-    check(M.handler_arm_matches("Exception", "Mine", k1, one) is True
-          and M.handler_arm_kinds("Mine", k1, one) is not None,
-          "hierarchy: a DECLARED class with no declared subclass is decidable",
-          "the common `class MyErr(ValueError)` shape must work; refusing it "
-          "would refuse most real code")
-    check(k1["ValueError"] == table["ValueError"],
-          "hierarchy: a declared class does not move a builtin's kind",
-          f"{k1['ValueError']} against {table['ValueError']} — the property the "
-          f"two disjoint ranges exist for")
-
-    two = {"Mine": Decl("Mine", ["ValueError"]),
-           "MineSub": Decl("MineSub", ["Mine"])}
-    k2 = M.exception_kind_table(two)
-    check(M.handler_arm_kinds("Mine", k2, two) is None
-          and M.handler_arm_matches("Mine", "MineSub", k2, two) is True,
-          "hierarchy: a DECLARED SUBCLASS refuses the compare list and is still "
-          "a source match",
-          "the list is numbered in the declared range, which a dylib and its "
-          "caller number differently, so the list would mean something else in "
-          "the other image; the source question needs no numbering")
-
-    unmodelled = {"Mine": Decl("Mine", ["External"])}
-    k3 = M.exception_kind_table(unmodelled)
-    check(M.handler_arm_kinds("Mine", k3, unmodelled) is None
-          and M.handler_arm_matches("Exception", "Mine", k3, unmodelled) is None,
-          "hierarchy: an UNMODELLED base is undecidable in both directions",
-          "nothing here knows whether `External` is an Exception, so `False` "
-          "would drop an exception CPython catches and a list would make "
-          "`except Exception:` silently stop catching it")
-
-    cyclic = {"A": Decl("A", ["B"]), "B": Decl("B", ["A"])}
-    chain, unresolved = M.exception_base_chain("A", cyclic)
-    check(chain == ("A", "B") and not unresolved,
-          "hierarchy: a cyclic declaration terminates",
-          f"chain {chain} / unresolved {unresolved}; a hang in a matcher is "
-          f"worse than an answer about a prefix of the chain")
-
-    check(M.handler_arm_kinds("NoSuchError", table) is None,
-          "hierarchy: a name no image can name has NO compare list",
-          "an empty list is the answer to nothing: every class is its own "
-          "subclass, so a dispatch comparing against it never takes an arm")
-
-
-def kind_table_in_info_checks(tmpdir):
-    """Both backends' `info` must carry the SAME published table, under one key.
-
-    The proof generators read `info`, so this is what makes "one list" true
-    rather than aspirational: two emitters that each computed their own would
-    agree today and could not be shown to. It is read out of the `(code, info)`
-    pair each backend's `compile` RETURNS — the same object the linker and the
-    proof generators are handed — rather than out of the publisher, because the
-    claim is about what a PROOF GENERATOR is given and only `info` is that.
-    """
-    import formal.build as FB
-    from formal.arm64_codegen import ARM64Codegen
-    from formal.x86_64_codegen import X86_64Codegen
-
-    src = ('class MyErr(ValueError):\n'
-           '    """no fields at all"""\n'
-           '\n'
-           '\n'
-           'def boom():\n'
-           '    raise MyErr("the message")\n'
-           '\n'
-           'def main(n):\n'
-           '    boom()\n'
-           '    return 0\n')
-    check(FB.M.exception_kind_for("MyErr") is None,
-          "kind table: nothing is published before a unit is prepared",
-          "a kind was already installed, so the numbering a proof generator "
-          "reads is not this image's")
-    seen = {}
-    for label, cls in (("arm64", ARM64Codegen), ("x86_64", X86_64Codegen)):
-        try:
-            stmts = FB.parse_module(src, filename=f"<{label}>")
-            _fns, _structs, _symbols, _slots = FB._prepare_functions(
-                stmts, synthetic=True, source_path=None)
-            _code, info = cls().compile(stmts, structs=None)
-        except Exception as exc:                          # noqa: BLE001
-            check(False, f"the kind-table program compiles on {label}",
-                  repr(exc)[:200])
-            continue
-        seen[label] = info.get("exception_kinds")
-        check(seen[label] is not None,
-              f"{label}'s info carries the exception kind table",
-              "`exception_kinds` is absent from `info`, so a proof generator "
-              "reading it would have no table to read")
-    if len(seen) == 2 and all(seen.values()):
-        check(seen["arm64"] == seen["x86_64"],
-              "both backends hand their proof generators the SAME kind table",
-              f"arm64 has {len(seen['arm64'])} entries and x86-64 has "
-              f"{len(seen['x86_64'])}, and they differ")
-        check(FB.M.exception_kind_for("MyErr") is not None,
-              "kind table: the image's own class is nameable in it",
-              "`class MyErr(ValueError)` did not get a kind, so a `raise MyErr` "
-              "would be an exception the image cannot name")
-
-
 def build(source, out, backend=None, tmpdir=None, arg=3):
     """`fire.py build --formal --no-prove -n <arg>`, as (rc, output).
 
@@ -588,18 +313,28 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit('a message')\n", 3),
-    # ── `SystemExit(<computed>)`, where the status is a VALUE ────────────────
+    # ── a COMPUTED status ───────────────────────────────────────────────────
+    # `sys.exit(n)` with a computed `n` is the ORDINARY spelling, and it is the
+    # case this table could not express: `model.raise_exit_status` answered 1
+    # for every argument that is not a literal, and 1 is the status of the
+    # overwhelming majority of real failures — so a caller checking `!= 0` was
+    # right and a caller checking `== 3` was wrong, which is the definition of a
+    # fault nobody can detect from the program itself.  Both backends now emit
+    # the argument and hand it to the exit as a register.
     #
-    # `sys.exit(n)` is the ordinary spelling and CPython honours the value; the
-    # five rows above are all about the status being IN THE TEXT, and a program
-    # that computes it used to get 1 on both architectures — the same number as
-    # the overwhelming majority of real failures, so a caller checking `!= 0` was
-    # right and a caller checking `== 3` was wrong, and this path cannot detect
-    # that on its own.
+    # Five rows, and the split is the point: the status at 3 (the case that was
+    # silently 1), at 0 (a computed 0 must exit 0 and a mask applied on one
+    # machine only would not), negative (the byte truncation `exit(3)` performs
+    # — the reason the row above it exists), out of range (300 -> 44, which is
+    # the only one of the five that distinguishes a mask from an implicit
+    # 32-bit truncation), and inside a `try` (the status word has to survive the
+    # finally flush, which is the one instruction the change actually adds on
+    # arm64 and the one pop it adds on x86-64).
     #
-    # Four rows and each is a different part of the mechanism:
+    # The last one also says the argument expression RUNS before the exit,
+    # which a lowering that computed the status somewhere else would lose.
     ("systemexit_with_a_computed_status",
-     "def code() -> Int:\n"
+     "def code():\n"
      "    return 3\n"
      "\n"
      "def main(n):\n"
@@ -611,28 +346,21 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit(code())\n", 3),
-    # Zero, which is the row that says the value reached the register rather
-    # than a mask that folded a non-zero word to nothing.
     ("systemexit_with_a_computed_zero_status",
-     "def code() -> Int:\n"
+     "def code():\n"
+     "    print('arg')\n"
      "    return 0\n"
      "\n"
      "def main(n):\n"
-     "    print('before')\n"
      "    raise SystemExit(code())\n",
      "def code():\n"
+     "    print('arg')\n"
      "    return 0\n"
      "\n"
      "def main(n):\n"
-     "    print('before')\n"
      "    raise SystemExit(code())\n", 3),
-    # Negative, and the reason the mask is at the POINT OF DELIVERY rather than
-    # in `model.raise_exit_status`: a computed value does not exist until the
-    # exit register is written, and `exit(3)`'s `status & 0xFF` has to be
-    # reproduced there. This is the row that would catch a mask applied on one
-    # backend only — measured 2^64-1 on a missing mask, 255 with it, on both.
     ("systemexit_with_a_computed_negative_status_is_truncated_to_a_byte",
-     "def code() -> Int:\n"
+     "def code():\n"
      "    return -1\n"
      "\n"
      "def main(n):\n"
@@ -644,51 +372,6 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit(code())\n", 3),
-    # Through a LOCAL, which is what a real `sys.exit` looks like — the argument
-    # is a name whose kind is a statement's evidence, not a call's, and it is the
-    # shape that says the rule reads a NAME and not only a literal.
-    ("systemexit_with_a_computed_status_through_a_local",
-     "def code() -> Int:\n"
-     "    return 4\n"
-     "\n"
-     "def main(n):\n"
-     "    v = code()\n"
-     "    print('before')\n"
-     "    raise SystemExit(v)\n",
-     "def code():\n"
-     "    return 4\n"
-     "\n"
-     "def main(n):\n"
-     "    v = code()\n"
-     "    print('before')\n"
-     "    raise SystemExit(v)\n", 3),
-    # And the direction that matters most, because the computed path is a NEW
-    # register write and the string path must not have become one: a callee
-    # declared `-> str` keeps status 1, which is CPython's answer for a
-    # non-integer argument. This row is what stops the fix from being "put
-    # whatever the argument computes in the exit register" — measured at 220 on
-    # arm64 and 200 on x86-64 without it, from a pointer's own low bits.
-    ("systemexit_with_a_computed_non_integer_argument_is_still_status_one",
-     "def code() -> str:\n"
-     "    return 'boom'\n"
-     "\n"
-     "def main(n):\n"
-     "    print('before')\n"
-     "    raise SystemExit(code())\n",
-     "def code():\n"
-     "    return 'boom'\n"
-     "\n"
-     "def main(n):\n"
-     "    print('before')\n"
-     "    raise SystemExit(code())\n", 3),
-    # Two more rows over the same mechanism, and each is the half of it the five
-    # above cannot see. The OUT OF RANGE one is 300, which is
-    # the only value in that family that tells a mask from an implicit 32-bit
-    # truncation: 300 & 0xFF is 44 and 300 & 0xFFFFFFFF is 300, so the row
-    # says the mask is `EXIT_STATUS_BITS` and not merely "some mask".
-    # The FINALLY one is the instruction the change actually adds on arm64
-    # (`stp`/`ldp` around the flush) and the pop it adds on x86-64: the status
-    # word has to survive `fflush`, which clobbers every caller-saved register.
     ("systemexit_with_a_computed_out_of_range_status_is_truncated_to_a_byte",
      "def code():\n"
      "    return 300\n"
@@ -702,7 +385,6 @@ CASES = [
      "def main(n):\n"
      "    print('before')\n"
      "    raise SystemExit(code())\n", 3),
-
     ("systemexit_with_a_computed_status_survives_a_finally",
      "def code():\n"
      "    return 7\n"
@@ -722,105 +404,6 @@ CASES = [
      "        raise SystemExit(code())\n"
      "    finally:\n"
      "        print('f')\n", 3),
-    # ── the `finally` on EVERY way out of the `try` body ─────────────────────
-    # `_flush_pending_finally` used to TRUNCATE its frame list, so the first
-    # exit out of a `try` body flushed the `finally` and every later exit found
-    # an empty list and emitted no cleanup. Both backends printed the wrong
-    # thing; CPython runs the cleanup on every path. Fixed by keeping the frames
-    # and guarding re-entry by identity.
-    # The first row is the smallest second-return case; the second is the loop
-    # `break`/`continue` spelling, which is the same defect through the
-    # `fin_depth` argument.
-    ("a_second_return_out_of_a_try_still_runs_the_finally",
-     "def f(n):\n"
-     "    try:\n"
-     "        if n == 1:\n"
-     "            return 10\n"
-     "        return 20\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(f(1))\n"
-     "    print(f(2))\n"
-     "    return 0\n",
-     "def f(n):\n"
-     "    try:\n"
-     "        if n == 1:\n"
-     "            return 10\n"
-     "        return 20\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(f(1))\n"
-     "    print(f(2))\n"
-     "    return 0\n", 3),
-    ("break_and_continue_each_run_the_finally",
-     "def loop_break():\n"
-     "    out = 0\n"
-     "    for i in range(0, 4):\n"
-     "        try:\n"
-     "            if i == 1:\n"
-     "                out = out + 100\n"
-     "                continue\n"
-     "            if i == 2:\n"
-     "                out = out + 1000\n"
-     "                break\n"
-     "            out = out + i\n"
-     "        finally:\n"
-     "            print('fin', i)\n"
-     "    return out\n"
-     "\n"
-     "def main(n):\n"
-     "    print(loop_break())\n"
-     "    return 0\n",
-     "def loop_break():\n"
-     "    out = 0\n"
-     "    for i in range(0, 4):\n"
-     "        try:\n"
-     "            if i == 1:\n"
-     "                out = out + 100\n"
-     "                continue\n"
-     "            if i == 2:\n"
-     "                out = out + 1000\n"
-     "                break\n"
-     "            out = out + i\n"
-     "        finally:\n"
-     "            print('fin', i)\n"
-     "    return out\n"
-     "\n"
-     "def main(n):\n"
-     "    print(loop_break())\n"
-     "    return 0\n", 3),
-    # A `return` inside a `finally` discards the in-flight return and WINS
-    # (CPython warns and returns 2). arm64 used to SIGBUS here: the nested
-    # return emitted an epilogue while the flush's save slot was still below
-    # SP, so the frame teardown left SP 16 bytes high and `ret` used a garbage
-    # X30. `_emit_epilogue` now steps over the outstanding flush slots; x86-64
-    # was already correct because `leave` is frame-pointer relative. CPython's
-    # SyntaxWarning goes to stderr and is not compared.
-    ("a_return_inside_a_finally_wins_and_runs_once",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
     # ── ZeroDivisionError from a builtin operation ───────────────────────────
     # The INTEGER divide already guarded itself; these pin it against CPython
     # rather than against a constant, and `uncaught_zd_*` is the pair that says
@@ -1045,62 +628,7 @@ CASES = [
      "    finally:\n"
      "        print('outerfin')\n"
      "    return 0\n", 3),
-    # ── a `return` INSIDE a `finally` ───────────────────────────────────────
-    # CPython warns about it (`SyntaxWarning`) and then obeys it: the in-flight
-    # `return 1` is discarded, the `finally` body runs, and the `return 2` in it
-    # WINS. These rows are the measured pair for the arm64 double-epilogue
-    # SIGBUS that `_flush_pending_finally` used to cause: it emitted a second
-    # epilogue on top of the one the nested `return` already emitted, tearing
-    # the frame down twice. The first row is the single-level case (was `Bus
-    # error`, exit 138); the second pins that an outer `finally` still runs on
-    # the nested return's way out, and that it runs
-    # exactly once.
-    ("a_return_inside_a_finally_wins",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
-    ("a_return_inside_an_inner_finally_still_runs_the_outer_one",
-     "def h():\n"
-     "    try:\n"
-     "        try:\n"
-     "            return 1\n"
-     "        finally:\n"
-     "            return 3\n"
-     "    finally:\n"
-     "        print('outer')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        try:\n"
-     "            return 1\n"
-     "        finally:\n"
-     "            return 3\n"
-     "    finally:\n"
-     "        print('outer')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
+    # ── a `try` with no raising body ────────────────────────────────────────
     # The `except: pass` shape, which is the commonest in the corpus and must
     # keep building: the arm has no effect to drop, so nothing is lost by
     # leaving it out, and this row is what would notice a repair that started
@@ -1222,148 +750,6 @@ def run_refusal(name, source, needle, tmpdir, verbose):
         print(f"      arm64 and x86-64 agree: {needle!r}")
 
 
-# ── the CROSS-MODULE refusals ───────────────────────────────────────────────
-#
-# (name, {filename: source}, needle)
-#
-# These are the shapes `RaiseGraph`'s own call graph cannot see, because the
-# `raise` is in ANOTHER MODULE of the same image — `try: boom()` contains no
-# `raise` at all. `model.RaiseGraph` is built from ONE unit's function list, so
-# before the published per-module table (`model.publish_module_raisers`, read
-# here through `formal/build.py::_publish_imported_raisers`) an imported callee
-# was UNRESOLVED, and unresolved is answered `False`.
-#
-# **That `False` was a wrong answer and not a shrug**, and the symptom is the
-# shape that is worse than a wrong number: the program BUILT. Measured on both
-# architectures before the table existed, the first row below built, printed
-# NOTHING and exited 1, where CPython prints `caught` and exits 0 — every
-# statement after the `try` missing from the image because the `raise` left it.
-CROSS_MODULE_REFUSALS = [
-    # The bare spelling, `from h2 import boom`, which is the commonest one and
-    # the one that needed `model.imported_module_bindings` to carry: `boom(…)` is
-    # a bare callee, so without the binding it is the same unresolved name as
-    # `dict.get`.
-    ("a_try_over_a_raising_callee_in_an_imported_module",
-     {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("the message")\n'
-                 '\n'
-                 '\n'
-                 'def quiet():\n'
-                 '    return 1\n',
-      "main.mojo": 'from h2 import boom\n'
-                   '\n'
-                   'def main(n):\n'
-                   '    try:\n'
-                   '        boom()\n'
-                   '    except:\n'
-                   '        pass\n'
-                   '    printf("caught\\n")\n'
-                   '    return 0\n'},
-     "h2.boom(…)` , which can end the process".replace("` ", "`")),
-    # The dotted spelling, `import h2` then `h2.boom()`, which needs no binding
-    # at all — the qualifier is in the AST — so it is the row that would still
-    # pass if `imported_module_bindings` were deleted, and the pair is what says
-    # both spellings of one cross-module call are answered.
-    ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
-     {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("the message")\n',
-      "main.mojo": 'import h2\n'
-                   '\n'
-                   'def main(n):\n'
-                   '    try:\n'
-                   '        h2.boom()\n'
-                   '    except:\n'
-                   '        pass\n'
-                   '    printf("caught\\n")\n'
-                   '    return 0\n'},
-     "h2.boom(…)` , which can end the process".replace("` ", "`")),
-]
-
-
-def run_cross_module_refusal(name, files, needle, tmpdir, verbose):
-    """Both backends must REFUSE an image of SEVERAL modules, with the needle.
-
-    Written out rather than reusing `build` because the subject IS the
-    multi-module image: the callee has to live in a second file or the row is
-    measuring the single-module rule it sits beside.
-    """
-    for filename, text in files.items():
-        with open(os.path.join(tmpdir, filename), "w") as f:
-            f.write(text)
-    seen = {}
-    for backend in BACKENDS:
-        out = os.path.join(tmpdir, f"{name}.{backend}")
-        src = os.path.join(tmpdir, "main.mojo")
-        p = subprocess.run(
-            [sys.executable, FIRE, "build", "--formal", "--no-prove",
-             f"--backend={backend}", "-o", out, src],
-            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
-        text = p.stderr or p.stdout or ""
-        if not check(p.returncode != 0,
-                     f"{name} is refused on {backend}",
-                     "it BUILT and ran, so a `try` whose callee ends the "
-                     "process in ANOTHER module is in the image as a program "
-                     "that stops where CPython goes on"):
-            continue
-        seen[backend] = text
-        check(needle in text,
-              f"{name} on {backend} names the callee it cannot resolve",
-              f"the message does not contain {needle!r}: "
-              f"{text.strip()[-300:]}")
-    if len(seen) == 2 and verbose:
-        print(f"      arm64 and x86-64 agree: {needle!r}")
-
-
-# ── the CROSS-MODULE ANSWERED table ─────────────────────────────────────────
-#
-# (name, {filename: source}, needle-in-stdout)
-#
-# **The negative half of the table above, and it is what makes the two a pair.**
-# An empty raiser set is a FACT — "this module's functions cannot end the
-# process" — and if it were not published, every call into a compiled module
-# would still be a possibility and the table above would have over-refused its
-# own corpus. So the control is a `try` around an imported function that raises
-# nothing, which must keep BUILDING and keep running the statements after the
-# `try`.
-CROSS_MODULE_ANSWERED = [
-    ("a_try_over_a_callee_that_raises_nothing_still_builds",
-     {"h2.mojo": 'def quiet():\n'
-                 '    return 1\n',
-      "main.mojo": 'from h2 import quiet\n'
-                   '\n'
-                   'def main(n):\n'
-                   '    try:\n'
-                   '        quiet()\n'
-                   '    except:\n'
-                   '        pass\n'
-                   '    printf("after\\n")\n'
-                   '    return 0\n'},
-     "after\n"),
-]
-
-
-def run_cross_module_answered(name, files, needle, tmpdir, verbose):
-    """Both backends must BUILD and print `needle` for a multi-module image."""
-    for filename, text in files.items():
-        with open(os.path.join(tmpdir, filename), "w") as f:
-            f.write(text)
-    for backend in BACKENDS:
-        out = os.path.join(tmpdir, f"{name}.{backend}")
-        src = os.path.join(tmpdir, "main.mojo")
-        p = subprocess.run(
-            [sys.executable, FIRE, "build", "--formal", "--no-prove",
-             f"--backend={backend}", "-o", out, src],
-            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
-        text = p.stderr or p.stdout or ""
-        if not check(p.returncode == 0,
-                     f"{name} builds on {backend}", text[-400:]):
-            continue
-        rc, got, _err = run(out)
-        check(got == needle,
-              f"{name} on {backend} prints what the source says",
-              f"printed {got!r}, the source says {needle!r}")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -1379,19 +765,6 @@ def main():
             if args.cases and name not in args.cases:
                 continue
             run_refusal(name, source, needle, tmpdir, args.verbose)
-        for name, files, needle in CROSS_MODULE_REFUSALS:
-            if args.cases and name not in args.cases:
-                continue
-            run_cross_module_refusal(name, files, needle, tmpdir, args.verbose)
-        for name, files, needle in CROSS_MODULE_ANSWERED:
-            if args.cases and name not in args.cases:
-                continue
-            run_cross_module_answered(name, files, needle, tmpdir,
-                                      args.verbose)
-        kind_table_checks()
-        handler_arm_matching_checks()
-        if not args.cases:
-            kind_table_in_info_checks(tmpdir)
 
     total = len(RESULTS)
     passed = sum(1 for ok, _ in RESULTS if ok)

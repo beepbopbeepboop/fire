@@ -81,7 +81,7 @@ default, and a field with no class-level default is a word of zeros: the count
 word would be read from address 0. …)
 ```
 
-and the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.1 measured 164 of the 165
+and `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.1 measured 164 of the 165
 files in that row as closure behind it. That refusal is gone. It was **three**
 defects, none of them the refusal's own text:
 
@@ -178,7 +178,7 @@ the second half.** `binary_heap.mojo` lowering is necessary and not sufficient.
 
 ## 2b. What is BEHIND the export gate, measured 2026-10-03: it is `tile.mojo`, and the row is claimed
 
-the `b9` round of `bugs/FORMAL_sweep_work_map.md` §3 records the state of the row
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §3 records the state of the row
 after `formal/monomorph.py` landed: **163 files, "module exports no public
 functions", 162 of them naming nothing `binary_heap.mojo` declares.** §2 above
 says the gate is wall two and that fixing wall one is necessary and not
@@ -472,7 +472,7 @@ tests and one tool keyed on changed:
   on that enumeration, so `clear` joining the table would have taken every file in
   the row back to `other refusal` **silently**.  It is re-pointed at the clause
   that states the fact — "is not one of those methods of those receivers" — for
-  the reason the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1 gives: a marker
+  the reason `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §5.1 gives: a marker
   keyed on a list a change to the list invalidates is a row that reads as a cause
   blocking nothing.
 * `test_refusal_taxonomy.py`'s sample for that row now carries the message's TAIL,

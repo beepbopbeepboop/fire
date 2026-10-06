@@ -7,12 +7,10 @@ answerable. Measured 2026-10-05 on `work/gatefix11` at `cb752863`; the change
 below is `work/formal31-3`, 2026-10-05.**
 
 This is the same defect `formal/model.py::string_element_refusal`'s docstring
-now records as fixed, one function over, and the sibling of the one
-`work/formal27-6` measured on 2026-10-05 — the encoding guard asked of a byte
-buffer rather than of a character, which has since been fixed by the same
-`receiver_is_declared_bytes` exemption this document's element half records
-(see "What landed" below). **The element half landed** — see "What landed"
-below; **the `len` half is what this document is about.**
+now records as fixed, one function over, and the sibling of the bug
+`work/formal27-6` filed as `FORMAL_the_encoding_refusal_is_asked_of_a_byte_buffer`
+(measured there, not fixed there either). **The element half landed** — see
+"What landed" below; **the `len` half is what this document is about.**
 
 ## What I ran
 
@@ -251,8 +249,3 @@ says the seed landed at the element and nowhere else. **68/68, and 58/58 before.
 which is the check that matters for a change that rewrote nine `== STR_KIND`
 comparisons: every one of them now reads `string_operand_is_string`, which
 returns the same answer for every kind that existed before this one.
-* The fix that made it green for a day is `4d081b4f` (`formal: a
-  namespace-qualified `decide` axiom was invisible to the closure census`),
-  and the doc it deleted with that fix is named by the commit rather than by
-  a path that no longer exists — which is why the measurement above is over
-  a table that has been stale before.

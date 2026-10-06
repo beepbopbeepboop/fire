@@ -132,10 +132,8 @@ carries a type tag (a small index into a per-image table of class names and
 field layouts), which is a change to `formal/model.py`'s value representation
 AND to the Lean proof (`lib/ProofLib.lean`'s `Value` is one word — the same
 change `bugs/FORMAL_module_state_no_storage.md` describes for module state, and
-for the same reason). That is the shape of work this tree has already done
-twice — `bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 is the same
-shape, a value-model change plus the Lean side of it: a model change plus a
-proof, not a codegen change.
+for the same reason). That is the `bugs/FORMAL_contract_work_handoff.md` shape
+of work: a model change plus a proof, not a codegen change.
 
 **The alternative, and the one the corpus actually needs**, is to answer the
 question AT COMPILE TIME where the static type is known — which is what

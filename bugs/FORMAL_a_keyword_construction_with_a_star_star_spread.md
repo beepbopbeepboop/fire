@@ -13,7 +13,7 @@ refusal_in_x86_64_decode.md`), and it holds 13 f-strings of which five are
 `insn()` call sites — so "the source stops spreading" is no longer a one-file
 mechanical change but a chain, and the variadic ABI is the only blocker left.**
 Found 2026-10-03 while clearing the single-file causes in
-the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2. **The refusal itself is still
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2. **The refusal itself is still
 CORRECT** — what changed is that the sentence it used to produce was false about
 the source, that a spread of a dict LITERAL is now answered rather than refused,
 and that the gap that remains is NOT the one this doc's §"The exact next step"

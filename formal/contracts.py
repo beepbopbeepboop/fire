@@ -139,17 +139,7 @@ _SIGN_FLIP = "0x8000000000000000"
 # UInt64 arithmetic as Lean spells it.  `UInt64.div` / `UInt64.mod` rather than
 # a bare `/` or `%`, which on `UInt64` is not the truncating operation -- the
 # same table `_dylib_spec_lean` uses, reached through it.
-_ARITH_OPS = {"+", "-", "*", "/", "//", "%"}
-
-# The AST spells integer division `//`; this IR -- and the model's own word
-# arithmetic -- spell it `/`, the tag `_lean_of` renders as `UInt64.div` and
-# `_eval_of` evaluates as `a // b`.  A reader keyed on the AST operator alone
-# therefore had no arm for `//` at all: a clause over it emitted nothing (with a
-# reason that named `/`), and a body containing it was a skip at every input.
-# The alias is what keeps the ONE IR the reader produces and the model's
-# spelling identical, rather than a second spelling supplied by each caller --
-# which is what `formal/loop_invariants.py`'s removed `_word_arith` used to do.
-_ARITH_ALIASES = {"//": "/"}
+_ARITH_OPS = {"+", "-", "*", "/", "%"}
 
 # The verdict set.  Named constants rather than bare strings because
 # `classify` and every consumer have to agree on the SPELLING, and a typo in a
@@ -418,7 +408,7 @@ class _Op:
     NEG = "neg"        # word negation: (NEG, e)
     POS = "pos"        # unary `+`, which is the identity: (POS, e)
     INVERT = "inv"     # `~`: (INVERT, e)
-    ARITH = "arith"    # (ARITH, op, a, b) for + - * / % (source `//` reads `/`)
+    ARITH = "arith"    # (ARITH, op, a, b) for + - * / %
     CMP = "cmp"        # (CMP, op, a, b) for the six comparisons
     AND = "and"        # (AND, a, b)
     OR = "or"          # (OR, a, b)
@@ -527,19 +517,12 @@ class _Reader:
                 if a is None or b is None:
                     return None
                 return (_Op.CMP, "=" if op == "==" else op, a, b)
-            tag = _ARITH_ALIASES.get(op, op)
-            if tag in _ARITH_OPS:
+            if op in _ARITH_OPS:
                 a = self.value(getattr(node, "left", None))
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                # `//` and `/` are the SAME IR tag.  The machine computes
-                # `UInt64.div` for both -- `_eval_of`'s `/` is `a // b` and
-                # `_lean_of`'s `/` is `UInt64.div`, the word reading -- so
-                # normalising the spelling here is what keeps one reader for
-                # the operator rather than a second one in every caller.
-                # `_ARITH_ALIASES` is that normalisation, applied to `tag`.
-                return (_Op.ARITH, tag, a, b)
+                return (_Op.ARITH, op, a, b)
             return None
         if kind == "TernaryExpr":
             test = self.truth(getattr(node, "condition", None))
@@ -806,112 +789,23 @@ _MASK = (1 << 64) - 1
 # `bv_decide` is DELIBERATELY absent.  It decides `BitVec` goals; `UInt64` is
 # `Lean.UInt64`, a `Fin (2^64)`, which is a STRUCTURE and not a bitvector, so on
 # a goal in this module it is a category error rather than a weaker tactic --
-# and it is a MEASURED one: `bv_decide` abstracts `arm64_reg 0 (S14 (start n))`
-# as an opaque variable and reports a spurious counterexample, because
-# `Arm64State` is a structure and not a bitvector.  Measured on the dylib
-# export contract `hreg`, which is where the diagnosis and the fix both live
-# (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
-# memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
-# ever wanted, THIS is where it goes, and the note travels with it.
+# the same mistake `bugs/FORMAL_contract_work_handoff.md` §3 records as having
+# produced a spurious counterexample on `arm64_reg`.  If a clause over `BitVec`
+# is ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`
 # takes the first rung that CLOSES it; the last rung is `omega`, whose failure
 # is an error, so the script either proves the contract or fails with the
 # theorem named.
-#
-# Each rung is a (NAME, SPELLING) pair, and it is a pair because a rung is a
-# tactic SEQUENCE and only its first tactic is a name: `simp_all_toNat` is
-# spelled `simp_all [...] <;> omega`, and a verdict that printed that whole
-# sequence would bury the three names a reader actually needs.  `Verdict.why`
-# prints the NAME; `_ladder_script` emits the SPELLING, and
-# `test_formal_contracts.py` checks the spelling is in the emitted theorem --
-# which is the anti-drift property that matters, and is STRONGER than checking
-# the name, because a name can be present in a script that runs a different
-# tactic under it.
-#
-# `simp_all_toNat` LEADS, and that order is measured rather than tidied: with
-# the bare `simp_all` rung first, `simp_all_toNat` never runs and the ladder is
-# back to 1 of 6.  A rung that makes progress without closing the goal does not
-# hand its rewrites to the next rung -- `first` restores the goal -- so a
-# partially-successful earlier rung does not "help along" the later one; and a
-# `simp_all` that has already rewritten the goal has consumed the `<;> omega`
-# it would have needed.  Measured both orders on the corpus: toNat-first closes
-# `bounds_index`, bare-first does not.
-LADDER = (
-    ("simp_all_toNat", "simp_all [{lemmas}, {extra}] <;> omega"),
-    ("simp_all", "simp_all [{lemmas}]"),
-    ("omega", "omega"),
-    ("decide", "decide"),
-)
+LADDER = ("simp_all", "omega", "decide")
 
-# The lemma set `simp_all_toNat` adds, and WHY it is the whole fix.
-#
-# The comparison every clause in this module is stated over is SIGNED, so it is
-# rendered through `sKey` -- and `sKey x` is `x ^^^ 0x8000000000000000`, a
-# `UInt64`, which is `Lean.UInt64` = `Fin (2^64)`.  `omega` has NO arithmetic
-# over `Fin` (it says so: "No usable constraints found"), `simp_all` cannot use
-# a relation between two variables as a rewrite, and `decide` cannot decide a
-# goal with free variables.  That is why the ladder's reach was, until this
-# rung, exactly "the goal becomes ground after splitting over the model's own
-# branches", and why `bounds_index`'s body -- which has no branch at all -- was
-# unreachable: there was nothing to split on AND nothing to reason with.
-#
-# `UInt64.lt_iff_toNat_lt` and `UInt64.le_iff_toNat_le` are the library's own
-# bridges from the `Fin` order to `Nat`'s (used throughout `lib/ProofLib.lean`),
-# so putting them in the simp set turns every hypothesis and the goal into `Nat`
-# inequalities, which is the arithmetic `omega` has.  Then `<;> omega`: the
-# hypotheses have to be REWRITTEN before `omega` runs, and `first` does not
-# carry a failed rung's rewrites forward to the next one, so the rewrite and
-# the arithmetic it enables have to be ONE rung.
-#
-# `bugs/FORMAL_contract_ladder_reach.md` §4 prescribed a lemma here instead --
-# `sKey_lt_iff : sKey a < sKey b ↔ a < b`, to be added to `lib/work.lean`.  That
-# lemma is FALSE, and it is worth recording why because the doc's reasoning is
-# right and only its conclusion is wrong: `sKey` flips the top bit, so
-# `sKey a < sKey b` is the SIGNED reading of `a < b`, not the unsigned one
-# `Fin` gives.  Measured, `decide` refutes it: at `a = 0` and
-# `b = 0xffffffffffffffff`, `sKey a < sKey b` is FALSE (flipping the top bit
-# makes 0 the larger) while `a < b` is TRUE.  The ladder does not need it
-# either -- it needs transitivity of `<` into `≤`, and `Nat.le_of_lt` after the
-# `toNat` rewrite is that fact, already in core.
-_EXTRA_SIMP = "UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le"
-
-# The order bridge the ladder's `simp_all` rung carries, beside `sKey` and the
-# two `u64_*_iff` lemmas.  `bugs/FORMAL_contract_ladder_reach.md` §3 measured why
-# it is needed and §4 named the shape of the fix; the measurement is the short
-# version:
-#
-#   * `Lean.UInt64` is NOT an integer type `omega` has.  It is a bitvector type
-#     whose `<` and `≤` are the *order on `toNat`* but whose `^^^` is a BIT
-#     operation, so a clause stated over the sign-flipped words
-#     (`i ^^^ 0x8000000000000000 ≤ n ^^^ 0x8000000000000000`, which is what
-#     makes the comparison signed and therefore what CPython means for an `Int`)
-#     hands `omega` a goal it reports as "No usable constraints found … which
-#     may also involve … modular remainder" -- with BOTH preconditions already
-#     in context, because `intro hpre0 / obtain ⟨…⟩ := hpre` puts them there.
-#   * `simp` could not do it either, for the same reason: `^^^` on a bitvector is
-#     not a simp-normal form, so `simp_all [sKey]` turns the goal into the same
-#     un-normalised comparison it already had.
-#
-# These three names are what does it.  `UInt64.lt_iff_toNat_lt` and
-# `UInt64.le_iff_toNat_le` are the tree's own statement that the two orders are
-# the order on `toNat`; rewriting with them turns every hypothesis AND the goal
-# into arithmetic on `Nat`, where `Nat.le_of_lt` -- the step from a strict bound
-# to a weak one, which is the whole of `bounds_index.mojo`'s contract -- is a
-# simp lemma rather than an absence.
-#
-# A library lemma was considered and rejected: the obvious spelling
-# (`sKey_lt_iff` in `lib/work.lean`, which is what the doc §4 prescribed) is a
-# proof about the *sign flip* being an involution, and the goal is already
-# stated over flipped words -- the flip is not what is in the way, the ORDER is.
-# So this is three names in this module's own simp set, no `lib/` change, no
-# `.olean` rebuild, and the same three names work for any goal over `UInt64`
-# rather than only for the shapes they were found on.
-_ORDER_BRIDGE = ("UInt64.lt_iff_toNat_lt", "UInt64.le_iff_toNat_le",
-                 "Nat.le_of_lt")
+# How each rung is SPELLED, one place.  `simp_all` is the only one that needs
+# the lemma set, and `simp_all` is also the only one whose spelling differs
+# from its name (it is `simp_all [...]`, not `simp_all`).  A rung with no entry
+# here is written bare, which is right for the other two and would be wrong for
+# anything needing a simp set -- so a new rung that needs one has to be added
+# here rather than to the `first` block.
+_LADDER_LEMMAS = {"simp_all"}
 
 
 def _ladder_script(simp: str) -> str:
@@ -920,15 +814,12 @@ def _ladder_script(simp: str) -> str:
     Exists so `LADDER` and the emitted script cannot disagree, which they did
     once: `LADDER` named `bv_decide`, the script did not contain it, and every
     PROVED verdict therefore quoted a tactic the proof never ran.
-
-    Every rung is parenthesised, including the bare `omega` and `decide`: a
-    bare `| omega` alternative cannot carry a `<;>`-sequence, and one rung here
-    does.
     """
     lines = ["first"]
-    for _name, spelling in LADDER:
-        text = spelling.format(lemmas=simp, extra=_EXTRA_SIMP)
-        lines.append(f"    | ({text})")
+    for rung in LADDER:
+        text = f"{rung} [{simp}]" if rung in _LADDER_LEMMAS else rung
+        lines.append(f"    | {text}" if rung not in _LADDER_LEMMAS
+                     else f"    | ({text})")
     return "\n".join(lines)
 
 
@@ -1066,8 +957,7 @@ def contract_theorems(contract, params, model_name=None, fn=None,
                 if splits else "")
     simp = (", ".join(hs + pre_names + [model, "sKey",
                                         "u64_lt_iff_false_of_le",
-                                        "u64_le_iff_false_of_lt"]
-                       + list(_ORDER_BRIDGE)))
+                                        "u64_le_iff_false_of_lt"]))
     # The ladder, BUILT FROM `LADDER` rather than written out beside it.  It
     # was written out beside it, and then `LADDER` and the script disagreed --
     # `LADDER` listed four rungs and the script had three -- so `Verdict.why`
@@ -1097,32 +987,8 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     # One bullet per postcondition, each opening with the case split the model
     # needs.  Bullets rather than one `And` split because each postcondition is
     # then separately checkable: a failure names which one broke.
-    #
-    # The conjunction is SPLIT before the first bullet, and a `constructor`
-    # precedes every bullet but the LAST.  Two defects, both measured on
-    # `formal/contracts/clamped.mojo`, and both of which report a contract the
-    # ladder DOES close as UNREACHED -- which is the one failure this module
-    # exists to prevent, and it does it by accident:
-    #
-    #   * With no `constructor` before the first bullet, the single
-    #     `· first | … | … | …` is handed the WHOLE conjunction and `simp_all`
-    #     closes it outright whenever it can discharge every conjunct.  The
-    #     bullets after it then have no goal and Lean reports "No goals to be
-    #     solved" -- the exit status of an unproved theorem.
-    #   * With one before every bullet, the split is against the WRONG nesting:
-    #     `_lean_of` renders `P0 ∧ P1 ∧ … ∧ Pn` right-nested, so `constructor`
-    #     peels off the head and leaves the tail to be split again, and the
-    #     bullet after the peel is handed `Pn-1 ∧ Pn` rather than `Pn-1`.
-    #     Measured on four postconditions: the third bullet is handed a
-    #     conjunction, which is its own "no goals to be solved".
-    #
-    # Peeling the head before every bullet but the last is the one shape that
-    # matches both: bullet `i` is handed `Pi` and the leftover `Pi+1 ∧ … ∧ Pn-1`
-    # is what the next `constructor` splits.  For a single postcondition there
-    # is nothing to split, which is why the rule is about the LAST bullet rather
-    # than about the first.
     for i, _p in enumerate(post_text):
-        if i < len(post_text) - 1:
+        if i:
             lines.append("  constructor")
         lines.append(f"  · {by_cases}{rung}")
     if source_note:
@@ -1202,7 +1068,7 @@ def unlowered_reason(contract, params, model_name=None) -> str:
         (f"`{c.text}`" if c.is_pragma else f"`@{c.name}(...)`") for c in bad)
     return (f"{len(bad)} of {len(contract.clauses)} clause(s) has no Lean "
             f"rendering ({spelled}); the expression subset a contract may use "
-            f"is literals, the parameters, `result`, `+ - * / // %`, the six "
+            f"is literals, the parameters, `result`, `+ - * / %`, the six "
             f"comparisons, `and`/`or`/`not`, a conditional expression, and "
             f"`abs`/`min`/`max`/`clamp`")
 
@@ -1349,7 +1215,7 @@ class SourceRunner:
             return (a - b) & _MASK
         if op == "*":
             return (a * b) & _MASK
-        if op in ("/", "//"):
+        if op == "/":
             if b == 0:
                 raise Unsupported("a division by zero (the machine traps here)")
             return (a // b) & _MASK
@@ -1750,8 +1616,7 @@ def classify(emission, lean_ok=None, lean_detail="", counterexample=None,
                 lean_detail=lean_detail, theorem=emission.lean)
         return Verdict(name, PROVED,
                        f"Lean closed `{name}_contract` with the ladder "
-                       f"({' → '.join(name for name, _ in LADDER)}) and the "
-                       f"bounded search found "
+                       f"({' → '.join(LADDER)}) and the bounded search found "
                        f"no counterexample among "
                        f"{len(BOUNDARY_INPUTS) + SEARCH_RANGE} inputs "
                        f"(the search is a check, not part of the proof)"

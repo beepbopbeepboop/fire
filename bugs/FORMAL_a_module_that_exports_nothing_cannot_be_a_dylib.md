@@ -1,148 +1,10 @@
 # FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib: `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it
-**Status: PARTIALLY FIXED 2026-10-05 (`work/formal41-exports-and-strings`; re-measured the same day, row UNCHANGED and the remainder owned by `formal28-4`'s `FORMAL_module_state_no_storage.md` — see §0.3,
-`9722edb7` + `57412b76`) — the `std/math/constants.mojo` terminal cause on this
-row is GONE (33 of 59 files, measured on both architectures) and the gate is now
-a rule with a tested boundary. The row's TOTAL did not move and no file builds:
-the 33 went one level deeper to `_io.mojo`, which is the same row. The
-`_unicode_lookups` half this document is named for is NOT fixed, and every wall
-§3 describes still stands.** §0 records the measurement in full, including the
-part of it that is unflattering; nothing below has been re-derived and the
-analysis is the 2026-10-03 one.
-
-## 0.3 Re-measured 2026-10-05: this row is UNCHANGED, and what is left on it is
-##       another worker's claim
-
-This round was given the doc and did not move the row. §0 is a good record of
-why, and the re-measurement confirms it rather than adding to it, so what is
-worth writing down is **which claim owns the remainder** — a reader deciding
-whether to start needs to know that starting here means starting somewhere else.
-
-**This document's own subject has not moved.** `_unicode.mojo` still refuses,
-byte for byte as §1 recorded it, on the same export gate:
-
-```
-build: _unicode.mojo imports 'std.collections.string._unicode_lookups', which
-cannot be built either: _unicode_lookups.mojo: formal dylib has no public
-functions: _unicode_lookups.mojo exports nothing under doc/ABI.md's rules
-because it declares no function and no type at all — only module-level
-constants, which are ...
-```
-
-**And §0's own conclusion still holds: 56 of the row's 59 files are stopped by
-ONE storage feature, and that feature is not this row's.** §0.1 and §4 step 1
-both name it — `FORMAL_module_state_no_storage.md` §(2), "a module constant whose
-value is not a word needs a real `__DATA` home" — and `python3 tools/control.py
-claims` puts that doc on **`formal28-4`**, not on this worker. So the three
-remaining walls (§3 wall 1½, wall 2's MLIR row, and this row's export gate) are
-each either that feature or downstream of it, and none of them can be closed from
-here without editing an area another live claim holds.
-
-**Why this is not filed as a new bug**: it is not a new finding, it is this
-document's §4 next step, already written down with the two walls named and the
-"do not add a stub function" warning attached. A second doc saying the same thing
-under a different name is the duplicate the queue rules exist to prevent.
-
-**What a worker WITH the claim should know, which §0 does not say**: the storage
-feature is now worth more than this row. §0 moved 33 files off one blocker and
-onto another of the same row, and §0 says so plainly ("a row count is an upper
-bound and not a coverage number"). So `FORMAL_module_state_no_storage.md` §(2) is
-the cheapest open thing on 56 files, and this doc is the evidence for that claim
-rather than a separate piece of work.
-
-## 0. 2026-10-05: the `constants.mojo` terminal cause is gone, the row is not
-
-**The terminal cause of the largest group on the row was a module this
-document does not mention**, and the map could not even name it:
-the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 records the row's 59 files
-as "33 blocked by `constants.mojo`" and then says the `uses:` line is
-**NOT MEASURED** — "the chain names this module by basename only and that
-basename is absent or ambiguous in this tree". It is ambiguous: this tree has
-three `constants.mojo`, and the one the chain means is **`std/math/constants.
-mojo`** — 33 lines, eight `comptime` constants (`pi`, `e`, `tau`, `log2e`,
-…), and not one declaration.
-
-`std/math/__init__.mojo` writes `from .constants import e, pi, tau`, and that
-one edge was refused for **33 of the row's 59 files**. So the biggest single
-group on the third-largest row of the whole corpus was not the feature this
-document asks for and not the constants-only family the previous round
-measured as permanent. It was a rule about when a module with no SYMBOL is
-still allowed to be a LIBRARY.
-
-**The refusal was right about the module and wrong about the consequence.**
-`constants.mojo` really has no symbol, and `no_public_api_reason`'s sentence
-("There is nothing an importer could bind") is true of it. But the importer was
-not asking for a symbol. It was asking for a **value**, and a value crosses a
-boundary through the manifest's `constants` table — one value of a folded
-module-level name in a whole program, so the consumer materializes the same one
-in its own image. That route is not new: `sys.byteorder` and every package that
-re-exports a constant already take it, and `formal/hostmods/sys.mojo`'s own
-docstring says so. What was missing was a module whose whole API is such values
-being allowed to BE a library, which is precisely what `_namespace_library`
-emits — a real MH_DYLIB with an empty export trie and a populated constants
-table. So the gate that reaches it (`formal/build.py::
-_publishable_constant_values_module`) is now reached by a second shape, and
-the refusal stands for the half with no way across at all.
-
-**Measured, both architectures, all 59 files of the row, 118 builds:**
-
-| | before | after |
-|---|---|---|
-| files stopped by `constants.mojo` | **33** | **0** |
-| files stopped by `_io.mojo` | **23** | **56** |
-| files stopped by `_select.mojo` / `_unicode_lookups.mojo` / `stat.mojo` | 1 / 1 / 1 | 1 / 1 / 1 |
-| **the row's total** | **59** | **59** |
-| files that BUILD | 0 | **0** |
-| architectures disagreeing about any of the 59 | 0 | 0 |
-
-**Read that table honestly, because the shape of it is the whole result and it
-is not the flattering one.** The row's total did not move and not one of the 59
-files builds. What moved is 33 files from one blocker on this row to ANOTHER
-blocker on this row: `_io.mojo` went 23 → 56 because the 33 that used to stop at
-`constants.mojo` now get one level further and stop there instead. That is the
-shape this project's own instruments warn about — "a file's terminal cause is
-the first refusal its build walk reaches, so fixing one moves the file to the
-next with the count unchanged" (the `b13` round of
-`bugs/FORMAL_sweep_work_map.md` §4) —
-and it is why a row count is an upper bound and not a coverage number.
-
-**What the change is worth is therefore not a row count, and claiming one would
-be the error the map's §4.3 is about.** It is worth three things a count cannot
-show:
-
-* **the `constants.mojo` terminal cause is gone** — not moved behind another
-  refusal of the same kind, but gone: 0 of 118 builds stops there, against 33 of
-  59 before;
-* **the gate is now a rule with a stated boundary** rather than a refusal whose
-  only content was that the module declares nothing. `_unicode_lookups.mojo`'s
-  container and `_io.mojo`'s `FileDescriptor(0)` are refused for a REASON —
-  nothing to publish — and both are pinned by tests that fail if the reason
-  changes;
-* **the `std/math/constants.mojo` case is a module real importers use**, and it
-  now builds on both architectures with its four values readable across the
-  boundary, checked against CPython. `std/math/__init__.mojo` is still refused,
-  on `_io.mojo`, and it will stay refused until §0.1's storage feature lands —
-  so this fix moved that file, not saved it.
-
-### 0.1 What is left, and it is the part this document is actually about
-
-`std/sys/_io.mojo` is the largest group on the row, and it is a DIFFERENT fact
-from `constants.mojo`: its three names are `comptime stdin = FileDescriptor(0)`,
-`stdout`, `stderr` — **struct constructions**, and `fold_module_value` has no arm
-for a call, so there is no value to publish and no symbol either. A module in that
-shape genuinely has nothing an importer could reach, and the refusal is the right
-answer; it is recorded and pinned by `test_formal_imports.py`'s `a constants-only
-module with an unfoldable value is still refused`. Closing it is
-`FORMAL_module_state_no_storage.md` §(2) — a real `__DATA` home for a module
-constant whose value is not a word — and that doc has **no live claim**, so it is
-the cheapest open thing left on this row.
-
-**So: of the row's 59 files, 56 are now stopped by one storage feature, and the
-other three are correct refusals** (a private name, a container blob, generic
-templates nobody instantiates). **This document's own subject —
-`_unicode_lookups.mojo` — did not move**, and §4's verdict about it still stands:
-it needs the container feature, and even with it the MLIR row is behind it.
-
-### 0.2 2026-10-03: unchanged, and the honest stopping point had moved further away
+**Status: unchanged and re-measured 2026-10-03 (`work/formal16-2`); the row is
+still "not worth it", and the honest stopping point has MOVED FURTHER AWAY rather
+than closer.** The refusal below is byte for byte what this doc recorded, the
+container-constant refusal §3 quotes is still the current one, and the MLIR row of
+§3 wall 2 is now *behind a second wall the doc does not mention*. Nothing here is
+fixed, and the one thing that would fix it is a feature another worker holds.
 
 Re-measured on this tree:
 
@@ -171,29 +33,22 @@ new is that reaching it through the real spelling costs one more blocker:
 returned-frame function cannot go into a dylib at all. So the feature §4 step 1
 asks for would have to clear THREE walls to move this row by one file, not two.
 
-**Why nothing was done here** (as of 2026-10-03; §0 above is what changed),
-and it is not only the "not worth it" the original Status gave:
+**Why nothing was done here**, and it is not only the "not worth it" the original
+Status gave:
 
 * the fix is one feature — inline a container-valued module constant at the use
   site, and skip the dylib for a module nothing binds — and that feature is the
   one `FORMAL_module_state_no_storage.md` §(2) needs, which is
   `work/formal16-5`'s claim. Two workers implementing one feature is how the two
-  halves end up disagreeing about what a module constant IS.
-  **The second half landed 2026-10-05 for the folded-value case** (§0) and the
-  first did not, which is the split this bullet predicted: "a module with nothing
-  to export needs no dylib" and "a module constant's value crosses a boundary"
-  are two features wearing one sentence, and only the one that needs no new
-  storage was cheap;
+  halves end up disagreeing about what a module constant IS;
 * even done, the row moves one file (`_unicode_lookups.mojo`, which nothing
   imports for its own sake) and `_unicode.mojo` still refuses — on the MLIR row,
   now behind the slice row;
 * and the working repair for the table is still an accessor, which is a source
   change to an external stdlib that no repository worktree can make.
 
-Found by sweeping `std/collections` (`std/collections` 33 files: 3 pass, 2
-refused in themselves, 28 behind one of six walls — this export gate, the
-`binary_heap.mojo` `pop()` receiver, `builtin_slice.mojo`'s `self = other`, the
-bracketed-specialization rule, and one call through a function VALUE).
+Found by sweeping `std/collections` for `sweep14:std-collections`; see
+`FORMAL_sweep14_std_collections.md` §5.1.
 
 ---
 
@@ -297,25 +152,14 @@ which is exactly the kind no repository worktree can make.
 
 ## 4. The exact next step
 
-**This row is closed as "not worth it", and this doc exists so that decision is
-on the record rather than re-derived.** If someone does want it:
+**None. This row is closed as "not worth it", and this doc exists so that
+decision is on the record rather than re-derived.** If someone does want it:
 
-1. ~~skip the dylib for a module nothing binds~~ — **DONE for the folded-value
-   case**, 2026-10-05 (`9722edb7`): `_publishable_constant_values_module` lets a
-   module whose whole API is folded literals be a library, which is where the
-   `constants.mojo` terminal cause went (33 → 0 files). **It moved those 33
-   files one level deeper rather than off the row**, so this step bought the
-   cause and not the count — §0 has the table. What is left is the other half of
-   the same sentence, and it is `FORMAL_module_state_no_storage.md` §(2), which
-   has no live claim:
-   1. a module constant whose value is **not a word** — a struct construction
-      (`std/sys/_io.mojo`, which 56 of the row's 59 files now stop at, §0.1) or
-      a container blob (`_unicode_lookups.mojo`, §3 wall 1½) — needs a real
-      `__DATA` home, and `module_body` is where it would be taught to inline one
-      at the use site;
+1. teach `module_body` to inline a container-valued module constant at the use
+   site, and skip the dylib for a module nothing binds — one feature, and it is
+   the same feature `FORMAL_module_state_no_storage.md` §(2) needs;
 2. then re-sweep `_unicode.mojo` and expect the MLIR row, which is the honest
-   stopping point. **Unchanged by §0**: that file did not move, and nothing in
-   §0 brings the MLIR row any closer.
+   stopping point.
 
 **Do not** add a stub function to `_unicode_lookups.mojo` to get past the gate.
 It would move the refusal one layer and hide the real one — which is what
@@ -329,13 +173,6 @@ the fix rather than kept as a Status history.
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
-
-# §0: the half that is fixed — a package importing a constants-only module,
-# both architectures, and the empty export trie beside the two folded values
-python3 test_formal_imports.py    # a constants-only module is imported, …
-
-# §0.1: the boundary — the unfoldable shape is still refused, by name
-python3 test_formal_imports.py    # … and with an unfoldable value is refused
 
 # the row
 python3 tools/memslot.py --gb 8 --label u -- python3 fire.py build --formal \

@@ -210,9 +210,8 @@ generator was changed for any of them.
 
 So: **`hx30` is not the expensive thing.** All 32 of those goals — the whole
 chain `simp only […qS0, …qT23, arm64_reg, arm64_set_reg, Arm64State.init]`
-that `bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §2.3 records as
-the obvious suspect and would rewrite as per-step lemmas — are inside the 23
-seconds. And
+that `FORMAL_csel_in_the_model_costs_a_ternary_export_its_whole_proof.md`
+prescribes rewriting as per-step lemmas — are inside the 23 seconds. And
 `runProg`'s reduction, which the error POSITION (`6035:8`, the theorem's own
 header) points at, is inside the 22.
 
