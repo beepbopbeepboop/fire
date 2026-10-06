@@ -24402,6 +24402,25 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # pair, and a constructor's having to build a counted region. Every consumer
 # reads the decision from `BYTE_BLOB_CTORS` (the widths) or from
 # `empty_blob_constructor` (the routing), never from this tuple.
+#
+# **`StaticString` is here for a THIRD reason, and it is the one that costs a
+# reader an hour.** It is a language builtin, so it is in NO table of DECLARED
+# types: not in any `structs_by_name` this build compiles, and not among the 220
+# `formal/imports.py::imported_struct_defs` reaches from `std/sys/arg.mojo`
+# (measured on that file). And `type_constructor_kind`'s documented `None` means
+# "not a type constructor at all", so a bracket ELEMENT spelled `StaticString`
+# classified as a bare name this image cannot resolve — which is false about the
+# language. It IS a type, and it is unrepresentable here for the ordinary reason
+# (a compile-time string is not a `char *`, so one word does not carry it).
+#
+# Being in this tuple is what makes `Span[StaticString, ImmStaticOrigin]` —
+# `std/sys/arg.mojo:51`, one refusal byte-identical on both architectures — take
+# the MIXED branch of `_comptime_param_element_sentence`, which names `element
+# 2 `ImmStaticOrigin`` alone instead of leaving the reader to choose between two
+# candidates neither of which the build can resolve. A name missing from a table
+# of types reads as a fact about the target, and this one is a fact about the
+# table; `myinterpreter.py` already knows `StaticString` as a borrowed-string-view
+# type, so the two halves of this compiler disagreed about whether it is a type.
 BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 
 #: The IEEE float formats NARROWER than binary64, the fourth of the language's
@@ -24447,6 +24466,7 @@ NARROW_FLOAT_TYPE_NAMES = (
 UNREPRESENTABLE_TYPE_CTORS = (
     "Span", "Error", "SIMD", "SIMDVector", "List", "Dict", "Set", "Tuple",
     "Optional", "StringRef", "DType", "InlineArray", "Array", "StaticTuple",
+    "StaticString",
 ) + BYTE_BLOB_TYPE_CTORS + NARROW_FLOAT_TYPE_NAMES
 
 
