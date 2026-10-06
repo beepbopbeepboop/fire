@@ -4694,13 +4694,38 @@ def _match_case_binds(case) -> set:
 
 
 def _cfg_int_literal(e) -> object:
-    """The `int` an `IntLiteral` node holds, or None for anything else.
+    """The `int` this literal node holds, or None for anything else.
 
     Named apart from the module's other `_int_literal_value` (line ~17500,
     which handles a boxed handle rather than a node) because two functions with
     one name and two meanings is how a call site ends up reading the wrong
-    one."""
-    return e.value if isinstance(e, F.IntLiteral) else None
+    one.
+
+    The NEGATION is folded HERE rather than by each caller, and it has to be:
+    the parser does not keep `-1` as a negative literal, it is
+    `UnaryOp('-', IntLiteral(1))` (`_for_step_sign`'s docstring in
+    `formal/arm64_codegen.py` says so from the emitter's side, and reads the
+    same shape).  `_range_is_nonempty` grew its own folding for that reason and
+    said so, and the cost of the duplication was that every OTHER reader — the
+    preheader's literal table above all — inherited the gap: `i = -1` bound
+    nothing, so `while i:` and `if -1:` were both undecidable.  Measured, both
+    ways: `if -1:` followed by a read of a name the guard stores was REFUSED by
+    `read_before_store` as a false refusal, the same defect `if True:` had and
+    fixed by the same rule in `_build_cfg`.  The rows are
+    `test_formal_read_before_store.py`'s `if_true_guard_is_not_a_branch_ok`,
+    `if_integer_literal_guard_is_not_a_branch_ok` and
+    `if_negative_integer_literal_guard_is_not_a_branch_ok`, and the direction
+    that keeps the fix from becoming a licence is the adjacent
+    `if_false_guard_store_then_read_refused`.
+    """
+    if isinstance(e, F.IntLiteral):
+        return e.value
+    if isinstance(e, F.UnaryOp) and getattr(e, "op", None) in ("-", "+"):
+        inner = _cfg_int_literal(getattr(e, "operand", None))
+        if inner is None:
+            return None
+        return -int(inner) if e.op == "-" else int(inner)
+    return None
 
 
 def _range_is_nonempty(args, consts=None) -> bool:
@@ -4745,11 +4770,16 @@ def _range_is_nonempty(args, consts=None) -> bool:
         # different readers is how the table and the call would answer the same
         # `range` differently. It is also the only reader here that knows about
         # a name, so `consts` is its argument rather than a second lookup.
+        # `_cfg_int_value` and not `_cfg_int_literal`: an argument the PREHEADER
+        # decided (`k = 0` then `range(0, k)`) is as much a fact about the
+        # program as the literal written beside it, and reading the two with
+        # different readers is how the table and the call would answer the same
+        # `range` differently. It is also the only reader here that knows about
+        # a name, so `consts` is its argument rather than a second lookup. The
+        # `-1` spelling needs no arm of its own: `_cfg_int_literal` folds the
+        # negation, which is where the parser's `UnaryOp('-', IntLiteral(1))`
+        # is read by every reader at once.
         v = _cfg_int_value(a, consts)
-        if v is None and isinstance(a, F.UnaryOp) and a.op == "-":
-            v = _cfg_int_literal(getattr(a, "operand", None))
-            if v is not None:
-                v = -int(v)
         if v is None:
             return None
         vals.append(int(v))
@@ -4909,6 +4939,18 @@ def _literal_truth(e, consts=None) -> object:
     """
     if isinstance(e, F.BoolLiteral):
         return bool(e.value)
+    # A bare INTEGER LITERAL is decided for the same reason a `BoolLiteral` is,
+    # and the corpus writes the two interchangeably: `if 1:` is as ordinary a
+    # spelling of "always" as `if True:`. Without this arm `while 1:` and `if
+    # 1:` were undecidable, so `_loop_body_always_runs` kept the zero-iteration
+    # edge for a loop that cannot take it and `_build_cfg` read a
+    # constant-true `if` as a branch — one false refusal for both spellings of
+    # one construct. `_cfg_int_value`, not a private read of `IntLiteral`, so
+    # the `UnaryOp(-)` spelling (`if -1:`) and the preheader's table are the
+    # same reader here as everywhere else.
+    v = _cfg_int_value(e, consts)
+    if v is not None:
+        return bool(v)
     if isinstance(e, F.IdentExpr) and consts and e.name in consts:
         # A name that is DECIDED is a value, and a value is either truthy or
         # not: `while i:` with `i = 0` is a loop that never runs, and answering
@@ -5281,6 +5323,49 @@ def _build_cfg(body) -> tuple:
         for s in (stmts or []):
             kind = type(s).__name__
             if kind == "IfStmt":
+                if _literal_truth(getattr(s, "condition", None)) is True:
+                    # `if <constant true>:` IS NOT A BRANCH, and reading it as
+                    # one is a FALSE REFUSAL rather than a conservative one:
+                    #
+                    #     if True:
+                    #         x = 5
+                    #     print(x)
+                    #
+                    # builds and runs on CPython, and the header block's join
+                    # intersects the then-arm's `x` with nothing — the
+                    # straight-line fall-through carries none — so `x` drops out
+                    # and the analysis claims CPython raises
+                    # UnboundLocalError. It does not.
+                    #
+                    # Measured on both architectures, and found by metamorphic
+                    # testing rather than by a hand-written table:
+                    # `tools/formal_metamorph.py`'s `if_true` transformation
+                    # wraps a statement in `if True:`, and on a 30-program
+                    # `calls` sweep 8 of 30 twins came out `TWIN-DIVERGES` — one
+                    # machine lowered the original and refused the twin, which
+                    # needs no oracle because the twin is the same program. The
+                    # regression rows are in `test_formal_read_before_store.py`
+                    # (six, three each way) and `test_formal_run.py` (four, both
+                    # backends).
+                    #
+                    # So the then-arm is emitted as the statement's ONLY
+                    # continuation: no header block, no false edge, no `else`
+                    # arm. The `else` arm being unreachable is the point rather
+                    # than a casualty — nothing in it is a definition that
+                    # dominates anything, and an emitter that lays it out anyway
+                    # still never enters it, because the condition it guards is
+                    # a constant.
+                    #
+                    # `_literal_truth` with NO `consts` is the right reader and
+                    # the narrow one: it answers only from the condition's own
+                    # literals, never from an assumption about a name, so this
+                    # cannot license a read CPython refuses. A condition it
+                    # cannot decide is `None` and takes the branch arm below
+                    # unchanged.
+                    pending = run(getattr(s, "then_body", None) or [], loops,
+                                  pending, facts=facts)
+                    cur = None
+                    continue
                 cond = first([s], pending)
                 pending = [cond.index]
                 cur = None

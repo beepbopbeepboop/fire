@@ -450,6 +450,65 @@ CASES = [
      "        t = 1\n        i = i + 1\n"
      "    return t\n", "refuse",
      "the body runs, but a `break` before the store reaches the join"),
+    # ── `if <constant true>:` IS NOT A BRANCH ─────────────────────────────
+    #
+    # Every row above that the analysis REFUSES is one where CPython raises, and
+    # the file's oracle checks that in both directions — so a rule that over-
+    # refuses cannot pass this table silently.  This group is the other
+    # direction: four rows this table could not have contained before
+    # 2026-10-05, because the analysis refused all of them, and CPython raises
+    # for NONE of them.  `if True:` is not a branch, so a store inside the guard
+    # dominates everything after it and the `else` arm — which never runs —
+    # contributes nothing to the join.  The refusal's own sentence said
+    # "CPython raises UnboundLocalError for that program", so it asserted a
+    # falsehood, not merely a coarse answer.
+    #
+    # Found by metamorphic testing, not by this table: `tools/formal_metamorph.py`
+    # wraps a statement in `if True:` and compares the two builds, and 8 of 30
+    # programs of a `calls` sweep came out as `TWIN-DIVERGES` — one machine
+    # lowered the original and refused the twin.
+    ("if_true_guard_is_not_a_branch_ok",
+     "    if True:\n        x = 5\n    return x\n", "ok"),
+    # The read is inside ANOTHER branch, which is the shape that needs the join
+    # after the guard to keep the store: the header's join intersected the
+    # guard's arm with the straight-line fall-through, which carries none.
+    ("if_true_guard_store_dominates_a_branched_read_ok",
+     "    if True:\n        x = 5\n    if n > 2:\n        return x\n"
+     "    return 0\n", "ok"),
+    # The integer spelling, which is the one the generated corpus writes (`if
+    # (1):`) and which the same rule decides.  `formal/model.py`'s
+    # `_literal_truth` gained the bare-literal arm for it.
+    ("if_integer_literal_guard_is_not_a_branch_ok",
+     "    if 1:\n        x = n + 1\n    return x\n", "ok"),
+    ("if_negative_integer_literal_guard_is_not_a_branch_ok",
+     "    if -1:\n        x = 5\n    return x\n", "ok"),
+    # The same folded literal on the LOOP side, and this one is a refusal that
+    # was MISSING rather than one that was spurious — the other direction, and
+    # the reason the negation fold belongs in `_cfg_int_literal` rather than in
+    # the one caller that had it.  `_range_is_nonempty` could already fold
+    # `UnaryOp('-', IntLiteral(1))`; the preheader's literal table could not, so
+    # `k = -1` bound nothing and `range(k)` was undecidable, and an UNBOUND
+    # loop target read after the loop was licensed.  CPython raises
+    # `UnboundLocalError` for every value of `n` here (`range(-1)` is empty),
+    # so master's `ok` was a wrong answer waiting for a program that printed it.
+    ("for_range_bound_decided_negative_refused",
+     "    k = -1\n    for i in range(k):\n        sink(i)\n    return i\n",
+     "refuse",
+     "`range(-1)` is empty, and a decided bound is what says so"),
+    # …and the direction that keeps it from becoming a licence: the same table
+    # with a bound that provably yields items still binds the target.
+    ("for_range_bound_decided_positive_ok",
+     "    k = 3\n    for i in range(k):\n        sink(i)\n    return i\n", "ok"),
+    # …and the two directions the guard rule must NOT have bought, which is what
+    # keeps it a rule rather than a relaxation.  `if True:` is not dead code, so
+    # a read inside it is still unstored; and `if False:` really does store
+    # nothing, so the join loses the name and the read after it refuses.
+    ("read_inside_a_true_guard_refused",
+     "    if True:\n        sink(x)\n        x = 1\n    return 0\n",
+     "refuse",
+     "the guard is not dead code, so the read is still unstored"),
+    ("if_false_guard_store_then_read_refused",
+     "    if False:\n        x = 5\n    return x\n", "refuse"),
     ("while_true_body_store_ok",
      "    while True:\n        t = 1\n        break\n    return t\n", "ok"),
     ("while_literal_true_body_store_ok",

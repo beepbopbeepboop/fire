@@ -20794,6 +20794,59 @@ REFUSAL_CASES = [
      "printf(\"x=%d\", x)\n",
      "refuse:does NOT resolve in module scope until after the assignment",
      None),
+    # A STORE INSIDE A CONSTANT-TRUE GUARD, which this path used to refuse and
+    # which CPython runs.  Found by metamorphic testing rather than by a hand
+    # table: `tools/formal_metamorph.py`'s `if_true` transformation wraps a
+    # statement in `if True:`, and on a 30-program `calls` sweep 8 of 30 twins
+    # were REFUSED where the original built — `TWIN-DIVERGES`, which needs no
+    # oracle, because the twin is the same program.  The refusal asserted a
+    # falsehood (`CPython raises UnboundLocalError for that program`; it does
+    # not), and the root cause was `read_before_store`'s CFG giving `if True:`
+    # a header block and a false edge, so the guard's store did not dominate the
+    # reads after it.  `formal/model.py::_build_cfg` now emits the then-arm as
+    # the statement's only continuation.  The `if 1:` next to it is the same
+    # rule for the integer spelling, which the refusal also rejected.
+    ("if_true_guard_store_then_read_ok",
+     "def f():\n"
+     "    if True:\n"
+     "        x = 5\n"
+     "    if 1:\n"
+     "        printf(\"x=%d\", x)\n"
+     "    return 0\n"
+     "f()\n",
+     0, "x=5"),
+    ("if_integer_literal_guard_store_then_read_ok",
+     "def f():\n"
+     "    if 2:\n"
+     "        x = 5\n"
+     "    printf(\"x=%d\", x)\n"
+     "    return 0\n"
+     "f()\n",
+     0, "x=5"),
+    # …and the DIRECTION that keeps the rule from becoming a licence: the guard
+    # is not dead code, so a READ inside it is still unstored, and the
+    # constant-FALSE spelling still stores nothing.  Without these two a
+    # `if True:` rule that dropped the body's reachability would pass the row
+    # above and answer `printf("x=%d", x)` with whatever the caller left in the
+    # slot.
+    ("read_inside_a_true_guard_refused",
+     "def f():\n"
+     "    if True:\n"
+     "        printf(\"x=%d\", x)\n"
+     "        x = 1\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 3 before anything in this function stores it",
+     None),
+    ("if_false_guard_store_then_read_refused",
+     "def f():\n"
+     "    if False:\n"
+     "        x = 5\n"
+     "    printf(\"x=%d\", x)\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 4 before anything in this function stores it",
+     None),
     # The AUGMENTED spelling, which reads more like ordinary code than
     # `x = x + 1` does and is the one most likely to be missed.
     ("augmented_read_before_store_refused",
