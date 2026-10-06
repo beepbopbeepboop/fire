@@ -17271,34 +17271,33 @@ NOT_LOWERED_BUILTINS = {
 FOREIGN_ABI_BUILTINS = frozenset({"abs", "pow", "round"})
 
 
-# The one name `NOT_LOWERED_BUILTINS` lists that the emitters DO lower when it is
-# CALLED, so `not_lowered_builtin_refusal` must not ask about it.
+# The names in `NOT_LOWERED_BUILTINS` whose CALL SHAPE the emitters DO lower,
+# and which this pre-pass must therefore not refuse.
 #
-# **`float(x)` is an integer-to-double CONVERSION and both emitters build it**,
-# measured on this tree at HEAD in all three argument positions —
-# `printf("%.17g\n", float(9007199254740995))`, `printf("%s\n", float(7))`, and
-# a `float(7)` bound to a `var` first — and `test_formal_run.py`'s three float
-# rows depend on it, answering `9007199254740996` where the source says
-# `9007199254740995` and CPython says the same. So a pre-pass that refused the
-# name would take three passing rows red, which is the whole cost of a
-# name-based check that has not asked whether the name is lowered.
+# **Two readers, because there are two ways a name can be lowered, and one
+# reader per way is how they came to disagree.** `emitter_lowers(name)` is the
+# emitters' own question — `ord`, `chr` and `hash` are in `EMITTER_BUILTINS`
+# because `_emit_text_builtin` answers one of them (a literal's single character
+# folds to its code point) and words a refusal for the other two that is
+# specific to each. `float` is the other kind: it is NOT in `EMITTER_BUILTINS`
+# (the emitters reach it through the type-conversion path rather than a named
+# builtin intercept), so it is listed here by name, with the measurement
+# `LOWERED_CALL_SHAPED_BUILTINS`'s own comment gives.
 #
-# The table row is not wrong, and this is why both can be true: `float` is in
-# `NOT_LOWERED_BUILTINS` because a `Double` is not a VALUE on this path — every
-# value is one 64-bit integer word — and the row is about the value model. The
-# call shape is a separate fact, and it is answered, so the name belongs in
-# neither this pre-pass nor `FOREIGN_ABI_BUILTINS` (which is for names whose
-# call shape is refused with a better message, not for names whose call shape
-# works).
-#
-# `abs`, `pow` and `round` are excluded by `FOREIGN_ABI_BUILTINS` instead, for
-# the same reason and with a different message: those ARE refused at the
-# emitter, by `builtin_binding_refusal`, and its sentence names the C function
-# whose namesake would be bound — which says more than this table's one-liner.
-# Between them these two exclusions and this table account for every name in
-# `NOT_LOWERED_BUILTINS`, so the set of names this pre-pass may refuse is stated
-# here rather than left as "the ones nobody has tried yet": the other twenty
-# were each probed at HEAD and every one refuses.
+# **The pre-pass landed on 2026-10-05 and this exclusion is what it did not
+# bring with it**, which is why the two sets are consulted together rather than
+# the second one replacing the first: without `emitter_lowers` here, every
+# `ord("A")` and every `chr(233)` is refused by NAME before an emitter runs,
+# with the generic "write the operation out in the source" sentence, where the
+# emitter answers the first with the right NUMBER and refuses the second with
+# the reason that is about it ("a NEW one-character object … this
+# representation has nowhere to put one"). Measured on `master` before this:
+# `test_formal_unicode.py` 141/9, the nine being exactly the four `ord`-folds
+# and the five `ord`/`chr`-refusals, and `test_formal_unicode.py`'s own
+# comment on the `ord`/`chr`/`hash` block recording the folded answer as
+# landed. **A name the emitters lower is not this pre-pass's to refuse**, which
+# is the same sentence `FOREIGN_ABI_BUILTINS`' exclusion below says for the
+# other three names with the other reason.
 LOWERED_CALL_SHAPED_BUILTINS = frozenset({"float"})
 
 
@@ -17393,7 +17392,16 @@ def not_lowered_builtin_refusal(functions, module_names=()) -> str | None:
             if name not in NOT_LOWERED_BUILTINS or name in compiled \
                     or name in at_module or callee_is_a_bound_value(fn, name):
                 continue
-            if name in LOWERED_CALL_SHAPED_BUILTINS:
+            if name in LOWERED_CALL_SHAPED_BUILTINS or emitter_lowers(name):
+                # A name one of the emitters LOWERS is answered downstream —
+                # `ord("A")` folds to 65 and `chr(233)` is refused by the
+                # sentence that is about a NEW one-character object — and this
+                # pass would pre-empt both with a weaker, generic one. Asked
+                # through `emitter_lowers` rather than by listing the names, so
+                # the question is the emitters' own and the two cannot drift.
+                # `float` is in the list because it is lowered through the
+                # conversion path rather than a named builtin intercept, so
+                # `emitter_lowers` does not see it.
                 continue
             if name in FOREIGN_ABI_BUILTINS:
                 # `abs`, `pow` and `round` are in the table AND refused at the
