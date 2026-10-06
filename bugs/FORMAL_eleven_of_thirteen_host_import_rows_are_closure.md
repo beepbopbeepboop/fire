@@ -465,3 +465,40 @@ files), because the two closures this document names have both moved:
 question rather than a missing file. `collections` at 10 is the larger reachable
 row and is `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue, not
 this document's.
+
+## The last row, `version.py`, ANSWERED (2026-10-05, `work/formal52-docs`)
+
+§"What is left on the row" left this as "a capability question rather than a
+missing file". That is now measured, and the answer is **sequencing behind
+`bugs/FORMAL_module_state_no_storage.md`, plus a cost**, so it is neither free
+nor this document's.
+
+`version.py`'s whole `functools` use is `@functools.lru_cache(maxsize=1)` on
+`version()`, a zero-argument function — so a plain cached call would answer it,
+exactly as this document said. There are three ways to write that, and each was
+tried:
+
+| route | measured result |
+|---|---|
+| hand-rolled memo: a module-level `_cached` plus `global` in `version()` | **REFUSED.** `FormalBuildError: f: 'G' has no home: the register allocator collected no home for it, so the emitter and the allocation walk disagree about this function's locals` — both architectures. (`global` with a READ only is accepted; it is the ASSIGNMENT that has no home, which is `bugs/FORMAL_module_state_no_storage.md`'s subject and not a spelling problem.) |
+| move the memo to the callers | possible and cheap in principle — `jit/arm64.py:84` already keeps its own `cached` — but `cas.py:233` and `cas.py:319` are two separate fingerprint functions, so it edits `cas.py`, which every build's cache key depends on and which no claim in `tools/control.py claims` covers but which is not this document's to refactor |
+| delete the decorator and let each call re-run `git` | works and is answer-preserving, and costs **~46 ms per call** (measured: two `git` subprocesses). `lru_cache` makes it one per process; without it a build pays it up to three times (`cas.py`'s two fingerprints, plus `fire.py -v` / `jit/arm64.py`) — roughly **+90 ms on every build**, to move one row of a formal-backend census |
+
+**So the row is blocked behind module state, and that is `formal28-4`'s claim**
+(`bug:FORMAL_module_state_no_storage`), not a missing `formal/hostmods/functools.mojo`
+and not this document's. It is recorded here rather than taken for the same
+reason `glob` was not taken in §3: the person who picks it up needs the three
+costs above, and two of the three are edits outside the formal backend.
+
+The re-measurement that puts the row where it is, on this tree:
+
+```console
+$ python3 tools/formal_host_import_wall.py --scope repo --min 1
+functools   modelled  reach 1  alone 1   version.py
+```
+
+which is the same reading as the 2026-10-05 pass above, and the whole table is
+unchanged: `collections` at 10 is
+`bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue, and every other
+row is closure or unreachable. **The row this document opened is closed; the one
+row it left is answered and owned elsewhere.**
