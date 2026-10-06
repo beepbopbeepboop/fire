@@ -3432,6 +3432,21 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     address, not by symbol, because an image that both traps and `raise`s has two
     `exit` facts to tell apart.
 
+    **arm64 publishes a trap list too now, and the reason is a different trap.**
+    Its STACK-FLOOR guard is still a raw `svc` and still needs nothing — the row
+    `test_arm64_needs_no_trap_list_and_keeps_its_run_tests` still holds for a
+    program that emits no bounded stop at all. But `_emit_exit` flushes before
+    it traps (`fflush(NULL)`, so a program that printed something keeps it), and
+    that flush is a `BL` to the C library, which puts a real `fflush` into
+    `extern_calls` for every bounded stop in the image. Measured on
+    `formal/examples/mod_by_var.mojo` (`n % d`, a variable divisor): its image's
+    ONLY unbound call is the `fflush` in the divide-by-zero arm, and
+    `_gen_extern_test` read that as the program's one opaque call and emitted a
+    `run_pc_reached … = true` for an address the run never reaches — a false
+    obligation, rejected by `native_decide`, so a program that computes, runs
+    and is modelled correctly was a `lean-rejected` row of
+    `tools/formal_proof_census.py`. The rows below are that fix's pins.
+
     Every row of this class is cheap: proof GENERATION, no Lean.  That the run
     tests which come back are TRUE is a separate claim and only Lean tells it
     (`TestStringValueInTheModel` below is the assertion that the string model
@@ -3444,6 +3459,12 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
     RETURNS_A_STRING = "def main(n: Int) -> Int:\n    return \"small\"\n"
     PRINTS = "def main(n: Int) -> Int:\n    print(42)\n    return 7\n"
+    # The arm64 half: a bounded stop the program never reaches, and therefore
+    # the only unbound call in the image. `n % d` with a VARIABLE divisor is
+    # what puts the call there — `_emit_div_shift_pow` guards the divide by a
+    # zero divisor and the guard's `_emit_exit` flushes — and `formal/examples/
+    # mod_by_var.mojo` is the committed copy of this program.
+    DIVISOR = "def mod_by_var(n):\n    d = 4\n    return n % d\n"
 
     @classmethod
     def setUpClass(cls):
@@ -3470,6 +3491,25 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                 cls.built[(arch, name)] = open(
                     r["proof_path"], encoding="utf-8").read()
                 cls.built[(arch, name, "info")] = r["info"]
+        # The arm64 row is a separate loop because it is arm64-ONLY: the same
+        # program on x86-64 has a different trap (a call to the C library's
+        # `exit`, in the guard's prologue) and asserting about one backend's
+        # list inside the other's table is how a row ends up checking nothing.
+        path = os.path.join(cls.tmp, "divisor.mojo")
+        with open(path, "w") as f:
+            f.write(cls.DIVISOR)
+        try:
+            r = fb.compile_formal(
+                path, arch="arm64",
+                output=os.path.join(cls.tmp, "divisor-arm64.aout"),
+                prove=True, check=False)
+            cls.built[("arm64", "divisor")] = open(
+                r["proof_path"], encoding="utf-8").read()
+            cls.built[("arm64", "divisor", "info")] = r["info"]
+            cls.built[("arm64", "divisor", "code")] = r["code"]
+        except Exception as e:                        # noqa: BLE001
+            cls.built[("arm64", "divisor")] = None
+            cls.built[("arm64", "divisor", "error")] = f"{type(e).__name__}: {e}"
 
     @classmethod
     def tearDownClass(cls):
@@ -3564,21 +3604,151 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
         """The other backend, and the reason the asymmetry was the bug.
 
-        arm64's trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so its
-        `extern_calls` was always empty for a program that calls nothing and
-        its run tests were never suppressed. Nothing here may change that, and
-        the assertion that it has not is what makes the x86-64 fix a fix rather
-        than a lowering of the bar on both sides.
+        arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
+        decodes, so a program that emits no bounded stop has an empty
+        `extern_calls` and needs nothing subtracted. Nothing here may change
+        that, and the assertion that it has not is what makes the x86-64 fix a
+        fix rather than a lowering of the bar on both sides.
+
+        The name says "no trap list" and the assertion is `assertFalse`, so it
+        is worth being exact about what it does and does not claim: it claims
+        THIS program's list is empty, and arm64 DOES publish one for a program
+        with a bounded stop — see the two rows below, which are the other half
+        and which this row used to contradict.
         """
         info = self._info("arm64", "plain")
         self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
                          [], "arm64's guard trap is an `svc`, not a call")
         self.assertFalse(info.get("compiler_traps"),
-                         "arm64 published compiler traps, so its trap is no "
-                         "longer the in-image `svc` this assertion assumes")
+                         "a program with no bounded trap published one, so "
+                         "something other than a stop is being recorded")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
+
+    def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
+        """arm64's own trap is a `BL fflush`, and it must be published as one.
+
+        Every published address must be an `fflush` in `extern_calls` — the
+        flush is a real call and has to stay accounted for on the link line —
+        and the list must not be empty for a program whose image contains a
+        bounded stop, because a generator with nothing to subtract puts
+        `_gen_extern_test` on a path the program never takes.
+        """
+        info = self._info("arm64", "divisor")
+        traps = info.get("compiler_traps")
+        self.assertTrue(traps,
+                        "the image has a divide-by-zero stop and no trap was "
+                        "published, so its `fflush` is being read as a call "
+                        "the program makes")
+        by_addr = {e["addr"]: e["sym"]
+                   for e in (info.get("extern_calls") or [])}
+        for addr in traps:
+            self.assertIn(addr, by_addr,
+                          f"{addr:#x} is published as a trap but is not an "
+                          f"extern call at all, so the subtraction would "
+                          f"silence nothing and the list is wrong")
+            self.assertEqual(by_addr[addr], "fflush",
+                             f"the trap at {addr:#x} is a "
+                             f"{by_addr[addr]!r} call, and subtracting a "
+                             f"program call is the defect the by-address rule "
+                             f"exists to prevent")
+
+    def test_a_recorded_trap_is_the_bl_and_not_the_instruction_before_it(self):
+        """The recorded address must be the `BL`, which is NOT where the call
+        starts emitting.
+
+        `fflush(NULL)` emits `mov w0, #0` and THEN `bl fflush`, so the
+        assembler's position before the call is twelve bytes short of the
+        instruction. Taking that position records an address that is not in
+        `extern_calls` at all, the subtraction matches nothing, and the
+        generator is exactly as wrong as it was before — with a list published
+        that claims it is not. That is what this row is for: it decodes the word
+        at every published address out of the EMITTED CODE and requires it to be
+        a `BL` (step-table index 15), and separately requires the word twelve
+        bytes earlier not to be one — without that second half the row would
+        pass on an image whose layout happens to put another call in front.
+        """
+        import formal.arm64_proof_gen as G
+        info = self._info("arm64", "divisor")
+        code = self.built[("arm64", "divisor", "code")]
+        base = info["base_addr"]
+        traps = info.get("compiler_traps") or []
+        self.assertTrue(traps)
+        for addr in traps:
+            off = addr - base
+            word = int.from_bytes(code[off:off + 4], "little")
+            self.assertEqual(G._step_branch_index(word), 15,
+                             f"the word at the published trap {addr:#x} is "
+                             f"{word:#010x}, which is not a `BL`: the recorded "
+                             f"address is not the call")
+            before = int.from_bytes(code[off - 4:off], "little")
+            self.assertNotEqual(G._step_branch_index(before), 15,
+                                f"the instruction before the published trap "
+                                f"{addr:#x} is also a `BL`, so this row could "
+                                f"not tell the two apart")
+
+    def test_a_program_whose_only_unbound_call_is_a_trap_gets_its_run_test(self):
+        """The whole fix: `n % d` with a variable divisor, end to end.
+
+        Its image's only unbound call is the divide-by-zero guard's flush, on a
+        path the program never takes (the divisor is 4). Before the subtraction
+        `_gen_extern_test` treated it as the program's one opaque call and
+        emitted `mod_by_var_pre_reaches_0 : run_pc_reached … = true`, which is
+        FALSE — `native_decide` rejected it with "evaluated that the
+        proposition to be false", so a program that computes, runs and is
+        modelled correctly was a `lean-rejected` census row.
+
+        Three assertions, because "it generates something" is not the claim: no
+        `pre_reaches` theorem is emitted at all (the extern-test shape is not
+        taken), the ordinary run test IS emitted with the program's real answer,
+        and the image's program-call list is empty — so what removed the false
+        obligation is the subtraction and not a generator that stopped asking.
+        """
+        text = self._text("arm64", "divisor")
+        self.assertNotIn("pre_reaches", text,
+                         "the false obligation is being emitted again: this "
+                         "image has no program call for one to be about")
+        self.assertNotIn("extern_fflush_step", text,
+                         "the trap's `BL` is still being bridged as if the "
+                         "program made it")
+        self.assertIn("run_result_exit", text,
+                      "the program's own run test is missing, so the "
+                      "subtraction removed the section instead of the trap")
+        self.assertRegex(text, r"run_result_exit \{ \(Arm64State\.init 10",
+                         "the concrete run test must start from the entry "
+                         "state and carry the program's answer")
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self._info("arm64", "divisor")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the subtraction did not remove the trap")
+        self.assertTrue(info.get("extern_calls"),
+                        "the image really does carry the `fflush`, so this "
+                        "row is not passing because there was nothing to "
+                        "subtract")
+
+    def test_the_arm64_subtraction_is_by_address_not_by_symbol(self):
+        """The same design decision as the x86-64 row, on the other backend.
+
+        An image that both traps and prints has an `fflush` that is the
+        compiler's and a `printf` that is the program's; subtract by symbol and
+        the wrong half disappears. And an `info` with no `compiler_traps` — a
+        dylib, or an emitter that predates the key — must subtract nothing,
+        which is the conservative direction.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        trap, printed = 0x1000, 0x2000
+        info = {
+            "extern_calls": [{"sym": "fflush", "addr": trap},
+                             {"sym": "printf", "addr": printed}],
+            "compiler_traps": [trap],
+        }
+        self.assertEqual(_program_extern_calls(info),
+                         [{"sym": "printf", "addr": printed}])
+        self.assertEqual(len(_program_extern_calls(
+            {"extern_calls": info["extern_calls"]})), 2,
+            "with no traps published both calls are the program's")
+        self.assertEqual(_program_extern_calls({}), [])
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):

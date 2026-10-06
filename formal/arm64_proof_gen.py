@@ -9265,6 +9265,52 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     return "\n\n".join(blocks)
 
 
+def _program_extern_calls(info: dict) -> list:
+    """The extern calls the PROGRAM makes — `extern_calls` less this backend's own.
+
+    `info["extern_calls"]` is every unbound `BL` the image carries, and
+    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted as
+    its own bounded stops: the `BL fflush` inside each `_emit_exit`. Subtracting
+    it here is what puts the run tests back for a program whose only unbound
+    call is one of those.
+
+    **Measured on `formal/examples/mod_by_var.mojo` (`n % d`, a variable
+    divisor), and this is the whole reason the subtraction exists.** Its image
+    carries exactly ONE unbound call — the `fflush` in the DIVIDE-BY-ZERO arm of
+    `_emit_div_shift_pow` — and the call is on a path the program never takes,
+    because the divisor is 4. Before this, `_gen_extern_test` treated it as the
+    program's one opaque call and emitted
+
+        theorem mod_by_var_pre_reaches_0 :
+          run_pc_reached { … } mod_by_var_code 4294968440 200000 = true := by
+          native_decide
+
+    which is FALSE, and `native_decide` said so in the generated file's own
+    words (`error: Tactic `native_decide` evaluated that the proposition to be
+    false`), so the example was a `lean-rejected` row of
+    `tools/formal_proof_census.py`. It was not a false theorem shipped — Lean
+    rejects it — but it was a program that computes correctly, runs correctly,
+    and is modelled correctly, refused a proof over a construct the PROGRAM never
+    executes. The model agrees: the run from the entry state reaches
+    `4294968476` with `x0 = 2`, which is `10 % 4`, and never has a pc inside
+    `429496846c..4294964890` — the trap block the call sits in.
+
+    Subtract by ADDRESS, not by symbol, for the reason x86-64's `_program_externs`
+    gives: an image that both traps and prints has two facts to tell apart, and
+    dropping every `fflush` would also drop one the program really does reach.
+    A `raise` reaches `_emit_diverge` → `_emit_exit`, so it loses its run test
+    too — which is correct, because the model halts at that flush and cannot
+    say what the program did next anyway.
+
+    An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
+    predates the key — is read as having none, which is the conservative
+    direction: nothing is subtracted and the refusal stands.
+    """
+    traps = set(info.get("compiler_traps") or ())
+    return [c for c in (info.get("extern_calls") or ())
+            if c.get("addr") not in traps]
+
+
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
@@ -10231,7 +10277,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"  {eval_eq_mojo_proof}"
         )
     code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
-    extern_calls = info.get("extern_calls") or []
+    extern_calls = _program_extern_calls(info)
     externs = list(getattr(prog, "externs", []) or [])
     step_tests = ""
     if extern_calls:

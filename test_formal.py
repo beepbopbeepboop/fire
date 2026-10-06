@@ -391,14 +391,19 @@ EXPECTED_FAILURES = {
                   "IMAGE computes it -- both backends and CPython answer 19 -- "
                   "and `floordiv`/`udivmod` are refused outright for the same "
                   "division's helper call",
-    "mod_by_var": "`n % d` with a VARIABLE divisor calls the run-time division "
-                  "helper, which is outside the image, so the modelled run "
-                  "stops there and never reaches the exit the generated "
-                  "`mod_by_var_pre_reaches_0` asserts it reaches -- an "
-                  "obligation FALSE about the machine, in the generated file's "
-                  "own words (`bugs/FORMAL_arm64_an_extern_call_makes_the_run_"
-                  "never_reach_the_exit.md`). `floordiv`/`udivmod`, with two "
-                  "such calls, are refused instead",
+    # `mod_by_var` was in this table until 2026-10-05 and is not any more.  The
+    # entry above recorded the reading that "`n % d` with a VARIABLE divisor
+    # calls the run-time division helper, which is outside the image" — and that
+    # was wrong twice.  The `BL` in that image is `fflush`, inside
+    # `_emit_div_shift_pow`'s divide-by-zero arm, and it is a COMPILER trap on a
+    # path the program never takes (the divisor is 4).  The obligation was false
+    # because the generator counted the compiler's own trap as the program's one
+    # opaque call, not because the model could not follow a division: arm64
+    # publishes `info["compiler_traps"]` now and
+    # `arm64_proof_gen._program_extern_calls` subtracts them, so the example
+    # takes the ordinary run-test path and its `run_result_exit … = mojo 10` is
+    # a theorem Lean accepts with no `sorry` (measured, `check_proof_cached`).
+    # `floordiv`/`udivmod`, with TWO such calls, are still refused.
     # `unary_ops` was in this table until 2026-10-05 and is not any more: unary
     # `+` was modelled as a LOGICAL NEGATION (a false model, which the run test
     # caught), and both the model and the AST bridge now spell it as the

@@ -705,6 +705,12 @@ dylib_exports: list = None, globals_base: int = None,
         self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
+        # The ADDRESSES of the `BL fflush` this backend emits inside its own
+        # bounded stops, published as `info["compiler_traps"]` and subtracted by
+        # `formal/arm64_proof_gen.py::_program_extern_calls` from the program's
+        # own extern calls. See `_emit_exit` for why the subtraction is the
+        # difference between a proof and a `lean-rejected` row.
+        self._compiler_trap_addrs: set = set()
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -1063,6 +1069,13 @@ dylib_exports: list = None, globals_base: int = None,
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
+            # The `BL fflush` inside each of this backend's own bounded stops.
+            # They are calls the COMPILER emitted, on paths the program takes
+            # only when it is about to stop, and the proof generator subtracts
+            # them from `extern_calls` — see
+            # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
+            # arm64 twin of x86-64's `_program_externs`.
+            "compiler_traps": sorted(self._compiler_trap_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -2714,8 +2727,7 @@ dylib_exports: list = None, globals_base: int = None,
         """
         if computed:
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
-                                   args=[F.IntLiteral(0)]))
+        self._emit_trap_flush()
         if computed:
             self.asm.emit(encode_ldp_sp_post(0, 31))
             # `exit(3)`'s `status & 0xFF`, so a computed value out of byte range
@@ -2726,6 +2738,35 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
+
+    def _emit_trap_flush(self) -> None:
+        """`fflush(NULL)`, and RECORD where the call landed.
+
+        The recording is the point of the method, and it could not be done by
+        taking the assembler's position before the call: `_emit_call` emits the
+        ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`), so
+        the position before the call is twelve bytes short of the `BL`. Reading
+        the addresses the call actually appended to `asm.extern_refs` is
+        therefore the only way to name the instruction, and naming it is what
+        `info["compiler_traps"]` is for — `formal/arm64_proof_gen.py::
+        _program_extern_calls` subtracts these addresses from the program's own
+        extern calls, so a program whose only unbound call is a trap the program
+        never takes gets its run tests back. Measured on
+        `formal/examples/mod_by_var.mojo`: without this the example is a
+        `lean-rejected` row whose first diagnostic is a false
+        `run_pc_reached … = true`, and with it the example's ordinary run test
+        (`run_result_exit … = mojo 10`) is emitted and is true.
+
+        Filtered to `fflush` rather than to "whatever the call added", because
+        `_emit_call` on a computed status can reach a nested call of its own and
+        a nested `exit(f())` is the PROGRAM's call, not a compiler trap.
+        """
+        before = len(self.asm.extern_refs)
+        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                   args=[F.IntLiteral(0)]))
+        self._compiler_trap_addrs.update(
+            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
+            if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status=1, computed: bool = False) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
