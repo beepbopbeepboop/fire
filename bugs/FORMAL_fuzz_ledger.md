@@ -1220,6 +1220,12 @@ rows, no compiler.
 
 ### 4.13 The tool's OWN minimiser reduced a real disagreement to a program CPython cannot run
 
+> **CLOSED, and it was closed before 2026-10-05 (`work/formal28-4`) — measured
+> against the predicate, all five rows. See "§4.11b" at the foot of this file
+> before acting on anything below.** The fix is `have_oracle and …` on the
+> comparison, a `compile()` of the candidate, and `_answers_only`; all three were
+> in `tools/formal_fuzz.py` when this section was written. A row pins it now.
+
 **Found:** the `refs` sweep, on §3.11's finding. `--minimize` on the program the
 sweep saved returned this:
 
@@ -1247,6 +1253,13 @@ to the five-line reproducer in §3.11 in about four minutes — so the shape is
 right and only the acceptance test is wrong.
 
 ### 4.14 A caller's own reading of the oracle's return shape is a coin flip
+
+> **FIXED 2026-10-05 (`work/formal28-4`).** The measurement below reproduces
+> exactly; the fix is a SHAPE, not a convention — an answer is an `OracleAnswer`
+> and both non-answers are `None`, with the reason beside them. See "§4.11b" at
+> the foot of this file. `_cpython_raises_any` turned out to be the purest
+> instance of this defect and nobody had reported it: it reported "CPython raises
+> nothing" for a program that raised a `NameError`.
 
 `cpython_answer` returns `((exit, stdout), stderr)`, and **every caller in the
 tool unpacks it first** (`ref, err = cpython_answer(...)`), which is what makes
@@ -1490,3 +1503,121 @@ python3 tools/memslot.py --gb 8 --label fz -- \
 python3 tools/memslot.py --gb 8 --label t -- \
     python3 test_formal_fuzz.py --no-build-check --mix noreturn --count 8 -j 2
 ```
+
+## 4.11b Status 2026-10-05 (`work/formal28-4`): §4.14 is FIXED, and §4.13 was
+## already fixed and its text is STALE
+
+Both of the tool defects this section's tail lists as open were re-measured, and
+they came out differently — one fixed by code that landed after this section was
+written, one fixed now. **Neither is a backend finding, and neither is a tally;
+they are the two entries a reader would otherwise re-fix.**
+
+### §4.14 — the coin flip is gone, because the SHAPE changed and not the docstring
+
+The measurement in §4.14 reproduces exactly, on this tree, before the change:
+
+```
+rejected program:   has_oracle(ref)     = False   <- correct
+                    has_oracle(whole)   = True    <- §4.14's wrong reading
+```
+
+`cpython_answer` returned `((exit, stdout), stderr)` with the first element being
+`("error", text)` on a REJECTION and `None` on a TIMEOUT — so `ref[0] ==
+"error"` is true of the unpacked half and false of the value one level up, and
+nothing at the definition said which one a caller held.
+
+What landed is a shape rather than a convention, because a convention is what was
+already in the docstring and at every call site:
+
+  * **`OracleAnswer(exit, stdout)`**, a `NamedTuple`, so an ANSWER is a type;
+  * **both non-answers are `None`**, with the REASON beside them. That is a
+    simplification, not only a renaming: two shapes become one, so every caller
+    stops having to know both — and `record_reduction`'s
+    `("CPYTHON-TIMEOUT" if ref is None else "generator-error")` was reading a
+    SHAPE to mean a REASON. It reads the reason now, which is where the
+    distinction always was;
+  * **`oracle_answer(ref)`**, and `has_oracle` is a one-liner over it instead of
+    a hand-rolled `ref[0] != "error"`. Asking the accessor has no wrong reading,
+    because there is no second element to reach for;
+  * **`is_oracle_timeout(reason)`** over a named `ORACLE_TIMEOUT_REASON`, since
+    the reason is free text (a traceback, for a rejection) and three literals
+    matching a string in another function is three spellings of one fact.
+
+**`_cpython_raises_any` was the purest instance of the defect, and it is worth
+naming because nobody had reported it.** It tested
+`isinstance(ref, tuple) and ref and ref[0] == "error"` on the un-unpacked value,
+so it answered "CPython answers this program, and raises nothing" for a program
+that raised a `NameError` — a refusal audit that refutes nothing, on exactly the
+family whose whole purpose is to be refutable. It reads the reason now.
+
+And one guard had to move in the OTHER direction, which is the part a mechanical
+change gets wrong: `audit_refusal`'s `no-predicate` test was `cpython is None`,
+and after the change `None` is also what a REJECTED program looks like — a case
+that IS checkable, because the traceback is what the claim is about. The guard
+is now "`None` AND no usable reason". A reader who had only made the shape
+uniform would have turned every CPython-checkable refusal claim into
+`no-predicate`, which is the verdict that is counted, printed and never a
+finding.
+
+### §4.13 — the minimiser already refuses what the doc says it accepts
+
+§4.13 is **already fixed on master** and this section's text is stale. Measured
+directly against the predicate, with `cpython_answer` and `run_on` stubbed so the
+answer is about the predicate and not about a compiler:
+
+| candidate | `_still_fails` |
+|---|---|
+| the §4.13 reproducer, five undefined names | **False** |
+| the same inside `main` | **False** |
+| a real disagreement, oracle present (the control) | **True** |
+| a candidate that REFUSES where the original ANSWERED | **False** |
+| a candidate that refuses, the original refused too | **False** |
+
+Three things did it, all present before this round: the `have_oracle and …`
+guard on the comparison (so `want_exit` being `None` cannot be satisfied by an
+image that answered), a `compile()` of the candidate against the driver so a
+non-parsing reduction cannot demonstrate anything, and `_answers_only` so a
+refusal-only reduction cannot stand in for an ANSWER finding. `formal_fuzz.py`
+was last touched at 16:53 on 2026-10-05 and this section at 14:04 the same day,
+which is the whole explanation.
+
+**A row now pins it**, because a reader who trusts this section would otherwise
+re-fix working code. The doc's own closing advice — "a 40-line line-granularity
+ddmin that keeps a reduction only when CPython answers it" — is not needed: that
+is what `_still_fails` now does.
+
+### What this section's tail is worth after this round
+
+Nothing, and that is the finding rather than a gap: §4.13 and §4.14 were the
+last two tool defects listed, every backend finding in this ledger is fixed or
+filed elsewhere, and the open remainder is §5's cost notes (a corpus-coverage
+question, not a bug) plus `nonlocal`, which is a feature.
+`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+is the live backend bug this ledger's §4.11a row is a marker for, and it is not
+this file's.
+
+Tests, no compiler:
+
+```
+formal fuzz: oracle     PASS 7 shape checks (no compiler)
+formal fuzz: shrink    PASS 5 predicate rows (no compiler)
+formal fuzz: record    PASS 4 record shapes (no compiler)
+formal fuzz: audit     PASS 11 verdicts (no compiler)
+python3 test_formal_fuzz.py --no-build-check                  PASS — 0 failures
+python3 test_formal_fuzz.py --no-build-check --mix noreturn \
+    --count 8 -j 2                                           PASS
+```
+
+The `oracle` row is seven checks and is RED against master's `formal_fuzz.py` in
+the bluntest possible way — it cannot load, `AttributeError: module
+'formal_fuzz' has no attribute 'OracleAnswer'` — because "the fix is a named
+accessor" means the accessor has to exist before a row can use it. The
+behavioural measurement at the top of this section is the one that says what was
+wrong, and it is a measurement rather than a load error.
+
+One test bug found on the way, and it is the same shape as the bug it was
+testing: the new shrink stub wrapped `cpython_answer`'s `(oracle, reason)` pair
+in a second pair, so the oracle arrived where an `OracleAnswer` was expected and
+the predicate reported `False` for a candidate that plainly still disagreed. The
+stub returns the pair as it is now, and says why in a comment — because the next
+person to write a stub for this function will reach for the same wrap.
