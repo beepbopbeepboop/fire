@@ -326,3 +326,47 @@ says why. §3's standing caveat is unchanged — the sweep was not re-run, so
 "nothing that answered before is refused now" rests on the narrow suites
 (`test_formal_value_model.py` 83, `test_formal_run.py`'s eq rows,
 `test_formal_returned_frame.py` 46, `test_formal_method_param_field.py` 32).
+
+## §3's one unmeasured claim is now MEASURED FALSE (`formal37-2`, 2026-10-05):
+## `test_struct_formal.py` is 193/193, not 163 failures
+
+§3 "What was NOT re-measured" ends with a note that is a standing warning to the
+next reader, and it is the only part of this document a narrow session can
+actually settle:
+
+> `test_struct_formal.py` is RED on this tree and was red before this change, for
+> a reason with nothing to do with it … a reader who re-runs it deserves to know
+> which of its 163 failures are theirs.
+
+**It is green.**
+
+```
+$ python3 tools/memslot.py --gb 8 --label sf -- python3 test_struct_formal.py
+193/193 checks passed
+```
+
+193 checks, 0 failures. So there are no 163 failures to triage, and the recorded
+reason is stale in the way a stale measurement always is: the stated cause was
+`from struct import calcsize` being refused by
+`formal/hostmods/os/_syscalls.mojo`'s string-subscript rule
+(`bugs/FORMAL_string_value_model.md`), and **`calcsize` is now a modelled host
+function** — `formal/hostmods/struct.mojo` is in this tree and defines it, with
+the degradation documented in its own docstring ("the honest degradation is a
+RETURN VALUE: `calcsize` returns 0"). The refusal the note attributes 163
+failures to is not reachable that way any more.
+
+**The caveat this removes is worth more than the row it removes.** §3's real
+content is that "nothing that answered before is refused now" rests on narrow
+suites rather than a sweep diff, and this note was the one place it told a reader
+which failures were *not* this change's. That triage list is now wrong in the
+strong direction, and a reader who had trusted it would have gone looking for 163
+failures to attribute. §3's own standing caveat — **the sweep is still not
+re-run**, so the regression claim still rests on
+`test_formal_value_model.py`, `test_formal_run.py`'s eq rows,
+`test_formal_returned_frame.py` and `test_formal_method_param_field.py` — is
+unchanged by this and is still the honest limit of the claim.
+
+Nothing else in this document was touched: `NotImplemented` as a dunder's return
+value is still refused on both backends before and after, still with a message
+that says why, and per this Status's own closing section nothing here is a step
+toward it.

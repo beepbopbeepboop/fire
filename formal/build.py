@@ -3869,6 +3869,94 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
     )
 
 
+def _widen_printf_integer_conversions(functions: list) -> int:
+    """Give every 32-bit INTEGER conversion of a printf format an `ll`.
+
+    **The rewrite that made `printf("%d", 2**62)` print the number the source
+    wrote, and it is HERE, in the one pipeline both front ends go through, for
+    the reason the neighbouring passes give.** A `%d` on this path reads a C `int` out of a
+    64-bit word, so `printf("%d", 2**62)` printed `0` where CPython prints
+    `4611686018427387904` — measured on BOTH architectures, exit 0, wrong
+    number, and invisible to every differential test that compares exit status
+    or whose integers happen to fit in 32 bits.
+
+    **A REWRITE of the format literal, not a refusal and not an emitter-side
+    substitution**, and each of those three is the wrong layer for a stated
+    reason:
+
+    * **Not a refusal.** This path refuses what it cannot answer
+      (`int_parse_base_refusal`, `float_binary_refusal`, `printf_kind_conversion_refusal`),
+      and this one CAN be answered: the operand is one 64-bit word
+      (`doc/ABI.md`, "Scalar types") and libc's `%lld` renders all eight bytes
+      of it. Refusing `%d` would also refuse what a large amount of ordinary
+      Mojo spells, including three of this repository's own `formal/hostmods/`.
+    * **Not per-emitter.** Two backends that each substituted a widened format
+      would be two answers to one question, and this file already carries the
+      scar: `fire.py dylib --formal --backend=x86_64` built an **arm64** image
+      because the architecture flag was parsed and dropped
+      (`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §3). One rewrite,
+      in the shared pipeline, is what makes the two architectures unable to
+      disagree.
+    * **Not in the emitters.** Doing it here means the emitters'
+      `printf_format_refusal` reads the WIDENED text, so the `%s`-of-an-integer
+      refusal, the missing-operand refusal and this agree about what the format
+      says — rather than one of them having to know the other ran first.
+
+    **It rewrites the literal's TEXT, which is what `_intern_string` interns,
+    and the escape discipline is `print_literal`'s.** A source literal reaches
+    here as raw text (`"%d"` is two characters), the decode is
+    `fire_compiler.decoded_literal`, and the emitter decodes AGAIN when it
+    interns — so a widened format written back raw would be decoded twice. The
+    value is therefore replaced with the DOUBLED-BACKSLASH form of the widened
+    decoded text, which is what `print_literal` already does for the same
+    reason and states in its own docstring.
+
+    **The decision is per CONVERSION and does NOT consult the operand**, which
+    is a scope statement rather than an omission. The one shape where `%d`
+    renders C's answer and `%lld` would not is a bare libc `int`-returning name
+    with no `BARE_C_RETURN_KINDS` row, which arrives zero-extended; but that
+    word is what `print` already renders as `4294967295` and what `a < 0`
+    already answers `no` for, so widening `%d` makes the two agree instead of
+    leaving one rendering that contradicts the rest of the model. The residual
+    defect is upstream and is filed as
+    `bugs/FORMAL_a_bare_c_int_return_with_no_prototype_row_is_not_sign_extended.md`;
+    its exposure on this corpus is zero, measured over every real libc bare
+    callee in 423 `.mojo` files.
+
+    **What it does not reach, and it is a real limit rather than an oversight:**
+    a format held in a NAME (`fmt = "%d"; printf(fmt, x)`) is not a literal,
+    so nothing here can scan it. That is the permissive direction every format
+    reader on this path already takes — `printf_format_refusal` is a no-op for
+    a non-literal format for the same reason — and the shape is rare enough
+    that the bug doc's own next step does not ask for it. Recorded on
+    `model.printf_widened_format` and in the bug doc's Status.
+
+    Returns the number of literals rewritten, which is what the test asserts
+    against: a pass that reports progress it did not make would be a bug in
+    its own right.
+    """
+    count = 0
+    for fn in functions:
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            lit = M.printf_call_format_literal(node)
+            if lit is None:
+                continue
+            widened = M.printf_widened_format(F.decoded_literal(lit))
+            if widened is None:
+                continue
+            # The same doubling `print_literal` does, and for the same reason:
+            # the emitter's `_intern_string` decodes, so the value written here
+            # has to be the inverse of that decode or an escape is decoded
+            # twice. `is_raw` is left as the parser set it, because a raw
+            # literal is not decoded at all and doubling its backslashes would
+            # ADD a backslash rather than remove one.
+            if not getattr(lit, "is_raw", False):
+                widened = widened.replace("\\", "\\\\")
+            lit.value = widened
+            count += 1
+    return count
+
+
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = (),
@@ -17975,6 +18063,22 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # name, so
     # every other module missed and silently got an empty census — the quieter
     # half of the same bug, and why `_check_method_receiver_types` was dead.
+    # A `printf` format's 32-bit INTEGER conversions are given an `ll` HERE,
+    # and HERE for the same reason as the four passes above it: this is the one
+    # pipeline both front ends go through, so one rewrite is what makes the two
+    # architectures unable to disagree about what a `%d` means. It is asked
+    # LAST, immediately before the frame pass, so it sees the final function
+    # list — after closures are flattened and lambdas lifted — for the reason
+    # `_frame_receivers`'s own docstring states about itself.
+    #
+    # `printf("%d", 2**62)` printed `0` where CPython prints
+    # `4611686018427387904`, on BOTH architectures, with exit 0: a formal value
+    # is one 64-bit word and libc's `%d` reads a C `int` out of it. The
+    # measurement, the three rejected alternatives (a refusal, a per-emitter
+    # substitution, an emitter-side rewrite) and the one shape it cannot reach
+    # (a format held in a NAME) are in `_widen_printf_integer_conversions`'s
+    # docstring and on `model.printf_widened_format`.
+    _widen_printf_integer_conversions(functions)
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
                      star_imported_modules(stmts), enum_structs, one_field)
@@ -19561,7 +19665,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (668 entry points, 262 of them word-shaped,
+    §3.1 for the word-shaped surface (683 entry points, 272 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps
