@@ -5338,12 +5338,35 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'what catches a brand-new file citing a deleted doc')
     check('dangling refs: a ledger entry the corpus has outgrown is visible, '
           'which a ceiling cannot report',
-          dangling_doc_refs.stale_baseline_entries(synth, led) == {'d.py': (1, 4)},
+          dangling_doc_refs.stale_baseline_entries(synth, led)
+          == {'c.py': (0, 2), 'd.py': (1, 4)},
           f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
           f'ledger is a CEILING, so a file that fixed its citations needs no '
           f'entry change to stay green and an entry left behind by a fix is '
           f'indistinguishable from one still needed — a worker who fixes a '
           f'citation should drop the entry rather than leave it')
+    # …and `c.py` in that same synthetic corpus is the half that was INVISIBLE
+    # until 2026-10-05, and it is a different mechanism from `d.py`'s, so it
+    # cannot be covered by the assertion above passing: `find()` gives a file a
+    # key in `by_file` only once something cites into it, so a file whose
+    # citations were ALL fixed is absent from the corpus entirely. Reading the
+    # ledger through `ledger_verdicts` (a join over `by_file`) therefore could
+    # not report it at any number — not here, not in the ratchet, not in
+    # `sanctioned`. Measured on this tree: the ledger carried
+    # `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1` for a citation
+    # that had since been rewritten, and nothing could see it
+    # (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`).
+    check('dangling refs: an entry for a file that cites NOTHING is stale too, '
+          'which the corpus join cannot see',
+          dangling_doc_refs.stale_baseline_entries(synth, led).get('c.py')
+          == (0, 2)
+          and 'c.py' not in synth
+          and 'c.py' not in dangling_doc_refs.ledger_verdicts(synth, led),
+          f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}, '
+          f'verdicts {dangling_doc_refs.ledger_verdicts(synth, led)}, '
+          f'corpus keys {sorted(synth)}; "fixed every citation in this file" '
+          f'and "the ledger never mentioned this file" were the same '
+          f'observation, so the join has to be over the LEDGER')
 
 
 def test_the_formal_doc_index_is_current():
