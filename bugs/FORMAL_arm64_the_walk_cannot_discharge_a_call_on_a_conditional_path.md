@@ -1,5 +1,67 @@
 # The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing`
 
+**Status 2026-10-05 (`work/formal40-4-r2`): the blocker this doc names is
+MISNAMED, and the correction is worth more than the work it precedes — the Lean
+gate is NOT what stands in front of option 1. It is runnable, cheaply, by
+exactly the worker this doc says cannot run it; what is out of reach is
+REBUILDING `lib/ProofLib.lean`, and that is a memory number rather than a policy
+one.** Measured on this tree, and the method is at the end so a reader can
+re-derive it:
+
+| what | cost on this tree |
+|---|---|
+| `formal/lean.py::ensure_library` with every `lib/*.olean` absent | **0.6 s, 0.0 GB** — all six are a **CAS hit** (`cas.lookup(_olean_key(...))` returns a blob for `ProofLib`, `work`, `Refine`, `Contracts`, `X86`, `IEEE754`), so the library is COPIED, never rebuilt |
+| a generated proof checked through `check_proof_cached` | **rc=0, 3.8 GB peak, ~4 min** for a 5051-line file, under `tools/memslot.py --gb 8` |
+| `lib/ProofLib.olean` itself | **7.82 GB peak**, `formal/lean.py`'s own measured table — and `LEAN_MEMORY_MB`/`LIBRARY_MEMORY_MB` are 6144/12288, which is why it is a *budget* question and not a policy one |
+
+So the sentence at the end of this document's header — "it is a
+`lib/ProofLib.lean` change whose soundness cannot be established without the
+Lean gate, which a light worker may not run" — is true of the PROOF and false of
+the GATE. A light worker can establish it; what a light worker cannot do is
+*change the library the proof is about*, and that is a 7.82 GB line under an
+8 GB ceiling, not a rule.
+
+**What that buys option 1, concretely.** Option 1 (a set-valued `arm64_go_exit`
+plus the gluing family beside `go_exit_step`/`go_exit_b`) is a `ProofLib` change
+*and* an emitter change, and the two halves are separable in a way the doc does
+not separate: **the emitter half can be built and measured against the library
+as it stands**, and the shape of the obligation it cannot discharge is exactly
+the information the `ProofLib` half needs. Concretely, a worker can
+
+1. thread a LIST of halt addresses through `_gen_universal_e2e_cfg` and
+   `emit_runs` in place of the single `exit_at`, and
+2. run the doc's own reproducer through `formal/lean.py` and read off WHICH
+   obligation fails,
+
+which is the whole of "what would the new lemma have to say" — and it costs one
+Lean run at 3.8 GB, not a 7.82 GB library rebuild. The doc's own warning is the
+reason this is worth spelling out: *"a per-block terminal that does not close
+produces a theorem with a `sorry` in it, which the census reads as clean"* — and
+that warning is only half the risk. The other half is symmetric and is the one a
+`native_decide`d goal hides: a per-block terminal that closes **by accident**
+produces a FALSE theorem. A measured failing obligation names both; a `sorry`
+names neither.
+
+**What this does not change.** Option 2 ("two independent induction chains, one
+per halt address") is still refuted by this document's own argument, and the
+neighbouring fix does not touch it. Option 1 is still the work.
+
+**One thing measured here that this doc gets wrong by inheritance.** §"Why it is
+not the same as the x86-64 side" and the refusal text both say the CFG walk "is
+per-function". That was true of this repository on 2026-10-04 and stopped being
+true the same day: `_same_image_call_plan` +
+`ctx["ret_to"]` (`bfdaabb5`, `bugs/FORMAL_arm64_the_universal_theorem_cannot_
+follow_a_call_into_the_same_image.md`) make the walk descend into a second
+function's blocks — whose blocks were already its blocks, since `_cfg_blocks`
+spans every function to the image's last `RET` — whenever the return address is a
+CONSTANT of the call. So the precise statement is: **the walk is per-function
+where the return address is a property of the call path, and per-image where it
+is a constant.** That does not help the exit-flush case, whose callee is outside
+the image and whose return address does not exist; it does mean the phrase
+"per-function walk" in a sibling doc should be read with the qualification, and
+that a reader sizing this work should not assume the callee's blocks are a
+second walk.
+
 **Area:** FORMAL, both backends. **Status: OPEN, and it is the PRECONDITION for the
 doc named above, measured on this tree 2026-10-04 (`work/formal23-2`). RE-MEASURED
 2026-10-05 on `work/formal27-2` and still open, with two things landed and the
@@ -183,3 +245,41 @@ it, and **it cannot be landed without the Lean gate**: a per-block terminal that
 does not close produces a theorem with a `sorry` in it, which the census reads as
 clean, and one that closes by accident produces a false theorem. That is the
 whole of why this is still open.
+
+## The measurement the correction above rests on
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+
+# 1. the library, with every lib/*.olean absent: served, not built
+rm -f lib/*.olean lib/*.srcsha256
+python3 tools/memslot.py --gb 8 --label prooflib -- python3 -c "
+import os,sys; sys.path.insert(0,os.getcwd())
+from formal.lean import find_lean, ensure_library
+ensure_library(find_lean(os.getcwd()), os.path.join(os.getcwd(),'lib'))"
+#   real 0m0.647s, memcap: done, peak 0.0 GB
+ls -la lib/*.olean          # 8 files, ProofLib.olean 52 MB
+
+# 2. the same question asked of the CAS directly, which is what says WHY
+python3 -c "
+import os,sys; sys.path.insert(0,os.getcwd())
+from formal.lean import find_lean, _effective_digest, _olean_key
+import cas
+lib=os.path.join(os.getcwd(),'lib'); lean=find_lean(os.getcwd())
+for stem in ('ProofLib','work','Refine','Contracts','X86','IEEE754'):
+    src=os.path.join(lib,stem+'.lean')
+    d=_effective_digest(stem,lib)
+    print(stem, 'cas hit:', bool(cas.lookup(_olean_key(stem,src,lean,d),'.olean')))"
+
+# 3. one generated proof, checked, under an 8 GB ceiling
+python3 tools/memslot.py --gb 8 --label lean -- python3 -c "
+import os,sys; sys.path.insert(0,os.getcwd())
+from formal.lean import check_proof_cached
+print(check_proof_cached('.tmp/intra/simple_proof.lean', repo_root=os.getcwd())[:3])"
+#   OK=1, sorries=0, memcap: peak 3.8 GB, ~4 min wall
+```
+
+Step 2 is the load-bearing one: a CAS hit is why step 1 costs nothing, and
+`_olean_key` folds `lib/<stem>.lean`'s digest, so a hit is a hit *for these
+sources* and a `ProofLib.lean` edit misses it — which is the boundary, and the
+only reason the library is out of reach.

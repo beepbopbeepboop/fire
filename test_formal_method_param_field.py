@@ -1132,22 +1132,18 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def set(out self, o: Opt):\n"
-     "        self.inner = o\n"
+     "    def set(out self, n: Int):\n"
+     "        self.inner = Opt()\n"
+     "        self.inner.v = n\n"
+     "        self.inner.has = 1\n"
      "\n"
      "    def get(out self) -> Int:\n"
      "        return self.inner.v * 10 + self.inner.has\n"
      "\n"
-     "def mk(n: Int) -> Opt:\n"
-     "    var o = Opt()\n"
-     "    o.v = n\n"
-     "    o.has = 1\n"
-     "    return o\n"
-     "\n"
      "def main() -> int:\n"
      "    var b = Box()\n"
-     "    b.set(mk(4))\n"
-     "    printf(\"g=%d\", b.get())\n"
+     "    b.set(4)\n"
+     '    printf("g=%d", b.get())\n'
      "    return 0\n",
      None, None, None,
      "a constructor's argument is the frame the CALLER reached"),
@@ -1155,10 +1151,20 @@ CASES = [
     # CPython: the same program with the field assigned in `__init__` from
     # `__init__`'s own parameter. This is the half that is easy to leave out —
     # a reworded advice nobody runs is an advice nobody knows is true — and it
-    # is the case that keeps `bugs/FORMAL_builtin_slice_optional_field_is_a_
-    # frame_holder.md`'s remaining item (the `_REASSIGNED` question) described
-    # accurately: the refusal is a LIFETIME question about which function
-    # assigns, not a gap in what a frame-typed field can be.
+    # is the case that keeps the `_REASSIGNED` question described accurately:
+    # the refusal is a LIFETIME question about which function assigns, not a gap
+    # in what a frame-typed field can be.
+    #
+    # **The document that carried that question was deleted with its answer**
+    # (`work/formal40-4`, "a non-constructor method may assign a frame-typed
+    # field"): a method that is NOT `__init__` may now store its own annotated
+    # parameter, so `_REASSIGNED` no longer fires for a setter like that and the
+    # question has no remaining case. What replaced the document is this file's
+    # own direction of travel — the two rows above are re-pointed at a writer
+    # that stores a CONSTRUCTION, which the predicate still refuses, and the
+    # shapes that now build got executed rows — plus
+    # `formal/model.py::field_stores_a_caller_frame`, whose own comment states
+    # the lifetime argument that document reasoned its way to.
     ("the_delegating_constructor_form_the_advice_names_builds_and_answers",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -1491,6 +1497,100 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
+     "    def set(out self, n: Int):\n"
+     "        self.inner = Opt()\n"
+     "        self.inner.v = n\n"
+     "        self.inner.has = 1\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        var t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.set(4)\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     None, None, None,
+     "a frame belonging to whichever function ran the assignment"),
+    # ── A DELEGATING SETTER, which is the boundary this change moved ────────
+    #
+    # Both rows above were this program, with `def set(out self, o: Opt):
+    # self.inner = o` as the writer: a setter that stores one of ITS OWN
+    # annotated parameters, which `model.field_stores_a_caller_frame` now
+    # accepts for the same reason it accepts the constructor's — the frame in
+    # the slot is the CALLER's and the object it went into is the RECEIVER, so
+    # the two die together.  They were re-pointed at a writer that stores a
+    # CONSTRUCTED value (`self.inner = Opt()`), which is the writer the
+    # predicate still refuses and is the boundary this case has to keep: a
+    # refusal whose program no longer refuses is a hole, not a fix.
+    #
+    # So the shape that now BUILDS gets its own EXECUTED rows, both against
+    # CPython and both architectures, because a lowering that reads a setter's
+    # frame at the wrong slot or from the wrong scratch computes a number and
+    # exits 0 — the failure `bugs/FORMAL_wide_receiver_by_reference.md` exists
+    # to prevent, and the only way to see it is to run it.
+    ("a_delegating_setter_is_readable_through_the_field",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.set(mk(4))\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = None\n"
+     "    def set(self, o):\n"
+     "        self.inner = o\n"
+     "    def get(self):\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.set(mk(4))\n"
+     'sys.stdout.write("g=%d" % b.get())\n',
+     0, "g=41", None),
+    # …and the SAME writer read through a local copy, which is the row whose
+    # needle the re-pointed refusal above now carries: `_REASSIGNED` is ONE
+    # refusal reached from two directions, and the direction that builds is
+    # worth an executed row for the same reason the refusal needs one.
+    ("a_delegating_setter_is_readable_through_a_local_copy",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
      "    def set(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
@@ -1507,10 +1607,71 @@ CASES = [
      "def main() -> int:\n"
      "    var b = Box()\n"
      "    b.set(mk(4))\n"
-     "    printf(\"g=%d\", b.get())\n"
+     '    printf("g=%d", b.get())\n'
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.inner = None\n"
+     "    def set(self, o):\n"
+     "        self.inner = o\n"
+     "    def get(self):\n"
+     "        t = self.inner\n"
+     "        return t.v * 10 + t.has\n"
+     "def mk(n):\n"
+     "    o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "import sys\n"
+     "b = Box()\n"
+     "b.set(mk(4))\n"
+     'sys.stdout.write("g=%d" % b.get())\n',
+     0, "g=41", None),
+    # ── AND the lifetime the new predicate must NOT claim ───────────────────
+    #
+    # A store into anything but the RECEIVER.  `b` is a local of `steal` and is
+    # returned, so the frame `o` names is the CALLER's and it dies when the
+    # caller returns — while the `Box` that holds the word outlives the call.
+    # This is refused, and it must stay refused, and it is refused at the STORE
+    # (`_frame_field_store_is_sound`) rather than at the read, which is why
+    # `field_stores_a_caller_frame` — which counts only `self.<field>` stores —
+    # cannot reach it.  A setter the analysis accepted and a local the analysis
+    # accepted would be the same bug wearing two hats.
+    ("a_frame_field_stored_into_a_returned_local_is_still_refused",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(out self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def steal(o: Opt) -> Box:\n"
+     "    var b = Box()\n"
+     "    b.inner = o\n"
+     "    return b\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var o = mk(4)\n"
+     "    var b = steal(o)\n"
+     '    printf("g=%d", b.get())\n'
      "    return 0\n",
      None, None, None,
-     "a frame belonging to whichever function ran the assignment"),
+     "is stored in the field 'b.inner'"),
     # …and the name the loop also binds.  `t` is bound twice — once to the
     # slot's address and once by the loop — so after the loop it holds the
     # LOOP's word and not the address, and a seeding that classified it from the
