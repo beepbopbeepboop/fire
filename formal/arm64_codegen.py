@@ -1440,6 +1440,12 @@ dylib_exports: list = None, globals_base: int = None,
         # `fflush` — see `_emit_stack_floor_guard`).
         self.asm.emit(encode_stp_sp_pre(29, 30))
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
+        # The caller's callee-saved registers are pushed BEFORE the argument
+        # homes below overwrite them (the homes ARE X19..X28), and the guard
+        # comes after the homes, so its `getrlimit` call cannot destroy an
+        # incoming argument.
+        for i in range(self._npairs):
+            self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
         # The module-global initializer, LAZILY: a function that touches a
         # global checks a flag and fills the slots if they are not filled yet.
         # Placed here — after the frame is established and the callee-saved
@@ -1623,15 +1629,13 @@ dylib_exports: list = None, globals_base: int = None,
         # `k=14` dies of SIGSEGV with no output, which is the crash this whole
         # mechanism exists to replace. So the order is:
         #
-        #     STP X29, X30 — argument homes (X19..X28) — GUARD — STP X19..X28 —
+        #     STP X29, X30 — STP X19..X28 — argument homes (X19..X28) — GUARD —
         #     SUB SP, #_SCRATCH
         #
         # and the one property to preserve if this is ever moved again is that
         # the guard sees an SP this prologue has not yet written to.
         if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
-        for i in range(self._npairs):
-            self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:

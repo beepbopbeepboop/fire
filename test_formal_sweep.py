@@ -624,7 +624,9 @@ class TestDyldProbe(unittest.TestCase):
         # visible to the sweeping interpreter. If this ever starts passing,
         # the old mechanism would stop being wrong for the wrong reason.
         image = self.resolvable_img
-        (ordinal, name), = S._binds(image)
+        # The image may also bind libSystem's own `getrlimit` (the stack-floor
+        # guard's), so the helper is the bind that names the dylib, not "the one".
+        (ordinal, name), = [b for b in S._binds(image) if b[0] == 2]
         self.assertEqual(ordinal, 2, "the helper must bind from the dylib")
         import ctypes
         self.assertFalse(hasattr(ctypes.CDLL(None), name),
@@ -795,7 +797,7 @@ class TestDyldProbe(unittest.TestCase):
         from formal import macho_linker as ML
         helper = S._load_dylib_names(self.resolvable_img)[1]
         code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
-        name = S._binds(self.resolvable_img)[0][1]
+        name = [b for b in S._binds(self.resolvable_img) if b[0] == 2][0][1]
 
         wrong = ML.build_macho_executable_extern(
             code, [name], "arm64", dylibs=[{"install_name": helper,
@@ -822,7 +824,7 @@ class TestDyldProbe(unittest.TestCase):
                          "precondition: the helper is a thin non-x86_64 dylib")
         self.assertIn(ML.CPU_TYPE_ARM64, S._macho_cputypes(helper))
         code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
-        name = S._binds(self.resolvable_img)[0][1]
+        name = [b for b in S._binds(self.resolvable_img) if b[0] == 2][0][1]
         img = ML.build_macho_executable_extern(
             code, [name], "x86_64", dylibs=[{"install_name": helper,
                                              "symbols": {name}}])
