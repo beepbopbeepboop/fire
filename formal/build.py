@@ -13450,8 +13450,8 @@ def _lower_dialect_arith(functions: list, structs_by_name: dict = None) -> int:
 
     **The operand's DECLARED type is the whole of the gate**, and that is the
     answer to the question
-    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
-    Correction raised: the operation's name settles elementWISE-ness and never
+    `bugs/FORMAL_dialect_operations_with_no_lowering.md` §Correction raised:
+    the operation's name settles elementWISE-ness and never
     settles word-or-N-lanes, so a table keyed on the name would have been RIGHT
     for the corpus's 9 word-typed sites and WRONG for the 26 that are a
     `!kgen.simd<…>` — a scalar add of two vector-typed words, which is a
@@ -13737,7 +13737,7 @@ def _lower_dialect_casts(functions: list, structs_by_name: dict = None) -> int:
     It is in the shared pipeline rather than an emitter arm per architecture, so
     "both architectures" here is a statement about ONE code path and not about
     two implementations agreeing — the argument
-    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` makes
+    `bugs/FORMAL_dialect_operations_with_no_lowering.md` makes
     for the whole family and the reason `_lower_dialect_select` is beside it.
 
     **Three gates, and each is the same one the refusal asks about**, so the

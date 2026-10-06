@@ -59,8 +59,8 @@ competing name to lose to, and both guards assert what the fix must NOT break.
 Run:  python3 test_formal_mlir_precedence.py [-v] [case ...]
 
 THE SECOND SUBJECT, added 2026-10-04: what the refusal says once the
-operation's OPERAND type can be read. `bugs/FORMAL_mlir_dialect_refusal_is_
-false_of_the_word_valued_ops.md` § Correction measured that the corpus's
+operation's OPERAND type can be read. `bugs/FORMAL_dialect_operations_with_no_
+lowering.md` § Correction measured that the corpus's
 arithmetic sites are scalar or vector depending on the OPERAND's declared type
 and not on the operation's name — 9 word-typed, 26 over a `!kgen.simd<…>` — so a
 table keyed on the name would have been right for nine and wrong for

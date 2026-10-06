@@ -78,7 +78,7 @@ ImmStaticOrigin              a name with no WORD to bind
 Span[StaticString, ImmStaticOrigin]()      ← link 2, the refusal as reported
 ```
 
-Link 1 is `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`'s
+Link 1 is `bugs/FORMAL_dialect_operations_with_no_lowering`'s
 area (`formal19-4`), and it is the same wall the chain walk measures at its
 eighth link on the same scope (`reflect.mojo: the module-level comptime binding
 '_field_types_of' is initialized from an MLIR attribute template`). **Link 2 is
