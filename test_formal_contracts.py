@@ -93,6 +93,28 @@ def functions(mod):
     return [s for s in mod if type(s).__name__ == "FunctionDef"]
 
 
+def _int_literals(node):
+    """Every integer literal under `node`, as Python ints.
+
+    Read off the PARSED clause rather than off the source text, so the assertion
+    is about what the checker will see and not about a spelling: a rewrite that
+    kept the text `n <= 20` somewhere the reader ignores would pass a text
+    assertion and fail this one."""
+    out = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+            continue
+        if type(n).__name__ == "IntLiteral":
+            out.append(n.value)
+        for value in getattr(n, "__dict__", {}).values():
+            if isinstance(value, (list, tuple)) or hasattr(value, "__dict__"):
+                stack.append(value)
+    return out
+
+
 def contract_of(fn, source="<test>", text=None):
     from formal import contracts as CT
     return CT.read_contracts(fn, source, text)
@@ -473,12 +495,47 @@ def test_a_skipped_input_is_not_agreement(tmpdir=None):
           str(CT._signed(v.counterexample["result"])))
 
 
-def test_the_corpus_facts_own_contract_is_false(tmpdir=None):
-    """`formal/examples/fact.mojo` carries `@ensure(result >= 0)`.  It is FALSE:
-    `fact(21)` is 5.1e19 and overflows a `UInt64` to -4249290049419214848.
-    This was true before `formal/contracts.py` existed and nothing reported it,
-    because nothing read the decorator.  The row is here so the finding cannot
-    quietly stop being true."""
+def test_the_corpus_facts_own_contract_is_not_refuted(tmpdir=None):
+    """`formal/examples/fact.mojo` carried `@ensure(result >= 0)` and it was
+    FALSE: `fact(21)` is 51090942171709440000, which is
+    51090942171709440000 - 2**64 = -4249290049419214848 read as a signed 64-bit
+    integer.  True before `formal/contracts.py` existed, and nothing reported it
+    for as long as the decorator was there, because nothing read the decorator.
+
+    **The corpus file now promises something true, and the row is here so that
+    cannot quietly go back.** The fix tightened the PRECONDITION to the same
+    range `@refines(Specs.factorial64; 20)` already claims, rather than weakening
+    the postcondition — `n!` fits in a word exactly up to 20, so the precondition
+    and the specification now agree and `@ensure(result >= 0)` is true over it.
+
+    Three assertions, and the third is the one that keeps the row from going
+    vacuous:
+
+      * the precondition really is the range, read off the parsed clause rather
+        than off the source text, so a rewrite that dropped `n <= 20` and left
+        `@ensure` alone fails HERE rather than silently becoming UNKNOWN for the
+        wrong reason;
+      * the verdict is not REFUTED — a corpus file must not carry a false
+        promise — and `UNKNOWN` is the honest answer here, exactly as it already
+        is for the corpus's other three contract files, because the ladder does
+        not close `fact`'s goal over `UInt64` arithmetic. It is not a pass and
+        `Verdict.ok` is False for it;
+      * **the detector still fires.** This file's rows above already refute
+        `@ensures(result >= 0)` on the same function with the same arithmetic,
+        `loop_wrong` and `wrong_clampv` each refute their own, and
+        `test_the_fact_contract_is_refuted` names the input 21 and the value. If
+        fixing the corpus file had been done by weakening the CHECKER instead of
+        the clause, every one of those would still pass and this row would be the
+        only place the loss is visible — so it asserts the clause's shape, not
+        only its verdict.
+
+    **The generated Lean proof is BYTE-IDENTICAL before and after**, measured:
+    `formal/examples/fact.mojo` compiled to `fact_proof.lean` with the old
+    precondition and with the new one, `diff` empty over 4284 lines. The contract
+    does not reach the theorem statement — `fact_contract` here is the
+    instrumented form, `Post fact_prog fuel mojo st arg`, with no hypothesis —
+    so this is a corpus-source change and not a change to what any Lean gate
+    checks."""
     from formal import contracts as CT
     path = os.path.join(HERE, "formal", "examples", "fact.mojo")
     src = open(path).read()
@@ -486,8 +543,12 @@ def test_the_corpus_facts_own_contract_is_false(tmpdir=None):
           if getattr(f, "name", None) == "fact"][0]
     c = contract_of(fn, path, src)
     check("fact_declares_a_contract", len(c.ensures) == 1, repr(c))
+    check("fact_declares_one_precondition", len(c.requires) == 1, repr(c))
+    bound = _int_literals(c.requires[0].expr)
+    check("the_precondition_bounds_n_at_the_refines_range", 20 in bound,
+          repr(bound))
     _e, v = CT.check_source(fn, path, src)
-    check("the_corpus_contract_is_REFUTED", v.status == CT.REFUTED, repr(v))
+    check("the_corpus_contract_is_not_REFUTED", v.status != CT.REFUTED, repr(v))
 
 
 def test_PROVED_is_unreachable_without_Lean(tmpdir=None):
@@ -818,7 +879,7 @@ ALL = [
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,
     test_a_skipped_input_is_not_agreement,
-    test_the_corpus_facts_own_contract_is_false,
+    test_the_corpus_facts_own_contract_is_not_refuted,
     test_PROVED_is_unreachable_without_Lean,
     test_a_counterexample_outranks_a_green_ladder,
     test_every_example_builds_and_agrees_with_cpython,

@@ -1341,8 +1341,10 @@ class SourceRunner:
 
         The RECURSION depth is metered, and that is not a formality: `fact` is
         a contract in this corpus (`formal/examples/fact.mojo`, `@ensures(result
-        >= 0)`), it calls itself on `n - 1`, and the search's boundary inputs go
-        up to `2^63`.  Unmetered, one input hangs the checker until Python's own
+        >= 0)` over `@require(n >= 0 and n <= 20)`), it calls itself on
+        `n - 1`, and the search's boundary inputs go up to `2^63` — which is
+        above the precondition's range, and that is the reason this corpus file
+        now reports UNKNOWN rather than REFUTED.  Unmetered, one input hangs the checker until Python's own
         `RecursionError` -- which is the wrong instrument and the wrong
         message, and lands tens of thousands of frames deep with a traceback
         that names nothing about the contract.  `RecursionError` is caught
