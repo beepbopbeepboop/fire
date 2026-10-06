@@ -1,5 +1,11 @@
 # FORMAL_sweep14_std_collections: `std/collections`, `std/memory` and `std/algorithm` on both architectures
 
+**§0's OPEN QUESTION IS ANSWERED (2026-10-05, `work/formal54-docs`): `std/format/
+_utils.mojo` CANNOT export `FormatStruct`, and the reason is `doc/ABI.md`'s rule
+rather than a missing export — so the wall is `formal19-1`'s and this document's
+§6 item 0 is answered rather than outstanding.** §0 also mis-cites the owner; the
+correction is in §0.1 with the measurement.
+
 **RE-MEASURED 2026-10-05 (`work/formal29-5`), and THREE OF THE SIX WALLS HAVE
 MOVED — which is the whole content of this document, refreshed.** Each wall was
 built directly (`tools/formal_sweep.py -j 1 -t 120 <file>` on the stdlib
@@ -24,9 +30,58 @@ report `binary_heap`'s `pop()`. **So the export rule is the largest single wall
 in this area, ahead of both rows §6 called items 1 and 2, and it is one missing
 export in one module rather than 38 files of anything.** Whether
 `std/format/_utils.mojo` can export it is a one-line question this session did
-not ask, and it is the first thing a planner should measure: it is the wall
+not ask, and it is the first thing a planner should measure: ~~it is the wall
 `FORMAL_stdlib_module_names_are_not_classified` and the `-77` files behind it
-both sit behind.
+both sit behind~~ — **§0.1 answers it, and the citation was wrong.**
+
+## 0.1 §0's open question, answered: `_utils.mojo` CANNOT export `FormatStruct`,
+## and the owner is `formal19-1` (`work/formal54-docs`)
+
+`../new-modular/Mojo/stdlib/std/format/_utils.mojo:287` is
+
+```mojo
+struct FormatStruct[T: Writer, o: MutOrigin](Movable):
+```
+
+— a **generic template**, and one build of that module says what that costs:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label s14 -- \
+    python3 fire.py build --formal --no-prove -o .tmp/fmt.out \
+    ../new-modular/Mojo/stdlib/std/format/_utils.mojo
+build: _utils.mojo imports 'std.io.io', which cannot be built either:
+`FormatStruct` is called, and it is imported from `std.format._utils`, so the
+call has to bind a symbol `std.format._utils` exports. That module does not
+export it, and the reason is `doc/ABI.md`'s export rule rather than anything
+about this call: **a generic template is not one symbol but one per
+instantiation** …
+```
+
+**So the answer to "can `_utils.mojo` export it" is no, and it is not a missing
+export line.** `reflect.EXCL_GENERIC` excludes every generic template from a
+module's boundary set (`formal/monomorph.py`'s `_excluded_name_sets` is the one
+reader of that rule, and `collect_exports_src` filters the export table through
+the same function), so there is nothing to add to that module: the name is
+excluded by the rule whatever the module's source says.
+
+**And the wall is therefore the one `formal19-1` holds, not the one §0 named.**
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` is
+the row — 123 measured files tree-wide, of which this slice's 38 are a third —
+and the refusal above names it and says why the call arrives unbound: Mojo infers
+a template call's type arguments, the stdlib's own
+`FormatStruct(writer, "Allocation")` relies on it, and this path's demand pipeline
+reads type arguments off an explicit bracket.
+
+**§0's citation was wrong and is corrected here rather than left to rot.** It said
+the wall "is the wall `FORMAL_stdlib_module_names_are_not_classified`", which is a
+document about CPython **host-module classification** (`formal/imports.py`'s
+tiers, `sys.stdlib_module_names`) and has nothing to do with a generic template
+crossing a dylib boundary. The two walls are unrelated and the mis-citation would
+have sent a planner to a 200-name queue instead of to `formal19-1`.
+
+**What this does NOT do:** it moves no file. `FormatStruct` is still unexported,
+the `-77` files behind it are still behind it, and the fix is a monomorphiser
+feature in another claim's territory.
 
 **Everything below is the 2026-10-04 measurement and is kept as it was**,
 because it is the record of what the row was and the three rows above are what
@@ -235,6 +290,16 @@ onto the variadic ABI. **The order to measure in now is: (0) the
 2 and 3 at once, then (1) `binary_heap.mojo`'s new `self.unsafe_ptr()` row,
 then (2) `builtin_slice.mojo` past the export gate.** Items 4-6 below are
 unchanged and still not this claim's.
+
+**ITEM 0 IS ANSWERED — §0.1 — and it is `formal19-1`'s, not this claim's.** The
+`std.format._utils` export of `FormatStruct` cannot be added: the name is a
+generic template and `reflect.EXCL_GENERIC` excludes every one of those from a
+module's boundary set, so the wall is a monomorphiser feature
+(`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`)
+and **the order above becomes: (1) `binary_heap.mojo`'s `self.unsafe_ptr()`,
+(2) `builtin_slice.mojo` past the export gate** — with the caveat §0.1 repeats,
+that both are measured to be behind item 0's ABI rule and neither is a patch.
+Items 4-6 are unchanged and still not this claim's.
 
 1. ~~**`binary_heap.mojo`'s `pop()`**~~ — **FIXED between 2026-10-04 and
    2026-10-05** (`formal/model.py`'s one-field-mutator receiver handover, which
