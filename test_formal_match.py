@@ -639,6 +639,194 @@ ROWS = [
      "    case _:\n"
      "        print('rest')\n"
      "print('after')", ("refuse", "ENUM CASE")),
+
+    # ── the shapes a first lowering gets wrong, one row each ────────────────
+    #
+    # Everything above is a `match` in a straight-line function. These are the
+    # shapes where a lowering that is "an if-chain, roughly" gives a wrong
+    # answer or a refusal, and each one is here because of what it would take
+    # to get it wrong rather than because of what it prints.
+    #
+    # A `return` out of an arm inside a `try`: the emitters keep a list of
+    # pending `finally` bodies and flush it on every exit path
+    # (`_emit_stmt`'s `ReturnStmt` arm calls `_flush_pending_finally`), so an
+    # arm's `return` has to be spliced into the enclosing `try` for the flush to
+    # see it. A lowering that built a separate function per arm, or that
+    # lowered the arm body into a synthetic block, would skip the cleanup
+    # entirely. CPython's order — the `finally` runs BEFORE the returned value
+    # reaches the caller — is what this row pins, and it is ALSO where the row
+    # finds somebody else's bug: the FIRST exit out of a `try` body flushes the
+    # pending `finally` and the second one does not, so this image is missing
+    # the `fin` that CPython prints before `20`. That defect is not about
+    # `match` (it reproduces with a plain `if` in the `try`, measured) and it is
+    # written down in
+    # `bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md`, so this
+    # row is in the KNOWN-DEFECT table at the end of this file rather than here.
+    ("arm_return_inside_a_try_runs_the_finally", "def f(n):\n"
+     "    try:\n"
+     "        match n:\n"
+     "            case 1:\n"
+     "                print('one')\n"
+     "                return 10\n"
+     "            case _:\n"
+     "                print('other')\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    print(f(1))\n"
+     "    print('done')\n"
+     "    return 0\n", ("cpython",), "module"),
+    # A `match` inside an arm, with BOTH subjects an EXPRESSION, so each `match`
+    # allocates its own temporary. The two questions are separate and both are
+    # invisible in a straight-line program: the walk has to reach a `match`
+    # nested inside another `match`'s arm, and the fresh-name counter has to
+    # produce two names that do not collide (a collision would be harmless here
+    # — the outer temporary is dead by the time the inner arm runs — so this row
+    # is not a test of that, and `_fn_spelled_names` is what covers it).
+    ("match_nested_in_an_arm", "def s(v):\n"
+     "    return v\n"
+     "\n"
+     "def main():\n"
+     "    match s(1):\n"
+     "        case 1:\n"
+     "            match s(9):\n"
+     "                case 9:\n"
+     "                    print('inner-nine')\n"
+     "                case _:\n"
+     "                    print('inner-other')\n"
+     "            print('after-inner')\n"
+     "        case _:\n"
+     "            print('outer-other')\n"
+     "    print('after')\n"
+     "    return 0\n", ("cpython",), "module"),
+    # A subject whose value is a POINTER rather than a word. The temporary the
+    # lowering introduces holds whatever the subject held, and for a string that
+    # is a `char *` into `__TEXT,__text` — so this row is about the temporary
+    # being a pointer-typed home and not about string comparison, which
+    # `lit_string` already covers.
+    ("string_subject_expression", "def s():\n"
+     "    return 'bb'\n"
+     "\n"
+     "def main():\n"
+     "    match s():\n"
+     "        case 'aa':\n"
+     "            print('first')\n"
+     "        case 'bb':\n"
+     "            print('second')\n"
+     "    print('after')\n"
+     "    return 0\n", ("cpython",), "module"),
+    # A capture in an EARLIER arm makes the name BOUND for a LATER arm, so
+    # `case v:` twice is a capture and then a COMPARISON. That is the
+    # interpreter's `scope.has` answer — the first arm's `define` is visible
+    # when the second arm is reached — and it is what makes the second `case v:`
+    # here a comparison (7 == 7) rather than a second capture. CPython refuses to
+    # compile this text at all ("name capture 'v' makes remaining patterns
+    # unreachable", measured), so the oracle is this compiler's interpreter:
+    # both print `captured`, `same-name-compare`, `after`.
+    ("capture_in_an_earlier_arm_binds_a_later_pattern", "n = 7\n"
+     "match n:\n"
+     "    case 1:\n"
+     "        print('one')\n"
+     "    case v:\n"
+     "        print('captured')\n"
+     "        match n:\n"
+     "            case v:\n"
+     "                print('same-name-compare')\n"
+     "            case _:\n"
+     "                print('inner-other')\n"
+     "print('after')", ("frontend",)),
+    # `case True:` is a VALUE pattern in both compilers and not a capture of a
+    # name called `True`. `None`/`True`/`False` are in the interpreter's every
+    # scope and CPython spells them as literals, so the compile-time rule has to
+    # agree with both — which it does by construction, and this row is what
+    # would catch a lowering that treated every bare name in a pattern as a
+    # capture.
+    ("bool_patterns_are_values", "def f(flag):\n"
+     "    match flag:\n"
+     "        case True:\n"
+     "            print('yes')\n"
+     "        case False:\n"
+     "            print('no')\n"
+     "        case _:\n"
+     "            print('other')\n"
+     "\n"
+     "def main():\n"
+     "    f(True)\n"
+     "    f(False)\n"
+     "    f(7)\n"
+     "    return 0\n", ("cpython",), "module"),
+    # `global K` makes the name a module-level one, so a `case K:` after it is a
+    # comparison in both oracles — measured, `fire.py run` prints `rest` for a
+    # subject of 5 against `K = 2`. CPython would capture instead, so the
+    # frontend oracle is the one that can run this text with the same answer.
+    ("global_makes_a_pattern_a_comparison", "K = 2\n"
+     "\n"
+     "def main():\n"
+     "    global K\n"
+     "    n = 5\n"
+     "    match n:\n"
+     "        case K:\n"
+     "            print('low')\n"
+     "        case _:\n"
+     "            print('rest')\n"
+     "    print('after')\n"
+     "    return 0\n", ("frontend",), "module"),
+    # A `match` with NO cases. The parser accepts it (`cases` is an empty list)
+    # and every lowering has to answer "nothing matches", which means the
+    # statement disappears rather than becoming a chain with an empty test. CPython
+    # refuses to compile it ("expected an indented block after 'match'"), so the
+    # oracle is this compiler's interpreter.
+    ("match_with_no_cases", "n = 3\n"
+     "match n:\n"
+     "print('after')\n"
+     "\n"
+     "def main():\n"
+     "    return 0\n", ("frontend",), "module"),
+]
+
+
+# ── the rows that PIN a known wrong answer ───────────────────────────────────
+#
+# Every row above is either right or refused. These are not, and a table of
+# `match` semantics that quietly left them out would be a census with the
+# failures taken out — the thing CLAUDE.md calls "a fixed bug still listed is
+# indistinguishable from an open one" in its worse form, the failure never
+# written down at all.
+#
+# Each row asserts the CURRENT answer and carries CPython's in a comment. When
+# the defect is fixed the row fails, which is the point: the fix and the row's
+# update land in the same commit, and a silent fix cannot leave a stale claim
+# behind.
+#
+# (name, body, the answer the image gives today, CPython's answer, the doc).
+KNOWN_DEFECT_ROWS = [
+    # The FIRST exit out of a `try` body flushes the pending `finally`; the
+    # second one finds the emitter's frame list already emptied and emits
+    # nothing. So `fin` is missing before the `20`. Measured with a plain `if`
+    # in place of the `match`, so it is not a `match` bug:
+    # bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md
+    ("second_exit_from_a_try_drops_the_finally",
+     "def f(n):\n"
+     "    try:\n"
+     "        match n:\n"
+     "            case 1:\n"
+     "                print('one')\n"
+     "                return 10\n"
+     "            case _:\n"
+     "                return 20\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    print(f(1))\n"
+     "    print(f(2))\n"
+     "    print('done')\n"
+     "    return 0\n",
+     "one\nfin\n10\n20\ndone\n", "one\nfin\n10\nfin\n20\ndone\n",
+     "bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md"),
 ]
 
 
@@ -698,6 +886,30 @@ def _want(want, backend):
         if isinstance(want, dict) else want
 
 
+def judge_known_defect(row, tmpdir):
+    """One KNOWN-DEFECT row: the image's CURRENT stdout, on both backends.
+
+    Deliberately not compared with an oracle. A row that pins a wrong answer
+    cannot be compared with the right one — that is the failure it documents —
+    so it states the wrong answer, and says so in a comment beside CPython's.
+    Both architectures must produce the SAME wrong answer, because the defect
+    is in the shared `_flush_pending_finally` and a per-backend difference here
+    would mean something else is also wrong.
+    """
+    name, body, want, cpython, doc = row
+    source = mod_prog(body)
+    for backend in BACKENDS:
+        res = build_run(tmpdir, name, source, backend)
+        tag = "[%s] %s" % (backend, name)
+        if res[0] == "BUILD-FAIL":
+            check(False, tag + " builds", res[1][-400:])
+            continue
+        check((res[1], res[2]) == (want, 0),
+              tag + " still prints the documented wrong answer (%s)" % doc,
+              "printed %r exit %d; the pinned answer is %r (CPython: %r)"
+              % (res[1], res[2], want, cpython))
+
+
 def judge(name, backend, res, want, tmpdir, source):
     tag = "[%s] %s" % (backend, name)
     if res[0] == "BUILD-FAIL":
@@ -748,9 +960,14 @@ def main():
         rows = [(i, r) for i, r in rows if i == args.only_row]
     if args.substring:
         rows = [(i, r) for i, r in rows if args.substring in r[0]]
+    if not args.substring and args.only_row is None:
+        rows += [(1000 + i, r) for i, r in enumerate(KNOWN_DEFECT_ROWS)]
 
     with tempfile.TemporaryDirectory(prefix="formal-match-") as tmp:
-        for _i, row in rows:
+        for i, row in rows:
+            if i >= 1000:
+                judge_known_defect(row, tmp)
+                continue
             name, want = row[0], row[2]
             source = row_source(row)
             for backend in BACKENDS:
@@ -760,8 +977,9 @@ def main():
                 print("ran %s" % name, flush=True)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
-    print("%d/%d verdicts passed over %d rows"
-          % (passed, len(RESULTS), len(rows)))
+    print("%d/%d verdicts passed over %d rows (%d of them pinning a known "
+          "wrong answer)"
+          % (passed, len(RESULTS), len(rows), len(KNOWN_DEFECT_ROWS)))
     return 0 if passed == len(RESULTS) else 1
 
 

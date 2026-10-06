@@ -18483,13 +18483,14 @@ def _match_scope_names(fn, module_names) -> set:
     assignment of the subject and a comparison lowers to a READ of a name this
     pass would otherwise have to prove has a home; so a name this pass fails to
     see bound becomes a fresh local rather than a read of something unbound.
-    The one place that direction costs a refusal rather than a wrong answer is
-    a name bound only by a statement AFTER the `match`, which this pass reads as
-    unbound: `case k:` above `k = 5` becomes a capture and the later store
-    overwrites it. CPython decides the same program the other way (it makes `k`
-    a local of the whole function and raises `UnboundLocalError` at the
-    pattern), and the interpreter agrees with CPython there, so that shape is
-    the one `match` program this lowering answers differently from both.
+    The direction is also the one both oracles take for the shape it decides:
+    a name bound only by a statement AFTER the `match` is a CAPTURE in CPython
+    and in the interpreter alike (measured, both print `capture 3` then
+    `after 5` for `case v:` … `v = 5`), so reading it as unbound is not a
+    fallback here — it is the answer. What CPython refuses to compile at all is
+    the neighbouring shape, `case v:` followed by `case _:` ("name capture 'v'
+    makes remaining patterns unreachable"), and this path lowers it as the
+    capture-then-wildcard it reads as.
     """
     names = {"None", "True", "False"}
     names |= set(module_names or ())
@@ -18540,6 +18541,15 @@ def _statement_binds(stmt) -> set:
         # fact about the OUTER scope and is why `case inner:` below one is a
         # comparison rather than a capture.
         return {stmt.name} if isinstance(getattr(stmt, "name", None), str) else set()
+    if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
+        # A `global K` / `nonlocal K` DECLARES the name bound somewhere else, so
+        # a `case K:` after it is a comparison in both oracles: CPython's
+        # `global` makes the name a module-level one and its pattern is a value
+        # pattern, and the interpreter's scope finds it in the outer frame. Both
+        # emitters treat the declaration itself as a no-op
+        # (`_emit_stmt`'s `GlobalStmt` arm), so this only moves the DECISION.
+        return {n for n in (getattr(stmt, "names", None) or ())
+                if isinstance(n, str)}
     return set()
 
 
@@ -18561,7 +18571,8 @@ def _lower_match_stmts(stmts: list, parent_fn, bound: set, fresh, fn,
     out = []
     for stmt in (stmts or []):
         if isinstance(stmt, F.MatchStmt):
-            pieces, bound = _lower_one_match(stmt, bound, fresh, fn)
+            pieces, bound = _lower_one_match(stmt, bound, fresh, fn,
+                                            parent_fn, module_names)
             out.extend(pieces)
             continue
         _lower_match_descend(stmt, bound, fresh, fn, module_names, parent_fn)
@@ -18630,7 +18641,8 @@ def _lower_match_descend(stmt, bound: set, fresh, fn, module_names,
                                        module_names)
 
 
-def _lower_one_match(stmt, bound: set, fresh, fn) -> tuple:
+def _lower_one_match(stmt, bound: set, fresh, fn, parent_fn,
+                     module_names) -> tuple:
     """One `match` as `(statements, bound_after)`.
 
     The shape it emits, for `match s:` over cases `[c0, c1]` — a decision tree
@@ -18673,12 +18685,35 @@ def _lower_one_match(stmt, bound: set, fresh, fn) -> tuple:
     order right: a capture binds the subject and matches, so nothing after it is
     evaluated and nothing after it is bound.
 
+    **Every arm body is lowered BEFORE the chain is built, in source order.**
+    An arm body is ordinary statements, so it can hold a `match` of its own, and
+    the chain is assembled from the bodies — so a body that was copied verbatim
+    into the new `IfStmt` would arrive at the emitter with a `MatchStmt` still in
+    it and be refused as "unsupported statement MatchStmt" from inside an arm.
+
+    **…and each body is walked on a COPY of `bound`, so a name an arm's body
+    assigns does not decide that arm's own pattern.** `case v:` with `v = v + 10`
+    in the arm is a CAPTURE — the store comes after the pattern is read, and
+    reading `v` to compare it would be a read before anything stored it (which
+    `check_module_symbols` refuses, correctly). Sharing the set made the body's
+    own store visible to the pattern above it and turned the capture into a
+    comparison of an unstored name; the copy also stops an arm's bindings from
+    reaching a LATER arm's pattern, which is the conservative direction —
+    a name bound only on the path that reached the first arm is not bound on
+    the path that reaches the second, so treating it as a capture can only
+    produce a working assignment where a comparison would have produced a read
+    of nothing.
+
     `bound` comes back in the return value rather than being mutated in place,
     because the arms' captures join it and the caller threads it down the
     statement list.
     """
     subject = stmt.subject
     cases = list(getattr(stmt, "cases", None) or [])
+    for case in cases:
+        case.body = _lower_match_stmts(list(getattr(case, "body", None) or []),
+                                       parent_fn, set(bound), fresh, fn,
+                                       module_names)
     if isinstance(subject, F.IdentExpr):
         tmp, head = None, []
         subject_ref = subject
