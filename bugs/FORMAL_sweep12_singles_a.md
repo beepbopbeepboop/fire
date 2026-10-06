@@ -7,6 +7,36 @@ every cause below is either fixed here, fixed by somebody else, blocked on a
 cause another claim holds, or not makeable from a repository worktree — and the
 last three are exactly the things the next reader would otherwise re-derive.
 
+**Status 2026-10-05 (`work/formal54-docs`): nothing in this document is open
+under this claim, and the one row that was "not attempted" here (§6) is now
+MEASURED by the claim that holds it — so this document has no work of its own
+left.** What changed and why it matters for a reader:
+
+* **§2a (2026-10-05, `work/formal29-5`) already moved every row in §3**, and
+  nothing has moved back: the four files this claim measured are stopped by an
+  f-string literal (three of them) and by a host import (`formal/x86_64.py`).
+  Neither is this claim's, and both are named by other documents.
+* **§6's "not attempted" row is now answered elsewhere, so this document's last
+  open item is closed by measurement rather than by decision.** The row was "a
+  writable per-call-site byte buffer", refused here because
+  `FORMAL_string_value_model` was claimed. That claim has moved holder (it is
+  `formal29-4` now, not `formal10-5`), and
+  `bugs/FORMAL_string_composition_has_no_buffer.md` §7.0a has since ANSWERED
+  the value-model half of it: a composed buffer in frame scratch is passable,
+  because `String`/`str`/`StringLiteral`/`StringSlice` are `formal/model.py`'s
+  `IDENTITY_TYPE_CTORS` and the `FRAME_ADDRESS_CTORS` are exactly the other
+  three. What blocks it is LIFETIME, not category. What is left there is emitter
+  work on both backends — which is the size of job this document called "a
+  project rather than a patch", and it is **one piece of work with one owner**,
+  not two rows in two documents.
+* **§5's dead citation is confirmed dead**, as §2a says: `FORMAL_an_enum_
+  typed_parameters_field_has_no_layout.md` is not in this tree, and the file no
+  longer reaches that refusal anyway.
+
+**What a reader should take from this document now:** nothing to do. It is the
+record of a claim whose rows all moved to other claims, which is what §2a says
+and what this paragraph re-confirms on a later day.
+
 **Re-measured on the tree this ran on, both architectures**, because the map's
 numbers are from `master` at `e7fbe6ef` and a file's terminal cause is the FIRST
 refusal its walk reaches, so a cause can be overtaken by a refusal that did not
@@ -138,11 +168,27 @@ this representation has nowhere to put it … a missing buffer", and the family 
 belongs to (`LENGTH_DEPENDENT_METHODS`) is refused rather than lowered.
 
 That doc is **claimed** — `python3 tools/control.py claims` lists
-`bug:FORMAL_string_value_model` against `formal10-5` — so editing it, or landing
-a second string-representation decision beside it, is out of bounds for this
-claim. What is missing is a writable per-call-site byte buffer, which is a
-value-model change shared by both backends AND by the Lean proof, and it is a
-project rather than a patch. Left alone deliberately.
+`bug:FORMAL_string_value_model` against `formal10-5` (re-read 2026-10-05: the
+holder is now `formal29-4`, and the CONCLUSION this section reaches is unchanged
+— it is a live claim either way, so the row stays out of bounds for this claim)
+— so editing it, or landing a second string-representation decision beside it, is
+out of bounds for this claim. What is missing is a writable per-call-site byte
+buffer, which is a value-model change shared by both backends AND by the Lean
+proof, and it is a project rather than a patch. Left alone deliberately.
+
+**And the project it names is now MEASURED, by another claim.** The missing
+"writable per-call-site byte buffer" is the same buffer
+`bugs/FORMAL_string_composition_has_no_buffer.md` is about, and that document's
+§7.0a (2026-10-05) answers the question this section could not: a composed
+buffer in frame scratch **is** passable — `String`/`str`/`StringLiteral`/
+`StringSlice` are `formal/model.py`'s `IDENTITY_TYPE_CTORS` and `Pointer`/
+`UnsafePointer`/`CPointer` are the `FRAME_ADDRESS_CTORS` that are *not* — so what
+stops it is LIFETIME and not category. What remains there is emitter work (an
+integer-to-text routine and a chunk copy on each of the two backends), which is
+the same size of job this section called "a project rather than a patch". **So
+the two rows are one piece of work with one owner, and it is not this claim's.**
+This section's own two files were measured on 2026-10-05 (§2a) and are stopped by
+an f-string literal, which is that same buffer.
 
 ## 7. What the integrator has to know about the merge
 
