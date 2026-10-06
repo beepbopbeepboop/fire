@@ -5,8 +5,9 @@ backends) · **found by** growing `formal/examples` from 52 programs to 96 and
 running the new ones through `tools/formal_proof_census.py` · **both
 architectures**, because `formal/x86_64_proof_gen.py` shares the fold
 (`_go_defs_for`) · **filed 2026-10-05, the diverging-model half FIXED in the same
-commit, the missing contract NOT fixed** — see §"What landed" and §"What is
-still open".
+commit, the missing contract NOT fixed** — re-measured 2026-10-05, census
+unchanged, and §"Re-measured" names the library half — see §"What landed" and
+§"What is still open".
 
 ## What I ran
 
@@ -222,6 +223,62 @@ buys seven of the eight rows above, because `accum_max`, `ret_in_loop`,
 update. `nested_loop` needs two, and `for_two_bounds` needs the induction
 variable to be the range counter rather than the parameter, so it is the last of
 the eight and not the first.
+
+## Re-measured 2026-10-05: the census is unchanged, and the `u64pow` precedent is a `lib/` definition
+
+This round was given the doc and did not land the contract — the next step is a
+second accumulator in the loop model, which is a `lib/ProofLib.lean` theorem plus
+a change to the helper's signature, and the brief allows no Lean run beyond the
+one test covering a change. **So this is a measurement, not a fix.** It confirms
+the census and names one thing §"The next step" left implicit.
+
+**The census is exactly as §"What I saw" recorded it.** Asking the two patterns
+directly over every `formal/examples/*.mojo` (no build, no Lean):
+
+```
+dec_while  (3): countdown.mojo, wdiff.mojo, wge.mojo
+range_loop (1): sum_range.mojo
+neither    (98), of which seven contain a `while`:
+            accum_max, digits, loop_break, nested_loop,
+            ret_in_loop, var_typed_loop, while_ne_zero
+```
+
+So between them the two patterns still cover four programs, and the seven that
+want an accumulator are still outside both — the shape §"What I saw" described,
+unchanged.
+
+**The `u64pow` precedent is a LIBRARY change, not a generator change, and that
+is the part worth being explicit about.** §"The next step" says to model `total`
+"the way `u64pow` already does it", and it is worth being exact about where that
+precedent lives:
+
+```
+$ grep -n u64pow lib/ProofLib.lean formal/*.py
+lib/ProofLib.lean:930:def u64powGo (base exp acc : UInt64) (fuel : Nat) : UInt64 :=
+lib/ProofLib.lean:939:def u64pow (base exp : UInt64) : UInt64 := u64powGo base exp 1 64
+lib/ProofLib.lean:1111:  | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) ...
+formal/x86_64_proof_gen.py:234:  "u64pow", "u64powGo", "sKey"] + ...
+```
+
+`u64pow` is a hand-written `lib/ProofLib.lean` definition, and the generator only
+NAMES it in its `simp` set. So "model `total` as a second parameter the way
+`u64pow` does" means **a new `lib/ProofLib.lean` definition plus its equation
+theorem**, not a change to `_stmts_go` alone — which makes §"The next step" a
+two-part job in the same way the range-loop fix's `arm64_slt_iff_lt` was, and for
+the same reason: the statement has to be right in Lean before the generator half
+is worth writing.
+
+**What §"The next step" gets right, and it is the reason this is not simply
+"write the induction":** the loop is a function of ONE WORD in this model, so
+adding an accumulator is not a proof but a change to what the model IS. The
+generator emits `partial def <fn>_go_loop_0 (n_0 : UInt64) : UInt64`, and a
+second state word means a second parameter, which means every `loop_model`,
+`loop_body_model`, `loop_exit_x0` and the `_ltb_loop` fuel are restated. The
+seven programs it would buy are worth it; the change is a library contract and a
+generator signature together, and it wants its own negative control — a loop
+whose accumulator is deliberately wrong must make the induction FAIL rather than
+merely elaborate, which is the same requirement §"The next step" states for the
+specification layer and for the same reason.
 
 **The oracle for any of this is a proof, so it needs the formal suite behind it**
 — the same sentence `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
