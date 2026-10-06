@@ -442,30 +442,14 @@ def gen_flagged_alu(rng, free):
     int_overflow_traps` asks for it — and it shares the model branch with
     `CMN` (`Rd = 31` is the same word with the result discarded), which is why
     the census's LEAN column already reads `yes` for it. `SMULH` is the other
-    half of the same overflow question and it now has a model arm too
-    (`arm64_step`'s last, `(0xffe07c00, 0x9b407c00)`, with `work_step_smulh`),
-    so the 71 draws of it in 400 flagged cases are STEPs and the fuzzer's
-    differential is over the high half of the product rather than over the
-    flags. **Every one of those 71 draws was a `NOSTEP` until 2026-10-05**, when
-    `arm64_step` gained its last arm and `work_step_smulh` with it — the
-    instruction the emitter calls for the overflow check was an encoder with no
-    model arm anywhere, which is the shape the ISA census's LEAN column exists
-    to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
-    it).
-
-    **`TST` is here, and it is the logical half of the same flags question.**
-    `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`; `arm64_step`
-    has had `work_step_tst` for weeks; what was missing until now was the FUZZ
-    column, because nothing in this file spelled it — so
-    `tools/formal_isa_census.py`'s `test_every_emitted_form_has_a_model_a_fuzz_
-    case_and_an_as_check` was red on that row. Its answer is
-    `arm64_logic_flags (Xn &&& Xm)` with C and V clear, so a draw here is the
-    one case that exercises the logical flag test against the CPU rather than
-    the arithmetic one `adds`/`smulh` cover.
+    half of the overflow question and the model has NO arm for it, so a case
+    that draws it is a `NOSTEP`: that is the finding, not a pool bug, and
+    `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` is where the model side
+    is written down.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
-    k = rng.randrange(7)
+    k = rng.randrange(6)
     if k == 0:
         return "adds x%d, x%d, x%d" % (d, n, m), A.encode_adds_xd_xn_xm(d, n, m)
     if k == 1:
@@ -480,13 +464,8 @@ def gen_flagged_alu(rng, free):
     if k == 4:
         return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
-    if k == 5:
-        return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
-                A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
-    # `tst` writes no destination: it is `ands xzr, xn, xm`, so the pair of
-    # sources is the whole of its operands. Drawn last so the six arm indices
-    # above keep their meaning.
-    return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
+    return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
+            A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
 
 
 def gen_select(rng, free):

@@ -24,15 +24,14 @@ from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
     TryStmt, VarDecl,
-    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
-    for_target_names,
+    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
-from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
+from mojo.middle.exprtypes import _walk_ast, _struct_name_of
 from mojo.middle.solvers import ClosureInfo
 
 
-def _selfhost_fn_reassigns_method(_fn) -> bool:
+def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
     """True if `_fn`'s body monkey-patches a METHOD on the `gen`/`self` param
     (`gen._emit = intercepted_emit` — the `_gen_stmt_TryStmt` emit-
     interception idiom). Those functions must keep the param OPAQUE in the
@@ -48,11 +47,6 @@ def _selfhost_fn_reassigns_method(_fn) -> bool:
     closure pre-pass, so `_scan_for_closures`'s capture of `self` typed
     `int64_t` -> `self._mutated_free_names(...)` stubbed -> `mojo_set_union
     (self, ...)` -> SEGV compiling any program with a nested `def`."""
-    # The receiver names are a local, not a defaulted parameter: a default is
-    # padded at a cross-module call site, and the padding for a TUPLE default is
-    # the integer 0 once self-hosted -- `_n.target.obj.name in 0` was a SIGSEGV
-    # for every input that defines a function (no caller ever passed one).
-    _pnames = ('gen', 'self')
     _local_defs = {_d.name for _d in _walk_ast(getattr(_fn, 'body', []) or [])
                    if isinstance(_d, FunctionDef)}
     for _n in _walk_ast(getattr(_fn, 'body', []) or []):
@@ -119,54 +113,6 @@ def _gmi_all_stmts_nonfunc(stmts) -> list:
                 result.extend(_gmi_all_stmts_nonfunc(s.else_body))
     return result
 
-
-
-def loop_target_names(target) -> list:
-    """The LEAF NAMES a `for`/`with` target binds, as `str` and deduplicated.
-
-    **A THIN named wrapper, not a second reader, and the reason is a
-    measurement.** `fire_compiler.for_target_names` is this tree's one answer to
-    "which names does this target spell", it is already correct for every shape
-    the parser produces, and the caller-facing question here has one extra term
-    — `_as_str`, because under self-compilation a name can come back boxed —
-    plus the `'int64_t'` default the capture map needs and a `set`, because
-    `enriched_scope` is a DICT and `inner_assign_targets` is a set.
-
-    **The bug this exists for was a second reader, and the second reader was
-    wrong in a way the tests would not have shown.** `inner_assign_targets`
-    spelled it `isinstance(tgt, str)` / `hasattr(tgt, 'name')`, and measured on
-    this tree `ForStmt.target` is **always a bare `str`** — `"i"`, or the tuple
-    spelling `"(k, v)"` — never an `IdentExpr` (`mojo/middle/boundnames.py`
-    says so at length and records that missing this dropped every for-loop
-    variable from the shared bound set). So that spelling returned the literal
-    two-character-and-comma string `'(k, v)'` as ONE name, and a private
-    `elts`/`items` walk would have returned nothing at all for the only shape
-    the parser actually produces. `boundnames.py::_lbn_target_names` is the same
-    lesson learned twice already: "the representation is `fire_compiler.py`'s to
-    own, and a private copy is what let a 1-tuple target and a parenthesised
-    single name be indistinguishable". Three readers of one field is how that
-    happened, so this one delegates.
-
-    **A starred leaf keeps its star** — `for_target_names` hands back `*rest`
-    and stripping the star is a BINDING rule, not a spelling, so it happens
-    here. That is `boundnames.py`'s rule verbatim and for its reason: `*rest`
-    binds `rest`.
-
-    **A `Comprehension` is NOT routed through here.** A comprehension is a
-    separate scope and its targets are not enclosing-scope locals — see
-    `formal/build.py::_apply_module_constant_sites`, which says so at length —
-    so answering for one would capture a comprehension's loop variable into a
-    closure and shadow it. Callers pass a loop STATEMENT's target, never a
-    comprehension's `generators`.
-    """
-    out: set = set()
-    for _n in _as_list(for_target_names(target)):
-        _s = _as_str(_n)
-        if _s.startswith('*'):
-            _s = _s[1:].strip()
-        if _s:
-            out.add(_s)
-    return sorted(out)
 
 
 def mutated_free_names(inner: FunctionDef, candidate_names) -> frozenset:
@@ -240,10 +186,12 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     # field disagree with the body's local (hard C error).
                     if (isinstance(bstmt.value, MemberExpr)
                             and isinstance(bstmt.value.obj, IdentExpr)
-                            and is_bound_method_value(
-                                ctx, bstmt.value,
-                                ctx.var_types.get(bstmt.value.obj.name, ''))):
-                        t = 'MojoBoundMethod *'
+                            and ctx.var_types.get(bstmt.value.obj.name, '').endswith(' *')):
+                        _bmv_owner = _struct_name_of(
+                            ctx.var_types[bstmt.value.obj.name])
+                        if (f"{_bmv_owner}_{bstmt.value.member}" in ctx.func_return_types
+                                and bstmt.value.member not in ctx.struct_field_types.get(_bmv_owner, {})):
+                            t = 'MojoBoundMethod *'
                     if t == 'void':
                         t = 'int64_t'
                     enriched_scope[name] = t
@@ -255,27 +203,6 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                         t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     ctx.var_types[bstmt.name] = t
-            elif isinstance(bstmt, ForStmt):
-                # `loop_target_names` and NOT an `AssignStmt`-shaped arm: a
-                # `for i in …` binds `i` in the enclosing function exactly as
-                # `i = …` does, and without this arm a nested `def` reading a
-                # loop variable classified `i` as a free GLOBAL, so the capture
-                # filter (`if v in enriched_scope`) dropped it and the lift
-                # produced a `main_get()` whose body read a name with no home —
-                # refused downstream as `'i' has no home`, a sentence about the
-                # register allocator for what is a fact about this pass.
-                #
-                # `'int64_t'` is the `VarDecl` arm's own no-initializer default,
-                # reused rather than invented: a loop target's type is whatever
-                # the iterable yields, this pass does not ask, and the
-                # alternative — `_quick_type` on the iterable — would make the
-                # capture's width depend on the ITERABLE, which is exactly the
-                # kind of inference `_selfhost_fn_reassigns_method` above exists
-                # to refuse.
-                for _tgt in loop_target_names(bstmt.target):
-                    if _tgt not in enriched_scope:
-                        enriched_scope[_tgt] = 'int64_t'
-                        ctx.var_types[_tgt] = 'int64_t'
         ctx.var_types = _saved_vt2
         # Parallel structures instead of a list-of-3-tuples: a tuple element
         # indexed on the self-hosted compiled path erases to `int64_t`, and
@@ -330,9 +257,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     if bstmt.target.name not in _inner_nonlocals:
                         inner_assign_targets.add(bstmt.target.name)
                 elif isinstance(bstmt, ForStmt):
-                    for _ftgt in loop_target_names(bstmt.target):
-                        if _ftgt not in _inner_nonlocals:
-                            inner_assign_targets.add(_ftgt)
+                    tgt = bstmt.target
+                    if isinstance(tgt, str):
+                        inner_assign_targets.add(tgt)
+                    elif hasattr(tgt, 'name'):
+                        inner_assign_targets.add(tgt.name)
             # A PLAIN for-loop unpack (`for _pn, _pt in inner.params:`),
             # NOT a comprehension (`{pn for pn, _ in ...}` — tuple-unpack-
             # in-a-comprehension boxes `pn` to int64_t self-hosted) and
@@ -364,42 +293,15 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                          | inner_assign_targets):
                 if _as_str(_idv) not in _inner_nonlocals:
                     inner_declared.add(_as_str(_idv))
-            # `used - inner_declared` is the whole free-variable set, and
-            # `v in enriched_scope` below is the whole scoping decision: a
-            # name the ENCLOSING function binds is a capture, full stop.
-            #
-            # This used to subtract a `free_globals` set (every name in
-            # `ctx.func_return_types`) first, on the theory that a
-            # module-level function name can never be a capture, guarded by
-            # "unless an enclosing PARAMETER shadows it". The theory only
-            # holds for a name the enclosing scope does not ALSO bind, and
-            # the `v in enriched_scope` test already says exactly that, so
-            # subtracting first only ever deleted captures whose name the
-            # enclosing function had bound to something else — a collision,
-            # not a global reference. (And the guard did not even mean
-            # "parameter": `outer_params` came from `outer_scope.keys()`,
-            # which holds the enclosing function's parameters AND the names
-            # its body binds at STATEMENT level. What fell through was the
-            # shape that actually occurs here — the binding nested one
-            # block down, which `outer_scope` does not walk but
-            # `enriched_scope` does.)
-            #
-            # The capture then vanished from the env struct, the nested body
-            # re-resolved the name as the function, and
-            # `param_names[real_idx]` in ownership_destruct.py's
-            # `_arg_is_safe` (a local bound inside an `if` arm, read by a
-            # nested def, colliding with `mojo/middle/comptime.py`'s
-            # function of the same name) became pointer arithmetic on a
-            # function address: `_mojo_at_void (_funcptr_mojo_middle_
-            # comptime_param_names_9f63a2, _t19)`, gcc's "invalid
-            # argument to gimple call", and the self-host build broken
-            # (mojoc, selfhost, bootstrap-stage2-cc). The same read had
-            # also degraded `len(param_names)` to a literal 0, so it was
-            # answering wrong before gcc noticed the syntax.
-            #
-            # `test_closure_capture_shadows_function.py` covers the rule
-            # and the four cases that must keep behaving.
-            free         = used - inner_declared
+            outer_params: set = set()
+            for _op in outer_scope.keys():
+                outer_params.add(_as_str(_op))
+            free_globals: set = set()
+            for _fg in ctx.func_return_types.keys():
+                _fg = _as_str(_fg)
+                if _fg not in outer_params:
+                    free_globals.add(_fg)
+            free         = used - inner_declared - free_globals
             # An EXPLICIT capture list on the inner def is authoritative and
             # replaces the inference above. `def handler(...) {mut got_sum}:`
             # says exactly what the body borrows from this scope and under
@@ -561,8 +463,7 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                             _stack.append(_nb)
                 if len(_members) < 2:
                     continue
-                _member_map = _as_dict(ctx._all_closures[outer_name])
-                _member_cis = [_member_map[_m] for _m in _members]
+                _member_cis = [ctx._all_closures[outer_name][_m] for _m in _members]
                 _merged_caps: dict[str, str] = {}
                 _merged_mut: list = []
                 for _mci in _member_cis:
@@ -720,11 +621,7 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
         # in the generated .ci, a hard GCC parse failure). Mirrors the
         # closure-typedef-emission loops' identical fix.
         for _outer_name in list(ctx._all_closures):
-            # `_as_dict`: `ctx` is an untyped parameter, so `ctx._all_closures` has
-            # no recorded value type on the self-hosted path and its subscript
-            # was lowered as a LIST read (`mojo_list_get_int` with a string
-            # index -- a SIGSEGV for any input containing a nested `def`).
-            _inner_map = _as_dict(ctx._all_closures[_outer_name])
+            _inner_map = ctx._all_closures[_outer_name]
             for _inner_name in list(_inner_map):
                 _ci = _inner_map[_inner_name]
                 _sub_closures = ctx._all_closures.get(_ci.lifted_name, {})

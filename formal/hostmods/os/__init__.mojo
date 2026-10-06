@@ -32,7 +32,7 @@ because it is not a matter of taste:
     `readdir(3)`/`stat(2)`, whose `struct dirent`/`struct stat` is a different
     layout. That table is `model.target_libc_symbol`'s, and what it cost before
     it was there is
-    `FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`.
+    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`.
     (A host with no x86-64 support at all still skips the x86-64 half of the
     suites, with the reason printed.)
 
@@ -72,7 +72,7 @@ because it is not a matter of taste:
     whether the value it got back is a string. Without it a call result is a
     word of unknown provenance, and `f() == g()` on two of those was an
     ADDRESS comparison — two equal strings compared unequal, silently, on both
-    backends (FORMAL_string_equality_of_two_unclassified_words). The
+    backends (bugs/FORMAL_string_equality_of_two_unclassified_words.md). The
     four functions in `os.path` that return a TUPLE carry no annotation, for
     the reason that file gives.
 
@@ -103,12 +103,13 @@ because it is not a matter of taste:
     `KeyError` and there is no unwinder to raise into, so `[]` is `get` and
     answers 0.
 
-  * **A DEFAULT ARGUMENT IS MATERIALIZED ACROSS A DYLIB NOW, so a parameter
-    CPython gives a default gets CPython's default.** `mkdir` and `makedirs`
-    default `mode` to `0o777`, which is CPython's own. A call to a function in
-    ANOTHER image USED not to materialize the callee's defaults: the caller had
-    no signature to read them from, so the argument register was whatever the
-    caller last left in it. Measured, same source either way:
+  * **NO FUNCTION HERE HAS A DEFAULT ARGUMENT.** This one is a backend
+    defect rather than a property of the target, it is measured, and it is
+    filed as `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`.
+    A call to a function in ANOTHER image does not materialize the callee's
+    defaults: the caller has no signature to read them from, so the argument
+    register is whatever the caller last left in it. Measured, same source
+    either way:
 
         # dmod.mojo          def need_two(a, b=511): return b
         # in ONE file:       need_two(1)            ->  511
@@ -116,15 +117,12 @@ because it is not a matter of taste:
 
     A default that arrives as a stack address is worse than no default,
     because `mkdir(path, mode)` with a garbage mode SUCCEEDS and leaves a
-    directory nobody can enter — which is why the signature was written
-    without one. `formal/imports.py`'s `external_declarations` now hands the
-    emitter the callee's own declaration, so the register is filled from the
-    default and the measurement above no longer reproduces
-    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is). The one place a default was always wanted —
-    `getenv`'s — is a SECOND function, `getenv_or(name, default)`, so the
-    two-argument form has a name of its own rather than a signature that
-    silently does nothing.
+    directory nobody can enter. So the parameters that CPython gives defaults
+    are REQUIRED here: `mkdir(path, mode)`, `makedirs(path, mode)` and
+    `relpath(path, start)` are all spelled with every argument, and the one
+    place a default is genuinely wanted — `getenv`'s — is a SECOND function,
+    `getenv_or(name, default)`, so the two-argument form has a name of its own
+    rather than a signature that silently does nothing.
 """
 
 from ._syscalls import str_alloc, str_len, str_at, str_prefix, str_starts
@@ -187,7 +185,7 @@ def linesep() -> str:
     rule (`ast.mojo`'s character sets, `re.mojo`'s `nl`), so it is the one place
     that must not keep asserting a limitation that is gone. Their corpora keep
     the `str_alloc` + `memset` idiom for now — it is correct, and
-    `FORMAL_sys_mojos_escape_note_is_stale` §"what remains" says what
+    `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" says what
     simplifying them would take.
     """
     return "\n"
@@ -965,14 +963,14 @@ def rmdir(path) -> int:
     return fs_rmdir(path)
 
 
-def mkdir(path, mode=0o777) -> int:
+def mkdir(path, mode) -> int:
     """Create the directory `path` with permission bits `mode`. 0 or -1.
 
-    `mode` defaults to 0777, which is CPython's own default; the C library
-    masks it with the process umask either way. A default argument IS applied
-    to a call from another image now — `formal/imports.py`'s
-    `external_declarations` hands the emitter the callee's own declaration — so
-    this is CPython's signature rather than a workaround.
+    `mode` is REQUIRED, not defaulted to 0777: a default argument is not
+    applied to a call from another image, and a directory created with an
+    arbitrary mode is a real directory with unusable permissions. Pass 511 for
+    0777, which is what CPython's default is — the C library masks it with the
+    process umask either way.
 
     -1 with EEXIST when the directory is already there, which is the same
     signal `makedirs` below uses to decide it has nothing to do.
@@ -980,10 +978,10 @@ def mkdir(path, mode=0o777) -> int:
     return fs_mkdir(path, mode)
 
 
-def makedirs(path, mode=0o777) -> int:
+def makedirs(path, mode) -> int:
     """Create `path` and every directory above it that is missing.
 
-    `mode` defaults to 0777, for the reason `mkdir` gives. 0 when the whole path
+    `mode` is required, for the reason `mkdir` gives. 0 when the whole path
     exists afterwards, -1 otherwise. An intermediate
     component that is already a directory is not an error, so this is
     CPython's `makedirs(path, exist_ok=True)` and there is no spelling of the

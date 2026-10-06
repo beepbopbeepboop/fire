@@ -369,80 +369,6 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
-def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
-        tmpdir):
-    """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
-
-    `formal/model.py::specialization_call_refusal` is the bracket case, and the
-    two rows above it both name a concrete type argument as a DEMAND — a struct
-    template's instantiation and a function template's. This case is the third
-    shape and the one the message used to get wrong: a function of another
-    module whose generic parameter is IMPLICIT, written in the SIGNATURE
-    (`def unbox(t: Box[T])`) with no bracket to bind. There the type is inferred
-    from the call, so `unbox(b)` is the SAME PROGRAM and builds (run below,
-    against CPython on both architectures), while the source's `unbox[Int](b)`
-    has no declaration to bind its bracket against.
-
-    The old sentence answered it with "Write it as `unbox[<a type>](…)`", which
-    is the spelling already on the line — the `refuse_without:` class of defect,
-    a repair that is wrong about correct code. The refusal now names the bare
-    call instead, and this row is what keeps the two apart: a reword that put
-    the old advice back for this shape would pass every adjoining case, because
-    neither of them writes a bracket on an implicitly generic function at all.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from implib import Box\n"
-                 "from implib import unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 10\n"
-                 "    print(unbox[Int](b))\n")
-    bare = ("from implib import Box\n"
-            "from implib import unbox\n"
-            "\n"
-            "def main():\n"
-            "    var b = Box[Int]()\n"
-            "    b.v = 10\n"
-            "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 10\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_implicit_bracket", lib,
-                             bracketed, cpython, expect_ok=False,
-                             libname="implib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] `unbox[Int](b)` is not refused by the bracket "
-              f"sentence: {text.strip()[-300:]}")
-        check("Write it as `unbox[<a type>]" not in text,
-              f"[{arch}] the refusal still recommends `unbox[<a type>](…)`, "
-              f"which is the spelling already on the line: "
-              f"{text.strip()[-300:]}")
-        check("write `unbox(…)`" in text,
-              f"[{arch}] the refusal does not name the bare call, which is the "
-              f"same program for an implicitly generic function: "
-              f"{text.strip()[-300:]}")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_implicit_bare", lib, bare,
-                            cpython, libname="implib.mojo")
-        check(got == "10\n", f"[{arch}] printed {got!r}, expected 10")
-
-
 def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
     """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
     refused by name, on both architectures, for every struct template.
@@ -949,108 +875,6 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
              "    print(widen(5))\n"))
         check(bracketed == "5\n",
               f"[{arch}] the bracketed spelling printed {bracketed!r}")
-
-
-def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
-    """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
-
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
-    and §3: the function's `T` is INFERRED from its parameter's type, so it is
-    not one of the module's BRACKETED templates (`formal/monomorph.py::
-    template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
-    refuses it by name — "its declaration has no type parameter, so there is
-    nothing to substitute". So the explicit bracket `unbox[Int](b)` cannot be
-    demanded and reaches `specialization_call_refusal`.
-
-    **What this case pins is that the refusal no longer recommends the spelling
-    the source already uses.** It used to end "Write it as `unbox[<a type>](…)`
-    and the library will carry the instantiation" — about a call written
-    exactly that way. The repair for this shape is the OPPOSITE: Mojo infers a
-    template call's type arguments, so DROP the bracket and let the argument's
-    type carry the instantiation. The second half is the differential that makes
-    the advice a fact rather than a claim: `unbox(b)` builds and prints
-    CPython's answer on both architectures in this very tree.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from fnlib import Box, unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 5\n"
-                 "    print(unbox[Int](b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_inferred_brack", lib, bracketed,
-                             "", expect_ok=False, libname="fnlib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] the explicit bracket on an inferred-parameter function "
-              f"is not the specialization refusal: {text.strip()[-400:]}")
-        check("INFERRED from its parameter types" in text,
-              f"[{arch}] the refusal does not name the inferred parameter, "
-              f"which is the whole of why the bracket cannot bind: "
-              f"{text.strip()[-400:]}")
-        check("call it WITHOUT the bracket" in text,
-              f"[{arch}] the refusal does not give the repair (drop the "
-              f"bracket) for correct source: {text.strip()[-400:]}")
-        check("Do not add `[<a type>]`" in text,
-              f"[{arch}] the old imperative to write the spelling that arrived "
-              f"here is still the advice: {text.strip()[-400:]}")
-    inferred = ("from fnlib import Box, unbox\n"
-                "\n"
-                "def main():\n"
-                "    var b = Box[Int]()\n"
-                "    b.v = 5\n"
-                "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 5\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_inferred_drop", lib, inferred,
-                            cpython, libname="fnlib.mojo")
-        check(got == "5\n",
-              f"[{arch}] the spelling the refusal recommends printed {got!r}, "
-              f"not CPython's 5 — so the advice is a spelling nothing checks")
-
-
-def test_a_constants_only_module_builds_and_its_constants_read_back(tmpdir):
-    """`STDIN = 0` is a real API, and a module made only of such constants builds.
-
-    This was a pinned REFUSAL ("has no public functions", and a message that
-    must not claim there was nothing this backend could add). The wall is gone:
-    a module nothing binds needs no library, and the constants are read at their
-    use site. A test that kept asserting the refusal would be asserting a
-    limitation that no longer exists, so it is now a build-and-RUN comparison
-    against CPython on the same text, on both architectures.
-    """
-    lib = ("STDIN = 0\n"
-           "STDOUT = 1\n"
-           "MAX_FD = 2\n")
-    prog = ("from pairlib import STDIN, MAX_FD\n"
-            "\n"
-            "def main():\n"
-            "    print(STDIN)\n"
-            "    print(MAX_FD)\n")
-    ref = ("STDIN = 0\n"
-           "MAX_FD = 2\n"
-           "def main():\n"
-           "    print(STDIN)\n"
-           "    print(MAX_FD)\n")
-    for arch in ARCHES:
-        fresh_cas()
-        run_pair_case(tmpdir, arch, "mm_consts", lib, prog, ref)
 
 
 def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
@@ -1823,158 +1647,6 @@ def main():
     print(a.size())
 """
 
-# The CLASS-ATTRIBUTE read, which is the same subject one position over and was
-# refused for a different reason: `TypeDict.length` is a `MemberExpr` on the
-# TEMPLATE's own name, so the demand walk — which reads CALL SITES — never saw
-# it, and the read found the bare template where `Self.values` names a parameter
-# nothing has supplied.
-#
-# The CPython twin is written as a CLASS ATTRIBUTE because that is what the
-# source spells, and the point of the comparison is that both sides agree on 4
-# and 9 for the two programs. It is not `len()` over a list in the consumer:
-# that would be a different program, which is how this subject was misdiagnosed
-# once already (see the test below).
-CLASSCATTR_LIB = """\
-struct TypeDict[T: AnyType, values: List[T]]:
-    comptime length = len(Self.values)
-    var n: Int
-
-    def get(self) -> Int:
-        return self.n
-"""
-
-CLASSCATTR_PROG = """\
-from sizelib import TypeDict
-
-def main():
-    var d = TypeDict[Int, [1, 2, 3, 4]]()
-    print(TypeDict.length)
-    print(d.get())
-"""
-
-CLASSCATTR_CPYTHON = """\
-class TypeDict:
-    length = len([1, 2, 3, 4])
-    def __init__(self):
-        self.n = 0
-    def get(self):
-        return self.n
-
-def main():
-    d = TypeDict()
-    print(TypeDict.length)
-    print(d.get())
-"""
-
-# The AMBIGUOUS half, and the row that makes the fix a decision rather than an
-# accident: two instantiations of ONE template, and the read names neither. The
-# read spells no type arguments, so "the instantiation it means" is the one the
-# consumer demanded — and a consumer that demands two has two. Answering with
-# either would print a plausible number (4 or 1), which is the failure this
-# module treats as its worst.
-CLASSCATTR_TWO_PROG = """\
-from sizelib import TypeDict
-
-def main():
-    var a = TypeDict[Int, [1, 2, 3, 4]]()
-    var b = TypeDict[Int, [9]]()
-    print(TypeDict.length)
-    return 0
-"""
-
-
-# The `comptime` CLASS ATTRIBUTE read through the TEMPLATE's name. The library
-# is `SELF_BRACKET_LIB`'s library with the read promoted out of a method and into
-# the class body, which is the difference the subject is about: a method's read
-# is inside the body that monomorphisation substitutes, so it was already
-# answered; this one is in the CONSUMER, and the consumer's struct table holds
-# the mangled instantiation while the read names the template.
-ATTR_LIB = """\
-struct Sized[T: AnyType, values: List[T]]:
-    comptime size = len(Self.values)
-    var tag: Int
-
-    def get(self) -> Int:
-        return self.tag
-"""
-
-ATTR_PROG = """\
-from sizelib import Sized
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(Sized.size)
-    print(a.get())
-"""
-
-ATTR_CPYTHON = """\
-def main():
-    a_tag = 7
-    a_values = [1, 2, 3, 4]
-    print(len(a_values))
-    print(a_tag)
-"""
-
-# The same read at the OTHER length. Two cases rather than one program with two
-# instantiations, and the reason is the rule rather than the test: `Sized.size`
-# names the TEMPLATE, so with `Sized` applied at two lengths it is a question
-# with two answers and this build has no table that answers it (see
-# `ATTR_TWO_PROG` below, which is the refusal that says so).
-ATTR_SHORT_PROG = """\
-from sizelib import Sized
-
-def main():
-    var a = Sized[Int, [9]]()
-    a.tag = 5
-    print(Sized.size)
-    print(a.get())
-"""
-
-ATTR_SHORT_CPYTHON = """\
-def main():
-    a_tag = 5
-    a_values = [9]
-    print(len(a_values))
-    print(a_tag)
-"""
-
-# The guard. Two instantiations of ONE template and a read that names the
-# template: refused, and refused with the sentence that is true of the SOURCE
-# rather than with a number from whichever instantiation sorted first.
-ATTR_TWO_PROG = """\
-from sizelib import Sized
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    var b = Sized[Int, [9]]()
-    a.tag = 7
-    b.tag = 5
-    print(Sized.size)
-"""
-
-# The ONE-FILE shape of the same read, so `formal/imports.py`'s
-# `_own_instantiations` is exercised rather than only the imported half: the
-# demap entry comes from the module's OWN demand set there, and that is a
-# different call site building it.
-ATTR_ONE_FILE = """\
-struct Sized[T: AnyType, values: List[T]]:
-    comptime size = len(Self.values)
-    var tag: Int
-
-def main():
-    var a = Sized[Int, [1, 2, 3, 4]]()
-    a.tag = 7
-    print(Sized.size)
-"""
-
-ATTR_ONE_FILE_CPYTHON = """\
-def main():
-    a_tag = 7
-    a_values = [1, 2, 3, 4]
-    print(len(a_values))
-"""
-
 
 def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
     """`len(Self.values)` in a generic STRUCT builds, runs, and answers CPython.
@@ -2008,63 +1680,6 @@ def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
               f"whose bracket value parameter is [1, 2, 3, 4] and then [9]")
 
 
-def test_a_class_attribute_read_names_the_instantiation(tmpdir):
-    """`TypeDict.length` builds, runs, and answers CPython on BOTH backends.
-
-    The third spelling of the same subject as the row above, and the one that
-    was refused by a DIFFERENT pass for a different reason: `TypeDict.length` is
-    a `MemberExpr` on the template's own name, so `all_instantiation_calls` —
-    which reads CALL SITES — never saw it. The instantiated declaration was
-    already published and borrowed (the program also writes
-    `TypeDict[Int, [1, 2, 3, 4]]()`, which is a call site), so the read found
-    the BARE template and hit
-    `model.comptime_class_attribute_parameter_refusal` — "\u2018`TypeDict.length`
-    reads a `comptime` class attribute \u2026 and what it reads is \u2018values\u2019,
-    a PARAMETER of TypeDict\u2019" — for a program whose value the build had
-    already computed as 4.
-
-    The fix is one shape in the SAME traversal that rewrites the constructor, so
-    a rewritten read cannot name a declaration nothing published: the table is
-    `demap` inverted into `monomorph.unique_reads`, which is the reason a
-    reader and a constructor cannot drift apart. Both values are printed, so a
-    rewrite that mangled the constructor's name but not the read's would show.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_classattr", CLASSCATTR_LIB,
-                            CLASSCATTR_PROG, CLASSCATTR_CPYTHON,
-                            libname="sizelib.mojo")
-        check(got == "4\n0\n",
-              f"[{arch}] printed {got!r} for a class-attribute read of a "
-              f"`comptime` attribute whose value is len([1, 2, 3, 4])")
-
-
-def test_a_class_attribute_read_of_two_instantiations_is_refused(tmpdir):
-    """Two instantiations of one template: the read names NEITHER, and says so.
-
-    The row that makes the row above a decision rather than an accident. The
-    read spells no type arguments, so which instantiation it means is not
-    written at the read site — it is the one the consumer demanded, and this
-    consumer demands two. `unique_reads` therefore omits the base and the read
-    keeps the refusal that is true of it.
-
-    **Asserted on the MESSAGE rather than on a number, and that is the point:**
-    a rewrite that resolved the ambiguity would print 4, which is a plausible
-    answer and the reason this needs a needle. The needle is
-    `comptime_class_attribute_parameter_refusal`'s own, and `values` appears in
-    it because naming the PARAMETER is what makes the sentence actionable.
-    """
-    for arch in ARCHES:
-        text = run_pair_case(tmpdir, arch, "mm_classattr_two", CLASSCATTR_LIB,
-                             CLASSCATTR_TWO_PROG, "", expect_ok=False,
-                             libname="sizelib.mojo")
-        for needle in ("reads a `comptime` class attribute of TypeDict",
-                       "'values', a",
-                       "PARAMETER of TypeDict"):
-            check(needle in text,
-                  f"[{arch}] the ambiguous class-attribute read did not say "
-                  f"{needle!r}: {text.strip()[-400:]}")
-
-
 def test_the_same_read_works_in_one_file(tmpdir):
     """The executable path asks the same rule, and one file is where it is
     reachable without a dylib at all.
@@ -2083,86 +1698,6 @@ def test_the_same_read_works_in_one_file(tmpdir):
         check(got == "4\n",
               f"[{arch}] printed {got!r} for one file declaring and applying "
               f"Sized[Int, [1, 2, 3, 4]]")
-
-
-def test_a_comptime_class_attribute_read_through_the_template_name(tmpdir):
-    """`Sized.size` — a `comptime` class attribute whose value reads a bracket
-    parameter, read through the TEMPLATE's name — builds, runs and answers
-    CPython, and the two lengths are two CASES.
-
-    The refusal it replaces was true of the template and false of the read: the
-    class attribute's value `len(Self.values)` is only computable once the
-    parameter has been bound, and a value read through the TEMPLATE finds the
-    template's own unsubstituted copy. The instantiated body the library already
-    publishes says `comptime size = len([1, 2, 3, 4])`, which folds — so
-    nothing about the VALUE was missing, only the consumer's read naming the
-    template instead of the instantiation.
-
-    Two lengths in two cases rather than one program with two instantiations,
-    because `Sized.size` names the template and a template applied at two
-    lengths has no single `size`: that is `test_two_instantiations_leave_the_
-    template_read_refused` below, and splitting them here is what makes that
-    refusal a decision rather than an omission.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_attr", ATTR_LIB, ATTR_PROG,
-                            ATTR_CPYTHON, libname="sizelib.mojo")
-        check(got == "4\n7\n",
-              f"[{arch}] printed {got!r} for `Sized.size` at [1, 2, 3, 4] "
-              f"where CPython printed 4 then the field 7")
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_attr_short", ATTR_LIB,
-                            ATTR_SHORT_PROG, ATTR_SHORT_CPYTHON,
-                            libname="sizelib.mojo")
-        check(got == "1\n5\n",
-              f"[{arch}] printed {got!r} for `Sized.size` at [9] where CPython "
-              f"printed 1 then the field 5 — 4 is the OTHER program's answer, "
-              f"which is what a lowering that kept one instantiation's value "
-              f"would print")
-
-
-def test_two_instantiations_leave_the_template_read_refused(tmpdir):
-    """The other direction, and it is the rule rather than a leftover.
-
-    `Sized` applied at two lengths and `Sized.size` read once is a question with
-    two answers, and `demap` — which is keyed by the arguments the consumer
-    WROTE — has both of them. Answering would mean picking one, and the number
-    picked would be a plausible wrong one; so the read keeps the template's
-    spelling and is refused.
-
-    The refusal asserted here is the VALUE-MODEL one the read already met, and
-    that is the point: it is a sentence about the class body reading a parameter
-    nothing supplied, which is true of the template the source still names.
-    """
-    for arch in ARCHES:
-        text = run_pair_case(tmpdir, arch, "mm_attr_two", ATTR_LIB,
-                             ATTR_TWO_PROG, "", expect_ok=False,
-                             libname="sizelib.mojo")
-        check("excessive memory consumption" not in text
-              and "Traceback" not in text
-              and "is read at line" not in text,
-              f"[{arch}] did not refuse cleanly: {text.strip()[-400:]}")
-        check("Sized.size" in text and "reads a `comptime` class attribute"
-              in text,
-              f"[{arch}] refused with {text.strip()[-400:]!r}, and the read "
-              f"must be refused as the `comptime` class attribute read it is")
-
-
-def test_the_template_attribute_read_works_in_one_file(tmpdir):
-    """The same read with no dylib, which is a different demand set.
-
-    `formal/imports.py::_own_instantiations` builds the demap from the module's
-    OWN `own_demands`, and it also appends the instantiated statements to the
-    executable's list — so the mangled declaration this rewrite names is in this
-    image by a different route than it is in the library case, and a fix that
-    only answered the imported half would leave this one refused.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_attr_onefile", None,
-                            ATTR_ONE_FILE, ATTR_ONE_FILE_CPYTHON)
-        check(got == "4\n",
-              f"[{arch}] printed {got!r} for one file declaring and applying "
-              f"Sized[Int, [1, 2, 3, 4]] and reading `Sized.size`")
 
 
 def test_a_function_templates_body_is_still_compiled(_tmpdir):
@@ -2990,8 +2525,6 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
-    ("a bracket on an implicitly generic function recommends the bare call",
-     test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a dotted application says which word is the module",
@@ -3008,10 +2541,6 @@ TESTS = [
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
-    ("an inferred-parameter function is called without the bracket",
-     test_an_inferred_parameter_function_is_called_without_the_bracket),
-    ("a constants-only module builds and its constants read back",
-     test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
     ("only the export rule says what is a template",
@@ -3036,16 +2565,6 @@ TESTS = [
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
-    ("a class-attribute read names the instantiation",
-     test_a_class_attribute_read_names_the_instantiation),
-    ("a class-attribute read of two instantiations is refused",
-     test_a_class_attribute_read_of_two_instantiations_is_refused),
-    ("a comptime class attribute read through the template's name",
-     test_a_comptime_class_attribute_read_through_the_template_name),
-    ("two instantiations leave the template read refused",
-     test_two_instantiations_leave_the_template_read_refused),
-    ("the template attribute read works in one file",
-     test_the_template_attribute_read_works_in_one_file),
     ("the same read works in one file",
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",

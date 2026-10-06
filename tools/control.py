@@ -42,7 +42,7 @@ from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(MAIN)
-MODEL = os.environ.get("CONTROL_MODEL", "opencode-go/deepseek-v4.1-flash")
+MODEL = os.environ.get("CONTROL_MODEL", "opencode/space-bunny-free")
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -160,7 +160,7 @@ def cmd_spawn(a):
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)
-        cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name,   # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
+        cmd = ["opencode", "--model", a.model, "run", "--auto", "--dir", wt, "--title", a.name,
                "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
@@ -340,13 +340,12 @@ def cmd_hold(a):
 
 def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
-    arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
-    --dir <PARENT>/work-N`), theirs have neither."""
+    arguments: ours are launched with `--model M run --auto --dir <PARENT>/work-N`, theirs have neither."""
     tasks = {os.path.realpath(t["worktree"]): n for n, t in load().items()}
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
     for line in out.splitlines():
-        m = re.search(r"opencode .*(?:--dir |instructions are in )(\S+?)(?:/TASK\.md)?(?:\s|$)", line)
+        m = re.search(r"opencode .*--dir (\S+)", line)
         if m and " run " in line and "sh -c" not in line[:40]:
             pid, et, rss, _ = line.split(None, 3)
             print("%-24s pid %-6s up %-10s %5.0f MB" % (tasks.get(os.path.realpath(m.group(1)), "?"), pid, et, int(rss) / 1024))
@@ -567,7 +566,7 @@ def _task_text(t):
     return m.group(1) if m else t["summary"]
 
 
-def restart(name, why, model=None):
+def restart(name, why):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
     t = load()[name]
     wt = t["worktree"]
@@ -587,13 +586,13 @@ def restart(name, why, model=None):
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
-    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=model or t["model"])
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=t["model"])
     cmd_spawn(ns)
     return new
 
 
 def cmd_restart(a):
-    print("restarted as", restart(a.name, a.why, a.model))
+    print("restarted as", restart(a.name, a.why))
 
 
 def cmd_unstick(a):
@@ -718,7 +717,7 @@ def main():
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
-    s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_restart)
+    s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.set_defaults(f=cmd_restart)
     s = sub.add_parser("unstick"); s.add_argument("--idle-min", type=float, default=25); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_unstick)
     s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
