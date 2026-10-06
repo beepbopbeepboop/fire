@@ -18646,11 +18646,14 @@ def _lower_one_match(stmt, bound: set, fresh, fn, module_names) -> tuple:
     """One `match` as `(statements, bound_after)`.
 
     The shape it emits, for `match s:` over cases `[c0, c1]` — a decision tree
-    of compares and branches, with every arm's body SPLICED IN:
+    of compares and branches, with every arm's body SPLICED IN. NESTED `else`
+    and not `elifs`, so one `case` is one `IfStmt` and a case with a guard is
+    that case's `else`:
 
         _match_val1 = s                       # the subject, ONCE
         if p0 == _match_val1: <arm0>
-        elif p1 == _match_val1: <arm1>
+        else:
+            if p1 == _match_val1: <arm1>
 
     and with a guard on `c0`, the guard is the arm's own `if` and the chain
     continues in its `else`:
@@ -18660,6 +18663,11 @@ def _lower_one_match(stmt, bound: set, fresh, fn, module_names) -> tuple:
             else: <c1 lowered>
         else:
             <c1 lowered>
+
+    `elifs` would read a little flatter and mean the same thing to both emitters,
+    but a chain built from `elifs` cannot express a guard (there is nowhere to
+    put the `else` that continues the match), so the whole match would need two
+    shapes. One is enough.
 
     **The subject is bound to a temporary unless it is already a bare name.**
     CPython evaluates the subject expression exactly once, before the first
@@ -18682,9 +18690,12 @@ def _lower_one_match(stmt, bound: set, fresh, fn, module_names) -> tuple:
 
     **A capture or a wildcard ENDS the case's pattern list.** Both match
     whatever reaches them, so every later pattern in the same `case` is
-    unreachable — CPython drops them too. This is also what keeps the binding
-    order right: a capture binds the subject and matches, so nothing after it is
-    evaluated and nothing after it is bound.
+    unreachable — CPython drops them too, and the row that can see it dropping
+    one is `capture_at_the_front_of_a_pattern_list_kills_the_rest`. This is also
+    what keeps the binding order right: a capture binds the subject and matches,
+    so nothing after it is evaluated and nothing after it is bound. What the
+    capture does to the arm AROUND it — the arm runs on both outcomes of the
+    comparisons before it — is `_lower_one_case`'s business, not this one's.
 
     **Every arm body is lowered BEFORE the chain is built, in source order.**
     An arm body is ordinary statements, so it can hold a `match` of its own, and
@@ -18778,6 +18789,17 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
     two-case `match` otherwise. The operand-order sensitivity itself is a
     pre-existing gap in that generator and is filed as
     `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md`.
+
+    **Adding a capture's name to `bound` is a STATIC answer to a question the
+    reference asks at RUN TIME, and it is the right one.** The reference asks
+    `scope.has(name)` when it reaches each later `case`, and a case that contains
+    a capture or a wildcard ALWAYS matches — so the only path that reaches a
+    later case is a GUARD that said no, and the guard runs AFTER the capture has
+    already bound the name (`self.scope.define(...)` and then the guard test). On
+    every reachable path the name is bound by the time a later pattern reads it,
+    which is what `bound.add` records. A path on which the capture was never
+    reached is a path on which the case holding it MATCHED, and a case that
+    matches is not fallen through.
     """
     patterns = list(getattr(case, "patterns", None) or [])
     guard = getattr(case, "guard", None)
