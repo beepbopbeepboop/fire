@@ -11985,10 +11985,21 @@ ctor_field_value=self._ctor_field_value_for(name),
             return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
             if e.func.name == "range":
-                si = self._static_int(e.args[0]) if e.args else None
-                ti = self._static_int(e.args[1]) if len(e.args) > 1 else None
-                pi = self._static_int(e.args[2]) if len(e.args) > 2 else 1
-                bound = M.loop_trip_count(si, ti, pi)
+                # Through `_range_info`, not through `args[0..2]` read three
+                # times. `range(3)` used to reach `loop_trip_count` as
+                # `(3, None, 1)`, and `stop is None` means "no compile-time
+                # bound" there, so the ONE-argument spelling — which is how
+                # almost every `range` in this repository and the stdlib is
+                # written — got `BLOB_ESTIMATE_FALLBACK` from a header that
+                # states the answer in its first argument. `_range_info` is the
+                # one normaliser for the three spellings (the loop's own head
+                # test and `_blob_range_trip_bound` already go through it), and
+                # a second hand-rolled reading of the same three arguments is
+                # how the two spellings came to disagree.
+                si, ti, pi = self._range_info(list(e.args))
+                bound = M.loop_trip_count(self._static_int(si),
+                                          self._static_int(ti),
+                                          self._static_int(pi))
                 return bound if bound is not None else M.BLOB_ESTIMATE_FALLBACK
             if e.func.name in ("list", "sorted", "set", "reversed"):
                 return M.BLOB_ESTIMATE_FALLBACK

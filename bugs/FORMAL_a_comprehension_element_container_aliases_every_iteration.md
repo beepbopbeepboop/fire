@@ -58,25 +58,56 @@ elements are never read.
 
 `cap * span` bytes, and **`cap` is a hard bound here for the same reason the
 result blob's own reservation is**: the append exits(1) rather than writing a
-`cap`-th slot, so a generator cannot run past it. The one measured cost is a
-frame refusal where a comprehension's element subtree is itself large — a concat
-of a dynamic slice under a dynamic iterable reserves ~1 KB per slot and, at
-`cap = 64`, does not fit x86-64's 16 KiB blob region:
+`cap`-th slot, so a generator cannot run past it.
 
-```console
-$ python3 fire.py build --formal --no-prove --backend=x86_64 -o .tmp/x.bin .tmp/x.mojo
-build: … 1908 element(s) fit in what is left here …
+**Measuring that cost found a defect in the reservation itself, and that is the
+second half of what landed.** arm64's `_compr_cap` reads a `range` literal out
+of the generator header; x86-64's reaches its bound through `_blob_est`, **which
+had no `range` arm at all**, so every `range` iterable was
+`BLOB_ESTIMATE_FALLBACK` there. Measured on `[[j + i for j in range(3)] for i in
+range(20)]`: arm64 reserved a 20-element result and x86-64 a 64-element one, for
+the same source — and `_compr_cap`'s own docstring claimed "the two backends now
+size one comprehension's reservation identically", which was false. With the copy
+cost being `cap * span`, a 3.2x over-estimate is the difference between answering
+and REFUSING on x86-64's 16 KiB blob region:
+
+```
+build: a comprehension's own copy of its element does not fit in the frame: it
+needs 35328 bytes and this function has 15144 left for containers
 ```
 
-That trade is deliberate and it is the document's own §"Why it is a
+So: x86-64's `_blob_est` grew the `range` arm its twin already had, and **both**
+arms now read the header through `_range_info` — the one normaliser for the
+three spellings, which the loop's own head test and `_blob_range_trip_bound`
+already went through — instead of indexing `args[0..2]` and re-deriving "absent
+means None". That last part is a second fix in the same two lines, and it is what
+gives the **one-argument** `range(3)` a bound at all: it used to reach
+`loop_trip_count` as `(3, None, 1)`, and `stop is None` means "no compile-time
+bound" there, so the spelling almost every `range` in this repository and the
+stdlib is written was the no-bound answer. Measured after, both backends agree:
+`_compr_cap` 20 and 3 on each, `_blob_est(range(20))` 20 on each.
+
+**The arm64 half of that is a de-duplication and a smaller reservation, not a
+fixed wrong answer** — narrowing `_blob_est` can only ever shrink what it feeds
+`blob_loop_growth`, and for `for i in range(3): s = s + [1]` it makes the
+growth arithmetic exact (`1 + 1*3 = 4` words) where the fallback gave it 65.
+`test_formal_run.py`'s `blob-growth-guard` group (the one that wraps
+`_emit_blob_growth_guard` and records which sites actually emit one) is 5/0
+after it.
+
+The one measured cost that remains is a frame refusal where a comprehension's
+element subtree is itself large — a concat of a dynamic slice under a dynamic
+iterable reserves ~1 KB per slot and, at `cap = 64`, does not fit x86-64's
+region. That trade is deliberate and it is the document's own §"Why it is a
 refusal-shaped question" applied to the shapes that cannot be paid for: the
 program used to build and answer 90, so this is a refusal where there was a
 wrong number, which is the direction the whole formal path takes. Measured over
 this repository's own corpus the cost is **nothing**: `test_formal_run.py`
-(1125 cases), `test_formal_value_model.py`, `test_x86_64_containers.py`,
+(1126 cases), `test_formal_value_model.py`, `test_x86_64_containers.py`,
 `test_formal_closures.py`, `test_formal_list_splat.py`, `test_formal_globals.py`,
-`test_formal_json.py`, `test_ast_formal.py`, `test_formal_frame_len.py` and
-`test_formal_optional.py` are unchanged, and the two failures in
+`test_formal_json.py`, `test_ast_formal.py`, `test_formal_frame_len.py`,
+`test_formal_optional.py`, `test_formal_int_semantics.py` and
+`test_formal_core_hostmods.py` are unchanged, and the two failures in
 `test_x86_64_containers.py` (`with-statement`) and
 `test_formal_x86_64_parity.py` (`printf_float_operand_read_from_an_xmm_register`)
 are the pre-existing pair the previous commit recorded as verified against
@@ -85,7 +116,8 @@ master.
 ### The tests, and what each one is for
 
 Six ORACLE rows in `test_formal_value_model.py`'s `CASES` (CPython as the oracle,
-both architectures), one per row of the table above plus the direction guard:
+both architectures), one per row of the table above plus the direction guard
+and the sizing row:
 
 * the five aliasing shapes, each measuring a **SUM of `v[0]`** rather than a
   print of it — three copies of one container and three distinct containers have
@@ -94,7 +126,15 @@ both architectures), one per row of the table above plus the direction guard:
 * `a_comprehension_whose_element_is_a_bare_name_still_aliases_it`, which reads
   `vs[0] is vs[1]`. `is` is this path's unboxed integer equality, so it compares
   the two ADDRESSES — the observation that separates "copy it" from "leave it
-  alone", and one a sum would agree with either way.
+  alone", and one a sum would agree with either way;
+* `a_comprehension_over_a_range_iterable_is_answered_on_both_architectures`,
+  which pins the SIZING half and is the row that fails without the `_blob_est`
+  fix (x86-64 refuses it). It is an ORACLE row and not a reservation number
+  because a reservation is not observable at run time and this difference IS:
+  the frame runs out. Its inner generator's target is `j` and not `i` — with `i`
+  shadowed the element does not depend on the outer loop variable, the shared
+  blob happens to hold the right value, and the row would pass with the aliasing
+  defect in place.
 
 and one `REFUSALS` row, `a_comprehension_whose_element_holds_an_inner_container_is_refused`,
 for §0a below. Its needle is the clause that says the element holds an ADDRESS,

@@ -5695,6 +5695,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.Comprehension):
             return self._compr_cap(e)
         if isinstance(e, F.CallExpr):
+            # `range` is the ONE call with a length this path can read off the
+            # header, and reading it is what makes `_compr_cap` size
+            # `[.. for i in range(20)]` the same 20 elements arm64's does —
+            # which `_compr_cap`'s own docstring already claimed and which was
+            # false: this arm did not exist, so every `range` iterable here was
+            # `BLOB_ESTIMATE_FALLBACK` and x86-64 reserved up to 64x what
+            # arm64 reserved for the same source. Through `_range_info`, which
+            # is the one normaliser for the three spellings, so the
+            # one-argument `range(3)` — which is how almost every `range` in
+            # this repository and the stdlib is written — is not the
+            # no-bound answer it used to be. arm64's twin is the same four
+            # lines over the same two shared functions.
+            if isinstance(e.func, F.IdentExpr) and e.func.name == "range":
+                si, ti, pi = _range_info(list(e.args))
+                bound = M.loop_trip_count(self._static_int(si),
+                                          self._static_int(ti),
+                                          self._static_int(pi))
+                return bound if bound is not None else M.BLOB_ESTIMATE_FALLBACK
             return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.BinaryOp):
             if e.op in ("+", "|"):

@@ -725,6 +725,36 @@ CASES = [
      "    printf(\"same=%d\", 1 if vs[0] is vs[1] else 0)\n"
      "    return 0\n",
      "same=1"),
+    # The row that says the two backends SIZE ONE COMPREHENSION IDENTICALLY,
+    # which `_compr_cap`'s own docstring claimed and which was false: x86-64's
+    # reaches its bound through `_blob_est`, which had no `range` arm at all, so
+    # every `range` iterable was `BLOB_ESTIMATE_FALLBACK` there and arm64 read
+    # the literal. Measured on this source before the fix: arm64 reserved a
+    # 20-element result and x86-64 a 64-element one, for the same program — and
+    # because the per-iteration element copy (the row group above) is
+    # `cap * span`, the 3.2x over-estimate was the difference between answering
+    # and REFUSING on x86-64's 16 KiB blob region:
+    #
+    #     build: a comprehension's own copy of its element does not fit in the
+    #     frame: it needs 35328 bytes and this function has 15144 left
+    #
+    # It is pinned as an ORACLE row rather than as a reservation number because
+    # a reservation is not observable at run time and this difference IS: the
+    # frame runs out.
+    ("a_comprehension_over_a_range_iterable_is_answered_on_both_architectures",
+     "def main(n):\n"
+     "    var vs = [[j + i for j in range(3)] for i in range(20)]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     # The inner generator's target is `j`, NOT `i`: with `i` shadowed the
+     # element does not depend on the outer loop variable, the shared blob
+     # happens to hold the right value, and the row would pass with the
+     # aliasing defect in place — which is the coincidence control this
+     # document's own §1 exists to warn about.
+     "n=20 s=190"),
 ]
 
 # ── the rule the return-less refusal is decided by, asked directly ──
