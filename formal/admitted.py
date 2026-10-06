@@ -678,11 +678,14 @@ def lean_declarations(contracts: list) -> str:
     does not use `subprocess` would still be carrying the hole.
 
     The signature is `UInt64 → UInt64`, and the ONE argument is forced rather
-    than chosen.  `MojoExpr.call` in `lib/ProofLib.lean` carries a single
-    `UInt64` argument, so the AST layer of a generated proof can only evaluate a
-    call with one; an admission applied to two arguments in the source model and
-    one in the AST model would make `eval_eq_mojo` — the statement that the two
-    layers are the same function — false rather than merely unproved.  So a
+    than chosen.  `MojoExpr.call` in `lib/ProofLib.lean` carries a
+    `List MojoExpr` (widened 2026-10-05, so the AST is faithful for a call of
+    any arity), but `callFunc` is handed ONE value, so `evalArgs` PACKS a call's
+    arguments into a single `UInt64` product.  An admission applied to two
+    arguments in the source model and one product in the AST model would make
+    `eval_eq_mojo` — the statement that the two layers are the same function —
+    false rather than merely unproved, which is why this refusal is still correct
+    after the node was widened.  So a
     hostmod's admitted operation is written with ONE parameter, the request, and
     `formal/arm64_proof_gen.py`'s `_call_go` refuses a call that passes another
     number rather than padding it or dropping the rest.

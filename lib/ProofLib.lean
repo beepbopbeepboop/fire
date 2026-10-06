@@ -911,7 +911,16 @@ inductive MojoExpr where
   | var (name : String)
   | unop (op : String) (operand : MojoExpr)
   | binop (op : String) (left : MojoExpr) (right : MojoExpr)
-  | call (name : String) (arg : MojoExpr)
+  -- A call carries its arguments AS A LIST.  It carried ONE `MojoExpr` until
+  -- 2026-10-05, which made a call of any arity but one unstatable: there was
+  -- no faithful AST for it, so `eval_eq_mojo` could not be stated for a program
+  -- containing one.  The list is what makes the node faithful; what the HANDLER
+  -- is handed is still one `UInt64`, because `callFunc` is
+  -- `String → UInt64 → UInt64` and the arguments are PACKED into it
+  -- (see `evalExpr`'s `call` arm).  Those are two different facts and the
+  -- wording in `formal/arm64_proof_gen.py::_call_go` and `formal/admitted.py`
+  -- says the second, because that is the one that is true.
+  | call (name : String) (args : List MojoExpr)
 
 inductive MojoStmt where
   | return (expr : MojoExpr)
@@ -1058,7 +1067,28 @@ closes the bridge instead of leaving a signed/unsigned pair to be noticed by
 `bv_decide` as a "spurious counterexample". -/
 def sKey (x : UInt64) : UInt64 := x ^^^ 0x8000000000000000
 
-/-- Source semantics: evaluate expressions with a call handler for recursion -/
+mutual
+
+/-- Source semantics: evaluate expressions with a call handler for recursion.
+
+    **`mutual`, and that is not tidiness.**  `MojoExpr.call` now carries a
+    `List MojoExpr` of its own type's constructors, so the type is a NESTED
+    inductive, and a fold over that list (`List.foldl`, which is what the node
+    used to carry) is not a structural recursion Lean can see: the recursive
+    call's argument is an ELEMENT of the list, and nothing in `List.foldl`'s
+    definition hands Lean the membership fact.  Spelled that way Lean compiles
+    `evalExpr` into a well-founded fixpoint and SAYS so --
+
+        failed to infer structural recursion:
+        Cannot use parameter #1: unexpected occurrence of recursive application
+        ⊢ sizeOf a✝ < 1 + sizeOf n + sizeOf args
+
+    -- and the consequence is not a warning on one arm.  `evalExpr` stops
+    -- reducing, so all 26 of its per-node lemmas (`evalExpr_int`,
+    `evalExpr_var`, `evalExpr_binop …`) lose `rfl` and fail, including the ones
+    whose statement does not mention a call at all.  An explicit recursion over
+    the argument list makes the recursive argument visibly a subterm, and then
+    this is ordinary structural recursion again and every `rfl` survives. -/
 def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
   match e with
   | MojoExpr.int v => v
@@ -1110,7 +1140,26 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop _ l r => evalExpr callFunc l env
-  | MojoExpr.call name arg => callFunc name (evalExpr callFunc arg env)
+  | MojoExpr.call name args => callFunc name (evalArgs callFunc args env)
+
+/-- PACK a call's arguments into the ONE value `callFunc` is handed.
+
+    `callFunc` is `String → UInt64 → UInt64`: it takes one value, so the
+    arguments are multiplied together rather than passed as a tuple.  That is
+    a real loss, and it is why `formal/admitted.py`'s refusal of a multi-argument
+    call is still CORRECT after `MojoExpr.call` was widened -- the AST packs them
+    into one value, which is not what a multi-parameter callee takes.
+
+    `[]` answers `1` so that a ONE-argument call evaluates to exactly what it did
+    before the widening: `v * 1 = v`.  That is what keeps every proof that
+    typechecks today keeping its VALUE, so the widening cannot move a verdict by
+    itself. -/
+def evalArgs (callFunc : String → UInt64 → UInt64) :
+    List MojoExpr → (String → UInt64) → UInt64
+  | [], _ => 1
+  | a :: as, env => evalExpr callFunc a env * evalArgs callFunc as env
+
+end
 
 /-- Environment-threading evaluator.  Returns the optional result together with
     the final environment, so an `if` branch that assigns a local and then falls
@@ -1283,9 +1332,24 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
                                         · simp [evalExpr, h, h', h'', h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19]
 
 /-- Evaluate a function call expression. -/
-theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
-  evalExpr callFunc (MojoExpr.call name arg) env = callFunc name (evalExpr callFunc arg env) := by
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (args : List MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env) := by
   rfl
+
+/-- **The one-argument case, stated separately**, because it is the shape every
+    existing proof uses: `v * 1 = v` in `UInt64`, so this is what a proof of a
+    one-argument call rewrites with.  It is `simp` rather than `rfl` because the
+    product is what the list fold leaves behind. -/
+theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc arg env) := by
+  simp [evalExpr, evalArgs]
+
+/-- `evalArgs` over a singleton list is its element -- the property that makes
+    the widening value-preserving, stated on its own so it is checked rather
+    than argued. -/
+theorem evalArgs_singleton (callFunc : String → UInt64 → UInt64) (a : MojoExpr) (env : String → UInt64) :
+  evalArgs callFunc [a] env = evalExpr callFunc a env := by
+  simp [evalArgs]
 
 /-- Evaluate a return statement. -/
 theorem evalBody_return (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
@@ -8509,7 +8573,7 @@ def liftMF : MFExpr → MojoExpr
   | .field n => .var (fieldTag n)
   | .unop op e => .unop op (liftMF e)
   | .binop op l r => .binop op (liftMF l) (liftMF r)
-  | .call name a => .call name (liftMF a)
+  | .call name a => .call name (liftMF a :: [])
 
 mutual
 
@@ -8733,24 +8797,40 @@ set_option linter.unusedSimpArgs false in
 theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
     {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
     evalExpr callFunc e env = evalExpr callFunc e env' := by
-  induction e generalizing env env' with
-  | int v => rfl
-  | bool v => rfl
-  | var name => exact h name
-  | unop op operand ih =>
+  -- **`MojoExpr.rec` with BOTH motives, not `induction e`.**  `MojoExpr` is a
+  -- nested inductive since `call` carries a `List MojoExpr`, and `induction`
+  -- refuses it outright -- "The `induction` tactic does not support the type
+  -- `MojoExpr` because it is a nested inductive type".  `MojoExpr.rec` is the
+  -- combined recursor that does, and it wants a motive for the LIST as well as
+  -- for the node, plus the `nil`/`cons` alternatives: that is the whole of what
+  -- "pushing the element-wise hypotheses through the fold" needs, and it is why
+  -- this theorem is the one genuinely new proof obligation of the widening.
+  --
+  -- The STATEMENT is unchanged.  That matters: `evalBodyEnv`'s
+  -- environment-merging proof is `evalExpr_congr`'s only caller, so keeping the
+  -- statement is what stops this from moving every generated proof in the tree.
+  refine MojoExpr.rec
+    (motive_1 := fun e => ∀ {env env' : String → UInt64},
+      (∀ x, env x = env' x) → evalExpr callFunc e env = evalExpr callFunc e env')
+    (motive_2 := fun args => ∀ {env env' : String → UInt64},
+      (∀ x, env x = env' x) → evalArgs callFunc args env = evalArgs callFunc args env')
+    (fun v {env env'} _ => rfl)
+    (fun b {env env'} _ => rfl)
+    (fun name {env env'} hh => hh name)
+    (fun op operand ih {env env'} hh => by
       by_cases hop : op = "neg"
       · subst hop
-        simp only [evalExpr, ih h]
+        simp only [evalExpr, ih hh]
       · by_cases hop' : op = "not"
         · subst hop'
-          simp only [evalExpr, ih h]
+          simp only [evalExpr, ih hh]
         · by_cases hopb : op = "bnot"
           · subst hopb
-            simp only [evalExpr, ih h]
-          · simp only [evalExpr, hop', hopb, ih h]
-  | binop op l r ihl ihr =>
-      have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl h
-      have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr h
+            simp only [evalExpr, ih hh]
+          · simp only [evalExpr, hop', hopb, ih hh])
+    (fun op l r ihl ihr {env env'} hh => by
+      have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl hh
+      have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr hh
       by_cases h0 : op = "+"; · subst h0; simp only [evalExpr, hl, hr]
       · by_cases h1 : op = "-"; · subst h1; simp only [evalExpr, hl, hr]
         · by_cases h2 : op = "*"; · subst h2; simp only [evalExpr, hl, hr]
@@ -8771,8 +8851,12 @@ theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
                                       · by_cases h17 : op = "<<"; · subst h17; simp only [evalExpr, hl, hr]
                                         · by_cases h18 : op = ">>"; · subst h18; simp only [evalExpr, hl, hr]
                                           · by_cases h19 : op = "**"; · subst h19; simp only [evalExpr, hl, hr]
-                                            · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr]
-  | call name arg ih => simp only [evalExpr, ih h]
+                                            · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr])
+    (fun name args ih {env env'} hh => by simp only [evalExpr, ih hh])
+    (fun {env env'} _ => rfl)
+    (fun head tail ih1 ih2 {env env'} hh => by
+      simp only [evalArgs, ih1 hh, ih2 hh])
+    e env env' h
 
 mutual
 /-- Node count of one statement, counting its nested bodies. -/

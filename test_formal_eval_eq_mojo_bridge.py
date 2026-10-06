@@ -909,9 +909,12 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 # the doc's experiment that does not reproduce).
 #
 # IF THIS CLASS FAILS: the toolchain changed, and the doc's route list has to be
-# re-measured rather than re-read.  If `lib/ProofLib.lean`'s `call` ever carries
-# a `List MojoExpr`, step 1 of that doc has landed and this class has nothing
-# left to say.
+# re-measured rather than re-read.  (Step 1 of that doc LANDED on 2026-05: the
+# `mutual` route below is the one `lib/ProofLib.lean` uses, `evalExpr_call` and
+# `liftMF` are re-stated over the list, and `evalExpr_congr` keeps its statement
+# and changes only its proof -- via the recursor route pinned here.  The class
+# stays because all four answers are facts about the TOOLCHAIN and not about
+# this tree.)
 NESTED_HEADER = """inductive E where
   | int (v : Nat)
   | var (n : String)
@@ -960,6 +963,32 @@ INDUCTION_ROUTE = """theorem ev_congr (e1 e2 : E) (h : e1 = e2) : True := by
 """
 
 
+# The recursor route -- which is what `evalExpr_congr`'s proof ACTUALLY uses, so
+# it is a toolchain fact of the same kind as the three above and belongs beside
+# them: `MojoExpr.rec` is the COMBINED recursor, and it asks for a motive for
+# the argument LIST as well as for the node, plus `nil`/`cons` alternatives.
+# A toolchain that made `MojoExpr.rec` take only the node's motive would break
+# the congruence lemma every generated `eval_eq_mojo` reaches, and the error
+# would be an arity mismatch hundreds of lines from `MojoExpr`.
+RECURSE_ROUTE = """theorem ev_congr (cf : String -> Nat -> Nat) (e : E)
+    {env env' : Nat} (h : ∀ x, env x = env' x) : ev cf env e = ev cf env' e := by
+  refine E.rec
+    (motive_1 := fun e => ∀ {env env' : Nat},
+      (∀ x, env x = env' x) -> ev cf env e = ev cf env' e)
+    (motive_2 := fun args => ∀ {env env' : Nat},
+      (∀ x, env x = env' x) -> evArgs cf env args 1 = evArgs cf env' args 1)
+    (fun v env env' _ => rfl)
+    (fun n env env' hh => hh n)
+    (fun n args ih env env' hh => by simp only [ev, ih hh])
+    (fun env env' _ => rfl)
+    (fun hd tl ih1 ih2 env env' hh => by simp only [evArgs, ih1 hh, ih2 hh])
+    e env env' h
+
+example : ∀ (cf : String -> Nat -> Nat) (env : Nat) (e : E), ev cf env e = ev cf env e :=
+  fun _ _ _ => rfl
+"""
+
+
 class TestTheNestedExprRoutes(unittest.TestCase):
     """The three Lean facts `MojoExpr.call (args : List MojoExpr)` depends on."""
 
@@ -981,6 +1010,7 @@ class TestTheNestedExprRoutes(unittest.TestCase):
         cls.mutual = check(MUTUAL_ROUTE)
         cls.foldl = check(FOLDL_ROUTE)
         cls.induction = check(INDUCTION_ROUTE)
+        cls.recurse = check(RECURSE_ROUTE)
 
     @classmethod
     def tearDownClass(cls):
@@ -1029,6 +1059,26 @@ class TestTheNestedExprRoutes(unittest.TestCase):
                          "and it is not Lean's structural-recursion error after "
                          "all -- the doc quotes one, so a worker would go "
                          "looking for it:\n" + out)
+
+    def test_the_COMBINED_recursor_takes_a_motive_for_the_LIST_too(self):
+        """The route `evalExpr_congr` actually takes, pinned.
+
+        `test_induction_cannot_be_used_on_a_nested_inductive` says `induction`
+        is refused; this says what IS available instead, because "the recursor"
+        is a pointer at ~200 different names and the one that works is the
+        COMBINED `E.rec`, whose signature asks for a second motive over
+        `List E` and two more alternatives (`nil`/`cons`).  Getting that wrong
+        is an arity mismatch reported far from `MojoExpr`, and it is the only
+        new Lean obligation of widening the node to carry a list.
+        """
+        rc, out = self.recurse
+        self.assertEqual(rc, 0,
+                         "`MojoExpr.rec` no longer takes a motive for the "
+                         "argument list (or the nil/cons alternatives), so "
+                         "`evalExpr_congr` needs a different proof -- most "
+                         "likely a size function and a well-founded mutual "
+                         "induction:\n" + out)
+        self.assertNotIn("error", out, "and it said no error:\n" + out)
 
     def test_induction_cannot_be_used_on_a_nested_inductive(self):
         """What forces `evalExpr_congr`'s rewrite, pinned so it is not re-tried.
