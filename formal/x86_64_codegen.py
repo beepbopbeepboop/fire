@@ -2817,6 +2817,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._store_var(name, Reg.RAX)
             return
         ttype = self._ttype(stmt.target)
+        # `a += [3]` IS `a = a + [3]`, and the binary form is already lowered on
+        # this backend, so this desugars onto it rather than growing a second
+        # copy of the concat.  Asked after the divide-ops delegation above has
+        # returned, so what reaches it is the pure-ALU set, and the operators
+        # with no container lowering have already been refused by the shared
+        # gate.  `model.aug_assign_operands_are_blobs` is the one question and
+        # both backends ask it; the measurements that make it necessary — `a +=
+        # [3]` was 0 on arm64 and a SIGSEGV here, `a *= 3` a SIGSEGV on both —
+        # are in that function's docstring.
+        if M.aug_assign_operands_are_blobs(
+                self._expr_str_kind(stmt.target),
+                self._expr_str_kind(stmt.value)):
+            self._emit_binop(F.BinaryOp(op=op, left=stmt.target,
+                                        right=stmt.value))
+            self._store_var(name, Reg.RAX)
+            return
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
         # one, and RAX is holding the right one. R11 is written as the left

@@ -12564,8 +12564,8 @@ def string_binary_refusal(op: str, left_kind, right_kind,
             op, left_kind, right_kind, left, right, fn, untyped_callee)
         if word is not None:
             return word
-    blob = container_relational_refusal(op, left_kind, right_kind,
-                                        spelled_op)
+    blob = container_operator_refusal(op, left_kind, right_kind,
+                                     spelled_op)
     if blob is not None:
         return blob
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
@@ -12588,73 +12588,164 @@ def container_operand_is_blob(kind) -> bool:
     return is_list_kind(kind)
 
 
-def container_relational_refusal(op: str, left_kind, right_kind,
-                                 spelled_op: str | None = None) -> str | None:
+#: The CPython MEANING of each operator this gate covers, as the message
+#: states it.  One table beside the operator set below, because the reason a
+#: refusal is honest is that there IS an answer and this path cannot compute
+#: it — a reader who is only told "unsupported" goes looking for a spec, and
+#: the spec is the sentence that belongs in the diagnostic.  Read off
+#: CPython's own operators on `list`/`tuple`/`set`/`dict`, which is what
+#: `test_formal_container_methods.py` diffs this path against.
+CONTAINER_OP_MEANING = {
+    "<": "the first index where the two differ, compared element by element",
+    "<=": "the first index where the two differ, compared element by element",
+    ">": "the first index where the two differ, compared element by element",
+    ">=": "the first index where the two differ, compared element by element",
+    "==": "an element-by-element comparison, and then a length check",
+    "!=": "an element-by-element comparison, and then a length check",
+    "-": "SET DIFFERENCE — every element of the left the right does not hold",
+    "&": "INTERSECTION — every element both sides hold",
+    "^": "SYMMETRIC DIFFERENCE — every element exactly one side holds",
+    "/": "nothing at all: no container in Python has a quotient",
+    "//": "nothing at all: no container in Python has a floor quotient",
+    "%": "nothing at all: no container in Python has a remainder",
+    "**": "nothing at all: no container in Python has a power",
+    "<<": "nothing at all: no container in Python has a left shift",
+    ">>": "nothing at all: no container in Python has a right shift",
+}
+
+#: Every operator this gate covers.  It was the FOUR ORDERING OPERATORS alone
+#: until the whole matrix was measured, and every operator missing from it
+#: reached either the flag-setting compare or the integer ALU holding a
+#: blob's ADDRESS — see `container_operator_refusal`'s transcript for the
+#: numbers.  `+` (concatenation), `|` (set union), `*` (repetition), `in`,
+#: `not in`, `is` and `is not` are DELIBERATELY ABSENT: each is a real
+#: lowering on this path, `is`/`is not` correctly, because two distinct blob
+#: literals are two distinct blocks and so two distinct addresses, which is
+#: what identity is.  `==`/`!=` on a blob and the ordering operators are the
+#: same defect wearing different operators, so they belong in one gate.
+CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
+
+
+def container_operator_refusal(op: str, left_kind, right_kind,
+                               spelled_op: str | None = None) -> str | None:
     """Why `a {op} b` must not be lowered when an operand is a BLOB, or None.
 
-    **The relational operators only, and the reason is a measured wrong answer
-    rather than a caution.** A blob on this path is a frame-allocated block, and
-    the word a name holding one carries is its ADDRESS; `<`, `<=`, `>` and `>=`
-    are therefore integer comparisons of two addresses, and the branch they take
-    is decided by where the allocator happened to put two blocks. Measured on
-    this tree, both architectures, `def main(): a = [9]; b = [1]; return len(b)
-    if b > a else 0` answered **1 where CPython answers 0** — and the number is
-    the ALLOCATION ORDER, not the elements: the same program with the two
-    literals the other way round (`a = [1, 2]; b = [3, 4]`) happens to agree,
-    because `[3, 4]` is the later block and therefore the higher address. That is
-    why it is a refusal rather than a warning, and why the two architectures
-    agreeing is no comfort: they agree because they lay the frame out the same
-    way, not because either of them compared an element. Same outcome class as
-    `_string_operand_refusal`'s `char *` row, which is the company this keeps.
+    **The wrong answers are measured, and they are WORSE than the ordering ones
+    this table started as.**  A blob on this path is a frame-allocated block and
+    the word a name holding one carries is its ADDRESS, so every operator here
+    is arithmetic on that address rather than on the container.  Measured on this
+    tree, both backends, `a = [3, 1, 2]` and `1 if a == [3, 1, 2] else 0` answers
+    **0 where CPython answers 1** — `[3, 1, 2]` is a second block at a different
+    address, so the equality compares two addresses and says no.  `s = {1, 2}`;
+    `t = s - {2}` and `t = s ^ {2}` **SIGSEGV on both architectures** (exit -11,
+    no output): the subtraction produces a word far from any blob and `len(t)`
+    reads a count out of it.  `t = s & {2}` answers **2 on arm64 and 163061056 on
+    x86-64 where CPython answers 1** — one bitwise AND of two addresses, and the
+    two architectures' disagreement is the clearest possible statement that
+    neither of them computed a set.  `def main(): a = [9]; b = [1]; return len(b)
+    if b > a else 0` answers **1 where CPython answers 0**, and the number is the
+    ALLOCATION ORDER, not the elements: the same program with the literals the
+    other way round (`a = [1, 2]; b = [3, 4]`) happens to agree, because `[3, 4]`
+    is the later block and therefore the higher address.
 
-    **CPython's own answer is an ELEMENT-WISE lexicographic compare**, so there
-    is no spelling of this comparison that is right here and nothing to work
-    around: `xs < ys` means "the first index where they differ has a smaller
-    element in `xs`", and reading one element out of each blob and comparing
-    them is a loop with a per-element stride this path has to know at emit time.
-    That is a project, not a rewrite, so the refusal is the honest answer and
-    the message says what the source meant.
+    **The two architectures agreeing is no comfort, and for `==` they do NOT
+    agree about being wrong at all**: they agree on the ordering row because they
+    lay the frame out the same way, and disagree on the `&` row because their
+    `AND` instructions land on different bits of the same two addresses.  Either
+    way neither of them compared an element.  That is why this is a refusal and
+    not a warning, and it is the outcome class
+    `_string_operand_refusal`'s `char *` row already keeps.
 
-    **The other operators are deliberately NOT here.** `+` concatenates two
-    lists, `|` unions two sets and `*` repeats one, and all three are real
-    lowerings on this path; `-`, `/`, `//`, `%` and `**` have no container
-    meaning in CPython either (`[1] - [2]` is a `TypeError` there), so a program
-    that spells one is already broken and the address arithmetic is not the
-    thing that makes it so. `==`/`!=` is `string_compare_word_refusal`'s and
-    `string_compare_number_refusal`'s subject and is left where it is. Only the
-    four operators that silently take a BRANCH are refused, which is the class
-    where a wrong answer is hardest to see.
+    **CPython has an answer for every operator here**, so nothing on the far
+    side of this gate is a correct program, and the message says which answer —
+    `CONTAINER_OP_MEANING` is the table the sentence is written from, so a
+    diagnostic cannot claim a set has no difference while the table says it
+    does.  Computing any of them is a loop with a per-element STRIDE, which this
+    path would have to know before anything runs; that is a project, not a
+    rewrite, and a project is not a reason to answer with an address.  For the
+    six operators CPython itself refuses (`/`, `//`, `%`, `**`, `<<`, `>>`) the
+    refusal is doubly right: the program is already broken and the diagnostic
+    says what it meant to write.
 
-    A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` too, so
-    there is no correct program on the far side of this gate.
+    A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
+    `xs == 0` too, so there is no correct program on the far side of this gate.
     """
     bare = _bare_operator(op, spelled_op)
-    if bare not in STRING_RELATIONAL_OPS:
+    if bare not in CONTAINER_GATED_OPS:
         return None
     if not (container_operand_is_blob(left_kind)
             or container_operand_is_blob(right_kind)):
         return None
     shown = spelled_op or bare
-    which = "the left operand" if container_operand_is_blob(left_kind) else (
-        "the right operand" if container_operand_is_blob(right_kind)
-        else "an operand")
+    on_left = container_operand_is_blob(left_kind)
+    which = ("the left operand" if on_left else
+             "the right operand" if container_operand_is_blob(right_kind)
+             else "an operand")
     return (
         f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "
-        f"blob on this path is a fixed block of the frame with no header, so "
-        f"the word the name carries is the block's ADDRESS and `{shown}` is an "
-        f"integer comparison of two addresses — it builds, runs and takes a "
-        f"branch by where the allocator happened to put two blocks, and both "
-        f"backends lay the frame out the same way, so they agree on the wrong "
-        f"number rather than disagreeing. Measured on this tree, both backends: "
-        f"`a = [9]` and `b = [1]` then `len(b) if b > a else 0` answered 1 where "
-        f"CPython answers 0, and the same program with `a = [1, 2]` and "
-        f"`b = [3, 4]` agrees — the answer is the allocation order, not the "
-        f"elements. Python's `{shown}` on two sequences is an "
-        f"ELEMENT-WISE lexicographic compare — the first index where they "
-        f"differ, compared — and that needs a per-element stride this path has "
-        f"to know before anything runs, so there is no lowering to reach for. "
-        f"Compare the element you mean (`xs[i] < ys[i]`), or reduce the pair to "
-        f"the number you actually want and compare that")
+        f"blob on this path is a fixed block of the frame, so the word the "
+        f"name carries is the block's ADDRESS: `{shown}` is then arithmetic on "
+        f"that address and never looks at an element. Measured on this tree, "
+        f"both backends: `a = [3, 1, 2]` then `1 if a == [3, 1, 2] else 0` "
+        f"answered 0 where CPython answers 1, because the literal is a second "
+        f"block at a different address; `s = {{1, 2}}` then `s - {{2}}` and "
+        f"`s ^ {{2}}` both died with SIGSEGV and no output, because the result "
+        f"is a word nowhere near a blob and `len` read a count out of it; and "
+        f"`s & {{2}}` answered 2 on arm64 and 163061056 on x86-64 where CPython "
+        f"answers 1, which is one bitwise AND of two addresses — the two "
+        f"architectures disagreeing is the clearest sign that neither of them "
+        f"computed a set. Python's `{shown}` on two containers is "
+        f"{CONTAINER_OP_MEANING[bare]}, and every one of those needs a "
+        f"per-element STRIDE this path has to know before anything runs, so "
+        f"there is no lowering to reach for. Compare the element you mean "
+        f"(`xs[i] {bare} ys[i]`), reduce the pair to the number you actually "
+        f"want, or test membership with `in`")
+
+
+#: The name this gate had while it covered only the four ordering operators.
+#: A module attribute rather than a second function, so the two backends, the
+#: corpus and the existing callers keep one spelling: a second entry point
+#: would be the parallel implementation `CLAUDE.md` rules out, and its name
+#: would go on describing four operators out of fourteen.
+container_relational_refusal = container_operator_refusal
+
+
+def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
+    """True when `x OP= y` has a CONTAINER on either side, so it is `x = x OP y`.
+
+    The one question an augmented assignment asks that `_emit_binop` does not
+    already ask, and it is asked for the same reason the two backends share
+    `string_binary_refusal`: `x += y` is a SECOND emitter, so every fact
+    `_emit_binop` knows about `x + y` has to be re-established here or the two
+    spellings of one operator answer differently.
+
+    Measured on this tree, both backends, for `a = [1, 2]`:
+
+    | written | this path | CPython |
+    |---|---|---|
+    | `a + [3]` | 3, both backends | 3 |
+    | `a += [3]` | **0 on arm64, SIGSEGV on x86-64** | 3 |
+    | `a = a * 3` | 3, both backends | 3 |
+    | `a *= 3` | **SIGSEGV on both** | 3 |
+    | `s = {1, 2}; s \| {3}` | 3 on arm64, refused on x86-64 | 3 |
+    | `s \|= {3}` | **1 on arm64, 0 on x86-64** | 3 |
+
+    which is the whole of it: the binary form is right where it is lowered at
+    all, and the augmented form reached the integer ALU holding the receiver's
+    ADDRESS.  So the fix is not a new lowering but a DESUGARING — route the
+    augmented form through the binary emitter and store what comes back, which
+    is what `_emit_binop`'s caller already does for the plain form.  That is why
+    this predicate asks about KINDS and lets both backends do the same routing
+    rather than each growing its own copy of `_emit_list_concat`.
+
+    The operators with no container lowering are already refused by the time a
+    caller gets here, because `string_binary_refusal` asks
+    `container_operator_refusal` with the AUGMENTED SPELLING and this module's
+    `_bare_operator` strips the `=` — so `s -= {2}` and `s &= {2}` stop at that
+    gate rather than arriving here as a subtraction of two addresses.
+    """
+    return (container_operand_is_blob(target_kind)
+            or container_operand_is_blob(value_kind))
 
 
 def _word_from_an_unannotated_call(fn, operand, untyped_callee) -> bool:

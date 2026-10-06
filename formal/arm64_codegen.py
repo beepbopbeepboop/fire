@@ -2402,6 +2402,21 @@ dylib_exports: list = None, globals_base: int = None,
                     f"unsupported augmented operator {stmt.op!r} "
                     f"(formal arm64 path supports "
                     f"{' '.join(M.AUG_OPS)})")
+            # `a += [3]` IS `a = a + [3]`, and the binary form is already
+            # lowered, so this desugars onto it rather than growing a second
+            # copy of the concat. Asked AFTER the shifts and the divide-ops
+            # above have returned, so what reaches it is the pure-ALU set, and
+            # the operators with no container lowering have already been
+            # refused by the shared gate. `model.aug_assign_operands_are_blobs`
+            # is the one question and both backends ask it; the measurements
+            # that make it necessary are in that function's docstring.
+            if M.aug_assign_operands_are_blobs(
+                    self._expr_str_kind(stmt.target),
+                    self._expr_str_kind(stmt.value)):
+                self._emit_binop(F.BinaryOp(op=op, left=stmt.target,
+                                            right=stmt.value))
+                self._store_var(name, 0)
+                return
             if op in M.AUG_DIV_OPS or op == "**":
                 # Same lowering as the binary form (UDIV/SDIV, or DIV+MSUB
                 # for `%`, with the divide-by-zero exit; the `**` unroller for
