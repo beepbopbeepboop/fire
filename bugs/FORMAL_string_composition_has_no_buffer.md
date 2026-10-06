@@ -3,6 +3,9 @@
 **Area:** FORMAL (both backends; the refusal is shared and lives in
 `formal/model.py`, asked from `formal/build.py`'s one pipeline)
 · **Status:** OPEN — the buffer is still a buffer, and §7.1 is still §7.1.
+**§7.0's blocking question is ANSWERED as of 2026-10-05 (`work/formal54-docs`) —
+see §7.0a — so what remains is emitter work rather than a value-model decision,
+and no file moves.**
 **What landed 2026-10-05 (`work/formal25-5-r2`) is the half of this document
 that is decidable without a buffer, and it includes a measured CORRECTION to
 §6 and §7.3 (below).** Three defects in the refusal itself, all of which would
@@ -266,37 +269,64 @@ answer and no lifetime question, measure it, and only then decide whether the
 general case is worth a project:
 
 0. **WHAT IS NOW MEASURED, and it changes step 1's arithmetic (2026-10-05).**
-   `formal/model.py::interpolated_literal_segments` reads every interpolated
-   literal in the corpus into its chunks and its fields, so step 1's bound is no
-   longer something to work out per file — the refusal prints it, and the census
-   prints the shape of the whole corpus:
+    `formal/model.py::interpolated_literal_segments` reads every interpolated
+    literal in the corpus into its chunks and its fields, so step 1's bound is no
+    longer something to work out per file — the refusal prints it, and the census
+    prints the shape of the whole corpus:
 
-   ```
-   734 files, 14451 literals in 320 files; 6625 one-field, 452 spec(s),
-   1967 conversion(s); 0 file(s) wholly foldable; 40 t-string(s) in 21 file(s)
-   ```
+    ```
+    734 files, 14451 literals in 320 files; 6625 one-field, 452 spec(s),
+    1967 conversion(s); 0 file(s) wholly foldable; 40 t-string(s) in 21 file(s)
+    ```
 
-   **6625 literals have exactly ONE field**, which is step 1's shape and more
-   than 25x the 114 files the whole row is worth — so the row's own §2
-   concentration measurement (38 of 63 files in two copy-pasted helpers) says
-   nothing about where step 1's arithmetic is cheapest, and this census does.
-   **452 carry a `:spec` and 1967 a `!conv`**, and §7.3 (now corrected) is why
-   those two are separate obligations rather than part of the count.
+    **6625 literals have exactly ONE field**, which is step 1's shape and more
+    than 25x the 114 files the whole row is worth — so the row's own §2
+    concentration measurement (38 of 63 files in two copy-pasted helpers) says
+    nothing about where step 1's arithmetic is cheapest, and this census does.
+    **452 carry a `:spec` and 1967 a `!conv`**, and §7.3 (now corrected) is why
+    those two are separate obligations rather than part of the count.
 
-   **And the one thing step 1 assumes that is NOT free, measured here:** a
-   composed value is a FRAME ADDRESS, because it is the address of a buffer in
-   the frame that composed it — so "the result consumed by the next call in the
-   same function" is exactly the hand-off the frame-address rules govern
-   (`formal/model.py`'s "Where a frame ADDRESS may be handed off, and why not":
-   a builtin or C function takes the object BYTES and a frame address is
-   neither, so that is a **category error** rather than a missing layout).
-   **That is a value-model decision and not a patch**, and it is the same
-   dependency §8 names for `FORMAL_module_state_no_storage.md` — which is why
-   this section did not land step 1 with the input it now has. What step 1
-   needs decided first is: *is a composed string a frame address this path may
-   pass, and to whom?* Both questions have an answer somewhere in
-   `FRAME_ADDRESS_CTORS` and `frame_holder_disagreement_refusal`; neither has
-   been asked about a composed buffer.
+    **And the one thing step 1 assumes that is NOT free, measured here:** a
+    composed value is a FRAME ADDRESS, because it is the address of a buffer in
+    the frame that composed it — so "the result consumed by the next call in the
+    same function" is exactly the hand-off the frame-address rules govern
+    (`formal/model.py`'s "Where a frame ADDRESS may be handed off, and why not":
+    a builtin or C function takes the object BYTES and a frame address is
+    neither, so that is a **category error** rather than a missing layout).
+    **That is a value-model decision and not a patch**, and it is the same
+    dependency §8 names for `FORMAL_module_state_no_storage.md` — which is why
+    this section did not land step 1 with the input it now has. What step 1
+    needs decided first is: *is a composed string a frame address this path may
+    pass, and to whom?* Both questions have an answer somewhere in
+    `FRAME_ADDRESS_CTORS` and `frame_holder_disagreement_refusal`; neither has
+    been asked about a composed buffer.
+  0a. **STEP 1'S BLOCKING QUESTION IS ANSWERED, and the answer is YES for the
+  frame-local case (2026-10-05, `work/formal54-docs`) — so what is left is
+  emitter work, not a decision.** The three tables this document defers to say
+  the following, and they say it without being asked:
+
+  | the question | what the tree answers | where |
+  |---|---|---|
+  | is a string a `char *`? | yes, and `String` / `str` / `StringLiteral` / `StringSlice` are the `STRING_TYPE_CTORS` | `formal/model.py:25115-25124` |
+  | may a `char *` be handed to a callee? | **yes** — those four are `IDENTITY_TYPE_CTORS`, and the one that is NOT a `FRAME_ADDRESS_CTOR` is `Pointer`, precisely because "handing printf an address to dereference" is the mistake the split exists to catch | `formal/model.py:26145`, `FRAME_ADDRESS_CTORS = Pointer/UnsafePointer/CPointer` |
+  | so what stops a composed buffer? | **lifetime, not category.** The blocker is that the buffer is in the frame of the function that composed it, and the frame is reclaimed on return | `LENGTH_DEPENDENT_METHODS`' `strip`/`upper` texts, which name the write and the read-only `__TEXT` as the two halves |
+
+  **So a composed buffer is representable and is the RIGHT thing to pass** — the
+  tree's own tables already say a `char *` is passable and that the only thing a
+  bare `char *` cannot do is be written. The decision §7.0 was waiting on reduces
+  to a per-use-site liveness question ("is this consumed before the composing
+  frame returns?"), which is decidable where the composition is, and step 1's
+  stated scope — `f"--backend={backend}"` and `f'ledger-{name}.json'`, consumed
+  by the next call in the same function — is exactly the case that answers yes.
+
+  **What this does NOT do, and it is the whole of what is left:** nothing is
+  lowered and no file moves. §7.1's three obligations stand — the
+  integer-to-text conversion does not exist (`NOT_LOWERED_BUILTINS`'s own words
+  for `hex` and `chr`), there is no `memcpy` of a literal chunk into scratch, and
+  a composed string must carry a LENGTH and cannot contain a NUL — so step 1 is
+  still **two new pieces of emitter code on each of the two backends** before it
+  is one, plus the proof obligations for every program that gains an f-string.
+  **This section removes the blocker, not the work.**
 1. **A buffer with a compile-time-known bound, in the frame scratch, for a value
    that does not escape the frame.** `f"--backend={backend}"` and
    `f'ledger-{name}.json'` are the shape: literal chunk, one integer-shaped
