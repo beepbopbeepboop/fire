@@ -153,6 +153,141 @@ def kind_table_checks():
         M.publish_exception_kinds(saved)
 
 
+def handler_arm_matching_checks():
+    """§4's SUPERCLASS question, answered and pinned. No build, no Lean.
+
+    **`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 1 is
+    "decide §4's two design questions", and this is the first one with an
+    answer.** `handler_arm_matches` is CPython's own question ("does this arm
+    catch that class?") and `handler_arm_kinds` is the dispatch's ("which
+    integers must it compare?"), and the two are separate functions because they
+    have different answers for the same inputs — `except IOError:` is decidable
+    as a source question about `BlockingIOError` and *also* decidable as a
+    compare list, while `except Mine:` for a `class Mine(External)` is neither.
+
+    **The oracle here is CPython's `issubclass`, over EVERY ordered pair of the
+    71 names** — 5041 comparisons — rather than a hand-picked table of the ones
+    that matter. A matcher that gets `ArithmeticError`/`ZeroDivisionError` right
+    and the two aliases wrong is a matcher that has been spot-checked, and the
+    aliases are the case that bit the first version: `EnvironmentError` and
+    `IOError` ARE `OSError`, so a NAME hierarchy answers False for all 18 of
+    `OSError`'s subclasses under either. Measured: 36 disagreements before
+    `CPYTHON_EXCEPTION_ALIAS`, 0 after.
+    """
+    import builtins
+    import formal.model as M
+
+    names = sorted(M.CPYTHON_EXCEPTION_BASES)
+    table = M.exception_kind_table()
+    classes = {n: getattr(builtins, n) for n in names}
+
+    check(set(M.CPYTHON_EXCEPTION_BASE) == set(names),
+          "hierarchy: the table covers exactly the classes CPython has",
+          f"{sorted(set(M.CPYTHON_EXCEPTION_BASE) ^ set(names))[:5]}")
+    check(all(M.CPYTHON_EXCEPTION_BASE[n]
+              == tuple(b.__name__ for b in classes[n].__bases__
+                       if issubclass(b, BaseException))
+              for n in names),
+          "hierarchy: every base is the interpreter's, not a hand-kept list",
+          "a base here that CPython disagrees with makes every arm below it "
+          "answer the wrong way")
+    flat_bases = {b for bases in M.CPYTHON_EXCEPTION_BASE.values()
+                  for b in bases}
+    check(flat_bases <= set(names),
+          "hierarchy: a base is either a class in the table or nothing",
+          f"{sorted(flat_bases - set(names))[:5]}")
+
+    disagree = [(a, f) for a in names for f in names
+                if M.handler_arm_matches(a, f, table)
+                is not issubclass(classes[f], classes[a])]
+    check(not disagree,
+          "hierarchy: every arm/class pair agrees with CPython's issubclass",
+          f"{len(disagree)} of {len(names) ** 2} disagree, first {disagree[:3]}")
+
+    wrong_list = [a for a in names
+                  if M.handler_arm_kinds(a, table)
+                  != frozenset(table[f] for f in names
+                               if issubclass(classes[f], classes[a]))]
+    check(not wrong_list,
+          "hierarchy: every arm's COMPARE LIST is its CPython descendant set",
+          f"{len(wrong_list)} arms differ, first {wrong_list[:3]}; the list is "
+          f"what the dispatch emits, and an extra kind is an arm that takes a "
+          f"class it should not")
+
+    # The two shapes §4 says are the ones the integer could not be left to get
+    # wrong, because they are the commonest arms in real code.
+    check(M.handler_arm_matches("Exception", "SystemExit", table) is False
+          and len(M.handler_arm_kinds("Exception", table)) == 66,
+          "hierarchy: `except Exception:` misses the four direct BaseException "
+          "subclasses, and says so with a list",
+          f"{M.handler_arm_matches('Exception', 'SystemExit', table)} / "
+          f"{len(M.handler_arm_kinds('Exception', table) or ())}")
+    check(len(M.handler_arm_kinds("BaseException", table)) == len(names),
+          "hierarchy: `except BaseException:` compares against every kind",
+          f"{len(M.handler_arm_kinds('BaseException', table) or ())} against "
+          f"{len(names)} classes — this is the arm an integer word makes correct "
+          f"for free, which is why §4's answer is not a pointer")
+
+    check(M.handler_arm_matches("IOError", "BlockingIOError", table) is True,
+          "hierarchy: `IOError` IS `OSError` in CPython, so it catches its "
+          "subclasses",
+          "the two names are one class object; a name hierarchy that does not "
+          "canonicalise answers False for all 18 of them")
+    check(M.handler_arm_kinds("IOError", table) == M.handler_arm_kinds("OSError",
+                                                                      table),
+          "hierarchy: an alias arm and its canonical arm have the same list")
+
+    # ── the three refusals, and each one has to be UNDECIDABLE rather than wrong
+    class Decl:
+        def __init__(self, name, bases):
+            self.name = name
+            self.bases = bases
+
+    one = {"Mine": Decl("Mine", ["ValueError"])}
+    k1 = M.exception_kind_table(one)
+    check(M.handler_arm_matches("Exception", "Mine", k1, one) is True
+          and M.handler_arm_kinds("Mine", k1, one) is not None,
+          "hierarchy: a DECLARED class with no declared subclass is decidable",
+          "the common `class MyErr(ValueError)` shape must work; refusing it "
+          "would refuse most real code")
+    check(k1["ValueError"] == table["ValueError"],
+          "hierarchy: a declared class does not move a builtin's kind",
+          f"{k1['ValueError']} against {table['ValueError']} — the property the "
+          f"two disjoint ranges exist for")
+
+    two = {"Mine": Decl("Mine", ["ValueError"]),
+           "MineSub": Decl("MineSub", ["Mine"])}
+    k2 = M.exception_kind_table(two)
+    check(M.handler_arm_kinds("Mine", k2, two) is None
+          and M.handler_arm_matches("Mine", "MineSub", k2, two) is True,
+          "hierarchy: a DECLARED SUBCLASS refuses the compare list and is still "
+          "a source match",
+          "the list is numbered in the declared range, which a dylib and its "
+          "caller number differently, so the list would mean something else in "
+          "the other image; the source question needs no numbering")
+
+    unmodelled = {"Mine": Decl("Mine", ["External"])}
+    k3 = M.exception_kind_table(unmodelled)
+    check(M.handler_arm_kinds("Mine", k3, unmodelled) is None
+          and M.handler_arm_matches("Exception", "Mine", k3, unmodelled) is None,
+          "hierarchy: an UNMODELLED base is undecidable in both directions",
+          "nothing here knows whether `External` is an Exception, so `False` "
+          "would drop an exception CPython catches and a list would make "
+          "`except Exception:` silently stop catching it")
+
+    cyclic = {"A": Decl("A", ["B"]), "B": Decl("B", ["A"])}
+    chain, unresolved = M.exception_base_chain("A", cyclic)
+    check(chain == ("A", "B") and not unresolved,
+          "hierarchy: a cyclic declaration terminates",
+          f"chain {chain} / unresolved {unresolved}; a hang in a matcher is "
+          f"worse than an answer about a prefix of the chain")
+
+    check(M.handler_arm_kinds("NoSuchError", table) is None,
+          "hierarchy: a name no image can name has NO compare list",
+          "an empty list is the answer to nothing: every class is its own "
+          "subclass, so a dispatch comparing against it never takes an arm")
+
+
 def kind_table_in_info_checks(tmpdir):
     """Both backends' `info` must carry the SAME published table, under one key.
 
@@ -966,6 +1101,7 @@ def main():
             run_cross_module_answered(name, files, needle, tmpdir,
                                       args.verbose)
         kind_table_checks()
+        handler_arm_matching_checks()
         if not args.cases:
             kind_table_in_info_checks(tmpdir)
 
