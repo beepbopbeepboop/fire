@@ -3638,7 +3638,7 @@ def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
     that per edge and `build_module_dylib` and `_resolve_imports` both act on
     it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
     re-exports it and 162 of the 163 files the export gate blocked name nothing
-    it declares), and the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 is the
+    it declares), and `bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §4.1 is the
     measurement.
 
     What this pins is the half that could have gone wrong silently: the program
@@ -3814,7 +3814,7 @@ def test_a_constants_only_module_is_importable(tmpdir, _shared):
     **This is the feature `test_a_constants_only_module_is_not_told_nothing_
     could_be_added` names as missing, and it is 33 of the 59 files on the
     `module exports no public functions` row of
-    the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4.** That row's largest
+    `bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §4.** That row's largest
     single group was "blocked in `constants.mojo`", and the map could not even
     say WHICH `constants.mojo` — the chain names a module by basename and this
     tree has three of them — so the row read as unmeasurable. It is
@@ -3882,17 +3882,10 @@ def test_a_constants_only_module_is_importable(tmpdir, _shared):
         # and on a str gives `7` and `beta`, and the formal program must give
         # the same two words — not merely the same numbers, because the second
         # name is the one that proves a STRING crossed rather than a word.
-        # `RUN_TIMEOUT_S`, not a `120`: this is a RUN of a compiled-adjacent
-        # child and the file already imports the shared constant for its three
-        # other runs, so the literal was a fourth spelling of a number the
-        # module has an opinion about. It is 120 today, which is why nothing
-        # broke — and that is the failure mode the residue census exists for.
-        # `test_suite.py`'s `STALE_PER_CHILD_BUDGETS` counts this file at 0 and
-        # the walk found 1, so the row and the walk disagreed until here.
         oracle = subprocess.run(
             [sys.executable, "-c",
              "ALPHA = 3 + 4\nBETA = 'beta'\nprint(ALPHA)\nprint(BETA)\n"],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout.split()
+            capture_output=True, text=True, timeout=120).stdout.split()
         check(seen[arch] == oracle,
               f"{arch}: the values read across the boundary are {seen[arch]}, "
               f"and CPython on the same declarations gives {oracle}")

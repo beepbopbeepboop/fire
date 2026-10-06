@@ -789,16 +789,9 @@ _MASK = (1 << 64) - 1
 # `bv_decide` is DELIBERATELY absent.  It decides `BitVec` goals; `UInt64` is
 # `Lean.UInt64`, a `Fin (2^64)`, which is a STRUCTURE and not a bitvector, so on
 # a goal in this module it is a category error rather than a weaker tactic --
-# and it is a MEASURED one: `bv_decide` abstracts `arm64_reg 0 (S14 (start n))`
-# as an opaque variable and reports a spurious counterexample, because
-# `Arm64State` is a structure and not a bitvector.  Measured on the dylib
-# export contract `hreg`, which is where the diagnosis and the fix both live
-# (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
-# memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
-# ever wanted, THIS is where it goes, and the note travels with it.
+# the same mistake `bugs/FORMAL_contract_work_handoff.md` §3 records as having
+# produced a spurious counterexample on `arm64_reg`.  If a clause over `BitVec`
+# is ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`
 # takes the first rung that CLOSES it; the last rung is `omega`, whose failure

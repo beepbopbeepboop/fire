@@ -218,17 +218,10 @@ The construction-receiver doc (`formal13-4`'s, `Box().get()`) quoted the OLD
 sentence twice in its Status and said the advice it gives was the shape that
 crashes; both of those were right, and on 2026-10-04 the construct stopped being
 refused at all — the nested frame is now brought up at a construction site
-(`4af77b16`), so the lift runs. **The residual gap it named is closed as of
-2026-10-05** (`work/formal35-1`, commit 4086b233): a frame bring-up now RUNS the
-nested struct's constructor — `formal/model.py::nested_frame_constructor_stores`,
-asked by both backends' `_emit_frame_bringup` — so `Box().get()` over an `Opt`
-with an `__init__` answers 41 where it answered 0. `Box().get()` is an ORACLE
-row in `test_formal_receiver_position.py` now
-(`a_method_call_on_a_construction_receiver_whose_nested_constructor_runs`), and
-the refusal this paragraph warned about survives only for the shape a bring-up
-genuinely cannot account for: a nested constructor that REQUIRES parameters,
-since a bring-up is not a call and has no arguments to supply them. The message
-quoted below still does not exist, and the current one names the REPRESENTATION
+(`4af77b16`), so the lift runs and the residual gap is a nested struct's
+`__init__` not being run by that bring-up
+(`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`). The
+message it quotes still does not exist, and the current one names the REPRESENTATION
 (`… because a CONSTRUCTION is not a value this path can pass as a receiver: the
 struct is named, and a one-word struct's fields live in a frame that the
 construction in an argument position never builds`) instead of asking the reader

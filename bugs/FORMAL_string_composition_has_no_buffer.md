@@ -375,4 +375,4 @@ exported slot: a symbol kind, a relocation the loader honours, and a lifetime
 story in the proof) that nobody holds. The instrument rows this branch added are
 in `tools/formal_sweep.py::_REFUSAL_FAMILIES` and
 `tools/formal_sweep_causes.py::CAUSES`; neither file is claimed. The map for this
-round is the `b11` round of `bugs/FORMAL_sweep_work_map.md`.
+round is `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md`.

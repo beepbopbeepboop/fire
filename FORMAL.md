@@ -955,9 +955,9 @@ Stated so no reader infers otherwise.
   several hundred files, and `CLAUDE.md`'s own rule is the reason they are gone:
   a tally is not a property of the tree, and a file that states one goes stale
   underneath a change made in none of the files that state it. The current
-  census lives in `bugs/FORMAL_sweep_work_map.md` §1, which supersedes every
-  per-round map this tree grew — and a fresh one is
-  `python3 tools/formal_sweep.py`. Read the headline there.
+  census lives in the sweep work map — `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md`
+  is the latest — and a fresh one is `python3 tools/formal_sweep.py`. Read the
+  headline there.
 
   What survives from the old paragraph is the lesson, which is the part that was
   never a number: **a coverage number is only as good as the classification under

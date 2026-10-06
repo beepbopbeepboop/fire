@@ -16,7 +16,7 @@ of any kind and was refused by the dylib export gate with
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either".  That refusal is correct about the file and it is also
 the second wall behind the 165-file row in
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
+`bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1: past every codegen refusal
 in `binary_heap.mojo`, the module-dylib build still failed there.
 
 THE SHAPE OF THE ANSWER, and why it is a generated source file rather than a

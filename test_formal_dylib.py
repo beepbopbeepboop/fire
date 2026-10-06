@@ -1380,7 +1380,7 @@ NO_API_SHAPES = [
     # CONSTRUCTION, `fold_module_value` has no arm for it, so there is no value
     # to publish and no symbol either — and that is `std/sys/_io.mojo`, which
     # is 23 of the 59 files on the row
-    # (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    # (`bugs/FORMAL_sweep_work_map_2026-10-05_b13.md` §4).
     ("constants only, and no value this build can fold",
      "comptime stdin = FileDescriptor(0)\ncomptime stdout = FileDescriptor(1)\n",
      "no function and no type"),

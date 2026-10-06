@@ -893,105 +893,6 @@ def mlir_operand_clause(operand) -> str:
 MLIR_RESULT_TYPE_ATTRS = ("_type",)
 
 
-# What each word-to-word CAST would become if this path answered it, keyed on
-# the whole dialect name.  The shape of the answer is the claim, and it is
-# checked by a row that BUILDS AND RUNS each one on both architectures rather
-# than by reading this table — a cast whose rewrite is subtly not the identity
-# is a wrong answer wearing a lowering, which is the outcome `MLIR_WORD_ARITH_OPS`
-# § Correction is entirely about and the reason that table was re-derived when
-# the floor correction landed.
-#
-# **`pop.cast_to_builtin[_type=index](x)` is the IDENTITY and is the one the
-# corpus reaches**, read out of the stdlib's own spelling rather than inferred
-# from the name: `std/builtin/simd_length.mojo:76` is
-# `pop.cast_to_builtin[_type=__mlir_type.index](value._mlir_value)` on an
-# `Int`'s dialect value, and an `index` is pointer-sized and signed, so the
-# cast converts one word to the same word. It is NOT in `MLIR_WORD_ARITH_OPS`
-# because that table rewrites OPERATIONS over two operands into a binary
-# expression and this one is a unary identity over one — a different shape, in a
-# different pass (`formal/build.py::_lower_dialect_casts`, beside
-# `_lower_dialect_arith` and for the same reason: a construct both backends would
-# otherwise have to be taught separately).
-#
-# The other two casts are here as NAMES THIS PATH DECLINES, each with the reason
-# it is a refusal and not a rewrite, and neither may be widened by reading the
-# table: `pop.cast_from_builtin` converts a builtin value INTO a dialect one,
-# which for `index` is the identity in the other direction and for every other
-# type is the very conversion this path has no representation for; and a
-# `builtin.unrealized_conversion_cast` names a conversion the SOURCE does not
-# spell out at all, which is the §Correction argument in its purest form — a name
-# that does not say what it computes.
-MLIR_WORD_CAST_OPS = {
-    "pop.cast_to_builtin": (
-        " It is the IDENTITY over a word: `pop.cast_to_builtin[_type="
-        "__mlir_type.index](x)` converts one `index` to the same `index`, so the "
-        "rewrite is the operand itself with no instruction selection at all. "
-        "`formal/build.py::_lower_dialect_casts` does it in the shared pipeline, "
-        "so both architectures get it by construction rather than by agreeing."),
-    "pop.cast_from_builtin": (
-        " It converts a builtin value INTO a dialect one, which is the "
-        "identity in the other direction for `__mlir_type.index` and a "
-        "conversion this path has no representation for at every other type — so "
-        "the operation, not the representation, is what is missing here."),
-    "builtin.unrealized_conversion_cast": (
-        " It names a conversion the source does not spell out at all, so there "
-        "is nothing in the unit that says what it computes: which is the §"
-        "Correction argument about a table keyed on the operation's NAME, and "
-        "the reason no rewrite is offered for it."),
-}
-
-
-# **THE ONE ROW OF `MLIR_WORD_CAST_OPS` THIS PATH ANSWERS**, and it is one name
-# rather than three because the other two are documented DECLINES and a decline
-# that a rewriting pass matches is a wrong answer: the table is the refusal's
-# vocabulary — "here is what this operation would become, and here is why we do
-# not" — while the rewrite is the set of operations whose second half has
-# happened. Naming them in one table and asking membership of it would rewrite
-# `builtin.unrealized_conversion_cast[_type=__mlir_type.index](x)` to `x`,
-# which is a conversion this path has no source for, and it did: measured on
-# this tree, the first version of `_lower_dialect_casts` gated on
-# `MLIR_WORD_CAST_OPS` and built that program on both architectures, where the
-# whole point of the row is that it must not.
-#
-# So the answerable set is a name of its own and the table's docstring says why
-# it is separate — the same agree-or-refuse discipline every other
-# "which of these does this path handle" question in this file keeps, and the
-# same one `MLIR_WORD_ARITH_OPS` keeps for a different reason (that table is
-# keyed on the OPERATION because the operand type settles word-or-vector, and
-# this one is keyed on the operation because the OPERATION settles whether there
-# is a conversion at all).
-MLIR_WORD_CAST_LOWERED = ("pop.cast_to_builtin",)
-
-
-def mlir_dialect_cast_advice(op: str, bracket, operand) -> str:
-    """What this cast would become, for a site whose operand type IS declared.
-
-    ONE reader for the refusal text and the lowering table, and the reason is
-    the same one every other shared reader in this file carries: two copies of
-    "which casts this path answers" are two places for them to disagree, and the
-    disagreement would be a refusal telling a reader that an operation is
-    declined while the pass rewrites it — or the reverse, which is worse, because
-    it is a wrong answer.
-
-    A name in `MLIR_WORD_CAST_OPS` that this site does NOT match (a bracket
-    carrying something other than a `_type=`, or a result type that is not a
-    word) gets the generic half and not the row, because the row is a claim about
-    a specific rewriting and this site is not that shape. Only the two gate
-    conditions `_lower_dialect_casts` itself applies are asked here, so the
-    message and the rewrite cannot disagree about which sites are in scope.
-    """
-    row = MLIR_WORD_CAST_OPS.get(op)
-    if row is None:
-        return (" No table entry names it, and an operation this path does not "
-                "recognise is declined by name rather than guessed at.")
-    if not isinstance(bracket, F.SubscriptExpr) \
-            or mlir_type_kind(mlir_bracket_result_type(bracket)) != "word":
-        return (" This site is not the shape its row describes — the rewrite "
-                "needs a bracket naming a word result type — so it is declined "
-                "rather than rewritten.")
-    return row
-
-
 def mlir_bracket_result_type(bracket):
     """The SPELLING of the result type in a dialect bracket, or None.
 
@@ -1251,8 +1152,7 @@ def mlir_dialect_op_refusal(op: str, operand: str = None,
         # follows are four statements about the same fact, and asking
         # `mlir_type_kind` four times is four places for them to disagree.
         rkind = mlir_type_kind(mlir_bracket_result_type(bracket))
-        okind = mlir_type_kind(operand)
-        if rkind == "word" and okind is None:
+        if rkind == "word":
             tail = (" What is therefore missing is the OPERAND's DECLARED type, "
                     "and nothing in this unit states one: a DECLARATION is "
                     "what this path reads, and a field read off a struct the "
@@ -1262,38 +1162,6 @@ def mlir_dialect_op_refusal(op: str, operand: str = None,
                     "is nameable and its result is one word, so what is "
                     "missing is a fact about the operand rather than a "
                     "representation of the result.")
-        elif rkind == "word":
-            # **The operand's type IS established here, and the sentence above
-            # would be FALSE of it.** `mlir_operand_clause`, appended right
-            # after this one, then says "Its operand is declared
-            # '__mlir_type.index'", so the two halves of one message
-            # contradicted each other:
-            #
-            #   … What is therefore missing is the OPERAND's DECLARED type,
-            #   and nothing in this unit states one: … Its operand is declared
-            #   '__mlir_type.index', which is ONE 64-bit word here …
-            #
-            # Measured on a program this unit DOES declare the field for —
-            # `struct S: var _mlir_value: __mlir_type.index`, whose
-            # `pop.cast_to_builtin[_type=__mlir_type.index](self._mlir_value)`
-            # is a `_self`-spelled operand the reader resolves through
-            # `MLIR_SELF_TYPE_NAMES` (`mlir_operand_declared_type`). Both
-            # architectures, byte-identical. It is the same disease this
-            # document is about, one branch over: a diagnostic that cannot see
-            # a fact it now has, and here it cannot see it while the very next
-            # sentence in the same string states it.
-            #
-            # So the missing piece is the OPERATION, and it is named rather
-            # than waved at: `mlir_dialect_cast_advice` is the reader that says
-            # what each operation would become, and it is asked here so the
-            # refusal and the table cannot disagree about which operations are
-            # answerable — which is the reason it is one function rather than a
-            # sentence written out.
-            tail = (" The RESULT is one word and the OPERAND is a word too, so "
-                    "what is missing is neither a representation nor a "
-                    "declaration: it is this OPERATION, which is not one of the "
-                    "spellings this path rewrites."
-                    + mlir_dialect_cast_advice(op, bracket, operand))
         elif rkind == "vector":
             tail = (" What is therefore missing is a REPRESENTATION of an "
                     "N-lane vector — the buffer those lanes would live in, "
@@ -4391,29 +4259,7 @@ def _cfg_block_defs(stmts) -> tuple:
 
     `ExprStmt` and `Pass` are here as no-ops deliberately — they end a block
     for the reader's benefit, not the analysis's, and treating an unrecognised
-    statement as a definition would put a name in `defs` that nothing stores.
-
-    **`VarDecl` DEFINES ITS NAME ONLY WHEN IT HAS AN INITIALISER**, and the
-    `getattr(s, "value", None) is not None` guard below is the whole of that
-    rule. `var a: Int` with no `=` is a DECLARATION and not an assignment: it
-    gives `a` a home and no value, so treating it as a definition told
-    `read_before_store` that `a` was stored before any later read of it. The
-    cost of that was not a wrong refusal but a MISSING one —
-
-        def main(n: Int) -> Int:
-            var a: Int
-            printf("%d\\n", a)
-            return 0
-
-    builds, runs, exits 0, and prints whatever the register allocator left in
-    `a`'s home (measured 2026-10-05: 1709223448 on arm64, 306062552 on x86-64),
-    where CPython raises `UnboundLocalError`. It is found by
-    `tools/formal_memcheck.py`'s stack/register poison as
-    NONDETERMINISTIC — two plain runs of a straight-line program disagreeing is
-    only ever state nobody wrote — and `formal/memcheck/local_uninitialised.mojo`
-    is the row. `_definitely_stored`'s `VarDecl` arm carries the identical
-    guard, because a graph and a walk that disagree about one definition is a
-    refusal that appears and disappears with which one ran."""
+    statement as a definition would put a name in `defs` that nothing stores."""
     defs: set = set()
     kills: set = set()
     for s in (stmts or []):
@@ -4422,7 +4268,7 @@ def _cfg_block_defs(stmts) -> tuple:
             defs |= _store_names(getattr(s, "target", None))
         elif kind == "VarDecl":
             n = getattr(s, "name", None)
-            if isinstance(n, str) and getattr(s, "value", None) is not None:
+            if isinstance(n, str):
                 defs.add(n)
         elif kind == "MultiAssignStmt":
             for t in (getattr(s, "targets", None) or []):
@@ -6336,14 +6182,7 @@ def read_before_store(fn, params: set = None, placed: set = None):
             if kind == "VarDecl":
                 walk_expr(getattr(s, "value", None), live)
                 n = getattr(s, "name", None)
-                # The same rule `_cfg_block_defs` states, and for the same
-                # reason: `var a: Int` has no `=`, so it stores nothing, and a
-                # fixpoint that counted it as a definition could not report the
-                # read that follows. One reader of "does this statement define
-                # its name" would be better than two, but the two live in
-                # different halves of this module and the guard is a sentence
-                # either way -- see `_cfg_block_defs`'s docstring.
-                if isinstance(n, str) and getattr(s, "value", None) is not None:
+                if isinstance(n, str):
                     live.add(n)
                 continue
             if kind == "MultiAssignStmt":
@@ -9548,42 +9387,7 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
             return ("a value this function bound to an integer on that "
                     "statement's own shape")
         return one_word_text(arg) if one_word_text is not None else None
-    # **A LOWERED STRING METHOD is evidence, and step 4's blanket refusal of a
-    # call's kind was FALSE of it.** The rule below declines a call because
-    # `kind_of` answers `INT_KIND` for a callee it does not know — "a word is an
-    # integer everywhere else" — and reading that DEFAULT as evidence would
-    # refuse every extern's result, `printf("%s", platform_name())` being the
-    # case it names. That reasoning is right and it does not reach this shape:
-    # `POINTER_BOUNDED_METHODS` records what each string method YIELDS, as its
-    # own table's comment insists ("the yield is what the classifier needs … a
-    # method whose result is misclassified poisons every use site after it, and
-    # the symptom is a wrong answer rather than a diagnostic"). `startswith`,
-    # `endswith`, `find` and `count` are recorded as `INT_KIND` for that reason,
-    # and that is a DECLARATION about the result rather than the unclassified-
-    # callee default step 4 is refusing.
-    #
-    # Measured, and it was a SIGSEGV rather than a wrong number, on both
-    # architectures from a green build:
-    #
-    #     def cat() -> String: return "qq"
-    #     printf("%s|", cat().startswith("q"))    ->  exit 139
-    #
-    # because `%s` walks bytes at address 0 or 1 looking for a NUL. The
-    # `printf("[%s]", 1 > 0)` control IS refused — step 5 covers a comparison,
-    # whose shape cannot be seeded by a default — so the refusal machinery was
-    # working and the one shape it declined was the one with the best evidence.
-    #
-    # **Both halves of the question are asked, and the receiver's kind is the
-    # gate for the same reason `_string_method_kind`'s own docstring gives**: a
-    # method on a receiver this build cannot call a `char *` proves nothing about
-    # its result, so `x.count(y)` on an unclassified `x` stays None rather than
-    # borrowing the string table's answer.
-    if isinstance(arg, F.CallExpr):
-        declared = _lowered_string_method_result(arg, vk, is_text)
-        if declared is not None:
-            return declared
-        return None
-    if vk is None:
+    if isinstance(arg, F.CallExpr) or vk is None:
         return None
     if vk.kind_of(arg) == INT_KIND:
         return ("an EXPRESSION whose own shape holds a number — a literal, an "
@@ -9591,47 +9395,6 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
                 "its operand's word — and not a name, so none of it came from "
                 "the default an unclassified name gets")
     return None
-
-
-def _lowered_string_method_result(call, vk, is_text):
-    """Evidence for `%s` about `call`, when `call` is a lowered string method.
-
-    The reader `printf_arg_text_evidence`'s step 4 delegates to, and it is a
-    function rather than inline code because the DECISION is about what a
-    method call denotes and there is more than one caller that needs to know —
-    `string_method_yields_string` asks the same table for a different question
-    (`STR_KIND` rather than `INT_KIND`) and the two must not come apart.
-
-    Two conditions and both are required:
-
-      * the method is in `POINTER_BOUNDED_METHODS`, which is the set this path
-        LOWERS — a method in `LENGTH_DEPENTENT_METHODS` is refused by name at
-        the emitter and never reaches a `printf`, so asking about its result
-        would be answering for a construct that was declined one step earlier;
-      * the receiver is text, asked through the emitter's flow-sensitive
-        `is_text` first and `ValueKinds` second. `startswith` on a `char *`
-        yields 0 or 1 and `startswith` on a word is not a call this path can make
-        at all, so the receiver is what makes the table's row true rather than
-        merely applicable.
-
-    Returns the evidence STRING for a method that yields a number and None for
-    one that yields text (a `char *` is text, which step 2 of the caller has
-    already established, so claiming otherwise here would double-refuse it) and
-    for every shape this does not cover.
-    """
-    func = getattr(call, "func", None)
-    if not isinstance(func, F.MemberExpr):
-        return None
-    entry = POINTER_BOUNDED_METHODS.get(func.member)
-    if entry is None or entry[1] != INT_KIND:
-        return None
-    if is_text is not None and is_text(func.obj):
-        pass
-    elif vk is None or vk.kind_of(func.obj) != STR_KIND:
-        return None
-    return (f"the result of `{spelled(call)}`, which is "
-            f"`{func.member}`, a lowered string method this path records as "
-            f"yielding a NUMBER")
 
 
 def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
@@ -12414,66 +12177,15 @@ def list_append_overflow_message(name: str, capacity: int) -> str:
     No `printf` on this path, so the name and the capacity are spelled into
     the text by the build rather than formatted at run time; `name` is the local
     the receiver resolved to, which is the only thing about the site this path
-    knows.
-
-    **The advice was a DEAD END and is rewritten, because a repair that does not
-    work is the same defect as a wrong answer with a better costume.** It used
-    to read "…or move the appends into a function of their own so the capacity
-    each one sees is its own", and the second half does not work:
-
-        def fill() -> List[Int]:
-            var ys = []
-            var i = 0
-            while i < 3:
-                ys.append(i)          # overflows HERE, not in main
-                i = i + 1
-            return ys
-
-    Measured on both architectures: the overflow moves into `fill` and fires with
-    the same capacity of 1, because the capacity is counted per FUNCTION and
-    moving the appends moves the loop with them. A reader who followed the
-    sentence arrived at the identical message with a different function's name on
-    it, which is the outcome this message exists to prevent — it is what
-    `refuse_none_comparisons`'s own docstring says about a fold that cannot
-    observe the difference.
-
-    **What the advice says now is the two spellings that DO work**, and both are
-    measured on both architectures rather than reasoned about:
-
-      * build the list with its elements at CONSTRUCTION time — a literal, or
-        three `append` SITES outside any loop, which is capacity 3 and computes
-        the same thing. The distinction the sentence has to make is SITES versus
-        EXECUTIONS, and `while i < 3: xs.append(i)` is one site run three times
-        while `xs.append(1); xs.append(2); xs.append(3)` is three sites run once
-        each — the same three elements and the same answer;
-      * a `for … in range(n)` loop, where the iteration count is a compile-time
-        constant, is COUNTED (`model.walk_stmt_trips`), so
-        `for i in range(3): xs.append(i)` has capacity 3 and does not overflow.
-        That is the one spelling in which a LOOP is the answer rather than the
-        cause, and it is worth naming because it is the shape a reader reaches
-        for first — a `while` with a literal bound and a `for … in range` over
-        the same bound differ here for a reason that is a property of the
-        language (`range` has a length this path can read) and not an accident
-        of the rewrite.
-
-    What does NOT work, and is therefore absent rather than mentioned: moving the
-    appends into another function (measured above), and lowering the capacity so
-    the overflow stops — which would be a wrong answer, since the elements past
-    the frame's reserve would be written over whatever else is there.
-    """
+    knows."""
     return (f"formal: list.append overflowed {name!r}: its capacity is "
             f"{capacity}, the number of append SITES in the function that "
             f"built it, and every EXECUTION of a site counts against it — so a "
             f"list built in a loop outgrows the room the frame reserved for it. "
-            f"There is no heap on this path, so the blob cannot grow. Two "
-            f"spellings compute the same list and fit: build it with its "
-            f"elements at construction time (three `append` SITES outside any "
-            f"loop is capacity 3, where one site in a loop is capacity 1 "
-            f"however many times it runs), or accumulate it in a "
-            f"`for … in range(n)` loop whose count is a compile-time constant, "
-            f"which is counted rather than capped at one. Moving the appends "
-            f"into a function of their own does NOT help: the capacity is "
-            f"counted per function, so the overflow follows the appends.")
+            f"There is no heap on this path, so the blob cannot grow. Build the "
+            f"list with the elements it needs at construction time, or move "
+            f"the appends into a function of their own so the capacity each "
+            f"one sees is its own.")
 
 
 def blob_growth_overflow_message(what: str, capacity: int) -> str:
@@ -12543,20 +12255,12 @@ def string_binary_refusal(op: str, left_kind, right_kind,
     `left`/`right` are the operand NODES, `fn` the function being emitted and
     `untyped_callee` the backend's "is this a Mojo callee with no declared
     return type".
-    Only `string_compare_word_refusal` below uses them — the other arms ask
+    Only `string_compare_word_refusal` below uses them — the other two arms ask
     about kinds and have no use for the syntax — and they are all OPTIONAL so
     that a caller which has none of them still gets the first two arms. Both
     backends pass all four at every comparison site, so the third arm cannot be
     reached from one site and missed from another: that is the failure this
     function exists to prevent, applied to itself.
-
-    Four arms in the order they are asked, and the order is the order of how
-    wrong each would be to get backwards: the untyped-CALL word compare first
-    (a `char *` against a `char *`), then `container_relational_refusal` (a blob
-    against a blob, where the word is an address), then the string table's three.
-    The middle arm is second because it is the only one whose operand is neither
-    a string nor a number, and putting it last would have it pre-empted by a
-    `string_concat_refusal` that does not apply to it.
     """
     if (left is not None and right is not None and fn is not None
             and untyped_callee is not None):
@@ -12564,97 +12268,11 @@ def string_binary_refusal(op: str, left_kind, right_kind,
             op, left_kind, right_kind, left, right, fn, untyped_callee)
         if word is not None:
             return word
-    blob = container_relational_refusal(op, left_kind, right_kind,
-                                        spelled_op)
-    if blob is not None:
-        return blob
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
             or string_arithmetic_refusal(op, left_kind, right_kind,
                                          spelled_op)
             or string_compare_number_refusal(op, left_kind, right_kind,
                                              left, right, spelled_op))
-
-
-def container_operand_is_blob(kind) -> bool:
-    """True when `kind` says the value is a list/tuple/set/dict BLOB.
-
-    One predicate, beside `is_list_kind` and for the reason that one is a
-    function rather than a `startswith`: the question "is this word a container
-    rather than a number" has three consumers now — this module's relational
-    refusal, the emitters' container recognition, and `print`'s own kind
-    question — and a name two of them spell differently is a program one of them
-    answers by address.
-    """
-    return is_list_kind(kind)
-
-
-def container_relational_refusal(op: str, left_kind, right_kind,
-                                 spelled_op: str | None = None) -> str | None:
-    """Why `a {op} b` must not be lowered when an operand is a BLOB, or None.
-
-    **The relational operators only, and the reason is a measured wrong answer
-    rather than a caution.** A blob on this path is a frame-allocated block, and
-    the word a name holding one carries is its ADDRESS; `<`, `<=`, `>` and `>=`
-    are therefore integer comparisons of two addresses, and the branch they take
-    is decided by where the allocator happened to put two blocks. Measured on
-    this tree, both architectures, `def main(): a = [9]; b = [1]; return len(b)
-    if b > a else 0` answered **1 where CPython answers 0** — and the number is
-    the ALLOCATION ORDER, not the elements: the same program with the two
-    literals the other way round (`a = [1, 2]; b = [3, 4]`) happens to agree,
-    because `[3, 4]` is the later block and therefore the higher address. That is
-    why it is a refusal rather than a warning, and why the two architectures
-    agreeing is no comfort: they agree because they lay the frame out the same
-    way, not because either of them compared an element. Same outcome class as
-    `_string_operand_refusal`'s `char *` row, which is the company this keeps.
-
-    **CPython's own answer is an ELEMENT-WISE lexicographic compare**, so there
-    is no spelling of this comparison that is right here and nothing to work
-    around: `xs < ys` means "the first index where they differ has a smaller
-    element in `xs`", and reading one element out of each blob and comparing
-    them is a loop with a per-element stride this path has to know at emit time.
-    That is a project, not a rewrite, so the refusal is the honest answer and
-    the message says what the source meant.
-
-    **The other operators are deliberately NOT here.** `+` concatenates two
-    lists, `|` unions two sets and `*` repeats one, and all three are real
-    lowerings on this path; `-`, `/`, `//`, `%` and `**` have no container
-    meaning in CPython either (`[1] - [2]` is a `TypeError` there), so a program
-    that spells one is already broken and the address arithmetic is not the
-    thing that makes it so. `==`/`!=` is `string_compare_word_refusal`'s and
-    `string_compare_number_refusal`'s subject and is left where it is. Only the
-    four operators that silently take a BRANCH are refused, which is the class
-    where a wrong answer is hardest to see.
-
-    A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` too, so
-    there is no correct program on the far side of this gate.
-    """
-    bare = _bare_operator(op, spelled_op)
-    if bare not in STRING_RELATIONAL_OPS:
-        return None
-    if not (container_operand_is_blob(left_kind)
-            or container_operand_is_blob(right_kind)):
-        return None
-    shown = spelled_op or bare
-    which = "the left operand" if container_operand_is_blob(left_kind) else (
-        "the right operand" if container_operand_is_blob(right_kind)
-        else "an operand")
-    return (
-        f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "
-        f"blob on this path is a fixed block of the frame with no header, so "
-        f"the word the name carries is the block's ADDRESS and `{shown}` is an "
-        f"integer comparison of two addresses — it builds, runs and takes a "
-        f"branch by where the allocator happened to put two blocks, and both "
-        f"backends lay the frame out the same way, so they agree on the wrong "
-        f"number rather than disagreeing. Measured on this tree, both backends: "
-        f"`a = [9]` and `b = [1]` then `len(b) if b > a else 0` answered 1 where "
-        f"CPython answers 0, and the same program with `a = [1, 2]` and "
-        f"`b = [3, 4]` agrees — the answer is the allocation order, not the "
-        f"elements. Python's `{shown}` on two sequences is an "
-        f"ELEMENT-WISE lexicographic compare — the first index where they "
-        f"differ, compared — and that needs a per-element stride this path has "
-        f"to know before anything runs, so there is no lowering to reach for. "
-        f"Compare the element you mean (`xs[i] < ys[i]`), or reduce the pair to "
-        f"the number you actually want and compare that")
 
 
 def _word_from_an_unannotated_call(fn, operand, untyped_callee) -> bool:
@@ -14179,21 +13797,6 @@ def spelled(expr) -> str:
         return ".".join(reversed(parts))
     if isinstance(expr, F.CallExpr):
         callee = _flat_callee(expr)
-        # **A call whose callee is a DOT — `cat().startswith("q")` — is spelled
-        # through `spelled(node)` rather than named by its node type.** The
-        # recursion above hands this arm a `CallExpr` for `cat()` when the chain
-        # rooted here, and the fallback printed `CallExpr(...)`, so a refusal
-        # about `cat().startswith("q")` quoted `CallExpr(...)` — which names no
-        # construct the author wrote, and is the same complaint
-        # `_emit_expr`'s own `Ellipsis` refusal makes ("a node the author never
-        # wrote"). A reader sent to look for `CallExpr` finds nothing.
-        #
-        # The dotted callee goes through the SAME `spelled` recursion, so
-        # `a.b().c` prints `a.b().c` rather than being flattened by
-        # `_flat_callee`'s own rule (which would give `b` for a package path).
-        func = getattr(expr, "func", None)
-        if isinstance(func, F.MemberExpr):
-            return f"{spelled(func)}(...)"
         return f"{callee}(...)" if callee else f"{type(expr).__name__}(...)"
     if isinstance(expr, F.IntLiteral):
         # The literal's VALUE, which is its spelling. Same reason as the
@@ -17641,12 +17244,11 @@ def resource_context_manager_exit(expr) -> str | None:
     return RESOURCE_CONTEXT_MANAGERS.get(name)
 
 # The builtins each backend's CALL EMITTER intercepts by bare name and lowers
-# itself, rather than leaving to a module symbol. It is the single published
-# table both emitters' `if name == …` chains and `FRAME_VARIADIC_BUILTIN_CALLS`
-# read, so the three agree by construction. What disagreeing cost is measured
-# in `test_refusal_taxonomy.py::_no_def_callee_arm_checks` and in
-# `test_formal_run.py`'s `print(p)` guard: a name the emitter lowers was one
-# the model did not know was a callee.
+# itself, rather than leaving to a module symbol. This is the table
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 says would "retire" the
+# duplication: "a single published `model.EMITTER_BUILTINS` that both emitters'
+# `if name == …` chains and `FRAME_VARIADIC_BUILTIN_CALLS` read would make the
+# three agree by construction".
 #
 # They did not agree by construction before, and the disagreement is not
 # hypothetical — it is a refusal that names a callee wrongly. A name here is
@@ -17704,72 +17306,6 @@ def builtin_function(name: str):
     return BUILTIN_FUNCTIONS.get(name)
 
 
-def is_pure_expression(e) -> bool:
-    """True when evaluating `e` can be neither observed nor fatal.
-
-    Deliberately narrow, because a SELECT evaluates BOTH arms. An arm holding a
-    call may print, mutate a blob, or hit a cap, and running it when its value is
-    thrown away is a behaviour change, not an optimisation. So the allow-list is
-    literals, locals, field reads, and arithmetic over them.
-
-    Container literals are excluded even though a list display is
-    side-effect-free in principle: a list arm reserves frame space for its blob,
-    and reserving both arms' worth at once is a frame-pressure change for no
-    benefit. Calls are excluded even for known-pure builtins, because the builtin
-    set is exactly what grows over time and a stale allow-list here would
-    silently change semantics when it does.
-
-    **This is the ONE such reader and it lives here, not in an emitter.** It was
-    `formal/arm64_codegen.py`'s `_is_pure_expr` method, and
-    `formal/build.py`'s extremum lowering (`_lower_builtin_extremum`) needs the
-    same answer for the same reason — it rewrites `max(a, b)` into a
-    `TernaryExpr`, which mentions each operand twice, so an impure operand would
-    be evaluated twice and a call would happen out of CPython's left-to-right
-    order. Two copies of one allow-list is two answers that can drift on exactly
-    the shapes that drift (the next builtin somebody makes pure), so the emitter
-    now asks this and the arithmetic is in one place.
-    """
-    if isinstance(e, (F.IntLiteral, F.StringLiteral, F.BoolLiteral,
-                      F.IdentExpr)):
-        return True
-    if isinstance(e, F.MemberExpr):
-        return is_pure_expression(e.obj)
-    if isinstance(e, F.UnaryOp):
-        return is_pure_expression(e.operand)
-    if isinstance(e, F.BinaryOp):
-        return (is_pure_expression(e.left)
-                and is_pure_expression(e.right))
-    if isinstance(e, F.TernaryExpr):
-        return (is_pure_expression(e.condition)
-                and is_pure_expression(e.then_val)
-                and is_pure_expression(e.else_val))
-    return False
-
-
-def extremum_call_is_a_select(name, nargs: int, nkwargs: int) -> bool:
-    """Whether a call to `name` is the shape `max`/`min` lower as a select.
-
-    **The counts half of the rule, published as its own function so there is
-    ONE answer to "is this call of that name one this path lowers".** Two
-    readers need it and they do not share an AST: `formal/build.py`'s
-    `_lower_builtin_extremum` walks the fire AST, and
-    `tools/formal_proof_breadth.py`'s `_unlowered_builtins_in` scans CPython
-    `ast` because a census row that names the builtin it hit is a fact about the
-    program the census emitted. A second copy of the arity rule in the census
-    would go quiet the day the rewrite's guard changed, and it would go quiet in
-    the direction that reads well: a ledger row saying a program stopped on
-    `max` when it stopped on something else.
-
-    False for a name that is not an extremum, so a caller can hand it every name
-    it found without testing membership first. `nkwargs` counts KEYWORD
-    arguments (`key=` and `default=`), which are what make the remaining shapes
-    unanswerable rather than merely longer.
-    """
-    return (name in ("max", "min")
-            and not nkwargs
-            and nargs >= 2)
-
-
 # ── the builtins this path does NOT lower ───────────────────────────────────
 #
 # `EMITTER_BUILTINS` above is three names and `BUILTIN_FUNCTIONS` is two, and
@@ -17797,28 +17333,6 @@ def extremum_call_is_a_select(name, nargs: int, nkwargs: int) -> bool:
 # lower (`EMITTER_BUILTINS`, `INT_TYPE_CTORS`, `IDENTITY_TYPE_CTORS`); `abs`,
 # `pow` and `round` ARE here and are called out again below, because for those
 # three the absence was silent.
-#
-# **A ROW IS A NAME AND A SHAPE, and for two of the names the SHAPE is most of
-# the row.** `max` and `min` called with two or more POSITIONAL arguments and no
-# keyword are a compare and a select, and they are lowered —
-# `formal/build.py::_lower_builtin_extremum` rewrites them to the
-# `TernaryExpr` both emitters already have, and it runs in `_prepare_functions`
-# before `check_module_symbols` asks the question below, so a rewritten call is
-# never seen here. What this table therefore records for those two names is the
-# THREE shapes that survive it: one argument (a run-time sequence to fold), a
-# `key=` (a call through a value per element) and a `default=`. That is why
-# their rows were rewritten rather than deleted — a name deleted from here while
-# `max(xs)` still refuses would put a name in `LOWERED_BUILTINS` and
-# `NOT_LOWERED_BUILTINS` at once, which is the partition
-# `test_formal_proof_breadth.py`'s `test_every_allowed_name_is_either_lowered_
-# or_named_as_missing` exists to catch, and would move a measurable name out of
-# `tools/formal_proof_breadth.py`'s frontier for the sake of a shorter sentence.
-#
-# The rewrite is guarded by the SAME three questions this pre-pass asks — a name
-# the unit compiles, binds or imports is not the builtin — and it asks them
-# through the same readers (`callee_is_a_bound_value` and the module symbol
-# table), so a program that defines its own `max` still builds and the two
-# readers cannot disagree about which program that is.
 NOT_LOWERED_BUILTINS = {
     "abs": "a compare against zero and a select of the operand or its "
            "negation — and the C library's `abs` is NOT it, see "
@@ -17852,15 +17366,9 @@ NOT_LOWERED_BUILTINS = {
     "map": "a call THROUGH A VALUE per element, and calling through a value "
            "is not a thing this path can express — `sorted` needs a "
            "comparison call per element for the same reason",
-    "max": "TWO OR MORE POSITIONAL ARGUMENTS ARE A COMPARE AND A SELECT and are "
-           "lowered (`formal/build.py`'s `_lower_builtin_extremum` rewrites them "
-           "to the `TernaryExpr` both emitters already have); what is left here "
-           "is the OTHER three shapes — one argument (a run-time sequence to "
-           "fold, `FORMAL_listdir_no_run_time_sequence`), a `key=` (a call "
-           "through a value per element) and a `default=` (a value the empty "
-           "sequence takes) — none of which is a select",
-    "min": "the same three shapes as `max`, and the two-argument form lowers "
-           "the same way with `<`",
+    "max": "a compare and a select; both emitters already have the select "
+           "(`MLIR_SELECT_OP`'s `TernaryExpr` is one `CSEL`)",
+    "min": "a compare and a select, the same shape as `max`",
     "oct": "a base-8 rendering, the same shape as `bin`",
     "ord": "a one-character string to a code point — the inverse of `chr`, and "
            "the string half is the same gap",
@@ -18809,9 +18317,8 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
     This is `frame_receiver_escape_refusal`'s fifth case, split — it was one
     sentence over five different facts, and four of the five were false of the
     program in front of the reader.  Measured on the 12 files the sweep files
-    under it (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` row 8), and on the 41
-    over all roots — the population and the per-arm classification are both in
-    `test_refusal_taxonomy.py::_no_def_callee_arm_checks`, one callee per arm:
+    under it (`bugs/FORMAL_sweep_work_map_2026-09-30.md` row 8), and on the 41
+    over all roots (`bugs/FORMAL_callee_no_def_ceiling_zero.md`):
 
       * `_b64encode`, `discover_closures` — the callee is IMPORTED, so it IS
         compiled, into another module's library.  "this module's own functions
@@ -18942,8 +18449,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"refused with the disagreement when they do not. This arm is now "
             f"only reached when the callee is NOT resolved through the link "
             f"line, and the message says so. "
-            f"test_refusal_taxonomy.py::_no_def_callee_arm_checks classifies "
-            f"this arm in both tables, with a callee that reaches it")
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     if star_imported_from:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -18961,8 +18467,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"This arm is reached when the link line settles NEITHER — so "
             f"{callee} is not among the names any library on it publishes, and "
             f"there is no contract to compare. "
-            f"test_refusal_taxonomy.py::_no_def_callee_arm_checks classifies "
-            f"this arm in both tables, with a callee that reaches it")
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
             f"definition in hand in this image: this module defines no FUNCTION "
             f"of that name — a method declared here is reached as "
@@ -19287,8 +18792,7 @@ def cross_image_contract_absent_refusal(callee: str, position,
         f"The word is refused rather than followed, because following it "
         f"without the contract is a program that builds, runs, and returns a "
         f"number the source never wrote. "
-        f"test_refusal_taxonomy.py::_no_def_callee_arm_checks records the "
-        f"per-arm measurement")
+        f"bugs/FORMAL_callee_no_def_ceiling_zero.md records the measurement")
 
 
 # The THREE reasons a contract can be missing, as SENTENCES. A named constant
@@ -21244,11 +20748,8 @@ def _pair_value_kind(node):
     "a word is an integer" — refused as `len(inner) is len() of a value
     classified as 'int'` about a blob whose count field was sitting at offset 0
     of a perfectly good heap address. Measured before this change, both
-    architectures, on `formal/model.py`'s own element-kind rule. (The
-    document that recorded that measurement,
-    `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`, was deleted
-    with its fix; the measurement is here and `_list_literal_elem_kind` is the
-    fix.)
+    architectures, on `formal/model.py`'s own element-kind rule;
+    `bugs/FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`.
     """
     if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
         return list_kind(_list_literal_elem_kind(node.elements or []))
@@ -21279,9 +20780,8 @@ def _list_literal_elem_kind(elems, resolve=None) -> str | None:
     name it was bound to fell to "a word is an integer" — refused as
     `len(inner) is len() of a value classified as 'int'` about a blob whose
     count field was at offset 0 of a live heap address. Measured on both
-    architectures before this change — recorded in the deleted
-    `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`, whose fix is
-    the nested arm below.
+    architectures before this change;
+    `bugs/FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`.
 
     The flat reader is a FALLBACK and never a widening, which is the whole
     safety argument: a kind this returns is either one the flat reader already
@@ -21327,9 +20827,8 @@ def _kind_of_nested_elements(elems, resolve=None) -> str | None:
     With the nested arm, `rows` is `list:list:int` and every reader downstream
     (`len` off the count field, a subscript off the element kind, a walk's
     target) asks the same question and gets the same answer. Measured before
-    the change on both architectures; the document that recorded it
-    (`FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`) was deleted
-    with its fix, which is this arm.
+    the change on both architectures;
+    `bugs/FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`.
 
     Measured, both architectures, before this existed — and it is the
     comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
@@ -21466,9 +20965,8 @@ def container_literal_elem_kind(node) -> str | None:
     `_kind_of_nested_elements` and gets `list:int` for that literal, which is
     what makes `len(L[0])` a count-field read at both the local and the module
     level. Measured on both architectures before this change, where the module
-    spelling refused exactly as the local one did — the measurement the
-    deleted `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`
-    carried, and the reason this arm exists.
+    spelling refused exactly as the local one did;
+    `bugs/FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`.
     """
     if isinstance(node, F.DictExpr):
         values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
@@ -22615,8 +22113,8 @@ class ValueKinds:
         blob and `len(rows[0])` a count-field read. With the flat reader `rows`
         was a bare `list`, `subscript_element_kind` answered None, and the name
         the subscript was bound to fell to "a word is an integer"; measured on
-        both architectures before the change (the deleted
-        `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`). That
+        both architectures before the change
+        (`bugs/FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`). That
         reader's own docstring carries why the flat answer is kept as its
         fallback — an element kind nothing here has seen before must not cost a
         program the claim it already had. The `_resolving` cut-off keeps the
@@ -22976,31 +22474,14 @@ class ValueKinds:
             # literal's element kind comes from.
             return list_kind(container_literal_elem_kind(e))
         if isinstance(e, F.Comprehension):
-            # The element and the key are asked in this comprehension's OWN
-            # generator scope, because that is where the names they mention are
-            # bound — and `[k for k in d]`'s element is nothing but such a name.
-            #
-            # It was `_kind_of_simple`, which classifies a LITERAL and has no arm
-            # for a name, so every comprehension whose element is its generator's
-            # own target classified as the BARE `list`: no element kind at all,
-            # and a later walk over the result fell back to the "a word is an
-            # integer" default. Measured on both architectures,
-            # `d = {"ab": 100, "cde": 200}; ks = [k for k in d]; for k in ks:
-            # len(k)` was REFUSED — "len() of a value classified as 'int', and
-            # an integer has no length" — about a string the source plainly
-            # wrote, while `for k in d` over the SAME literal answers `2` then
-            # `3`. Two walks over one dict disagreeing about what a key is, and
-            # the generator scope already said `str` (`comprehension_generator_
-            # scopes` below); the loss was here, on the way out.
-            scopes = self.comprehension_generator_scopes(e)
             if e.kind == "dict":
                 # `e.element` is the dict comprehension's VALUE (`e.key` is the
                 # key), so this is the same arm as the `DictExpr` above and not
                 # the key/value unification a LIST comprehension does below.
-                return list_kind(self.kind_of(e.element, scopes))
-            ek = self.kind_of(e.element, scopes)
+                return list_kind(_kind_of_simple(e.element))
+            ek = _kind_of_simple(e.element)
             if e.key is not None:
-                ek = _unify(ek, self.kind_of(e.key, scopes))
+                ek = _unify(ek, _kind_of_simple(e.key))
             return list_kind(ek)
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e)
@@ -23961,53 +23442,6 @@ def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
             # path can carry, and the bare prefix is the honest thing to leave.
             return list_kind(elem) if elem and not is_list_kind(elem) else kind
     return dylib_export_return_kind(entry)
-
-
-def imported_optional_param_annotations(fdef) -> dict:
-    """`{argument index: the `Optional[T]` annotation}` an IMPORTED callee declares.
-
-    The PARAMETER half of `imported_callee_kind`, and the same discipline: a
-    parameter's declared type is a fact about the CALLEE and only the callee's own
-    source has it, so a call across a dylib boundary asks this and never infers
-    one from the call.
-
-    **The manifest signature cannot answer it, and that is why the DECLARATION is
-    the only input.** A library's C signature is one word per parameter, so
-    `int64_t` here is `-> List[Int]`, `-> Int`, `-> Bool` and `Optional[Bool]` at
-    once — `formal/imports.py`'s `external_declarations` reads the real
-    parameter list from the file the library was compiled from for exactly this
-    class of question, and `imported_callee_kind` is what already reads it for the
-    RETURN.
-
-    **Keyed by ARGUMENT index, not by parameter index, and the receiver offset is
-    applied here** rather than at each consumer, because the offset is a property
-    of the declaration (`doc/ABI.md`, "The formal backend's receiver convention":
-    a method's receiver travels by pointer and is not in the argument list) and a
-    consumer that forgot it would substitute the niche for the RECEIVER's
-    declared type — which names no `Optional`, so the substitution would never
-    fire and the shape would read as answered while doing nothing. That is the
-    failure `_optional_call_argument_none`'s own comment records for the in-unit
-    reader, and this is the same rule for the cross-module one.
-
-    Only an argument whose annotation IS an `Optional[…]` is in the answer, so a
-    consumer asks "is this index mine?" and nothing else. A declaration with no
-    positional parameters, one whose receiver spelling is not recognised, or one
-    with an arity this path cannot map gives `{}` — the honest "nothing here says
-    so", never a guess about a payload's width.
-    """
-    out: dict = {}
-    if fdef is None:
-        return out
-    shape = function_param_shape(fdef)
-    if not shape.positional:
-        return out
-    offset = 1 if shape.positional[0].split(":")[0].strip() \
-        .split()[-1] in ("self", "cls", "Self", "this") else 0
-    for i, spelling in enumerate(shape.positional[offset:], start=offset):
-        ann = param_annotation(fdef, spelling)
-        if optional_payload_annotation(ann) is not None:
-            out[i - offset] = ann
-    return out
 
 
 def abi_module_name(dotted: str) -> str:
@@ -26500,11 +25934,9 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
 
     and the consequence was that `Optional` — a ONE-word value whose receiver IS
     its field — became a two-field struct, so every `Optional` receiver became a
-    frame address and the `builtin_slice.mojo` row was refused for a
-    struct-typed field the source says is a single slot. That shape is
-    `test_formal_method_param_field.py`'s "a struct-typed FIELD, initialised
-    from a constructor ARGUMENT" case, and the field-representation question
-    behind it is `formal/model.py::struct_field_names`.
+    frame address and the 13-file `builtin_slice.mojo` row was refused for a
+    struct-typed field the source says is a single slot
+    (`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`).
     The SIBLING shape — a bare `self.helper` in VALUE position, which is not a
     call at all — is not this guard's business and is not settled here either;
     `struct_method_receiver_reads` is what decides it, by demoting a name the struct
@@ -27323,9 +26755,8 @@ def integer_literal_value(e) -> int | None:
     return None
 
 
-def raise_exit_status(exc_name: str, value=None,
-                      argument_is_int: bool = False) -> int | None:
-    """The status an uncaught `raise` of `exc_name` leaves behind, or None.
+def raise_exit_status(exc_name: str, value=None) -> int:
+    """The status an uncaught `raise` of `exc_name` leaves behind.
 
     1 for the whole hierarchy, and that is CPython's rule rather than this
     backend's convenience: an uncaught exception makes the interpreter report
@@ -27352,103 +26783,21 @@ def raise_exit_status(exc_name: str, value=None,
 
     Only an integer LITERAL is read, a NEGATED one included: `raise
     SystemExit(-1)` is 255 and not "computed", because `-1` is in the text (see
-    `integer_literal_value`).
-
-    **`None` means COMPUTED, and it is the whole of what the deleted document
-    `FORMAL_a_computed_systemexit_status_is_not_the_programs_own.md` asked for**
-    (fixed by this function's own change; the document was removed with its fix,
-    so the ask is recorded here rather than cited). A non-integer argument is
-    NOT computed: CPython's answer there is 1
-    whatever the object is, so a string literal stays 1 and a computed value
-    that this path cannot classify as a non-integer ALSO stays 1 — refusing to
-    be clever about a value whose type it cannot see is the direction every
-    other rule in this file takes. `None` is returned only where the argument
-    is an INTEGER the build cannot fold: a call, a name, an arithmetic
-    expression over either. Both emitters branch on the `None` and put the
-    argument's own value in the exit-status register, so `sys.exit(n)` — the
-    ordinary spelling, and the one every real script uses — stops being a
-    status of 1 and becomes the program's own.
-
-    **`argument_is_int` is the emitter's own answer to "is it an integer"**
-    (`raise_status_argument_is_an_integer`), passed IN rather than recomputed
-    here because both emitters already hold the function being emitted and this
-    function is also asked from `model.py` code that does not. It defaults to
-    False, which is the answer that leaves today's status 1 in place — so a
-    caller that forgets it gets the old behaviour and not a crash.
-
-    **Why the API change and not a second reader.** This used to return 1 for
-    the computed case, and a caller could only tell "1" from "1" by asking
-    `integer_literal_value` again — which is how two backends would have come
-    to disagree about what `None` means. The `None` is decided here, once, and
-    both emitters ask this.
-    """
+    `integer_literal_value`). `raise SystemExit(n)` for a value the build cannot
+    see is not a different program, so it must not be a different answer, and the
+    honest way to keep the two apart is to leave that case at 1 rather than to
+    claim a status the build cannot see — which is what a caller reading a wrong
+    number cannot detect. That case is written down in
+    `bugs/FORMAL_a_computed_systemexit_status_is_not_the_programs_own.md`."""
     if exc_name != "SystemExit":
         return 1
     args = raise_arg_exprs(value) if value is not None else []
     if not args:
         return 0
     status = integer_literal_value(args[0])
-    if status is not None:
-        # A literal is masked HERE rather than at the point of delivery, because
-        # there is nothing else to mask: the value is in the text and both
-        # backends put it in the exit register whole. A COMPUTED value is
-        # masked at the point of delivery instead, because that is where the
-        # value exists — and the two differ on the negative case, which is why
-        # the negative row is an ORACLE row in `test_formal_exceptions.py`
-        # rather than a claim about this function.
-        return status & 0xFF
-    if argument_is_int:
-        return None
     # A non-integer argument is CPython's "print the object and exit 1" form.
     # The exit status is 1 either way, so this needs no further reading.
-    return 1
-
-
-def raise_status_argument_is_an_integer(e, vk=None) -> bool:
-    """True when `raise SystemExit(e)`'s argument is an INTEGER this build can
-    compute but not fold.
-
-    **The gate on `raise_exit_status`'s `None`, and it is deliberately narrow.**
-    The question is "can this path put `e`'s own value in the exit register",
-    and the honest answer is only for a value the KIND model calls an integer:
-    a literal (which is folded instead and never reaches here), an arithmetic or
-    comparison form whose operands are integers, a call whose result kind is an
-    integer, and — the case the doc's reproducer is — a NAME whose kind says
-    integer.
-
-    Everything else answers False and so keeps status 1, which is CPython's
-    answer for a non-integer argument and the safe direction here: putting a
-    `char *` in an exit-status register would leave a number nothing in the
-    source wrote. **Measured on that case rather than argued**: a
-    `def code() -> str: return "boom"` with `raise SystemExit(code())` left 220
-    on arm64 and 200 on x86-64 where CPython leaves 1, when this gate was
-    reached through a bare `ValueKinds` with no `func_kind` hook — so the hook
-    is not optional and building a fresh `ValueKinds` here is not an option.
-
-    **`vk` is the emitter's OWN `ValueKinds`** (`self._vkinds`, built by
-    `_scan_value_kinds` with this backend's `func_kind`/`int_names` hooks), not
-    one built here, and that is the whole of what keeps the string case right:
-    a callee's result kind is this backend's question and it is already
-    answered. A `None` answers False, which is the status 1 that was there
-    before — so a caller with nothing to ask loses nothing.
-    """
-    if e is None or vk is None:
-        return False
-    if isinstance(e, F.UnaryOp):
-        if e.op in ("not", "-", "+", "~"):
-            return True
-        return False
-    if isinstance(e, F.BinaryOp):
-        # A comparison and a boolean connective are 0/1 wherever they appear,
-        # and every arithmetic operator on two integers is an integer. What is
-        # NOT here is `/` on the float kinds, which this path lowers as an
-        # integer division anyway, so both spellings agree here.
-        return True
-    if isinstance(e, F.TernaryExpr):
-        return True
-    kind = vk.kind_of(e)
-    return kind is not None and kind not in (STR_KIND, FLOAT_KIND) and (
-        kind == INT_KIND or kind.endswith(":int"))
+    return 1 if status is None else status & 0xFF
 
 
 def raise_declared_class_name(value, structs: dict | None = None) -> str | None:
@@ -36505,138 +35854,41 @@ def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
             or one_word_sole_field_frame(struct_def, decls or {}) is not None)
 
 
-def nested_frame_constructor_stores(struct_def, decls: dict, candidates=None,
-                                    rets=None) -> tuple:
-    """`(stores, refusal)` — what a frame bring-up must WRITE for `struct_def`.
-
-    **The half of the bring-up that is a CONSTRUCTION rather than a
-    default-initialization.** A construction brings a nested frame up in two
-    different places and they were
-    not the same code: a construction of the struct ITSELF runs its
-    `__init__` (`struct_construction_plan` → `CONSTRUCTION_INIT`, one store per
-    field at the fresh block), while a construction that happens INSIDE another's
-    frame goes through the emitters' own placement walk
-    (`_emit_frame_nested` → `_emit_frame_defaults` →
-    `_emit_frame_nested_addresses`) and that wrote each field's CLASS-LEVEL
-    DEFAULT and nothing else. Measured, both architectures:
-
-        struct Opt:  var v: Int;  var has: Int
-                     def __init__(out self): self.v = 41; self.has = 1
-        struct Box:  var inner: Opt
-        var b = Box();  b.inner.v     # 0 here, 41 in CPython
-
-    and the disagreement was invisible in both directions — `var o = Opt()`
-    answered 41 from the same declarations in the same file.
-
-    **It is `struct_construction_plan` asked with a synthesized zero-argument
-    call, and not a second walk of the constructor body.** That function is the
-    ONE reader of "which fields does this `__init__` store, and what goes in
-    each": it selects the overload, substitutes a bare parameter name with the
-    caller's expression or the signature's default, drops the store a nested
-    placement already made redundant, and refuses the statements it cannot
-    lower — each with its own message. A second walk here would be a second
-    opinion about which argument lands in which slot, and it is asked about a
-    construction with NO arguments, which is the case the zero-argument branch
-    of `struct_construction_plan` is about.
-
-    `([], None)` for a struct that declares no `__init__`, which is the ordinary
-    case and the one that must keep the bring-up exactly as it was. A REFUSAL is
-    returned rather than swallowed for the shape that cannot be inlined: a
-    bring-up that silently dropped the constructor's stores is the silent wrong
-    answer this fixes, so a body this path cannot lower has to stop the build
-    with the sentence that says which statement is responsible.
-
-    **A constructor that REQUIRES parameters keeps the defaults, and that is the
-    language's rule rather than a retreat.** A frame bring-up has no arguments to
-    supply — there is no call — so an `__init__` with a required parameter cannot
-    be run, and what the field holds is the default-initialized object. Measured
-    against the alternative, which was to ask `struct_construction_plan` with the
-    synthesized zero-argument call and take its arity refusal: that turned
-    `struct Inner: var inner2: Inner2; var z: Int` /
-    `def __init__(self, i: Inner2, b: Int)` inside a `struct Outer: var inner:
-    Inner`, brought up by `var o = Outer()`, into a BUILD FAILURE — and the
-    program overwrites the whole field on the next line
-    (`o.inner = Inner(Inner2(5), 6)`), so the frame it brought up was never
-    read. That row is `byref_three_level_chain_with_the_type_assigned_in_init` in
-    `test_formal_run.py` and it must keep passing: refusing the bring-up would
-    refuse a program whose object is correct.
-
-    **The residual, stated because it is a divergence and not a fix**: a program
-    that brings up such a frame and READS it before assigning sees the defaults
-    where Mojo's own default-initialization also puts them, so this is the
-    language's own answer and not a hole — but it is a hole in the sense that no
-    test here pins the READ, and `construction_bringup_is_complete`'s `why` is
-    where a reader who cares will find the shape named.
-    """
-    if struct_def is None:
-        return ([], None)
-    shapes = struct_init_shapes(struct_def)
-    if not shapes:
-        return ([], None)
-    name = struct_def.name
-    # The zero-argument overload selection, asked DIRECTLY rather than through
-    # `struct_construction_plan` with a synthesized call — because that function
-    # refuses when no overload takes no required parameter, and here the answer
-    # to that is "there is nothing to run", not "stop the build".
-    shape, why = init_overload_for_arity(shapes, 0)
-    if why is not None:
-        return ([], None)
-    plan, refusal = struct_construction_plan(
-        struct_def,
-        F.CallExpr(func=F.IdentExpr(name=name), args=[], kwargs=[]),
-        decls or {}, candidates or {}, rets)
-    if refusal is not None:
-        return (None, f"bringing up a nested {name} runs its constructor, and "
-                      f"that constructor is not lowered: {refusal}")
-    if plan[0] == CONSTRUCTION_INIT:
-        return (list(plan[1]), None)
-    # `CONSTRUCTION_DEFAULT` for a declared `__init__` means the plan found one
-    # and decided the call stores nothing — a body of only `pass`, or only
-    # docstrings. `POSITIONAL` and `COPY` cannot arise from a zero-argument call
-    # against a struct that declares a constructor, and falling through to the
-    # default answer rather than raising keeps that a future shape's problem
-    # rather than this bring-up's.
-    return ([], None)
-
-
 def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
                                       _seen=None) -> tuple:
-    """`(ok, why)` — can this construction's frame be LIFTED over?
+    """`(ok, why)` — does constructing this struct write EVERY slot it reserves?
 
-    The question is about the METHOD-CALL path rather than about the
-    construction itself: `formal/build.py::_call_receiver_verdict`'s
-    `construction_frame` verdict refuses a method call on a construction whose
-    frame a lift would not fully write, and this is the reader it asks.
+    The question the construction emitter cannot answer for itself, and it asks
+    it about the frames rather than about the struct: a construction brings a
+    nested frame up by writing each field's class-level DEFAULT
+    (`struct_default_word`'s `("nested_frame", …)` arm, then
+    `_emit_frame_defaults`, then `_emit_frame_nested_addresses` for the frames
+    inside it), and **a declared `__init__` is not part of a bring-up** — in
+    Mojo `T(...)` CALLS it, and nothing here calls it.
 
-    **It used to ask "does the bring-up run every `__init__` in the subtree",
-    and that was the wrong question — the bring-up runs them now.**
-    `nested_frame_constructor_stores` is what a bring-up emits, so a struct whose
-    `__init__` this path CAN inline no longer leaves the frame half-written:
+    Measured, both architectures, on the shape this predicate exists for:
 
-        struct Opt:  var v: Int;  var has: Int
-                     def __init__(out self): self.v = 41; self.has = 1
-        struct Box:  var inner: Opt
-        Box().get()      # 41, on both architectures (was 0)
+        struct Opt:
+            var v: Int
+            var has: Int
+            def __init__(out self):
+                self.v = 41          # CPython: Opt().v == 41
+                self.has = 1
 
-    Two shapes still make a lift unsound, and this is the reader for both:
+        struct Box:
+            var inner: Opt
+            def get(self) -> Int:
+                return self.inner.v
 
-      * **a constructor that REQUIRES parameters.** A bring-up is not a call, so
-        it has no arguments to fill them with and the frame stays at its
-        defaults — which is the language's own answer for a field nothing
-        assigns, but it is not what a construction `Box(Opt(5))` would leave, so
-        a lift that claimed the frame was fully written would be claiming a
-        program the source does not contain.
-      * **a constructor body this path does not lower.** `nested_frame_
-        constructor_stores` returns a refusal for it rather than dropping the
-        stores, so the build stops with the offending statement named — and a
-        lift must not paper over that by answering from the defaults.
+        Box().get()      # prints 0 on both architectures
 
-    So the answer is now "no struct in the subtree declares a constructor this
-    path cannot run at a bring-up", recursively, and `why` names the struct that
-    broke it so the refusal sends a reader to the declaration rather than to the
-    shape. `nested_frame_constructor_stores` is asked directly rather than a
-    structural rule being restated here, so the two cannot disagree about what a
-    bring-up writes.
+    `var o = Opt()` answers 41, so the stores are inlined for a construction of
+    `Opt` ITSELF (`model.init_body_stores`) and lost for one that happens inside
+    another's frame — the difference being that the frame bring-up is the
+    emitter's own placement walk and not a constructor call. So the answer is
+    "no struct in the subtree declares an `__init__`", recursively, and `why`
+    names the struct that broke it so a refusal can send a reader to the
+    declaration rather than to the shape.
 
     `depth` is the recursion bound and it is `MAX_NESTED_FRAME_DEPTH` for the
     same reason `struct_nested_frame_fields` bounds itself: a chain longer than
@@ -36659,51 +35911,9 @@ def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
         return (False, f"{key} nests inside itself")
     path.add(key)
     try:
-        # `nested_frame_constructor_stores` and not a structural rule restated
-        # here: it is the reader that decides what a bring-up writes, so asking
-        # it is what keeps "can this be lifted" and "what does the bring-up do"
-        # from being two answers to one question. `(stores, None)` — which
-        # includes the `([], None)` a struct with no constructor gets, and the
-        # one a constructor that REQUIRES parameters gets — is a frame this path
-        # can account for.
-        stores, refusal = nested_frame_constructor_stores(struct_def, decls)
-        if refusal is not None:
-            return (False, refusal)
-        shapes = struct_init_shapes(struct_def)
-        if shapes:
-            # A constructor that is DECLARED and produces nothing at a bring-up
-            # is the one shape this predicate still refuses, and it is not the
-            # shape it used to refuse. `nested_frame_constructor_stores` returns
-            # `([], None)` for it, and there are two ways to get there and they
-            # are opposite answers:
-            #
-            #   * a constructor whose body this path cannot lower, or whose
-            #     parameters are REQUIRED. A bring-up is not a call, so it has
-            #     no arguments to fill them with, and the frame keeps its
-            #     defaults — which is the language's answer for a field nothing
-            #     assigns, but is NOT what `Box(Opt(5))` would leave, so a LIFT
-            #     that claimed the frame was written would be claiming a
-            #     program the source does not contain.
-            #   * a constructor whose body genuinely stores nothing (`pass`, or
-            #     only docstrings). That frame IS fully written and lifting over
-            #     it is fine.
-            #
-            # The first is what this refuses and the second is not, so the
-            # distinction has to be made rather than inferred from an empty
-            # store list — which is why `struct_init_shapes` is asked here and
-            # the emptiness alone is not enough.
-            shape, why = init_overload_for_arity(shapes, 0)
-            key = getattr(struct_def, "name", None) or id(struct_def)
-            if why is not None:
-                return (False, f"{key} declares a constructor whose parameters "
-                                f"a frame bring-up has no arguments for, so the "
-                                f"frame it brings up holds the field DEFAULTS "
-                                f"rather than what a call to that constructor "
-                                f"would have stored")
-            if not stores and any(m.name == "__init__" for m in
-                                  struct_methods(struct_def)):
-                return (False, f"{key} declares a constructor this path does "
-                                f"not lower")
+        if any(m.name == "__init__" for m in struct_methods(struct_def)):
+            return (False, f"{key} declares an `__init__`, and a frame bring-up "
+                            f"writes field DEFAULTS rather than calling it")
         for _fname, _slot, child in struct_nested_frame_fields(
                 struct_def, decls, depth):
             ok, why = construction_bringup_is_complete(child, decls, depth - 1,
@@ -44051,9 +43261,10 @@ CALL_RECEIVER_WHY = {
         "the callee would read is not a number the source wrote",
     "construction_frame":
         "a construction IS placed and its frame is brought up before the "
-        "method reads it, and the bring-up RUNS the constructors it can — but "
-        "this one it cannot account for: {reason}. So the frame the callee "
-        "would read is not the frame the source describes, which is the one "
+        "method reads it, but the bring-up writes each field's class-level "
+        "DEFAULT and does not run a constructor: {reason}. So the frame the "
+        "callee "
+        "would read holds zeros where the source wrote stores, which is the one "
         "outcome this path may not produce. Assign the field after binding the "
         "construction to a local, which is the same program with the stores "
         "written where they are written",

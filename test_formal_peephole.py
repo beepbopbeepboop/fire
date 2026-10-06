@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The verified peephole pass: `formal/peephole.py`, its proofs, and its wiring.
 
-Four things, and the order is the order they can go wrong in:
+Five things, and the order is the order they can go wrong in:
 
   * **The licence.** Every rule in the registry names a theorem in
     `lib/Peephole.lean`, and the pass REFUSES to run a rule whose theorem is
@@ -10,26 +10,39 @@ Four things, and the order is the order they can go wrong in:
     declares a rule naming a theorem that does not exist and asserts the pass
     raises rather than rewriting.
 
+  * **The branch reader.** `TestTheBranchReader` checks `arm64_branch_target`
+    against the encoder that produced each word, in both directions, for all
+    six branch forms. It answered a wrong index for every one of them for a
+    while — which is why this pass had no loop structure at all — and nothing
+    below it can be checked if it is wrong.
+
   * **The rules themselves**, on hand-assembled instruction sequences rather
-    than on the corpus, because the corpus does not happen to contain the
-    windows they match (see `TestTheCorpus` and the note in
-    `bugs/FORMAL_peephole_rules_without_proofs.md`): `mov_self` and
-    `add_imm_fuse` fire zero times over all 52 `formal/examples`, and a rule
-    nobody exercises is a rule nobody has checked.
+    than on the corpus, because a corpus too small to contain the window is a
+    corpus that cannot check the rule: `add_imm_fuse` still fires zero times
+    over all 52 `formal/examples`. `copy_chain` is the other direction — it
+    fires 10 times over the corpus, in loops, which is exactly where its
+    liveness condition is subtle enough to be worth hand cases.
 
   * **The address remap.** Deleting bytes moves every label, relocation and
     external-call stub, and `_Remap` is the one piece of the pass that is not
     about recognising instructions. `TestRemap` builds a two-instruction window
     inside a labelled region with a branch over it and asserts the branch, the
-    labels and the stub address all land where the shrunken image says.
+    labels and the stub address all land where the shrunken image says. The
+    branch's own DISPLACEMENT is `_repatch_branches`, and a deletion that did
+    not move it corrupted control flow silently.
 
   * **The end-to-end claim.** `--opt` builds every `formal/examples/*.mojo`
     both ways and the two binaries must produce the same exit status and the
     same stdout. That is the differential run the flag exists for, and it is
-    the check that caught every real bug this pass has had.
+    the check that caught every real bug this pass has had — including the two
+    `formal/examples` that `copy_chain` answered wrongly while its liveness
+    check was a linear scan. It also now asserts that the pass fired at all,
+    because a differential over a corpus the pass never touches agrees with
+    itself and proves nothing.
 
 Run it:  python3 test_formal_peephole.py [-v]
 """
+import collections
 import os
 import struct
 import subprocess
@@ -42,7 +55,9 @@ ROOT = HERE
 sys.path.insert(0, ROOT)
 
 import formal.peephole as P                                    # noqa: E402
-from formal.arm64 import encode_add_xd_xn_imm, encode_ret     # noqa: E402
+from formal.arm64 import (encode_add_xd_xn_imm, encode_b, encode_bl,        # noqa: E402
+                           encode_b_cond, encode_cbz_xn, encode_cbnz_xn,
+                           encode_mul_xd_xn_xm, encode_ret)
 from formal.arm64_codegen import ARM64Codegen                  # noqa: E402
 from formal.build import compile_formal                        # noqa: E402
 
@@ -84,6 +99,13 @@ class _Asm:
 def _w(*args):
     """The instruction words of a list of `encode_*` results, as ints."""
     return [struct.unpack("<I", x)[0] for x in args]
+
+
+def _ctx(words):
+    """A `_Ctx` over hand-assembled words, for the liveness questions."""
+    raw = b"".join(struct.pack("<I", w) for w in words)
+    entries, _end = P._decode_region(_Asm(words), raw, "arm64")
+    return P._Ctx(entries, "arm64")
 
 
 def _i(word):
@@ -165,6 +187,107 @@ class TestDecode(unittest.TestCase):
         self.assertIsNone(P.decode_arm64(0x94000003))       # bl
 
 
+class TestTheBranchReader(unittest.TestCase):
+    """`arm64_branch_target` is where every CFG edge comes from.
+
+    It answered a wrong index for EVERY branch form this backend emits — the
+    displacement field's lowest bit was 2 in all six rows instead of 0 for `B`
+    and 5 for the rest — so `_back_edges` filtered every branch out of range,
+    the loop structure was invisible, and `arm64/copy_chain` fired on loops it
+    had to decline. Each row is checked against the encoder that produced it,
+    forward and backward, in both directions.
+    """
+
+    def test_each_form_lands_where_the_encoder_says(self):
+        rows = [
+            (encode_b(3), 10, 13),
+            (encode_b(-2), 10, 8),
+            (encode_cbz_xn(12, 4), 10, 13),          # offset is in BYTES
+            (encode_cbz_xn(-12, 4), 10, 7),
+            (encode_cbnz_xn(20, 2), 10, 15),
+            (encode_b_cond("eq", 16), 10, 14),
+            (encode_b_cond("ne", -16), 10, 6),
+        ]
+        for word, index, want in rows:
+            got = P.arm64_branch_target(_i(word), index)
+            self.assertEqual(want, got,
+                             f"{word.hex()} at {index} -> {got}, wanted {want}")
+
+    def test_a_call_and_a_return_have_no_pc_relative_target(self):
+        # `BL` is excluded on purpose: the CFG gives it the fall-through and
+        # the ABI clobber set rather than an edge into the callee.
+        self.assertIsNone(P.arm64_branch_target(_i(encode_bl(2)), 5))
+        self.assertIsNone(P.arm64_branch_target(_i(encode_ret()), 5))
+        self.assertIsNone(P.arm64_branch_target(_i(encode_mul_xd_xn_xm(0, 1, 2)), 5))
+
+    def test_the_repatch_is_the_inverse_of_the_reader(self):
+        for word, index in ((encode_b(3), 10), (encode_b(-4), 10),
+                            (encode_cbz_xn(12, 4), 10),
+                            (encode_cbnz_xn(-8, 7), 10),
+                            (encode_b_cond("ge", 40), 10),
+                            (encode_b_cond("lt", -24), 10)):
+            w = _i(word)
+            target = P.arm64_branch_target(w, index)
+            self.assertEqual(w, P._repatch_branch(w, target - index),
+                             f"{word.hex()} did not round-trip")
+
+    #: The mask of everything a branch word holds besides its displacement.
+    _KEEP = {0x54000000: 0xFF00000F,    # B.cond keeps its condition
+             0x34000000: 0xFF00001F,    # CBZ / CBNZ keep Rt
+             0x36000000: 0xFFF8001F}    # TBZ / TBNZ keep Rt and the bit number
+
+    def test_repatching_keeps_the_fields_that_are_not_the_displacement(self):
+        # A branch that jumps to the right place and tests the wrong thing is a
+        # wrong answer wearing a correct displacement, so every field the
+        # displacement does not live in has to survive a re-displacement.
+        for word in (encode_b_cond("ge", 0), encode_b_cond("lt", 0),
+                     encode_cbz_xn(0, 11), encode_cbnz_xn(0, 23),
+                     encode_b(0)):
+            w = _i(word)
+            keep = self._KEEP.get(w & 0xFF000000, 0xFC000000)
+            moved = P._repatch_branch(w, 5)
+            self.assertEqual(w & keep, moved & keep,
+                             f"{word.hex()} lost a field it must keep")
+            self.assertNotEqual(w, moved, f"{word.hex()} did not move at all")
+
+    def test_the_branch_forms_decode_their_own_operands(self):
+        # The read/write tables and the branch table are three decodes of the
+        # same encodings, and they disagreed: `reads_arm64` answered "every
+        # register" for a real `cbz x4, #12`, which is sound and makes every
+        # rule below a conditional branch un-fireable.
+        for word, reads in ((encode_b(3), frozenset()),
+                            (encode_cbz_xn(12, 4), frozenset({4})),
+                            (encode_cbnz_xn(-8, 7), frozenset({7})),
+                            (encode_b_cond("ge", 40), frozenset())):
+            w = _i(word)
+            self.assertEqual(reads, P.reads_arm64(w), word.hex())
+            self.assertEqual(frozenset(), P.writes_arm64(w), word.hex())
+
+    def test_a_deletion_moves_a_branch_target_and_the_displacement_with_it(self):
+        # The failure this closes is silent: a rule that deletes an instruction
+        # between a branch and its target used to leave the displacement alone,
+        # so the branch jumped four bytes too far into an image that still ran.
+        words = _w(encode_add_xd_xn_imm(4, 4, 0),   # 0: a self-copy
+                   encode_b(3),                     # 1: b 4  — over the second ret
+                   encode_b(1),                     # 2: b 3
+                   encode_ret(),                    # 3
+                   encode_ret())                    # 4
+        self.assertEqual(4, P.arm64_branch_target(words[1], 1))
+        asm = _Asm(words)
+        self.assertEqual(1, P._run(asm, "arm64", P.ARM64_RULES))
+        # 0 is gone, so that branch is now at index 0 and its target is index 3.
+        after = asm.words()
+        self.assertEqual(4, len(after))
+        self.assertEqual(3, P.arm64_branch_target(after[0], 0),
+                         "the displacement did not follow its target down")
+        # …and the branch that was INSIDE neither deletion still lands on the
+        # `ret` it named, which is index 2 now.
+        self.assertEqual(2, P.arm64_branch_target(after[1], 1))
+        # …and the whole image still decodes to what it was.
+        self.assertEqual([_i(encode_b(3)), _i(encode_b(1)), _i(encode_ret()),
+                          _i(encode_ret())], after)
+
+
 class TestRules(unittest.TestCase):
     """Each rule, on the window it matches and on one it must decline."""
 
@@ -231,16 +354,132 @@ class TestRules(unittest.TestCase):
             _w(encode_ret(), encode_add_xd_xn_imm(0, 0, 0), encode_ret()))
         self.assertEqual(1, removed)
 
-    def test_copy_chain_is_proved_but_not_fired(self):
-        # The rule is in `PENDING_RULES`, not `RULES`: its theorem is proved and
-        # its liveness matcher is not yet sound for a loop. This asserts the
-        # pass does NOT fire it, which is the property that keeps `--opt` safe
-        # while the liveness analysis is being finished.
+    def test_copy_chain_fires_when_the_intermediate_register_is_dead(self):
+        # `mov x1, x2 ; mov x3, x1` — nothing reads x1 again, so the first
+        # instruction's write can be dropped and its destination rewritten.
         words = _w(encode_add_xd_xn_imm(1, 2, 0), encode_add_xd_xn_imm(3, 1, 0),
                   encode_ret())
         asm, removed = self._run_words(words)
+        self.assertEqual(1, removed)
+        self.assertEqual([_i(encode_add_xd_xn_imm(3, 2, 0)), _i(encode_ret())],
+                         asm.words())
+
+    def test_copy_chain_declines_when_a_LOOP_reads_the_register_again(self):
+        # The shape that made the rule un-fireable, and the one that made it
+        # UNSOUND when it fired. The read of x1 is at index 1 — inside the loop,
+        # ABOVE the window — so a linear "is it read anywhere after the window"
+        # scan cannot see it, and it reported x1 dead; the rewrite then stopped
+        # writing it, and every iteration after the first read the previous
+        # one's. Real, measured: with `arm64/copy_chain` on,
+        # `formal/examples/sqsum.mojo` answered 109 for 129 and
+        # `formal/examples/sum_range.mojo` never terminated.
+        words = _w(
+            encode_cbz_xn(20, 4),          # 0: cbz x4, -> 5   (loop exit)
+            encode_add_xd_xn_imm(5, 1, 0),  # 1: mov x5, x1     <- loop-carried
+            encode_add_xd_xn_imm(1, 2, 0),  # 2: mov x1, x2     <- window
+            encode_add_xd_xn_imm(3, 1, 0),  # 3: mov x3, x1     <- window
+            encode_b(-4),                  # 4: b 0
+            encode_ret())                  # 5
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed,
+                         "x1 is read by the loop body on the next iteration")
+        self.assertEqual({1, 3}, set(_ctx(words).readers(1)))
+
+    def test_copy_chain_fires_inside_a_loop_when_the_window_is_the_last_reader(
+            self):
+        # The positive control for the row above, and the reason the condition
+        # is "read ONLY at the second instruction" rather than "not read after
+        # it": a backward `b` makes the second instruction a reader of the
+        # first one's register, and the rewrite DELETES that reader, so the
+        # window is dead after the rewrite and sound before it.
+        words = _w(
+            encode_cbz_xn(16, 4),          # 0: cbz x4, -> 4   (loop exit)
+            encode_add_xd_xn_imm(1, 2, 0),  # 1: mov x1, x2     <- window
+            encode_add_xd_xn_imm(3, 1, 0),  # 2: mov x3, x1     <- window
+            encode_b(-3),                  # 3: b 0
+            encode_ret())                  # 4
+        asm, removed = self._run_words(words)
+        self.assertEqual(1, removed, "the control must still fire")
+        self.assertEqual([_i(encode_cbz_xn(12, 4)), _i(encode_add_xd_xn_imm(3, 2, 0)),
+                          _i(encode_b(-2)), _i(encode_ret())], asm.words(),
+                         "the cbz's own displacement moved with its target")
+
+    def test_copy_chain_declines_when_a_branch_lands_on_the_second_instruction(
+            self):
+        # The second half of `window_dead`. A branch onto the second instruction
+        # runs `mov xc, xb` where the program had `mov xa, xb` above it, so xc
+        # gets the wrong source — a wrong answer rather than a missed rewrite,
+        # and one a whole-image reader-set cannot see.
+        words = _w(
+            encode_cbz_xn(8, 4),           # 0: cbz x4, -> 2
+            encode_add_xd_xn_imm(1, 2, 0),  # 1: mov x1, x2     <- window
+            encode_add_xd_xn_imm(3, 1, 0),  # 2: mov x3, x1     <- window
+            encode_ret())                  # 3
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed,
+                         "the cbz above branches straight onto the window")
+        self.assertEqual({0, 1}, set(_ctx(words).predecessors()[2]))
+
+    def test_a_read_modify_write_keeps_its_operand_live(self):
+        # `mul x0, x0, x1` READS the prior x0. A transfer function that said
+        # "a register an instruction reads and writes is not using the prior
+        # value" made x0 dead there, and `formal/examples/sqsum.mojo`'s
+        # accumulator is written by exactly such a `mul`. This is a machine
+        # instruction, not three-address code: every register read happens
+        # before any register is written.
+        words = _w(encode_add_xd_xn_imm(0, 2, 0), encode_add_xd_xn_imm(1, 0, 0),
+                   encode_mul_xd_xn_xm(0, 0, 1), encode_ret())
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed,
+                         "x0 is the operand of a mul two instructions later")
+        self.assertIn(2, _ctx(words).readers(0))
+
+    def test_the_return_value_register_is_never_dead(self):
+        # x0 leaves the program as the exit status and x30 carries the return
+        # address, and NEITHER is read by the `ret` that consumes it — so a
+        # reader set built from instructions alone would call x0 dead all the
+        # way to the end of the image and drop the write that produces the
+        # answer. This is `sqsum.mojo`'s 109 again, from the other end.
+        words = _w(encode_add_xd_xn_imm(0, 2, 0), encode_add_xd_xn_imm(1, 0, 0),
+                   encode_ret())
+        asm, removed = self._run_words(words)
         self.assertEqual(0, removed)
-        self.assertEqual(words, asm.words())
+        ctx = _ctx(words)
+        self.assertEqual({1, 3}, set(ctx.readers(0)), "…and the EXIT index")
+        self.assertIn(3, ctx.readers(30))
+        # x19 is neither, so the same window over it IS rewritable — the
+        # control that says the seed is a fact about x0 and x30 and not a
+        # blanket "nothing is dead at the end".
+        asm, removed = self._run_words(
+            _w(encode_add_xd_xn_imm(19, 2, 0), encode_add_xd_xn_imm(1, 19, 0),
+               encode_ret()))
+        self.assertEqual(1, removed)
+
+    def test_a_call_reads_every_argument_register(self):
+        # The CFG does not walk into the callee, so the eight registers a `BL`
+        # passes are read AT THE CALL: `reads_arm64` answers exactly that set,
+        # and a window whose intermediate register is one of them is not
+        # rewritable across the call.
+        words = _w(encode_add_xd_xn_imm(3, 2, 0), encode_add_xd_xn_imm(1, 3, 0),
+                   encode_bl(1), encode_ret())
+        self.assertEqual(frozenset(range(8)), P.reads_arm64(_i(encode_bl(1))))
+        self.assertEqual({1, 2}, set(_ctx(words).readers(3)),
+                         "x3 is read by the window's second instruction and "
+                         "by the call that takes it as an argument")
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed, "so the window is not rewritable")
+
+    def test_a_branch_reads_no_register(self):
+        # `B` had no row in the read table, so `reads_arm64` answered EVERY
+        # register for it — sound, and fatal for a rule whose window sits above
+        # a loop latch, because every register would then have a reader at the
+        # latch and nothing above one would ever be dead. The branch's own row
+        # in the WRITE table already says "control flow writes NO register";
+        # this is its read counterpart, and `B.cond`'s is beside it.
+        self.assertEqual(frozenset(), P.reads_arm64(_i(encode_b(3))))
+        self.assertEqual(frozenset(), P.writes_arm64(_i(encode_b(3))))
+        self.assertEqual(frozenset(), P.reads_arm64(_i(encode_b_cond("ge", 4))))
+        self.assertEqual(frozenset(), P.writes_arm64(_i(encode_b_cond("ge", 4))))
 
 
 class TestRemap(unittest.TestCase):
@@ -321,6 +560,7 @@ class TestTheCorpus(unittest.TestCase):
 
     def test_both_ways_agree_on_every_example(self):
         mismatched = []
+        fired = collections.Counter()
         for src in EXAMPLES:
             with tempfile.TemporaryDirectory() as td:
                 plain = os.path.join(td, "plain.aout")
@@ -338,7 +578,19 @@ class TestTheCorpus(unittest.TestCase):
                 if b["peephole"] and len(b["code"]) >= len(a["code"]):
                     mismatched.append((os.path.basename(src), "no shrink",
                                        len(a["code"]), len(b["code"])))
+                fired.update(b["peephole"] or {})
         self.assertEqual([], mismatched)
+        # …and the differential above is not vacuous. A corpus the pass never
+        # touches would agree with itself on every example and prove nothing,
+        # which is the state this test was in while `arm64/copy_chain` sat in
+        # `PENDING_RULES` with a liveness check that declined everything: the
+        # two rules enabled alongside it fire zero times over the whole corpus,
+        # so "52 of 52 agree" was 52 of 52 agree with the pass switched off.
+        self.assertGreater(sum(fired.values()), 0,
+                           f"the pass fired on nothing: {dict(fired)}")
+        self.assertIn("arm64/copy_chain", fired,
+                      "the rule this file's liveness tests are about never "
+                      "fired, so they are not being exercised")
 
     def _run(self, path):
         try:

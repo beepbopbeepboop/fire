@@ -2539,7 +2539,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit_extern_call(name)
         return self.asm.extern_refs[-1][1]
 
-    def _emit_call_exit(self, status: int, computed: bool = False) -> int:
+    def _emit_call_exit(self, status: int) -> int:
         """Call the C library's `exit(status)`.
 
         The extern path (a stub the loader binds) rather than a raw syscall,
@@ -2547,32 +2547,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         and the formal x86-64 path emits the same code for both — the binary
         format, not the instruction stream, is what differs per platform.
 
-        Returns the call site address; see `_emit_extern_call`.  Every caller
+        Returns the call site's address; see `_emit_extern_call`.  Every caller
         must decide for ITSELF whether that call is reachable — the difference
         is the whole of `info["compiler_traps"]`, and `_emit_diverge` (a
-        `raise`, which the program really does reach) must never claim one.
-
-        **`computed` says the status is ALREADY in RAX** rather than being an
-        immediate, and it is a flag on this method rather than a second exit so
-        that the `mov rax, 0` this needs for the varargs convention cannot drift
-        away from the `mov rdi` beside it. No stack is needed here, which is why this
-        backend's half of the computed-`SystemExit` fix is shorter than arm64's:
-        the only thing between the value and the argument
-        register is the mask, and SysV's first integer argument is written LAST
-        — so `raise SystemExit(code())` is `mov rax, <code()>`; `and rax, 0xff`;
-        `mov rdi, rax`; `mov rax, 0`; `call exit`.
-
-        The mask is HERE for the reason it is on arm64's `_emit_exit`: a
-        computed value does not exist until the point of delivery, and
-        `exit(3)` truncates to a byte, so a `code()` returning -1 must leave 255
-        and not 2^64-1. Measured both ways on this backend; the row is
-        `systemexit_with_a_computed_status` in `test_formal_exceptions.py`.
-        """
-        if computed:
-            self.asm.emit(encode_and_r64_imm32(Reg.RAX, 0xFF))
-            self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        else:
-            self._emit_mov_imm(Reg.RDI, status)
+        `raise`, which the program really does reach) must never claim one."""
+        self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
         return self._emit_extern_call("exit")
 
@@ -2633,45 +2612,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._flush_pending_finally()
             self._emit_call_exit(1)
             return
-        status = M.raise_exit_status(exc_name, value,
-                                     argument_is_int=self._sys_exit_status_is_int(
-                                         value))
-        if status is None:
-            # COMPUTED: the status is not in the text, so it has to be a VALUE,
-            # and RAX is where an expression leaves one on this backend (the
-            # section header says so). The FIRST argument is emitted for its
-            # value and the rest for their effects rather than every argument
-            # being emitted twice, so `raise SystemExit(code())` runs `code()`
-            # once — which is what the source says and what the loop below does
-            # for the non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
-                self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_call_exit(None, computed=True)
-            return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
         self._flush_pending_finally()
-        self._emit_call_exit(status)
-
-    def _sys_exit_status_is_int(self, value) -> bool:
-        """Is `raise SystemExit(value)`'s argument an INTEGER this build can
-        compute — `model.raise_exit_status`'s gate, asked with this function in
-        hand.
-
-        The one reader of it in this backend, and the mirror of
-        `formal/arm64_codegen.py`'s method of the same name: it needs
-        `self._vkinds` because a callee's result kind is this backend's
-        question, and the RULE is `model.py`'s — two copies of a gate is a gate
-        that can disagree about what it means.
-        """
-        args = M.raise_arg_exprs(value) if value is not None else []
-        if not args:
-            return False
-        return bool(M.raise_status_argument_is_an_integer(
-            args[0], getattr(self, "_vkinds", None)))
+        self._emit_call_exit(M.raise_exit_status(exc_name, value))
 
     def _frame_member_slot(self, node):
         """The frame slot `node` names, or None having refused the access.
@@ -3877,21 +3821,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         from `open` in an earlier statement of this function and its aliases.
 
         A frame slot is not covered (proving a field holds a descriptor is
-        cross-field flow).
-
-        **A CALL RESULT is covered, and the note that said it was not was
-        WRONG about the consequence.** It read "`open(p, "w").write(s)` refuses,
-        because a method on a call result is not a value receiver on this path at
-        all" — it did not refuse. `_is_value_receiver` answered False, the method
-        arm was never taken, and the chain reached the extern path as a call to
-        the C library's `write(2)` on whatever the argument registers held:
-        measured on both architectures the program built, exited 0, printed its
-        next line and **wrote nothing**. `_is_value_receiver` now answers True
-        for a `CallExpr` (its own docstring has the measurement), so the method
-        call reaches here at all, and `model.is_open_call` is what makes this arm
-        fire rather than refuse. arm64's copy carries the same arm."""
-        if isinstance(expr, F.CallExpr):
-            return M.is_open_call(expr)
+        cross-field flow), and neither is a CALL RESULT — `open(p, "w").write(s)`
+        refuses, because a method on a call result is not a value receiver on
+        this path at all (`_is_value_receiver`), which is a separate pre-existing
+        gap the arm64 docstring records in full."""
         if isinstance(expr, F.IdentExpr):
             return expr.name in self._fd_vars
         if isinstance(expr, F.MemberExpr):
@@ -4194,35 +4127,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         to be extended rather than left to find it by accident; without it the
         chain falls to the extern path and becomes a call against a symbol
         spelled after the chain. arm64's copy of this function says the same
-        thing about the same shape, and the two have to keep agreeing.
-
-        **A CALL RESULT is a value too, and leaving it out was a SILENT WRONG
-        ANSWER rather than a refusal** — measured on both architectures, which
-        is where the two backends found it at the same time:
-
-            def main(n) -> Int:
-                open("/tmp/fw.txt", "w").write("hello\\n")
-                printf("done\\n")
-                return 0
-
-        built green, exited 0, printed `done`, and **wrote nothing**: this arm
-        answered False, so the method arm was never taken, `_callee_symbol`
-        flattened the chain to the bare name `write`, and the extern path called
-        the C library's `write(2)` on a register holding the address of the path
-        string. The identical program with the descriptor bound to a NAME writes
-        the file on both machines. "Runs, writes nothing, exits 0" is the outcome
-        `VALUE_METHOD_RECEIVERS`'s own comment describes for a descriptor this
-        path cannot establish.
-
-        A call returns one — `model.receiver_shape`'s table says exactly that
-        ("a call result is whatever that call was declared to produce") and both
-        backends read it, so this is a shared decision rather than one emitter's.
-        arm64's copy of this function carries the same arm and the same
-        measurement; they have to agree because the alternative is a program that
-        writes a file on one machine and not on the other."""
+        thing about the same shape, and the two have to keep agreeing."""
         if isinstance(obj, F.StringLiteral):
-            return True
-        if isinstance(obj, F.CallExpr):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
@@ -10880,24 +10786,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_nested_frame_defaults(child,
                                               child_off + self._blob_base)
 
-    def _emit_frame_bringup(self, st, base: int) -> None:
-        """Bring ONE frame up: its slots at their class-level defaults, then its
-        own constructor's stores.
-
-        **Both halves are one method because a frame bring-up IS a construction,
-        and before this was one method the second half did not happen.** Mojo
-        `T(...)` calls `T.__init__`; the placement walk here wrote field DEFAULTS
-        and stopped, so a struct whose sole field holds a frame whose own struct
-        declares `__init__` came up at its class-level values. Measured, both
-        architectures, `Box()` over `struct Box: var inner: Opt` printing
-        `b=0` where CPython prints `b=41` — building, running, exiting 0, nothing
-        on stderr. The order is the language's: default-initialize, then run
-        `__init__`.
-
-        `nested_frame_constructor_stores` is the ONE reader of "which fields does
-        this `__init__` store" — `struct_construction_plan` asked with a
-        synthesized zero-argument call — so this backend and arm64's cannot
-        answer it differently."""
+    def _emit_frame_defaults(self, st, base: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
         for slot, (kind, payload) in enumerate(
                 M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
@@ -10906,10 +10796,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._emit_mov_imm(Reg.RAX, int(payload or 0))
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
-        self._emit_frame_constructor_stores(st, base)
 
     def _emit_nested_frame_defaults(self, st, base: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first, then its stores.
+        """`st`'s nested subtree, defaults first, deepest first.
 
         The x86-64 twin of arm64's, over the same `struct_block_direct_children`
         rows.  It replaces a loop that unpacked FOUR values out of
@@ -10917,41 +10806,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         only while no nested frame had a nested frame of its OWN; measured, both
         architectures, the 3-value unpack raised `ValueError` from the
         constructor of exactly such a struct.
-
-        **The constructor's stores come after this level's defaults and before
-        the level above's**, which is the language's order: default-initialize,
-        then run `__init__`.  Before this they were never emitted for a frame
-        brought up this way, so `Box()` whose `inner: Opt` has an `__init__`
-        wrote 0 where CPython writes 41 — on both architectures, silently.  They
-        come from `model.nested_frame_constructor_stores`, the ONE reader of
-        "which fields does this `__init__` store", so this backend and arm64
-        cannot answer it differently.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, base):
             self._emit_nested_frame_defaults(child, child_off + self._blob_base)
-        self._emit_frame_bringup(st, base)
-
-    def _emit_frame_constructor_stores(self, st, base: int) -> None:
-        """This frame's own constructor's stores, at `base + 8·slot`.
-
-        The register discipline is `_emit_frame_defaults`' and not
-        `_emit_block_store`'s, and the difference is the base: a construction
-        SITE's block is one fixed RBP-relative address while a nested frame's is
-        `base`, a distance INTO that block.  The store itself is the same two
-        instructions.
-        """
-        stores, refusal = M.nested_frame_constructor_stores(
-            st, self._structs, self._frame_candidates, self._return_types)
-        if refusal is not None:
-            raise CodegenError(refusal)
-        for _field, slot, value in stores:
-            if isinstance(value, int):
-                self._emit_mov_imm(Reg.RAX, value)
-            else:
-                self._emit_expr(value)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
+        self._emit_frame_defaults(st, base)
 
     def _emit_frame_nested_addresses(self, base: int, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -11094,7 +10953,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # one way to bring a subtree up at an offset the layout chose.
             base = self._blob_base + site[1]
             self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_bringup(nested, base)
+            self._emit_frame_defaults(nested, base)
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the

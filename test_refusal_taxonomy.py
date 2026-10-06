@@ -28,9 +28,8 @@ protecting, and they are not the same thing:
    sample attached to it.** The family "a module whose API is its top-level
    statements, imported by another" and its sample were removed on
    2026-10-03 with the dylib-module-body row it keyed on (§6 of
-   the `b7` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1, whose
-   document was consolidated with the fix): both object writers emit a
-   load-time initializer, so the refusal
+   `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose doc was deleted with
+   the fix): both object writers emit a load-time initializer, so the refusal
    that named it no longer exists and a sample of a message nothing produces is
    a sample that can only rot. A family is removed when its message stops being
    reachable, and the test that says so is this file's list — the absence of a
@@ -726,7 +725,7 @@ SAMPLES = [
 # So: one real message per cause, abbreviated at clause boundaries exactly as
 # above, and every cause must be reached by at least one of them. Cut from the
 # 2026-09-30 r2 arm64 sweep (637 files, log in the worktree that produced
-# the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md`).
+# `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`).
 CAUSE_SAMPLES = [
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
@@ -870,7 +869,7 @@ CAUSE_SAMPLES = [
     # tree, every one of them this one sentence. The ranking reported them as
     # `other refusal` — the bucket `tools/formal_sweep_causes.py`'s own docstring
     # defines as "nobody has looked" — which is the defect §5 of
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` is about.
+    # `bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` is about.
     #
     # **ONE sample, and BUILT, where there were two cut by hand until
     # 2026-10-05.** The two ends of the row differ only in the names they name
@@ -1380,11 +1379,7 @@ def _no_def_callee_arm_checks(failures):
     """EVERY arm of `frame_undefined_callee_refusal` keeps the clause, and every
     arm classifies as the one family in BOTH tables.
 
-    The row this rests on is the sweep's `callee has no definition on this
-    path` (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1,
-    row 8 — 12 files in the sweep's scope, 41 over all roots, and a ceiling
-    measured at 0 for both arms, which is why there is nothing left to fix
-    here and only the arms to keep honest): the
+    The row this rests on is `bugs/FORMAL_callee_no_def_ceiling_zero.md`: the
     fifth branch of `frame_receiver_escape_refusal` used to be one sentence over
     five different facts, four of them false of the program in front of the
     reader, and splitting it into one arm per fact meant the arms had to stay

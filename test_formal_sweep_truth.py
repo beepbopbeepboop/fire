@@ -4222,69 +4222,6 @@ _TMP_LITERAL = re.compile(r"^/tmp(?:/|$)")
 # it reads or writes it, so a read-only `/tmp` is stated here rather than
 # inferred — and the row below fails if a listed file stops naming one, which is
 # what keeps this from becoming a list that hides whatever is added next.
-# The `formal/examples` list as it stood on `master` before this merge grew it
-# 52 -> 93 (`work/formal36-proof-corpus`). A FACT ABOUT THE TREE, committed so
-# the growth can be told apart from a regression: the corpus-total row below
-# moves whenever an example is ADDED, and only a measurement over the examples
-# that were ALREADY here says whether the guard's branches are still settled.
-# Read by `TestTheStackFloorGuardIsWhatGatesTheValueTheorem`'s second assertion;
-# `TOTAL_PRE_MERGE52` is the number it must still produce.
-_PRE_MERGE_EXAMPLES = (
-    "formal/examples/absval.mojo",
-    "formal/examples/augassign.mojo",
-    "formal/examples/bigconst.mojo",
-    "formal/examples/bitops.mojo",
-    "formal/examples/bittest.mojo",
-    "formal/examples/both.mojo",
-    "formal/examples/chain.mojo",
-    "formal/examples/condassign.mojo",
-    "formal/examples/condassign2.mojo",
-    "formal/examples/const2.mojo",
-    "formal/examples/count.mojo",
-    "formal/examples/countdown.mojo",
-    "formal/examples/deepif.mojo",
-    "formal/examples/either.mojo",
-    "formal/examples/elif3.mojo",
-    "formal/examples/fact.mojo",
-    "formal/examples/fib.mojo",
-    "formal/examples/floordiv.mojo",
-    "formal/examples/identity.mojo",
-    "formal/examples/ifonly.mojo",
-    "formal/examples/ifonly2.mojo",
-    "formal/examples/ifparam.mojo",
-    "formal/examples/localmul.mojo",
-    "formal/examples/n8.mojo",
-    "formal/examples/neg.mojo",
-    "formal/examples/nonzero.mojo",
-    "formal/examples/pair.mojo",
-    "formal/examples/pow2.mojo",
-    "formal/examples/powexpr.mojo",
-    "formal/examples/ret42.mojo",
-    "formal/examples/reuse.mojo",
-    "formal/examples/seven.mojo",
-    "formal/examples/sgt8.mojo",
-    "formal/examples/shiftlr.mojo",
-    "formal/examples/sign.mojo",
-    "formal/examples/sle8.mojo",
-    "formal/examples/sqsum.mojo",
-    "formal/examples/subscript_var.mojo",
-    "formal/examples/sum.mojo",
-    "formal/examples/sum_range.mojo",
-    "formal/examples/swapadd.mojo",
-    "formal/examples/threevar.mojo",
-    "formal/examples/twoifs.mojo",
-    "formal/examples/twoparams.mojo",
-    "formal/examples/udivmod.mojo",
-    "formal/examples/ug8.mojo",
-    "formal/examples/vardecl.mojo",
-    "formal/examples/vardecl_typed.mojo",
-    "formal/examples/vardecl_unused.mojo",
-    "formal/examples/wdiff.mojo",
-    "formal/examples/wge.mojo",
-    "formal/examples/wide_recv.mojo",
-)
-
-
 _TOOLS_TMP_READERS = {
     "tools/wave2b_fix_deps.py":
         "reads /tmp/gimple_pre_wave2, a snapshot of the pre-wave2 sources a "
@@ -4371,27 +4308,12 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     TREES = (("formal/examples/ret42.mojo", 1, 16),
              ("formal/examples/bittest.mojo", 4, 220),
              ("formal/examples/wide_recv.mojo", 1, 150))
-    #: …and the corpus TOTAL, which is the doc's after-table's own row. A
-    #: per-example table cannot see a program that gained a branch, so the total
-    #: is the row that does, and it is the number the doc quotes.
-    #:
-    #: **Re-pinned 2026-10-05 from 69/2 718 to 105/4 232, and the cause is the
-    #: CORPUS rather than the guard.** `formal/examples` grew 52 -> 93 programs
-    #: (`work/formal36-proof-corpus`, 41 new examples), and this total is over
-    #: every `*.mojo` in it, so 26 of the 41 add trees and the number moves with
-    #: them. Verified as a growth and not a regression by re-measuring the subset
-    #: that already existed: **master's 52 examples on this tree are 39 trees /
-    #: 69 leaves / 2 718 steps / 13 declined — the doc's row EXACTLY.** So the
-    #: guard's own branches are still settled (the three per-example rows above
-    #: are unchanged and still assert what they asserted) and what moved is how
-    #: many programs the total is taken over.
-    #:
-    #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
-    #: examples on THIS tree rather than remembered: the TOTAL above moves
-    #: whenever an example is added, and this one is what says whether the
-    #: examples that were already here still produce what they produced.
-    TOTAL = (105, 4232)
-    TOTAL_PRE_MERGE52 = (69, 2718)
+
+    #: …and the corpus TOTAL, which is the doc's after-table's own row ("corpus
+    #: leaves / step equations … 69 / 2 718"). A per-example table cannot see a
+    #: program that gained a branch, so the total is the row that does, and it
+    #: is the number the doc quotes.
+    TOTAL = (69, 2718)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
@@ -4434,9 +4356,9 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
                     f"{E._MAX_CHAIN_STEPS} is what turns into a refusal")
 
         # …and the whole corpus, because three examples cannot see a program that
-        # was added. The recursive examples and the `idiv` ones build no tree at
-        # all (a backward call, and no step lemma for `group3:idiv`), so they
-        # are counted as declines rather than as zero-leaf trees.
+        # was added. The ten recursive examples and the two `idiv` ones build no
+        # tree at all (a backward call, and no step lemma for `group3:idiv`), so
+        # they are counted as declines rather than as zero-leaf trees.
         leaves_total = steps_total = trees = 0
         declined = []
         for path in self._corpus():
@@ -4461,47 +4383,6 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
             f"{self.TOTAL[0]}/{self.TOTAL[1]}; a conditional added to a "
             f"corpus example moves this, and the {len(declined)} that build no "
             f"tree are: {declined}")
-
-        # …and the SAME measurement over the examples that existed when the doc's
-        # figure was taken, which is what says the total above moved because the
-        # CORPUS grew rather than because the guard's branches came back. Without
-        # this row a re-pin to a bigger number is indistinguishable from a
-        # regression that happens to be larger, and only one of those two is a
-        # fix. The subset is master's `formal/examples` list, so it is a fact
-        # about the tree and not about this merge.
-        pre = _PRE_MERGE_EXAMPLES
-        if not pre:
-            self.skipTest(
-                "the pre-merge example list is gone; the corpus-total row above "
-                "is then the only one, and it cannot tell growth from regression")
-        old_total = [0, 0]
-        old_declined = []
-        for rel in pre:
-            path = os.path.join(HERE, rel)
-            if not os.path.exists(path):
-                old_declined.append("%s: deleted" % rel)
-                continue
-            try:
-                code, info, _insns, shapes = E._plan(path)
-                root = E._tree(code, info, shapes)
-            except (E._NoTree, ValueError) as e:
-                old_declined.append("%s: %s" % (os.path.basename(rel), e))
-                continue
-            if root is None:
-                old_declined.append(os.path.basename(rel) + ": no tree")
-                continue
-            found = list(E._paths(root))
-            old_total[0] += len(found)
-            old_total[1] += sum(len(x) for x in found)
-        self.assertEqual(
-            tuple(old_total), self.TOTAL_PRE_MERGE52,
-            f"the {len(pre)} examples that predate the 2026-10-05 corpus growth "
-            f"are {old_total[0]} leaves / {old_total[1]} steps on this tree; the "
-            f"doc's after-table and `TOTAL_PRE_MERGE52` say "
-            f"{self.TOTAL_PRE_MERGE52[0]}/{self.TOTAL_PRE_MERGE52[1]}. If THIS "
-            f"is what moved, the guard's branches are being walked again and a "
-            f"bigger corpus total is not the explanation; the {len(old_declined)} "
-            f"of them that build no tree are: {old_declined}")
 
     def test_every_value_theorem_refusal_is_the_guard_and_not_the_program(self):
         """The claim, over the whole corpus: `call_rel32` is in EVERY refusal.

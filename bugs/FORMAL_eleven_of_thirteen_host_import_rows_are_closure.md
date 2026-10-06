@@ -1,7 +1,7 @@
 # FORMAL_eleven_of_thirteen_host_import_rows_are_closure: what the host-import row looks like once `tempfile`, `textwrap`, `posixpath` and `html` have landed
 
 **Measured 2026-10-03** while picking the next host modules from
-the `b7` round of `bugs/FORMAL_sweep_work_map.md`'s host-import row. Not a claim on
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`'s host-import row. Not a claim on
 any of these modules — it is the measurement that says which of them is WORK and
 which is a file waiting on something else, because the ranking that started this
 (`tools/formal_sweep_causes.py --host`, whose 2026-10-03 write-up is deleted

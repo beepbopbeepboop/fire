@@ -17,16 +17,10 @@ census, and the residue it found is 289 sites a reader has to know about.**
   through every deletion that created them. `BARE_REF`/`bare_find` resolve a bare
   stem by EXISTENCE (`bugs/<stem>.md` absent AND no `.md` of that name anywhere in
   the tree, which keeps `doc/ELABORATION.md` and `doc/MODULE_CACHE_DESIGN.md` out
-  of it) and skip a line that already says the doc was deleted. The figure this
-  bullet originally carried — *"289 bare citations of 147 names that are nowhere,
-  across 109 files"* — **was an over-count of 64, measured 2026-10-05**: the
-  existence test was INVERTED for bug docs themselves, so every bare citation of
-  a **live** document was reported as dangling, 14 of them
-  `FORMAL_known_limits.md` — the same document `test_suite.py` uses as the
-  positive control for "a cited doc that EXISTS is not reported". Fixed, with the
-  corrected 208 across 120 names recorded in `bare_find`'s docstring and in
-  `BARE_REF`'s comment. The report below is deliberately NOT in the ratchet — see
-  `BARE_REF`'s comment for why, and for what a verdict on it would take.
+  of it) and skip a line that already says the doc was deleted. Measured on this
+  tree: **289 bare citations of 147 names that are nowhere, across 109 files.**
+  It is reported and deliberately NOT in the ratchet — see `BARE_REF`'s comment
+  for why, and for what a verdict on it would take.
 * **Step 2 — `test_formal_sweep.py:450`'s precondition: not this doc's.** It is
   filed and claimed as `bug:TEST_formal_sweep_relative_import_precondition_is_stale`,
   together with the fixture that cannot build

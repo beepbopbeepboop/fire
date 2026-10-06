@@ -97,27 +97,6 @@ not. The decision belongs with whoever fixes the storage.
 
 ## The next step
 
-**Read `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`
-first — it is the measurement of this section's own proposal, and it says the
-premise here is wrong.** This section asks "if it is a slot reserved per element
-SITE (as `frame_slots`/the local allocator would do), the fix is a
-per-iteration materialisation or a copy at the append". There is no per-element-
-site allocator: a comprehension's element reserves through the ONE sequential
-frame ledger (`_reserve_blob` against `_list_cursor`), it runs once at COMPILE
-time and N times at RUN time, and so any reservation it makes is one allocation
-for N iterations. A per-iteration array DOES fix the list-literal and dict-
-literal elements, and was measured doing so — but **not** the nested-comprehension
-element above, which is this document's own reproducer, because that one's
-allocation is the comprehension's own `res_offset` and relocating it means the
-result address stops being a compile-time constant and becomes a register that
-has to survive every append. That doc carries the three steps, both backends,
-and the arm64 half that was written and withdrawn.
-
-The machinery this section says "is being used in the wrong place" is not in the
-wrong place — it is not there. What is there is the ledger above.
-
-## What is true below, unchanged
-
 Read the two emitters' comprehension element materialisation and ask where the
 element's storage is allocated: if it is a slot reserved per element SITE (as
 `frame_slots`/the local allocator would do), the fix is a per-iteration

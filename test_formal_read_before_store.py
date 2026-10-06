@@ -114,44 +114,6 @@ CASES = [
     ("parameter_is_stored",
      "    return n + 1\n", "ok"),
 
-    # ── a DECLARATION IS NOT AN ASSIGNMENT ───────────────────────────────
-    # `var q: Int` with no `=` gives `q` a home and no value.  Both readers of
-    # "does this statement define its name" used to count it as a definition --
-    # `formal/model.py`'s `_cfg_block_defs` and `_definitely_stored` -- so the
-    # fixpoint believed `q` was stored before any later read of it, and the
-    # read went unreported.  Measured 2026-10-05 on the build before the fix:
-    # this case built, ran, exited 0, and printed 1709223448 on arm64 and
-    # 306062552 on x86-64, where CPython raises UnboundLocalError; and
-    # `tools/formal_memcheck.py`'s stack/register poison called the program
-    # NONDETERMINISTIC, because two plain runs of a straight-line program that
-    # disagree are only ever state nobody wrote.
-    #
-    # The two `refuse` rows DIVERGE, and the reason is that CPython cannot
-    # parse the text: `var q: Int` is a SyntaxError there, so the oracle's
-    # child dies before it can raise an UnboundLocalError for any probe value.
-    # That is a STRONGER statement than a raise -- a language with no syntax for
-    # the declaration rejects the program at parse time -- and it is still not
-    # the oracle's answer, so it is declared here rather than papered over.
-    # The end-to-end shape (a real image, refused by name, on both
-    # architectures) is `formal/memcheck/local_uninitialised.mojo`, which is
-    # built and run by `test_formal_memcheck.py::test_heap`.
-    ("bare_vardecl_refused",
-     "    var q: Int\n    return q\n", "refuse",
-     "CPython cannot parse `var q: Int` (SyntaxError), so it has no "
-     "UnboundLocalError to report"),
-    ("vardecl_with_initialiser_ok",
-     "    var q: Int = 0\n    return q\n", "ok"),
-    # The declaration must not license the read, but a LATER real store still
-    # does, and the order matters: this is the shape where the guard is wrong in
-    # the other direction -- a reader that stopped at the first `VarDecl` would
-    # refuse a program CPython runs.
-    ("bare_vardecl_then_store_ok",
-     "    var q: Int\n    q = 1\n    return q\n", "ok"),
-    ("bare_vardecl_annotated_read_refused",
-     "    var q: Int\n    var r: Int\n    return q + r\n", "refuse",
-     "CPython cannot parse `var q: Int` (SyntaxError), so it has no "
-     "UnboundLocalError to report"),
-
     # ── the shape the walk could not see: a store in only SOME arm ────────
     ("if_only_arm_refused",
      "    if n:\n        p = 1\n    return p\n", "refuse"),

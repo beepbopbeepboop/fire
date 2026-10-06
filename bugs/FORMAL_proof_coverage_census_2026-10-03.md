@@ -121,7 +121,7 @@ largest is **`+` on two strings at 10 of 31**, with `'%'` on a string at 4, a
 field access through a value at 5, a number compared with a string at 3, and a
 method call on a value at 2. The `+` family is the string-value-model row, so the
 census's top codegen cause is now the same one the sweep's 170-file row is
-(the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1), and it is a
+(`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1), and it is a
 value-model project rather than a patch.
 
 **And a negative measurement, because a change that adds a refusal has to say
