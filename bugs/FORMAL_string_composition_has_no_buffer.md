@@ -290,13 +290,61 @@ general case is worth a project:
    (`formal/model.py`'s "Where a frame ADDRESS may be handed off, and why not":
    a builtin or C function takes the object BYTES and a frame address is
    neither, so that is a **category error** rather than a missing layout).
-   **That is a value-model decision and not a patch**, and it is the same
-   dependency §8 names for `FORMAL_module_state_no_storage.md` — which is why
-   this section did not land step 1 with the input it now has. What step 1
-   needs decided first is: *is a composed string a frame address this path may
-   pass, and to whom?* Both questions have an answer somewhere in
-   `FRAME_ADDRESS_CTORS` and `frame_holder_disagreement_refusal`; neither has
-   been asked about a composed buffer.
+   **MEASURED 2026-10-05 later (`formal40-6`): the question as posed HAS an
+   answer, and it is neither one — the composed value is not a frame address in
+   this path's sense at all, so neither table applies and the decision step 1
+   actually needs is a LIFETIME question, not a value-model one.** The step above
+   asks "*is a composed string a frame address this path may pass, and to whom?*"
+   and says both answers are in `FRAME_ADDRESS_CTORS` and
+   `frame_holder_disagreement_refusal`. Read off the tables (`formal/model.py`,
+   no build needed):
+
+   ```
+   IDENTITY_TYPE_CTORS = {CPointer, Pointer, String, StringLiteral,
+                          StringSlice, UnsafePointer, str}
+   STRING_TYPE_CTORS   = {String, StringLiteral, StringSlice, str}
+   FRAME_ADDRESS_CTORS = (Pointer, UnsafePointer, CPointer)     # the difference
+   FRAME_VALUE_ONLY_CALLS contains: String, StringLiteral, StringSlice, str, len,
+                          int, repr, hex, ord, chr, hash, sorted, …  and NOT printf
+   FRAME_IDENTITY_CALLS = {origin_of}
+   ```
+
+   **Every one of those tables is about the value of a MULTI-FIELD STRUCT**, and
+   a struct's value on this path is the address of its storage — that is the whole
+   premise of `frame_receiver_escape_refusal`. **A composed string's value is
+   the address of a scratch buffer, which is an ordinary `char *`, and
+   `char *` is not a struct**: it is not in `FRAME_ADDRESS_CTORS`, it is not a
+   callee in `FRAME_VALUE_ONLY_CALLS`, and `origin_of` on it is the identity it
+   is everywhere else. So the "category error" that table refuses — *a builtin
+   wants the object's BYTES and a frame address is neither* — cannot arise: the
+   composed value **is** bytes-addressed, which is the one thing `printf("%s", …)`
+   needs.
+
+   **And that matters because `printf` is not in `FRAME_VALUE_ONLY_CALLS`**: it is
+   decided by `model.printf_format_refusal`, which asks about the FORMAT and the
+   vararg's kind and passes a `char *` through to C `printf` unchanged. **Every
+   shape step 1 names consumes the composed value that way** —
+   `f"--backend={backend}"`, `f'ledger-{name}.json'` — the literal chunk and the
+   field's text go into one buffer and the next call reads bytes at its address.
+
+   **So the remaining decision is smaller than the section wrote it, and it is
+   this: the scratch belongs to the frame that composed it, so a composed value
+   may be PASSED to a callee that consumes it immediately (`printf`, `len` — a
+   `strlen` walk over bytes that exist) and may not be STORED anywhere that
+   outlives that frame (a second buffer would be in a frame that may already be
+   gone).** That is a lifetime rule with a named owner — the same one
+   `FORMAL_module_state_no_storage.md` §(2) is about, and the same reason §6's
+   "`char *` buffer in the frame scratch" bullet says a composed string whose
+   value outlives its frame has nowhere to live — but it is a rule about WHERE a
+   value may go, and the emitter already has a place that answers it
+   (`frame_receiver_escape_refusal`'s escape walk reads the same AST).
+
+   **What this does NOT do:** it lowers nothing and moves no file, and it does
+   not make step 1 small. Step 1 is still two new pieces of emitter code per
+   architecture (the digit routine and the chunk copy) plus the bound arithmetic
+   §7.1 spells out, and the `.olean` trade for the library half still stands. It
+   is the blocker *removed from the list of things step 1 is waiting on*, which is
+   what item 0 asked for.
 1. **A buffer with a compile-time-known bound, in the frame scratch, for a value
    that does not escape the frame.** `f"--backend={backend}"` and
    `f'ledger-{name}.json'` are the shape: literal chunk, one integer-shaped
