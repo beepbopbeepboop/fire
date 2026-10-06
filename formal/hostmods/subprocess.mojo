@@ -31,7 +31,7 @@ model with no admission in it.
 THE CALL SURFACE THIS MODELS IS MEASURED, NOT ASSUMED
 ------------------------------------------------------
 The names and keywords below are the ones this repository's own source actually
-spells, read with `ast` over every `.py` in the tree (`test_formal_admitted.py`
+spells, read with `ast` over every `.py` in the tree (`test_formal_subprocess.py`
 re-measures them, and a name that appears without being modelled is a FAILURE
 rather than a note):
 
@@ -52,13 +52,12 @@ be called by NONE of those 547 call sites, however complete its contracts were.
 That is a fact about the CALL, not about the host: a keyword argument to a
 function in an imported module binds fine as soon as the callee has a parameter
 of that name (`match(p="/x.py", pat="*.py")` builds today), so the fix is here
-rather than in the ABI.  `FORMAL_host_import_row_5_measured` §`subprocess`
+rather than in the ABI.  `bugs/FORMAL_host_import_row_5_measured.md` §`subprocess`
 measured this row at 0 files and gave the keyword refusal as the mechanism; the
 mechanism was wrong (it was a NAME mismatch in a probe, not a refusal of keyword
-arguments), while the 0 was right for a different reason: re-measured over all
-143 importing files, the row is worth 0 builds, because `formal/imports.py`
-refuses an unresolvable import before the build ever lowers a `subprocess` call,
-so most of the files stop at the import and never reach it.
+arguments), while the 0 was right for a different reason, which
+`bugs/FORMAL_subprocess_row_measured_b7.md` re-measures over all 143 importing
+files.
 
 WHAT A CALL ACTUALLY DOES AT RUN TIME
 -------------------------------------
@@ -77,7 +76,7 @@ and no exit code can be outside the range, because the kernel masks one —
 `sh -c 'exit 300'` is reported as 44.  So the status cannot DISTINGUISH a refusal
 from an answer, and the diagnostic printed on stdout is the channel that does;
 125's real job is that it is nonzero and reserved by this tree.  The audit that
-established this is `FORMAL_trust_audit_2026-10-04`, and
+established this is `bugs/FORMAL_trust_audit_2026-10-04.md`, and
 `test_formal_admitted.py`'s `truth` group re-measures both halves on every run.
 
 That is a deliberate refusal to answer, and it is what makes the admission

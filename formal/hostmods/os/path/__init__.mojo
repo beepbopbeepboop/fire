@@ -23,13 +23,11 @@ deviations that are properties of this target and are stated on each one:
     alias say that too, because which one you got decides whether there is
     anything to free.
 
-  * A DEFAULT ARGUMENT IS MATERIALIZED ACROSS A DYLIB NOW, so a parameter
-    CPython gives a default gets that default here. `relpath`'s `start` is the
-    one such parameter in this module and it defaults to `"."` — CPython's own
-    `os.curdir`. A call from another image USED not to materialize a callee's
-    default arguments (`FORMAL_default_argument_not_applied_across_a_dylib`,
-    fixed; its doc is deleted, as a fixed bug's is), and that is what the old
-    "no parameter has a default" rule was a workaround for.
+  * NO PARAMETER HAS A DEFAULT. A call from another image does not materialize
+    a callee's default arguments — the caller has no signature to read them
+    from — so a defaulted parameter arrives as a stack address. `relpath` is
+    the one function here that CPython gives a default to, and it requires its
+    argument instead. (bugs/FORMAL_default_argument_not_applied_across_a_dylib.md)
 
   * FOUR FUNCTIONS CARRY NO RETURN ANNOTATION, and it is not an oversight.
     `split`, `splitdrive`, `splitext` and `_next_component` return a TUPLE, and
@@ -38,7 +36,7 @@ deviations that are properties of this target and are stated on each one:
     one would reach a caller as a dylib manifest signature. Every other
     function in this module and in `os/_syscalls.mojo` IS annotated, and that
     is what lets a CALL SITE classify what it got back
-    (FORMAL_string_equality_of_two_unclassified_words): a call result
+    (bugs/FORMAL_string_equality_of_two_unclassified_words.md): a call result
     with no annotation is a word whose provenance is unknown, and `f() == g()`
     on two of those was a comparison of two addresses — `c == d` FALSE for two
     equal strings.
@@ -717,7 +715,7 @@ def realpath(p) -> str:
     return r
 
 
-def relpath(path, start=".") -> str:
+def relpath(path, start) -> str:
     """`path` relative to `start` — CPython's `os.path.relpath`.
 
     Both are made absolute, the components they share are dropped, one `..` is
@@ -725,13 +723,10 @@ def relpath(path, start=".") -> str:
     `path` is appended. `"."` is the answer when the two are the same path, as
     in CPython. A fresh buffer unless the answer is the literal `"."`.
 
-    `start` defaults to `"."`, which IS CPython's default (`os.curdir` is the
-    string `"."` on a POSIX target, and a default argument has to be a literal
-    on this path, so the module's own `curdir()` cannot be spelled here). A
-    default argument is applied to a call from another image now —
-    `formal/imports.py`'s `external_declarations` gives the emitter the callee's
-    declaration, so the omitted register is filled from the default rather than
-    left holding whatever the caller last put there.
+    `start` is REQUIRED rather than defaulting to `"."`: a default argument is
+    not applied to a call from another image, so a defaulted `start` arrives as
+    whatever the caller left in the argument register. Pass `"."` for CPython's
+    one-argument form. (bugs/FORMAL_default_argument_not_applied_across_a_dylib.md)
 
     There is no `ValueError` for a relative `path` on a target that cannot
     change directory, which CPython raises on Windows; on a POSIX target the
@@ -829,7 +824,7 @@ def expanduser(p) -> str:
     **THE `~name` HALF IS A `getpwnam`, and this function used to claim it could
     not be done.**  It said "reading the password database is not something this
     target can do", and answered `~root/` unchanged where CPython answers
-    `/var/root/`.  That is a divergence CPython's own `test_posixpath` has a
+    `/var/root/`.  That is a divergence CPython's own `test_posixpath.py` has a
     case for — `self.assertEqual(posixpath.expanduser('~root/'), '/var/root')` —
     and it was found by generating that suite's cases rather than by reading it,
     which is the argument for generating them: the case is in the file the whole

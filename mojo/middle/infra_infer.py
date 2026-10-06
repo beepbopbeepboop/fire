@@ -42,7 +42,7 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.boundnames import bound_name_set
+from mojo.middle.boundnames import bound_names_in_order
 
 def _type_of(gen, name: str) -> str:
     boxed = getattr(gen, '_boxed_mut_locals', None)
@@ -654,8 +654,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     scan_expr(gen.iterable)
                     for cond in (gen.conditions or []):
                         scan_expr(cond)
-                if expr.value is not None:
-                    scan_expr(expr.value)
+                if expr.key is not None:
+                    scan_expr(expr.key)
                 scan_expr(expr.element)
             elif isinstance(expr, gimple_ctypes.SubscriptExpr):
                 # Check if the base (after unwrapping nested subscripts) is the parameter
@@ -1794,7 +1794,7 @@ def _returned_param_containers(func) -> dict:
     # `bound_names_in_order` with NO params is exactly "the names this body
     # binds", from the ONE name-binding walk `mojo/middle/boundnames` exists
     # to hold — not a second private walker here.
-    rebound = bound_name_set(getattr(func, 'body', None) or [])
+    rebound = set(bound_names_in_order(getattr(func, 'body', None) or []))
     out: dict = {}
     for n in returned:
         if n not in rebound:

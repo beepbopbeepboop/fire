@@ -1,64 +1,166 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
-## Status (2026-10-05 — `work/formal42-5`: TWO successor rows had drifted from the model, and 26 of 26 `terminates` cases were dead on arrival)
+## Status (2026-10-05 — B32/B33/B35: FIVE successor rows were still the model as it was BEFORE the fuzzer corrected it, and 26 of 26 examples were elaborating failures because of two of them)
 
-**The companion doc's next step, followed literally, found the whole of the 26
-elaboration failures — and a second live drift behind them.**
-A sibling doc recorded 26 of 26 `terminates` cases failing on `Type mismatch |
-x86_step_setcc_r8 sN`, named the next step as "compare
-`x86_step_setcc_r8`'s stated signature with what `x86_step` concludes … If it
-states a width the model does not produce, that is the same class of bug and the
-fix is in the lemma."  It is B2's mechanism exactly — **a successor table is a
-copy of the model, and `e54d2f4e` (2026-10-04) changed the model in three places
-and this was the fourth** — but the drift was in the *other* file:
+The same defect class as the `cqo` row (B29) and it is worth reading the two
+together, because **the model was fixed and this file's copy of it was not**,
+twice, in both of the shapes the mistake can take: a WRITE OF THE WRONG WIDTH and
+a WRITE OF THE WRONG SET OF FIELDS.
 
-| row | `_SUCCS` said | `lib/X86.lean` says | since |
-|---|---|---|---|
-| `setcc` | `x86_set_reg $s $rmv …` | `x86_set_reg_narrow $s $rmv 1 …` | `e54d2f4e`, the NARROW register write |
-| `imul_r64_r64` | no flags at all | `x86_set_flag4 {…} lo ovf ovf` | `e54d2f4e`, `imul`'s four flags |
+**B32 — `setcc r/m8` writes ONE BYTE, and `_SUCCS` wrote all eight.** `lib/X86.lean`
+says so, in the arm's own comment: a 1- or 2-byte write touches only the low
+bytes and LEAVES THE REST ALONE, and `x86_trunc32` used to be the model's rule
+for it, so `setcc al` with RAX = `0xdeadbeefcafebabe` left the model with RAX = 0
+while the hardware left `0xdeadbeefcafebabe`. `formal/x86_64_model_fuzz.py
+--census` called `setcc:e` WRONG on three initial states out of three; the arm
+was corrected to `x86_set_reg_narrow`; `x86_step_setne_al` and
+`x86_step_setle_al` were restated (`0xdeadbeefcafebabe` or `…babf`); and
+`x86_step_setcc_r8` — the general lemma all 26 examples are proved through — was
+restated to the narrow write. `_SUCCS["setcc"]` was left naming `x86_set_reg`,
+and `_SIMP_FORMS["setcc"]` was left naming `x86_trunc32`, so every generated
+proof of a `setcc` was a proof of a different instruction:
 
-Both are corrected now, and correcting the first **revealed** the second: a file
-that dies at its first elaboration error does not reach its second, so one stale
-successor hid the next.  Twelve examples emit a three-operand `imul`.
+```console
+$ python3 formal/x86_64_endtoend_test.py formal/examples/sle8.mojo
+sle8  terminates: FAIL lean exited 1: error: Type mismatch | x86_step_setcc_r8 s24 …
+```
 
-**And the consequence is the generalisation this file keeps relearning, one
-level up.**  A successor written as a *wrapper call* rather than as a literal
-record update cannot be projected through, and three proofs depend on doing that
-projection: the `x86_exec_go_exit_step` side condition (`¬ (the state).rip =
-exit`), the next step's own `rip` side condition, and `_concrete_read`'s
-`.mem`.  All three took their `simp` set from the LAST step's form; they now take
-it from `_path_simp(fs_path, …)` — the definitions of **every** step on the path,
-which is exactly the set the state they are folding is made of.  Measured on
-`powexpr` after the `imul` row was corrected: `x86_set_reg` reduces on its own
-(its `match` is on a literal index), `x86_set_flag4` does not, and the side
-condition was left holding a 30-field record.
+Both records printed in full, neither naming the field that differs — the same
+congruence-check failure B29's `call_rel32` row had, reached from the other
+direction. After the row quotes the model, `sle8` is `terminates: PROVED` and the
+whole file closes with **no `sorry` at all** (it admitted one before, because a
+`setcc` on the path stopped the closing read's evaluation at a wrapper with no
+`_mem` lemma — `x86_set_reg_narrow_mem`, added with `x86_set_flag4_mem`).
 
-`lib/X86.lean` gains the two `_mem` facts the closing read needed for the same
-reason (`x86_set_reg_narrow_mem`, `x86_set_flag4_mem`), because a `.mem`
-projection stops at a wrapper with no `_mem` fact and puts `rdi` — the program's
-input — into a term `native_decide` refuses.  `AXIOM_CLOSURE`'s `X86` row moves
-144/141 → 150/147 across the three passes of this work.
+**B33 — `imul r64, r64` sets FOUR FLAGS, and `_SUCCS` set none.** Its row's own
+comment was the bug: *"`imul` sets no flags, so there is nothing else in the
+successor"*, which is what the model believed until the same census found
+`imul_r64_r64` WRONG on three initial states out of three on `sf`, `zf`, `cf`,
+`of_` — ZF and SF from the low 64 bits of the product, CF and OF to the overflow
+bit. The arm was corrected to wrap the register write in `x86_set_flag4`,
+`x86_step_imul_r64` was restated around it, and the successor row kept the
+sentence. `localmul` is the example that reaches it:
 
-**What this does NOT do, and it is the same list as before.** The ten loop
-examples, `group3:idiv`, the value theorem's 12 open, and the `hpop` separation.
-The one thing that got BETTER by accident is the hole count: `powexpr`,
-`localmul` and `pair` each went from *one live hole at `hrip`* to **no live
-hole**, because `_WRAPPER_DEFS` now names the two wrappers the closing read had
-to see through.  **NOT RE-MEASURED as a corpus number by this section** — the
-45-example sweep is a heavy run and the numbers in every older section stand as
-written; `terminates proved with no sorry` is the prediction to check and
-`test_formal_sweep_truth.py::TestX86EndToEndEmitter` pins it Lean-free.
+```console
+$ python3 formal/x86_64_endtoend_test.py formal/examples/localmul.mojo
+Type mismatch — x86_set_flag4 { … } vs { x86_set_reg … }
+```
 
-**And the instrument, which is the part that was missing.**
-`formal/x86_64_model_coverage_test.py`'s `SUCCESSOR_FORMS` is the only thing in
-the tree that compares a successor against the model, it had no `setcc` row, and
-every row it had ran at `X86State.init 10 _` — where `x86_set_reg_narrow s 7 1
-1` and `x86_set_reg s 7 1` both answer `1`, so it could not have seen this.  The
-state is per row now, and `cqo` carries RAX at `0x8000000000000000` for the same
-reason: **its row was vacuous**, because `x86_cqo 0` and `x86_sign_extend32 0`
-are both `0`.  Three mutants measured caught against one green row before:
-`setcc`'s pre-`e54d2f4e` row, `cqo`'s pre-`da151f0c` row, and `alu_ri32:sub_reg`
-with `+imm` for `-imm`.
+After the row quotes the model, `localmul` is `terminates: PROVED` with no
+`sorry`, on an image of 37 steps and 8 functions.
+
+**B34 — and CF/OF were then the wrong TEST, which is a MODEL bug and not a
+successor bug.** Setting the flags was the first half of that fix and the second
+half was not: the arm computed `ovf := lo != x86_sign_extend64 lo`, which says
+"the low half is non-negative" and is not what the flags are defined to be
+(Intel SDM, `IMUL`: set if the result is truncated — the high half of the signed
+128-bit product is not the sign extension of the low half). Wrong in BOTH
+directions on the rows that decide it: `2 * 3` fits and it said SET;
+`0x8000…0000 * 2` does not and it said CLEAR; `0xffff…fff * 0xffff…fff` is 1
+signed, fits, and it said SET. The fix is the one-operand `imul r/m64` arm's own
+expression — `x86_split128 (x86_signed a * x86_signed b)` with
+`ovf := hi != x86_sign_extend64 lo` — which was right all along, so this is a
+copy of the correct neighbouring arm rather than a new rule. `lib/X86.lean`'s
+arm, `x86_step_imul_r64`, `_SUCCS` and `_SIMP_FORMS` follow it.
+
+**How B34 was found, which is why it is here rather than in the fuzzer's doc.**
+The arithmetic table that doc asks for as its last open item — `multiply_cases`,
+17 rows against exact integer arithmetic — landed in the same pass and **failed
+on 3 of its 8 two-operand rows on its first run**. It could not have been found
+by the hardware differential instead: that reporter absorbs every flag difference
+on a program ending in a multiply as this host's documented SF mislabelling, so
+the model was free to be wrong on essentially every non-negative product and the
+verdict could not say so.
+
+**B35 — and the SHIFT rows were stale twice over, which is what found them.** The
+same pass's own subset run turned up two more examples failing on
+`x86_step_shl_imm8`, and the row was wrong in both halves at once:
+
+* **the count was CLAMPED where the model MASKS it.** The model's arm is
+  `(code (m+3)).toNat &&& 63` — Intel masks a 64-bit operand's count to six
+  bits, so a count of 64 means 0 — and the row carried `min n 64`, which is the
+  OLD clamp the fuzzer's census had already found wrong;
+* **inlining `x86_shift_post` is not a spelling difference, it is a different
+  term.** The function's own `if k = 0 then … else …` cannot reduce while `k` is
+  a symbolic masked byte, so the model's step and an inlined successor are two
+  records that differ in every flag field:
+
+      Type mismatch
+      x86_step_shl_imm8 s16 rc … : … { x86_shift_post s16 … with rip := … }
+      : … but is expected to have type … { x86_set_reg s16 … with
+            zf := (x86_flags_logic …).zf, sf := … }
+
+  All three rows (`shl`, `shr`, `sar`) are one string now — the operation is an
+  ARGUMENT of `x86_shift_post`, not a difference in the shape of the update, so
+  three copies would be three more things to keep in step with the model.
+
+`shiftlr` and `shift_by_var` go from `FAIL lean exited 1: error: Type mismatch |
+x86_step_shl_imm8` to `terminates: proved, 1 live hole (hrip's own admission)` —
+the single admission every chain-crossing program carries, and what is left is
+`bugs/FORMAL_a_register_read_out_of_a_shift_has_no_projection_fact.md`.
+
+**Why nothing caught any of them, which is the part worth keeping.** Each model
+was corrected for a MEASURED reason by the fuzzer, and each correction changed no
+example's ANSWER — nothing in `formal/examples` reads a flag after a multiply, or
+a shift's count past 63, or the upper bytes of a register after a `setcc` — so
+the corpus was byte-identical before and after, and the `Type mismatch` is
+invisible to every check that runs an image rather than the emitter's own
+tables. `formal/x86_64_model_coverage_test.py::SUCCESSOR_FORMS`
+is the check that sees this class, and it covered **4 of the 43 forms** before
+this pass, with neither of these two in it. It has 6 now, and the other 37 are
+`bugs/FORMAL_x86_64_the_successor_table_is_compared_against_the_model_on_six_forms.md`.
+
+Two things fell out of fixing them that are defects in their own right and were
+not visible while the rows were wrong:
+
+* **`x86_exec_go_exit_step`'s `s_k.rip ≠ exit` side condition and every step's
+  own `rip` condition could not see through a stateful successor.** Both are
+  proved from `hs_k`, which describes `s_k` as the PREVIOUS step's successor, so
+  both project `rip` through whatever wrapper that successor is built on — and
+  `{ x86_set_reg_narrow … }` and `(x86_set_flag4 …)` are not `{ s with … }`. They
+  now name the previous form's definitions, read off the same `_SIMP_FORMS`
+  table `_decision_simp` uses. Without that the condition is ADMITTED, which is
+  the quiet failure: the file elaborates and the report says "proved with a
+  `sorry`" about a fact a `simp` set away.
+* **A wrapper in `_SUCCS` with no `_mem` lemma silently degrades the closing
+  read** rather than failing: the evaluation is simply refused and the gap is
+  admitted. The tripwire for that already existed
+  (`test_formal_sweep_truth.py::test_every_state_wrapper_the_successor_table_quotes_is_unfoldable`)
+  and it FIRED on this change, which is the argument for having it.
+
+**Measured, after this pass — and what was NOT measured, which is the first
+thing to say.** The whole-corpus sweep (93 examples × 2 theorems, 30-200 s each)
+was started and **killed after ~45 minutes**: B34 changed `lib/X86.lean` while it
+was in flight, so its later examples would have read a different library from its
+earlier ones and the tally would have meant nothing. What is measured is a named
+subset, chosen to cover the shapes the two rows are on — `setcc` (every one of
+them), `imul` (`localmul`), a shift (`shiftlr`, `shift_by_var`, the three
+`shift_imm8` forms), a call and a return (`call_helper`, `main_calls_helper`),
+and the tree shapes (`wide_recv` 5 functions / 1 leaf, `bittest` 4 leaves):
+
+| command | what it showed |
+|---|---|
+| `formal/x86_64_endtoend_test.py localmul sle8 twoifs` | 3 `terminates: PROVED`, `failing: 0`, **after B34** — and `sle8` closes with no `sorry` at all, which it did not before B32 |
+| `… vardecl ret42 const2 bittest` | 3 `PROVED` with no admitted fact, and `wide_recv` `FAIL lean exited -6: lean::memory_exception` — the pre-existing OOM this doc does not own |
+| `… shiftlr shift_by_var` | both were `Type mismatch` before B35; both are now `proved, 1 live hole (hrip)` — see `bugs/FORMAL_a_register_read_out_of_a_shift_has_no_projection_fact.md` |
+| `formal/x86_64_model_coverage_test.py` (7 s) | 185 samples / 67 forms all steppable; **6** successor rows; 25 lemmas / 52 encodings / 523 hypotheses; 16 divide, 21 shift, **17 multiply** cases — every one as the arithmetic says |
+| `python3 test_formal_sweep_truth.py` | 137 tests, 0 failures (was 136) |
+| the axiom census's `X86` row | `144/2/141` → **`150/2/147`**, `reaches` and `closure_only` unmoved: `lib/X86.lean` gains six kernel-checked projection facts |
+
+The two examples that were red before this pass and are green now are `sle8`
+(a `Type mismatch` on `x86_step_setcc_r8`) and `localmul` (the same on
+`x86_step_imul_r64`). The first of those was 26 of 26 `terminates` cases across
+the corpus — every one of them an elaboration error naming a LEMMA rather than a
+row — and that is the bug this pass fixes at the root, so the document that filed
+it is **deleted** rather than left with a Status: the two arms of the claim it
+made are both closed, and the check that keeps them closed is
+`SUCCESSOR_FORMS` plus `multiply_cases`.
+
+**Still open, unchanged by this pass:** the ten loop examples, `group3:idiv`,
+`emit`'s value theorem (0 of 43, all of it the stack-floor guard's `call_rel32` —
+`bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`), and
+the `hpop` separation behind
+`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
 
 ## Status (2026-10-04 — B30/B31: the guard did not admit, and a dead `lean` read as a proof)
 

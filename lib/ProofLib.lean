@@ -958,49 +958,6 @@ def sdiv64 (a b : UInt64) : UInt64 :=
   if b = 0 then 0
   else s64_to_u64 (Int.tdiv (u64_toS64 a) (u64_toS64 b))
 
-/-- The high 64 bits of the UNSIGNED 128-bit product: `UMULH`.
-
-    `Nat` carries the whole product, so the high word is an ordinary division
-    and the `UInt64.ofNat` is the reduction mod 2^64 that makes it a WORD
-    rather than a number.  Stated over `Nat` because this file has no 128-bit
-    type and a formal value is one 64-bit word — the product is a quantity the
-    model computes, not a value it holds.
-
-    `UMULH` is NOT an `arm64_step` arm: no encoder in `formal/arm64.py` emits
-    it and no image can contain one.  It is here because `SMULH`'s definition
-    is shorter written through it, and a helper with no arm is not a claim
-    about the machine. -/
-def umulh64 (a b : UInt64) : UInt64 :=
-  UInt64.ofNat ((a.toNat * b.toNat) / 18446744073709551616)
-
-/-- The high 64 bits of the SIGNED 128-bit product: `SMULH Xd, Xn, Xm`.
-
-    **This is the instruction `formal/model.py::int_overflow_traps` wants and
-    `MUL` cannot answer.**  `a * b` fits in 64 signed bits exactly when `SMULH`
-    and `MUL` agree in sign, so a wrapping `MUL` alone cannot decide it — which
-    is why the emitter emits this instruction for that decision, and why
-    `formal/arm64_codegen.py::encode_smulh_xd_xn_xm` exists and is byte-exact
-    against `as` (`test_arm64_encoders.py`).
-
-    Spelled as `umulh64` MINUS one copy of each negative operand rather than
-    as a signed 128-bit product, and the reason is that `UInt64`'s arithmetic
-    is already mod 2^64, which is exactly the reduction the answer wants:
-
-      * a, b both non-negative: the signed and unsigned products agree;
-      * a < 0: the signed product is the unsigned one less `b · 2^64`, whose
-        high word is the unsigned one less `b`;
-      * both negative: less `b` and less `a`.
-
-    So the two corrections are conditional subtractions of the OTHER operand and
-    no `Int` is needed.  Written through `u64_toS64` and a signed `tdiv`
-    instead, the definition would need the quotient of a 128-bit intermediate
-    that this file does not have — which is why `sdiv64` above spells itself
-    through `Int` (a 64-bit quotient fits in it) and this one does not. -/
-def smulh64 (a b : UInt64) : UInt64 :=
-  umulh64 a b
-    - (if (a >>> 63) = 1 then b else 0)
-    - (if (b >>> 63) = 1 then a else 0)
-
 /-- Signed 64-bit remainder truncating toward 0; 0 when divisor is 0.
     Matches MSUB after SDIV: a - (a / b) * b. -/
 def srem64 (a b : UInt64) : UInt64 :=
@@ -1916,20 +1873,6 @@ theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
   unfold t32s t16s
   bv_decide
 
-/-- The `add`/`sub`/`cmp` immediate forms' 12-bit immediate, SHIFTED by the `sh`
-    field (bits 23:22): `sh = 0` is `LSL #0` and `sh = 1` is `LSL #12`.
-
-    The arm's mask (`0xff800000`) keeps bit 23, so a word this helper is reached
-    for has `sh ∈ {0, 1}` — `sh ≥ 2` is RESERVED in this class and does not match
-    the arm at all. `&&& 0x1` states that rather than relying on it: it keeps the
-    shift total without ever computing an immediate no instruction can encode.
-
-    One helper for all five arms (ADD 32/64, SUB 32/64, CMP): a shift present in
-    one copy and absent from another is exactly the duplicate-decoder defect this
-    replaces. -/
-def arm64_ext_imm12 (insn : UInt32) : Nat :=
-  (((insn >>> 10) &&& 0xfff).toNat) <<< (12 * (((insn >>> 22) &&& 0x1).toNat))
-
 /-- ARM64 step function: decode and execute one instruction. -/
 def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   let insn := arm64_read_insn code s.pc
@@ -2082,47 +2025,47 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val2 := arm64_reg xm s
     let result := val1 ^^^ val2
     some (arm64_set_reg rd s result)
-  -- ADD Xd, Xn, #imm12{, lsl #12}: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  -- ADD Xd, Xn, #imm12: 0x11000000 (32-bit) / 0x91000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x11000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := arm64_ext_imm12 insn
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     let result := (arm64_reg rn s + UInt64.ofNat imm12)
     some (arm64_set_reg rd s result)
   else if (insn &&& 0xff800000) = 0x91000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := arm64_ext_imm12 insn
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base + UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- SUB Xd, Xn, #imm12{, lsl #12}: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
+      some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
+  -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x51000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := arm64_ext_imm12 insn
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     let result := (arm64_reg rn s - UInt64.ofNat imm12)
     some (arm64_set_reg rd s result)
   else if (insn &&& 0xff800000) = 0xd1000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := arm64_ext_imm12 insn
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base - UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+      some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
+  -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
   -- literal floor.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := arm64_ext_imm12 insn
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp rn s) (UInt64.ofNat imm12) }
   -- B #offset: 0x14000000 (sign-extended 26-bit, x4)
   else if (insn &&& 0xfc000000) = 0x14000000 then
@@ -2680,17 +2623,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
                   (arm64_reg_or_sp rn s) + UInt64.ofNat imm9
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   else if (insn &&& 0xffe00000) = 0xab000000 then
-    -- ADDS Xd, Xn, Xm (shifted register): writes `Rd` AND the flags of the SUM.
-    -- The mask does not include `Rd` (bits 4:0), so this class covers both the
-    -- `Rd = 31` spelling — `CMN Xn, Xm`, i.e. `ADDS XZR, Xn, Xm`, which writes no
-    -- register because `arm64_set_reg 31` is the identity — and `Rd ≠ 31`, which
-    -- is the `ADDS Xd, Xn, Xm` the backend emits for a signed `+` overflow check
-    -- (`formal/arm64_codegen.py::_emit_int_alu_checked`, `encode_adds_xd_xn_xm(0,
-    -- 0, 1)`). The one body covers both, exactly as the CMP arm's `Rd` does.
-    let rd := (insn &&& 0x1f).toNat
+    -- CMN Xn, Xm: `ADDS XZR, Xn, Xm` — the flags of the SUM, not of a
+    -- difference. No register moves (`arm64_set_reg 31` is the identity, which is
+    -- also how the CMP arm spells its `Rd`).
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s))
+    some { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) }
   else if (insn &&& 0xffe00000) = 0xea000000 then
     -- TST Xn, Xm: `ANDS XZR, Xn, Xm`, the logical sibling of CMP. The mask is
     -- 0xffe00000 and NOT 0x8a000000 (the AND shifted-register arm) because the
@@ -2713,30 +2651,6 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
                 else
                   (arm64_reg_or_sp rn s) + UInt64.ofNat imm9
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
-  else if (insn &&& 0xffe07c00) = 0x9b407c00 then
-    -- SMULH Xd, Xn, Xm: the HIGH half of the signed 128-bit product.
-    --
-    -- **The mask is the SAME VALUE the MUL arm above uses, `0xffe07c00`, and
-    -- that is what keeps the two apart.**  On the data-processing class bit 22
-    -- is `S`; the mask KEEPS it, and the two BASES differ in it — MUL is
-    -- `0x9b007c00` with bit 22 clear because MUL sets no flags, and SMULH is
-    -- `0x9b407c00` with bit 22 set, where on this class the bit means "the high
-    -- half" instead.  A mask with bit 22 CLEARED (`0xffa07c00`) would claim
-    -- MUL's words as well, and whichever arm came first in this chain would
-    -- answer for both — a proof about a different instruction, which is the
-    -- failure `check_step_conds` exists to make loud and what
-    -- `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` was filed about.
-    --
-    -- APPENDED at the end of the chain for the reason every arm after the
-    -- twelve access forms is: `_STEP_CONDS` and `_step_rhs` hard-code indices,
-    -- so a new instruction goes last.  It is cheap that way as well — see
-    -- `work_step_smulh`, which is the ONLY `work_step_*` lemma this arm
-    -- changes, because every other one negates the branches BEFORE its own and
-    -- this arm is after all of them.
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd s (smulh64 (arm64_reg rn s) (arm64_reg rm s)))
   else
     none
 
@@ -5098,7 +5012,7 @@ theorem work_step_eor (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x11000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (arm64_ext_imm12 w))) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5117,7 +5031,7 @@ theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x91000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5137,7 +5051,7 @@ theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x51000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (arm64_ext_imm12 w))) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5158,7 +5072,7 @@ theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xd1000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5180,7 +5094,7 @@ theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xf1000000) :
-    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (arm64_ext_imm12 w)) } := by
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5998,7 +5912,7 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xab000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -7287,106 +7201,6 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
     mem_read_after_write_u64_ne _ _ _ _ (Or.inr hwrite8)
   rw [hne]
   exact mem_read_write_below mem sp hjnw hKsp (by omega) v1
-
-set_option maxHeartbeats 4000000 in
-/-- Per-instruction step: `work_step_smulh`.
-
-    `SMULH` — the high 64 bits of the signed 128-bit product — APPENDED to
-    `arm64_step` as its last arm, with the comment in that chain giving the
-    reason it sits there and why its mask keeps bit 22.
-
-    **This is the only `work_step_*` lemma an appended arm changes**, and that
-    is the cheap half of what an instruction costs: every other lemma negates
-    the branches BEFORE its own, and this arm is after all of them, so none of
-    their `rw [if_neg …]` lists moves.  The TBZ/TBNZ wiring had to add an
-    `hne_` fact to all 18 of them because those two arms went in beside the
-    other pc-only branches — the architectural position rather than the end —
-    and the difference between that cost and this one is the whole of
-    `_STEP_CONDS`' "APPENDED, never inserted".
-
-    The 67 `bv_decide` facts below are the measurement that no earlier branch
-    claims these words.  With bit 22 kept the MUL arm's mask does not match,
-    and this file would not typecheck if it did — so the mask is checked by
-    the thing that reads it rather than by a comment saying it was. -/
-theorem work_step_smulh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe07c00) = 0x9b407c00) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s
-      (smulh64 (arm64_reg ((w >>> 5) &&& 0x1f).toNat s)
-        (arm64_reg ((w >>> 16) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
-    intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_pos h]
-  try dsimp; try rfl; try simp
 
 /-- **Split offset back into an STP pair's shape.**  `u64_sub_add` rewrites an
     address `(sp - K) + 8` into the split form `sp - (K - 8)`, which is what
