@@ -34,22 +34,33 @@ nothing, which `test_refusal_taxonomy.py`'s "a cause that matches no real
 message" check exists to prevent. The row to add is the day a corpus file
 writes one, with a `CAUSE_SAMPLES` entry beside it.
 
-**The three shapes are not "unsupported" — they are REFUSED, by name.**
-`case [a, b]:`, `case {"k": v}:`, `case Point(x=0):`, `case 1 | 2:` and
-`case [a] as whole:` all PARSE, into an ordinary `ListExpr` / `DictExpr` /
-`CallExpr` / `BinaryOp`. So a backend that lowered a pattern as "evaluate it and
-compare with `==`" would answer them — and be wrong, silently, in the exact way
-that reads as a working feature: `case 1 | 2:` computes `1 | 2 == 3` and matches
-the subject against 3, and `case [a, b]:` compares the subject to a list literal
-whose `a` and `b` are ordinary reads rather than bindings. This compiler's own
-free-variable analysis already treats all five as BINDING structural patterns
-(`test_new_syntax_parsing.py::test_match`'s `match_seq_pattern_binds`,
-`match_dict_pattern_binds`, `match_or_of_literals_has_no_names`,
-`match_as_binds_both_and_guard_is_a_use`), so the formal path refusing them by
-name is the two frontends agreeing, not the formal path being narrow. Those rows
-carry `("refuse", "<substring>")` and the substring is the CONSTRUCT.
+**The structural shapes are not "unsupported" — they are REFUSED, by name.**
+`case [a, b]:`, `case {"k": v}:`, `case Point(x=0):`, `case 1 | 2:`,
+`case [a] as whole:` and `case .A:` all PARSE, into an ordinary `ListExpr` /
+`DictExpr` / `CallExpr` / `BinaryOp` / `DottedLiteral` (measured with
+`formal/build.py::parse_module`, and the node each one produces is in
+`formal/model.py::match_pattern_kind`). So a backend that lowered a pattern as
+"evaluate it and compare with `==`" would ANSWER them — and be wrong, silently,
+in the exact way that reads as a working feature: `case 1 | 2:` computes
+`1 | 2 == 3` and matches the subject against 3, `case [a, b]:` compares the
+subject to a list literal whose `a` and `b` are ordinary reads rather than
+bindings, and `case Point(x=0, y=1):` CONSTRUCTS a `Point` and compares it.
+This compiler's own free-variable analysis already treats the first four as
+BINDING structural patterns (`test_new_syntax_parsing.py::test_match`'s
+`match_seq_pattern_binds`, `match_dict_pattern_binds`,
+`match_or_of_literals_has_no_names`, `match_as_binds_both_and_guard_is_a_use`),
+so the formal path refusing them by name is the two frontends AGREEING rather
+than the formal path being narrow; the sixth is Mojo's enum dispatch, which
+nothing on this path can resolve (`myinterpreter.py` refuses the same spelling).
+Those rows carry `("refuse", "<substring>")` and the substring is the CONSTRUCT.
+
+**The Lean model carries it, and that is measured rather than asserted.** The
+proof section at the end compares each program with the `if` chain it lowers to:
+they must agree on whether a proof is generated, and (where Lean is available) on
+whether it ELABORATES. See `PROOF_PAIRS`.
 
 Run:  python3 test_formal_match.py [-v] [-k SUBSTRING] [--only-row N] [--list]
+      [--no-lean] [--all-proofs]
 """
 import argparse
 import os
