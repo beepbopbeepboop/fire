@@ -502,6 +502,23 @@ MEASURED_PEAK_GB = {
     # worth having: this is the job whose SHAPE (45 builds plus a Lean
     # interpreter run) argues for `stage`, and its measurement says `tiny`.
     'formal-x86-machine-model': (1.4, 'measured'),
+    # The x86-64 END-TO-END termination sweep, which was registered, was in two
+    # buckets, and was red in BOTH with nothing to say so — 26 of 26 `terminates`
+    # cases failing and no gate job running the file at all (fixed 2026-10-05,
+    # `formal43-x86-endtoend-red`; its queue entry was deleted with that fix).
+    # Measured 2026-10-05 under `tools/memslot.py --gb 8`
+    # on the whole 93-program corpus, ~55 min: 6.1 GB peak across the process
+    # tree by memcap's own poll, which is the largest number in this table by
+    # more than a factor of four and the only row over the debt line in
+    # `MEM_DEBT_DOC`. It is `small` (8 GB) rather than higher because 6.1 is
+    # what the job DID — one `lean` at 1.4-2.9 GB plus the driver, with Lean's own
+    # `-M 6144` the ceiling actually reached — and not what its shape
+    # (93 generated proofs, one after another) resembles. The `memwhy` on its
+    # registration says the same thing and points at the doc that owns the
+    # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
+    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    # is about and which a class change would not fix.
+    'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
     # so no run ever executed them and no `expect=` anti-rot could fire on any
     # of them (that bug's doc, deleted with its fix). Same
@@ -2513,8 +2530,49 @@ test('formal-runtime-link', [PY, 'test_formal_runtime_link.py'],
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
      deps=['preflight', 'prooflib'],
      desc='the x86-64 examples, built and proof-checked')
+# **This job was RED and NOTHING RAN IT**, and both halves were true for the
+# same reason: it is registered, it is in two buckets, and neither of them is in
+# `gate`. So 26 of its 26 `terminates` cases were failing — every one of them an
+# elaboration error from one mechanism, three stale rows in
+# `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
+# and the only report of it was a bug doc. Fixed 2026-10-05
+# (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
+# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+# owns and which is a resource ceiling rather than a wrong proof. That doc's own
+# 2026-10-05 Status entry carries this branch's measurement.
+#
+# **`expect=` rather than `gate`, and the reasoning is worth stating because the
+# task asked for `gate`.** `gate` currently contains NO job that builds the Lean
+# library (measured: zero of its 78 have `deps=['prooflib']`), so adding this one
+# would make it the first — and at 55 minutes and 6.1 GB it is not a gate-sized
+# step by any reading. `expect=` with a CHECKED count is the other thing the task
+# offered, and it is the one that closes the hole it was about: the job RUNS, so
+# the marker's anti-rot is live, and a new failure inside it is reported rather
+# than absorbed. The count is checkable because the harness now prints
+# `PASS=n FAIL=m of N` (`observed_failures` in this file); it printed no summary
+# shape before, which would have made the marker UNCHECKED — i.e. a FAILURE.
 test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='module',
+     memwhy='measured 6.1 GB peak across its process tree (memcap, 2026-10-05), '
+            'and `module` is the ratchet\'s arithmetic on that number rather '
+            'than a choice: `PEAK_HEADROOM` is 1.5x, so 6.1 GB needs 9.2 and '
+            'the next rung is 24. The peak is one `lean` (1.4-2.9 GB measured '
+            'per proof elsewhere in this table) plus the python driver, and '
+            'Lean\'s own `-M 6144` is the ceiling actually reached. Over the '
+            'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
+            '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
+            'chain, which is the subject of '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
+            'and not something a class change would fix.',
+     expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
+            'than a wrong proof — `lean` aborts with '
+            '`lean::memory_exception: excessive memory consumption detected at '
+            '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
+            'read over a 113-equation chain. See '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
+            'The other 64 are 58 proved with no sorry and 6 proved with a '
+            'counted hole; the 28 that build no path tree are reported by the '
+            'harness itself (19 loop, 9 uncovered form) and are not cases.',
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'],

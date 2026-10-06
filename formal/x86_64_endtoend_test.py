@@ -772,11 +772,12 @@ _SUCCS = {
     # record and neither of the two fields that differ, which is the same
     # mechanism as the `cqo` row's `x86_sign_extend32` above and B2's rule one
     # level up: **a successor table is a copy of the model, so a change to the
-    # model is a change to every copy of it.** It was invisible for the reason
-    # `bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`
-    # records — no gate runs this file, so 26 of 26 `terminates` cases were red
-    # and nothing said so. Fixed here and pinned Lean-free by
-    # `test_formal_sweep_truth.py::TestX86EndToEndEmitter`.
+    # model is a change to every copy of it.** It was invisible because no bucket
+    # ran this file, so 26 of 26 `terminates` cases were red and nothing said so
+    # (the queue entry for that was deleted with this fix; the job's own
+    # `expect=` in `tools/suite.py` is what keeps it observed now). Pinned
+    # Lean-free by
+    # `test_formal_sweep_truth.py::TestX86EndToEndTables::test_every_row_applies_the_state_wrappers_its_lemma_concludes`.
     "setcc":
         "{ x86_set_reg_narrow $s $rmv 1 (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
@@ -4647,6 +4648,12 @@ def main(argv):
     val_ok = val_gap = term_ok = term_gap = 0
     val_holes = []
     fails = notree = noform = nocall = nosize = hole_total = guard_total = 0
+    #: Every case whose theorem was ELABORATED, for the `PASS=`/`FAIL=` line
+    #: below. A program that does not build, does not run, or builds no path
+    #: tree is not in it: those are reported as their own outcome and are not
+    #: cases of anything, so a marker's "of N" over them would be counting
+    #: abstentions as results.
+    attempted = 0
     for t in targets:
         name = os.path.basename(t)[:-5]
         try:
@@ -4745,6 +4752,7 @@ def main(argv):
                 noform += 1
             ts = _no_tree_line(kind, detail)
         else:
+            attempted += 1
             if ok and not fired:
                 term_ok += 1
                 ts = "  terminates: PROVED"
@@ -4795,6 +4803,21 @@ def main(argv):
           "%d returns into a caller, %d too large to prove)"
           % (notree + noform + nocall + nosize, notree, noform, nocall, nosize))
     print("  failing    : %d" % fails)
+    # **The runner reads its `expect=` marker's count out of THIS line, and
+    # nothing above it is a shape it can read.** `tools/suite.py`'s
+    # `_SUMMARY_FAILURES` knows three summary shapes — `N passed, M failed`,
+    # `PASS=N FAIL=M` and `N/M checks passed` — and `failing    : N` is none of
+    # them, so a marker claiming a count against this harness was reported
+    # UNCHECKED, which the runner treats as a FAILURE: a marker that states a
+    # count and cannot have it checked describes a test it is not watching.
+    # That is the same argument `CLAUDE.md` makes about `expect=` states a
+    # count — the count is the anti-rot, and an unreadable count is no count.
+    #
+    # `attempted` is every case whose theorem was ELABORATED, which is what a
+    # marker's "of N" means: a program that builds no path tree is not a
+    # failing case, it is a reported outcome with its own counter above.
+    print("  PASS=%d FAIL=%d of %d"
+          % (term_ok + term_gap + fails, fails, attempted))
     return 1 if fails else 0
 
 
