@@ -42,7 +42,7 @@ from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(MAIN)
-MODEL = os.environ.get("CONTROL_MODEL", "opencode/space-bunny-free")
+MODEL = os.environ.get("CONTROL_MODEL", "opencode/fledge-alpha-free")
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
