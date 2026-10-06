@@ -25,6 +25,15 @@ this file does not pretend the two agree everywhere:
     `myinterpreter.py`). Every such row carries the CPython reading in its
     comment, so the divergence is written down rather than assumed.
 
+**The sweep's own accounting, for completeness.** These six refusals are
+`other refusal` in `tools/formal_sweep_causes.py` today, and that is correct
+rather than an oversight: no file in this corpus writes a `match` (measured —
+`grep` over every `*.mojo` finds only prose that happens to contain the word),
+so a cause row for them would collect nothing while reading as one that blocks
+nothing, which `test_refusal_taxonomy.py`'s "a cause that matches no real
+message" check exists to prevent. The row to add is the day a corpus file
+writes one, with a `CAUSE_SAMPLES` entry beside it.
+
 **The three shapes are not "unsupported" — they are REFUSED, by name.**
 `case [a, b]:`, `case {"k": v}:`, `case Point(x=0):`, `case 1 | 2:` and
 `case [a] as whole:` all PARSE, into an ordinary `ListExpr` / `DictExpr` /
@@ -771,6 +780,29 @@ ROWS = [
      "            print('low')\n"
      "        case _:\n"
      "            print('rest')\n"
+     "    print('after')\n"
+     "    return 0\n", ("frontend",), "module"),
+    # `comptime __match`, the Mojo spelling, and the one place where this
+    # lowering deliberately does NOT fold. Real Mojo resolves `comptime __match`
+    # at compile time; this compiler's reference interpreter runs it as an
+    # ordinary `match` (`myinterpreter.py::execute_MatchStmt` has no comptime
+    # arm — `execute_ComptimeIfStmt` says outright that the interpreter "doesn't
+    # do compile-time branch elimination, so this just evaluates like a regular
+    # runtime if/elif/else"), and this lowering lowers it the same way. So the
+    # observable answer is the interpreter's and the row is here to say the
+    # divergence from Mojo is DELIBERATE and consistent rather than accidental:
+    # a fold would need `DottedLiteral` resolution (the `case .int:` spelling is
+    # refused by name, `dotted_literal_pattern_is_refused`) and nothing here has
+    # it. The literal cases below fold trivially and answer the same either way.
+    ("comptime_match_is_a_runtime_match_here", "def main():\n"
+     "    n = 2\n"
+     "    comptime __match n:\n"
+     "    case 1:\n"
+     "        print('one')\n"
+     "    case 2:\n"
+     "        print('two')\n"
+     "    case _:\n"
+     "        print('rest')\n"
      "    print('after')\n"
      "    return 0\n", ("frontend",), "module"),
     # A `match` with NO cases. The parser accepts it (`cases` is an empty list)
