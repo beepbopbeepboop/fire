@@ -42,6 +42,28 @@ a citation of one, and the fix is the one-line prose rewrite; and it can never
 go red for a branch that only fixed citations, because a file that lost them is
 below its ceiling. `--write-baseline` regenerates the ceilings after a sweep
 and prints what moved, so the ledger is regenerated rather than hand-edited.
+
+**THE RATCHET NOW COVERS THE BARE CLASS TOO**, in its own second table, and that
+is the one decision here that was left open on purpose. `BARE_REF`'s comment
+used to say a bare citation is reported and "deliberately NOT in the ratchet",
+and gave the reason: the ledger "would have to bless every existing sentence".
+The reason has since stopped holding, and what replaced it is in this file:
+`bare_find` skips any line carrying the `deleted_convention` words, so a
+sentence ABOUT a deleted doc is not counted as one that needs it. That is the
+convention the objection asked for, and it has been in the finder all along —
+the objection was made when the finder had no convention, so the two were never
+in the same state.
+
+What it cost to leave the class out is now on the record four times over
+(`bugs/FORMAL_a_surviving_citation_is_not_checked.md`): a bug doc was deleted with
+its fix, and three documents kept citing it by bare stem — a census row, a
+per-stem table row and a prose pointer — while `--ratchet` was GREEN, because a
+citation spelled without `bugs/` was invisible to it. A check that cannot see the
+commonest spelling of the thing it checks is not a check of that thing, and
+`BARE_BASELINE` is the second table that makes it one. The two tables are
+separate because the two classes are: `doc/ELABORATION.md` is a real document
+cited bare by four files and must never be a ceiling, while the same spelling
+of a document that is nowhere in the tree must be.
 """
 import argparse
 import json
@@ -79,13 +101,17 @@ SUFFIXES = ('.md', '.py')
 # citation when `bugs/<stem>.md` is absent AND no `.md` of that basename exists
 # anywhere in the repository.
 #
-# Reported, and deliberately NOT in the ratchet. The ratchet is a per-file
-# ceiling, and a bare-name citation has no convention that separates the ~20
-# historical "was X, deleted" sentences from a new one — a ledger for it would
-# have to bless every existing sentence, and this tree is worked from dozens of
-# worktrees at once, so any branch that fixes prose in a file another branch is
-# editing would move a number the ledger owns. Making it visible is the part
-# that pays; a verdict on it is a decision for whoever owns the tool.
+# **It is IN THE RATCHET, in `BARE_BASELINE`, and that is the fix rather than a
+# second census.** It used to be reported and excluded, on the reasoning that a
+# ledger "would have to bless every existing sentence" — which was true when it
+# was written and stopped being true when the `deleted_convention` skip above
+# landed: a line that says the doc was deleted is not counted, so there IS a
+# convention separating the historical "was X, deleted" sentences from a new
+# citation, and the ledger is seeded from the census by `--write-baseline` like
+# the prefixed one. What the exclusion bought was four stranded citations of a
+# deleted document with `--ratchet` green throughout
+# (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`), which is the failure
+# mode this file exists to end.
 #
 # The number it printed was an OVER-COUNT until 2026-10-05 — 272 where the truth
 # was 208 — because the existence test was inverted for bug docs themselves; see
@@ -304,12 +330,42 @@ ledger in the ledger. `test_suite.py` and `tools/suite.py` stay IN, because
 their fixtures are a fixed, small, intentional number that a ceiling can
 honestly bound.
 """'''
+
+# The second table's own header, and the reason it is a SEPARATE table is in
+# `BARE_REF`'s comment: a bare stem is a citation only when no `.md` of that name
+# exists anywhere in the tree, so `doc/ELABORATION.md` — cited bare by four real
+# files — resolves and is never a ceiling, while a name that is nowhere IS one.
+# One table keyed by the same file path cannot hold both answers, because the
+# question "what does this bare name mean" has two outcomes and the ledger would
+# have to record which, per name, per file.
+_BARE_BASELINE_HEADER = '''# `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
+# of a `<STEM>.md` with no `bugs/` in front of it, counted only when no `.md` of
+# that basename exists anywhere in this repository. Read by
+# `tools/dangling_doc_refs.py --ratchet` through `load_baseline(
+# "BARE_BASELINE")`, written by the same `--write-baseline`, and separate from
+# `BASELINE` for the reason `BARE_REF` gives.
+#
+# Seeded from the census, so it is green on arrival and can only shrink: a file
+# that fixes its bare citations drops below its ceiling and needs no edit here,
+# and a file that GAINS one — which is what deleting a bug doc whose name is
+# cited without the directory does to every file that named it — is a failure at
+# the delete rather than at the next reader's convenience
+# (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`).
+#
+# The exclusions are the walk's, not this table's: `tools/dangling_refs_baseline
+# .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
+# reason the header above gives for its prefixed entry.'''
 SELF_PATH = os.path.relpath(BASELINE_PATH, os.path.dirname(HERE)).replace(
     os.sep, '/')
 
 
-def load_baseline():
-    """The per-file ceilings, or {} when the ledger is absent.
+def load_baseline(key: str = 'BASELINE'):
+    """One of the ledger's per-file ceiling tables, or {} when it is absent.
+
+    `key` is `'BASELINE'` for the `bugs/`-prefixed class and `'BARE_BASELINE'`
+    for the bare one — two tables because two classes, not two answers, and
+    `write_baseline` writes both so a `--write-baseline` cannot silently drop
+    one (which would leave its half of the ratchet vacuously green).
 
     Read with `ast` and not by importing it. The ledger is generated, so the
     failure this guards is a half-written one (an interrupted `--write-baseline`
@@ -324,7 +380,7 @@ def load_baseline():
         tree = ast.parse(open(BASELINE_PATH, encoding='utf-8').read())
         for node in tree.body:
             if isinstance(node, ast.Assign) and any(
-                    getattr(t, 'id', None) == 'BASELINE' for t in node.targets):
+                    getattr(t, 'id', None) == key for t in node.targets):
                 return dict(ast.literal_eval(node.value))
     except (SyntaxError, ValueError) as e:
         print(f'warning: {os.path.relpath(BASELINE_PATH, ROOT)} is unreadable '
@@ -407,24 +463,72 @@ def ratchet_regressions(by_file, baseline=None):
                   key=lambda t: (-t[1], t[0]))
 
 
-def write_baseline(by_file, skip=(), baseline=None):
-    """Regenerate the ledger, and report what moved."""
+def ratchet_verdict(by_file, bare_by_file=None, baseline=None,
+                    bare_baseline=None):
+    """`(prefixed, bare)` — every file that GAINED a citation, in both classes.
+
+    `--ratchet`'s whole verdict in one function, so the two halves cannot drift
+    and a caller can ask the question without `main()` and the filesystem. It is
+    a function rather than an inline pair of `ratchet_regressions` calls for the
+    reason `test_suite.py` checks it with a planted corpus: the defect this file
+    ended was a verdict that consulted ONE of the two walks, and a verdict
+    assembled at the call site is a verdict whose second half nothing can reach.
+
+    `bare_by_file` defaults to `{}` — "this caller has no bare corpus" — and that
+    is NOT the same answer as `None`, which means "read the ledger yourself".
+    Passing `{}` therefore judges the bare class against its real ledger and
+    finds nothing, which is the correct answer for a caller that did not walk it.
+    """
+    bare = (load_baseline('BARE_BASELINE') if bare_baseline is None
+            else bare_baseline)
+    return (ratchet_regressions(by_file, baseline),
+            ratchet_regressions(bare_by_file or {}, bare))
+
+
+def write_baseline(by_file, bare_by_file=None, skip=(), baseline=None,
+                   bare_baseline=None):
+    """Regenerate BOTH ledger tables, and report what moved.
+
+    Both, and not one per invocation, because the two classes are two halves of
+    the same verdict and a ledger written for one of them leaves the other's
+    ratchet vacuously green — a check that cannot fail is the failure mode this
+    file exists to end, and it would be reached by the sanctioned command.
+    """
     have = load_baseline() if baseline is None else dict(baseline)
+    have_bare = (load_baseline('BARE_BASELINE') if bare_baseline is None
+                 else dict(bare_baseline))
     now = {rel: len(cites) for rel, cites in by_file.items() if cites}
+    now_bare = {rel: len(cites) for rel, cites in (bare_by_file or {}).items()
+                if cites}
     lines = [_BASELINE_HEADER, 'BASELINE = {']
     for rel in sorted(now):
         lines.append(f'    {rel!r}: {now[rel]},')
+    lines.append('}')
+    lines.append('')
+    lines.append(_BARE_BASELINE_HEADER)
+    lines.append('BARE_BASELINE = {')
+    for rel in sorted(now_bare):
+        lines.append(f'    {rel!r}: {now_bare[rel]},')
     lines.append('}\n')
     with open(BASELINE_PATH, 'w') as f:
         f.write('\n'.join(lines))
     fixed = sorted(r for r in have if r not in now)
     raised = sorted(r for r in now if now[r] > have.get(r, 0))
-    print(f'{len(now)} files, {sum(now.values())} citations of deleted docs; '
-          f'ledger written to {os.path.relpath(BASELINE_PATH, ROOT)}')
+    print(f'{len(now)} files, {sum(now.values())} `bugs/`-prefixed citations of '
+          f'deleted docs; ledger written to '
+          f'{os.path.relpath(BASELINE_PATH, ROOT)}')
     for rel in fixed:
         print(f'  DROPPED  {rel}: {have[rel]} -> 0 (entry removed)')
     for rel in raised:
         print(f'  RAISED   {rel}: {have.get(rel, 0)} -> {now[rel]}')
+    fixed = sorted(r for r in have_bare if r not in now_bare)
+    raised = sorted(r for r in now_bare if now_bare[r] > have_bare.get(r, 0))
+    print(f'{len(now_bare)} files, {sum(now_bare.values())} BARE citations of '
+          f'names that are nowhere in the tree')
+    for rel in fixed:
+        print(f'  DROPPED  {rel}: {have_bare[rel]} -> 0 (entry removed)')
+    for rel in raised:
+        print(f'  RAISED   {rel}: {have_bare.get(rel, 0)} -> {now_bare[rel]}')
     return 0
 
 
@@ -450,27 +554,44 @@ def main() -> int:
     n_cites = sum(len(v) for v in by_doc.values())
 
     if args.write_baseline:
-        return write_baseline(by_file, skip=set(args.skip))
+        _bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
+        return write_baseline(by_file, bare_by_file, skip=set(args.skip))
 
     if args.ratchet:
         regressions = ratchet_regressions(by_file)
         total = sum(len(v) for v in by_file.values())
-        if not regressions:
+        # The BARE class, in its own ledger and with its own walk. Asked here
+        # and not left to the census, because the ratchet is the only shape
+        # that can hold a verdict over a corpus this size, and a class that is
+        # measured but never judged is a census line: four citations of one
+        # deleted document sat in three files with this check green, which is
+        # the whole of `bugs/FORMAL_a_surviving_citation_is_not_checked.md`.
+        bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
+        regressions, bare_regressions = ratchet_verdict(by_file, bare_by_file)
+        bare_total = sum(len(v) for v in bare_by_file.values())
+        if not regressions and not bare_regressions:
             print(f'ratchet: no file gained a citation of a deleted doc '
-                  f'({total} citations remain across {len(by_file)} files, '
+                  f'({total} `bugs/`-prefixed across {len(by_file)} files, '
+                  f'{bare_total} bare across {len(bare_by_file)} files, '
                   f'all at or below their baseline)')
             return 0
-        print(f'ratchet: {len(regressions)} file(s) cite MORE deleted docs '
-              f'than tools/dangling_refs_baseline.py allows:')
+        print(f'ratchet: {len(regressions) + len(bare_regressions)} file(s) '
+              f'cite MORE deleted docs than '
+              f'tools/dangling_refs_baseline.py allows:')
         for rel, observed, allowed in regressions:
             print(f'  {rel}: {observed} (baseline {allowed}) — '
                   + ', '.join(sorted({d for d, _n in by_file[rel]}))[:200])
+        for rel, observed, allowed in bare_regressions:
+            print(f'  {rel}: {observed} (BARE baseline {allowed}) — '
+                  + ', '.join(sorted({d for d, _n in bare_by_file[rel]}))[:200])
         print('\nThe fix for one of these is to name the BUG rather than the '
               'doc — the\nsymptom, or the commit that fixed it — which is what '
-              'test_arm64_encoders.py says\nat its shift sweep. If the '
-              'citation is deliberate, say so in a comment\non the same line, '
-              'or raise the ceiling on purpose with\n'
-              '`--write-baseline` after reading the diff.')
+              'test_arm64_encoders.py says\nat its shift sweep. A line that '
+              'says the doc was DELETED is not a citation\n(`bare_find` skips '
+              'those words), which is how a sentence about a deleted\n'
+              'document stays out of this. If the citation is deliberate, say '
+              'so in a\ncomment on the same line, or raise the ceiling on '
+              'purpose with\n`--write-baseline` after reading the diff.')
         return 1
 
     if args.json:
@@ -495,10 +616,10 @@ def main() -> int:
           f'across {len(by_file)} files')
     print(f'{n_bare} BARE citations (no `bugs/` prefix) of {len(bare_by_doc)} '
           f'doc names that are nowhere in the tree, across '
-          f'{len(bare_by_file)} files — the spelling the count above cannot see, '
-          f'and the reason a whole class of them survived it. NOT in --ratchet; '
-          f'see BARE_REF\'s comment for why, and for the decision that would '
-          f'have to be made to put it there.')
+          f'{len(bare_by_file)} files — the spelling the count above cannot '
+          f'see, and the reason a whole class of them survived it. Held to a '
+          f'second ledger (`BARE_BASELINE`) by `--ratchet` for the same reason '
+          f'the first exists; see `BARE_REF`\'s comment.')
     if args.by_file:
         for rel, cites in sorted(by_file.items(), key=lambda kv: -len(kv[1])):
             names = sorted({d for d, _n in cites})

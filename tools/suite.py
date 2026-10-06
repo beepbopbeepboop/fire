@@ -1474,7 +1474,8 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
-     desc='no file cites a deleted bug doc more than it used to')
+     desc='no file cites a deleted bug doc more than it used to, by either '
+          'spelling (`bugs/<name>.md` or a bare `<STEM>.md`)')
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
 # the closure-capture pass (by-reference capture), and a regression in any one
