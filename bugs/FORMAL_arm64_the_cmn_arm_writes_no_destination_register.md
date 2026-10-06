@@ -4,8 +4,15 @@
 **Area:** FORMAL (the arm64 machine model's flag-setting-compare arm).
 **Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
 incompleteness — `arm64_step` returns a state that is not the machine's.** Not
-fixed: the fix is a `lib/ProofLib.lean` change and that build is 7.8 GB at
-`-j 4`, past a bounded worker's 8 GB ceiling.
+fixed: the fix is a `lib/ProofLib.lean` change, and that build peaks at
+**9.8 GB** measured with `formal/lean.py::ensure_library`'s own invocation —
+over a bounded worker's 8 GB ceiling, under the tree's `LIBRARY_MEMORY_MB =
+12288`, so the blocker is memory alone and the library is not broken.
+
+(The measurement has a trap: `run_lean`'s `heartbeats=0` becomes `-T 0` =
+`maxHeartbeats 0`, and a build under it fails with a `bv_decide` "unknown join
+point" cascade at 7.1 GB that looks exactly like an unbuildable library.
+`bugs/FORMAL_contract_ladder_reach.md` carries the full note.)
 
 ## 1. What I ran
 
@@ -113,4 +120,28 @@ round, so all three are one-line changes to an existing arm's shape"). The
 prescription produced the arm; the arm took the whole class. That doc's Status
 is corrected with the same measurement. The sibling defect found in the same
 sweep — the `imm12` arms dropping their `lsl #12` — is
+`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`.
+## 7. Confirmed a second way, without the fuzzer (2026-10-05)
+
+The fuzzer's `run_model` passes `heartbeats=0` to `formal/lean.py::run_lean`,
+which becomes `-T 0`, so its model side is NOT the invocation
+`ensure_library` uses. A finding that rests only on it would be worth one
+independent check, so here is one: `#eval` over the prebuilt
+`lib/ProofLib.olean`, through `run_lean` with **no** `heartbeats` override, on a
+state with `x1 = 3`, `x15 = 4`, `x14 = 9`, `x29 = 5`, reading the instruction
+word little-endian at `pc = 0x1000` the way `arm64_read_insn` does.
+
+```
+#eval (match arm64_step s0 (codeAt 0xab0f002b) with   -- ADDS x11, x1, x15
+       | none => 999 | some s => s.x11.toNat)
+0                                    -- hardware: 3 + 4 = 7
+
+#eval (match arm64_step s0 (codeAt 0xab0f003f) with   -- CMN x1, x15
+       | none => 999 | some s => s.x11.toNat)
+0                                    -- hardware: 7's slot untouched, so 0 -- CORRECT
+```
+
+Same two words, same run, one right and one wrong, which is the whole claim:
+the defect is the missing `Rd`, not the flag computation and not the byte
+layout. The sibling `imm12` defect is confirmed the same way in
 `bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`.

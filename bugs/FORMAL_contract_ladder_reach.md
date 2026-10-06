@@ -258,9 +258,26 @@ estimate: three postconditions over a two-way selection on two parameters, so
 `2^2 · 3` branches.
 
 **All of that is a `lib/ProofLib.lean` change plus a rebuild, so it is not this
-worker's to land** — the library build is 7.8 GB at `-j 4` and
-`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` records the 8 GB
-ceiling breach for exactly this build. Hand to a worker who can afford it.
+worker's to land.** The blocker is memory alone and it is now measured here
+rather than cited: **9.8 GB** — a `ProofLib.olean` build run exactly as `formal/lean.py::ensure_library` runs it, on this tree, measured 2026-10-05 — over a bounded worker's 8 GB ceiling and under the tree's own `LIBRARY_MEMORY_MB = 12288`. Memory alone, and the library is NOT broken.
+
+**And the measurement has a trap in it that will cost the next session the same
+hour it cost this one.** `formal/lean.py::run_lean`'s `heartbeats` argument
+becomes a **`-T <n>` flag**, and `heartbeats=0` — which reads as "no limit" —
+sets `maxHeartbeats 0`. A `ProofLib` build under `-T 0` does not report a bound:
+it reports a cascade of
+
+```
+error: Tactic `bv_decide` failed. Error: failed to compile definition,
+compiler IR check failed at `work_step_add_imm32._native.bv_decide…`.
+Error: unknown join point 'block_0'
+```
+
+at a **7.1 GB** peak, identically at an 8 GB ceiling and at a 20 GB one, which
+reads exactly like a library that cannot build on this toolchain. **It builds**:
+the same command without the flag exits 0 at 9.8 GB.
+`tools/formal_model_fuzz.py` passes `heartbeats=0` on purpose (its `#eval`s want
+no bound), so any script copied from it inherits the flag and the illusion.
 
 **The verdict stays UNKNOWN for all three and says so.** That is still the
 load-bearing half of this document, and it is now a weaker requirement than it

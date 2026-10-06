@@ -3,7 +3,11 @@
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
 **Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
 returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and
-that build is 7.8 GB at `-j 4`.
+that build peaks at **9.8 GB** measured with `formal/lean.py::ensure_library`'s
+own invocation — over a bounded worker's 8 GB ceiling, under the tree's
+`LIBRARY_MEMORY_MB = 12288`, so the blocker is memory alone and the library is
+not broken. (The `-T 0` trap that measurement has is written up in
+`bugs/FORMAL_contract_ladder_reach.md`.)
 
 ## 1. What I ran
 
@@ -108,3 +112,25 @@ re-measuring `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md`. That
 doc's §1 counterexample list is a list of instructions the model cannot STEP
 (`NOSTEP`); this is one it steps WRONGLY, which is a different bucket and is why
 the sweep it names would not have found it.
+## 6. Confirmed a second way, without the fuzzer (2026-10-05)
+
+Same reason as the sibling document: `tools/formal_model_fuzz.py::run_model`
+passes `heartbeats=0`, so its model side is not the invocation
+`ensure_library` uses. One independent check, through `run_lean` with **no**
+`heartbeats` override against the prebuilt `lib/ProofLib.olean`, on
+`x29 = 5`, `x14 = 9`:
+
+```
+#eval (match arm64_step s0 (codeAt 0x915a2fac) with   -- ADD x12, x29, #1675, lsl #12
+       | none => 999 | some s => s.x12.toNat)
+1680                                 -- = 5 + 1675; the model used imm12 unshifted
+                                     -- hardware: 5 + (1675 << 12) = 0x68b005
+
+#eval (match arm64_step s0 (codeAt 0xd14885d9) with   -- SUB x25, x14, #545, lsl #12
+       | none => 999 | some s => s.x25.toNat)
+18446744073709551080                 -- 2^64 - 535; hardware: 9 - (545 << 12)
+```
+
+1680 is `x29 + 1675` exactly — the immediate with its shift simply absent — and
+the two classes (ADD and SUB) fail identically, which is what a decode omission
+in a shared shape looks like and is not what a wrong operation would look like.
