@@ -517,22 +517,41 @@ classify names has: CPython itself raises `TypeError` for `list > 0` and for
 `max(rank - 2, 0)` — the corpus's one call — is a clamp, which is what a literal
 is for.
 
-**The module-body guard is the second measured one, and it was found by the
-rewrite reaching a place nobody had looked.** `TOP = max(3, 9)` at file level
-became a `TernaryExpr` in a module-level STORE, and such a store is not lowered:
-`TOP = 9 if 1 else 3` — **no `max` anywhere** — answers **0 on both
-architectures** where CPython answers 9, while `TOP = 3 + 9` at the same
-position answers 12. So the rewrite turned today's honest `max(...)` refusal into
-a wrong number on two architectures at once. `_lower_builtin_extremum` now skips
-`M.module_body_functions(functions)` — the one reader of *"this wrapper is a
-module's top level"*, used rather than matching `MODULE_BODY_NAME` because a
-library is compiled from SEVERAL sources and `compile_formal_dylib` renames the
-second and later bodies. **The underlying store defect is filed**
-(`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`, §6),
-with the three sibling positions measured: a default argument value and a struct
-field default are both **refused by name**, and `[max(3, 9)]` is right — so two of
-the four are refusals and one is a wrong answer, which is the shape of a gap
-rather than of a design.
+**The module-body guard — the second measured one — HAS BEEN REMOVED, because
+the measurement it rested on did not happen.** §5.1 recorded that
+`TOP = max(3, 9)` at file level became a `TernaryExpr` in a module-level STORE and
+that `TOP = 9 if 1 else 3` (no `max` anywhere) then answered **0 on both
+architectures** where CPython answers 9, so the guard skipped
+`M.module_body_functions(functions)`.
+
+**It does not.** The measurement compared the image's `$?` — the process exit
+status — against `python3 -c 'print(9 if 1 else 3)'`, which is a DIFFERENT program
+from the one built. A module whose body stores a name and calls nothing exits 0
+in CPython too, so that comparison could not distinguish the two behaviours it
+was cited for, and the sibling row it offered as a control (`TOP = 3 + 9` is 12)
+was read the same way. Reading the value observably — bind it to an annotated
+local in the body, because `print(TOP)` of a module global is refused for wanting
+to know its type — answers 9 on arm64 and 9 on x86-64, agreeing with CPython, and
+does so for every store shape measured beside it: a `TernaryExpr`, arithmetic
+over one, `7 // 2`, `7 % 3`, `-6`, `~6`, `2 ** 3`, `5 > 3`, a store inside an
+`if`, a store inside a `for`, a rebind, and a value produced by a call.
+
+**A module-level store is an ordinary store**, which is why there was no defect
+to guard against: the body is compiled as a function
+(`formal/build.py::_module_body_function`), a name it writes gets the module's
+`__DATA` slot (`model.module_body_store_names`), and both emitters' `AssignStmt`
+arm lowers whatever expression it is handed. Nothing on that path special-cases a
+`TernaryExpr`.
+
+So the guard was a **refusal of correct programs**, and removing it is what makes
+the rewrite mean one thing at every position it can be written. Pinned by
+`test_formal_value_model.py`'s four `MODULE_BODY_STORE_CASES`, which fail on the
+extremum row with the guard restored. The other guards are position-independent
+and unaffected: two containers still hit the integer-literal guard, and a
+container beside a literal is still refused by the relational comparison (§5.2).
+The three sibling positions §5.1 measured are unchanged and still refusals: a
+default argument value and a struct field default are **refused by name**, and
+`[max(3, 9)]` is right.
 
 ### 5.2 The silent wrong answer that guard would otherwise have walked into, REFUSED at the source
 
@@ -707,13 +726,12 @@ the exact next step.
   boundary `fire_compiler.py` already computes one layer up — with the one
   question to answer first stated in the doc (does `rawness` change the
   segmentation? it must not, and the reason is in the doc).
-* **`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`**
-  (NEW, found by §5.1) — a module-level store of a `F.TernaryExpr` answers **0 on
-  both architectures** where CPython stores the arm it took, and needs no `max` to
-  do it: `TOP = 9 if 1 else 3` is 0 while `TOP = 3 + 9` at the same position is
-  12. **Fenced off, not fixed** — `_lower_builtin_extremum` skips the module body,
-  and the doc's next step is the store path rather than the ternary, with the
-  three sibling positions measured.
+* **The module-level store of a `F.TernaryExpr` (found by §5.1) was NOT a bug
+  and its doc is deleted.** §5.1 measured `TOP = 9 if 1 else 3` as answering 0 on
+  both architectures; it answers 9, and the measurement compared an exit status
+  against a `print` from a different program. The module-body guard built on it is
+  removed with it, and the position is pinned by four cases in
+  `test_formal_value_model.py`. See §5.1 for the corrected measurement.
 * **The 136-file family-table gap (§4.3) needed no doc from this branch**: it had
   one (`FORMAL_the_sweep_family_table_has_no_row_for_the_export_rule_refusal.md`,
   filed by `formal32-instrument` off the `-12` log with **the same 136**), this

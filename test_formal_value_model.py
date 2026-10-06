@@ -1227,6 +1227,79 @@ HOLDER_ASSIGN_CASES = [
      "a=9 b=3 c=3"),
 ]
 
+# ── a module-level STORE, which is the position a measurement got wrong ──
+#
+# These four rows are `MODULE_GLOBAL_CASES` rather than a group of their own
+# because they are module-global cases: a name bound at file level, read from
+# somewhere else. What makes them a group is the POSITION of the store.
+#
+# A module-level store is compiled as an ordinary store in the synthetic
+# `__module_body__` (`_module_body_function`), the name gets the module's
+# `__DATA` slot (`module_body_store_names`), and both emitters' `AssignStmt`
+# arm lowers whatever expression it is handed. A doc once recorded the opposite
+# — that `TOP = 9 if 1 else 3` at file level "answers 0 on arm64 and 0 on
+# x86-64" — and a fence was built on it that REFUSED every `max`/`min` written
+# at module level. The measurement was wrong at its root: it read the image's
+# `$?` (the process exit status, 0 for a module that stores a name and calls
+# nothing — in CPython too) against `python3 -c 'print(9 if 1 else 3)'`, a
+# DIFFERENT program. Reading the value observably instead answers 9.
+#
+# So the read has to be observable here, which shapes the cases twice over.
+# `print(TOP)` of a module global is REFUSED ("cannot tell whether IdentExpr is
+# a string or a number"), so each case binds the name to an annotated local
+# first; and the read is in the MODULE BODY rather than in a `def`, because a
+# module with a body enters at the body (`entry_function` rule 1) and the
+# harness's own `sys.exit(main(1))` would be the only thing calling `main` —
+# which CPython also does, and which would leave the store unread in the image.
+# Reading in the body is the same position the store is in, which is the
+# position under test. The annotation is a read of the module's slot and
+# nothing else — it does not fold, because the value it reads is not a literal.
+#
+# `a_module_level_store_of_a_conditional_expression_is_the_arm_it_took` is the
+# row that would have caught the fence, and the other three are the neighbours
+# that show the store path is not special-casing anything: arithmetic over a
+# ternary, a `max` the rewrite lowers, and a store whose value is a call (which
+# needs a `__DATA` slot rather than a folded literal, so it exercises the other
+# half of the same path). Each carries a trivial `main` because the harness
+# appends the call to it.
+MODULE_BODY_STORE_CASES = [
+    ("a_module_level_store_of_a_conditional_expression_is_the_arm_it_took",
+     "TOP = 9 if 1 else 3\n"
+     "v: Int = TOP\n"
+     "printf(\"v=%d\", v)\n"
+     "\n"
+     "def main(n):\n"
+     "    return 0\n",
+     "v=9"),
+    ("a_module_level_store_of_arithmetic_over_a_conditional_expression",
+     "TOP = (9 if 1 else 3) + 1\n"
+     "v: Int = TOP\n"
+     "printf(\"v=%d\", v)\n"
+     "\n"
+     "def main(n):\n"
+     "    return 0\n",
+     "v=10"),
+    ("a_module_level_store_of_an_extremum_is_the_select_it_is",
+     "TOP = max(3, 9)\n"
+     "v: Int = TOP\n"
+     "printf(\"v=%d\", v)\n"
+     "\n"
+     "def main(n):\n"
+     "    return 0\n",
+     "v=9"),
+    ("a_module_level_store_of_a_call_needs_the_slot_rather_than_a_fold",
+     "def g() -> Int:\n"
+     "    return 7\n"
+     "\n"
+     "TOP = g() * 3\n"
+     "v: Int = TOP\n"
+     "printf(\"v=%d\", v)\n"
+     "\n"
+     "def main(n):\n"
+     "    return 0\n",
+     "v=21"),
+]
+
 # ── what a module-level binding may be used for, which is what the two
 #    read/assign refusals below are about ──
 #
@@ -2301,6 +2374,7 @@ def main():
                   + [(c, False) for c in TUPLE_STORE_CASES]
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]
+                  + [(c, False) for c in MODULE_BODY_STORE_CASES]
                   + [(c, False) for c in BUILTIN_CASES]
                   + [(c, False) for c in BUILTIN_EXTREMUM_CASES]
                   + [(c, True) for c in BUILTIN_EXTREMUM_REFUSALS]
