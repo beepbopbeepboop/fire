@@ -1,8 +1,11 @@
 # The contract ladder cannot do arithmetic on `UInt64`, because `UInt64` is a
 # `Fin` and `omega` has none for it
 
-**Status: the limit is MEASURED, named per example, and reported UNKNOWN. Not
-fixed. The next step is §4.**
+**Status: the `Fin`-versus-`Nat` half is FIXED (`f21e44cf`), and the ladder is
+no longer limited to ground goals. One of the four rows it could not close now
+closes; the other three fail on a MISSING LIBRARY LEMMA, which is a different
+limit and is named in §6. §4's prescribed fix is REFUTED and is not what
+landed — read §5 before implementing anything from it.**
 
 ## 1. What I ran and what I saw
 
@@ -32,6 +35,28 @@ hpre1 : i ^^^ 9223372036854775808 < n ^^^ 9223372036854775808
 
 Both hypotheses ARE in context — that was the first bug, §2 — and the goal
 still does not close.
+
+**`bounds_index.mojo` now CLOSES (`f21e44cf`), and this is the whole of the
+table's movement:**
+
+| example | contract | Lean, before | Lean, after `f21e44cf` |
+|---|---|---|---|
+| `mini2.mojo` | `@requires(a <= b) @ensures(result <= b)` | **exit 0** | **exit 0** |
+| `wrong_clampv.mojo` | three clauses, one false | exit 1, names the theorem | exit 1, names the theorem |
+| `bounds_index.mojo` | `@requires(i >= 0) @requires(i < n) @ensures(result <= n)` | exit 1 — UNREACHED | **exit 0** |
+| `mini.mojo` | `@ensures(result <= max(n, 3))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
+| `clamped.mojo` | `@ensures(result >= lo)`, `(<= hi)`, `(== clamp(...))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
+| `abspos.mojo` | `@ensures(result == abs(n))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
+
+**exit 0: 1/6 → 2/6**, measured the way §1 describes (the REAL `_gen_go` model
+and the REAL `contract_theorems` theorem, through `formal/lean.py::run_lean`,
+`test_formal_contracts.py --lean` → **308 passed, 0 failed**).
+
+`wrong_clampv` staying at exit 1 is the load-bearing half of that number: the
+new rung reasons about the goal and CANNOT close a false one. That was also
+checked on its own, outside the corpus — the same rung against a
+`result >= n` goal with an `i < n` hypothesis fails, which is the property that
+makes the rung a rung and not an `assume`-shaped hole.
 
 ## 2. The first bug, which was in the EMITTER and is fixed
 
@@ -82,20 +107,21 @@ sign-flip involution, into `≤` on `Fin`.  Every rung fails for its own reason:
 
 `mini2` closes for the opposite reason: its case split `by_cases (a < b)` makes
 every branch a **ground** fact, and ground facts on `Fin` are decidable.  So the
-ladder's reach is exactly *"the contract's goal becomes ground after splitting
-over the model's own branches"*, and `bounds_index`'s does not, because its
-body has no branch at all — there is nothing to split on.
+ladder's reach was exactly *"the contract's goal becomes ground after splitting
+over the model's own branches"*, and `bounds_index`'s did not, because its
+body has no branch at all — there was nothing to split on.
 
 `abspos` is the interesting boundary case: its body DOES branch, and its goal
 does not become ground, because `abs` in the CLAUSE is a selection the ladder
 renders and the simplifier has to evaluate at a symbolic `n`.
 
-## 4. The next step, precisely
+**§3's diagnosis of the three rungs is CORRECT and is what `f21e44cf` acted on.**
+Each rung fails for the reason stated. What was wrong was §4's conclusion about
+what to do about it — the next section.
 
-The fix is a **lemma**, not a bigger tactic, and it belongs in `lib/work.lean`
-next to the other `UInt64` helper facts (`u64_lt_iff_false_of_le`,
-`u64_le_iff_false_of_lt`, `work_cset_lt_false_iff`, all of which already exist
-for exactly this reason):
+## 4. The prescribed fix is REFUTED — `sKey_lt_iff` is false
+
+§4 (as originally written) prescribed a lemma:
 
 ```lean
 /-- The sign flip is an involution, so a signed order on the flipped words is
@@ -104,24 +130,140 @@ theorem sKey_lt_iff (a b : UInt64) :
     sKey a < sKey b ↔ a < b
 ```
 
-and a transitivity rung over it.  With `sKey` a `def` that `simp only [sKey]`
-unfolds, `simp only [sKey] at *` turns every hypothesis and the goal back into
-comparisons on `UInt64` proper, and the existing `u64_*_iff` lemmas then apply.
-That is a `simp` set change, not a new tactic, and it is the cheapest thing to
-try first:
+**That lemma is false, and it is false in the direction the prescription used it
+in.** `sKey x` is `x ^^^ 0x8000000000000000` — it flips the TOP BIT — so
+`sKey a < sKey b` (read on the `Fin`/unsigned order, which is the only order
+`Fin` has) is the **SIGNED** reading of `a < b`, not the unsigned one. The
+prescription wanted to turn a signed hypothesis into an unsigned goal; the lemma
+would have turned one signed reading into *another* signed reading.
 
-1. add `sKey_lt_iff` / `sKey_le_iff` to `lib/work.lean`;
-2. add them to the ladder's `simp_all` set in
-   `formal/contracts.py::contract_theorems`;
-3. re-run `python3 test_formal_contracts.py --lean` and see how many of the four
-   rows above flip from exit 1 to exit 0.
+Measured, on the pinned toolchain, in one line:
 
-The honest expectation is that this closes `bounds_index` and `abspos` and
-leaves `clamped` (three postconditions over a two-way selection on two
-parameters, so `2^2 · 3` branches) for a later pass.  Measure it; do not assume
-it.
+```lean
+example : sKey 0 < sKey 0xffffffffffffffff ↔ 0 < 0xffffffffffffffff := by
+  decide +kernel
+-- Tactic `decide` proved that the proposition is false
+```
 
-**Until then the verdict is UNKNOWN and says so**, with `Verdict.ok` False and
-the skipped-input count attached.  That is the load-bearing half of this
-document: the ladder's reach is small, and the requirement it must meet is not
-"proves everything" but "never reports a reach as a pass".
+At `a = 0`, `b = 2^64 - 1`: flipping the top bit makes `sKey a = 2^63` the
+LARGER of the pair, so `sKey a < sKey b` is **False**, while `a < b` is **True**.
+So `sKey_lt_iff` is not merely unnecessary — landing it would have put a FALSE
+theorem in `lib/work.lean`, behind a `[simp]` attribute, where it would rewrite
+comparisons in every proof in the tree.
+
+The doc's *reasoning* about the failure is right and §3 above is the record of
+it; only this conclusion was wrong, and it is wrong because the doc treated
+`sKey` as order-preserving when it is order-REVERSING. **The three hunks in §4's
+code block were written and measured and were correctly not committed**; the
+error was in the lemma's statement, which nothing had checked.
+
+## 5. What landed instead (`f21e44cf`), and why it is not a bigger tactic
+
+The goal `bounds_index` wants is transitivity of `<` into `≤` over `UInt64`:
+
+```
+hpre1 : i ^^^ 0x8000000000000000 < n ^^^ 0x8000000000000000
+⊢     i ^^^ 0x8000000000000000 ≤ n ^^^ 0x8000000000000000
+```
+
+and it needs no sign-flip lemma at all, because **`Lean.UInt64`'s order already
+IS `Nat`'s** — `Fin n`'s `LT`/`LE` go through `.val`. What was missing was the
+library's own two bridges from that order to `Nat`'s,
+`UInt64.lt_iff_toNat_lt` and `UInt64.le_iff_toNat_le`, which
+`lib/ProofLib.lean` already uses throughout (`u64_sub_one_toNat_le`,
+`mem_read_*`'s bound proofs, and so on). Adding them to the ladder's simp set
+turns the hypothesis and the goal into `Nat` inequalities, which is the
+arithmetic `omega` has, and `Nat.le_of_lt` — core, not a new lemma — is the
+transitivity fact the goal asks for.
+
+So the fix is **a rung whose simp set carries those two bridges, with `omega` in
+the SAME rung**:
+
+```python
+("simp_all_toNat", "simp_all [{lemmas}, {extra}] <;> omega")
+```
+
+The `<;>` is load-bearing and was measured, not guessed: a rung that makes
+progress without closing the goal does not hand its rewrites to the next rung
+(`first` restores the goal), so the rewrite and the arithmetic it enables have
+to be one rung. **For the same reason this rung LEADS the ladder** — with the
+bare `simp_all` rung first, `simp_all_toNat` never gets to run and the corpus
+is back to 1 of 6. Both orders were measured.
+
+Two things changed shape to carry it, and both are in `f21e44cf`:
+
+* `LADDER` is a tuple of `(NAME, SPELLING)` pairs, because a rung is a tactic
+  SEQUENCE and only its first tactic is a name. `Verdict.why` prints the NAME
+  (`simp_all_toNat → simp_all → omega → decide`) and `_ladder_script` emits the
+  SPELLING.
+* `test_formal_contracts.py`'s ladder row now asserts on the **spelling**
+  rather than the name, which is strictly stronger: a name can be present in a
+  script that runs a *different* tactic under it, which is the exact drift that
+  row was written for.
+
+## 6. What is still open, and it is a DIFFERENT limit
+
+`mini`, `clamped` and `abspos` are still exit 1, still honestly reported
+UNKNOWN with `Verdict.ok` False. **They no longer fail for §3's reason.** The
+`Fin`-versus-`Nat` gap is closed for all of them; what is left is a missing
+library lemma, and it is small and specific.
+
+`mini.mojo`'s emitted goal, after the split, is:
+
+```
+h0 : n ^^^ 0x8000000000000000 < 3 ^^^ 0x8000000000000000
+⊢ n ^^^ 0x8000000000000000 ≤ (if 3 ^^^ … < n ^^^ … then n else 3) ^^^ …
+```
+
+The hypothesis is `n < 3` and the goal's own test is `n > 3` — the same fact
+**in the other direction**, which is why the `if` cannot be decided and the
+goal never becomes a `Nat` inequality for `omega` to use. So `mini` needs the
+library's `UInt64` order facts in **all three directions**, and
+`lib/ProofLib.lean:1351-1355` has two of the three
+(`u64_lt_iff_false_of_le`, `u64_le_iff_false_of_lt`). The missing one is:
+
+```lean
+theorem u64_lt_iff_false_of_lt {a b : UInt64} (h : a < b) : (b < a) ↔ False :=
+  ⟨fun hba => (UInt64.not_lt.mpr (Nat.le_of_lt h)) hba, False.elim⟩
+```
+
+**Measured, and it is necessary but NOT sufficient**, which is worth stating
+because "add the third direction" looks like the whole answer and is not:
+
+* with it, `mini`'s `case pos` reduces to `⊢ n ^^^ K ≤ 3 ^^^ K` — which is
+  `h0` read as `≤`, and `simp` cannot do that rewrite on `Fin` because the two
+  orders are different *relations* even though they agree on this pair;
+* `mini`'s `case neg` still leaves `⊢ 3 ^^^ K ≤ (if 3 ^^^ K < n ^^^ K then n
+  else 3) ^^^ K`, i.e. the `if` is STILL undecided, because deciding
+  `¬(3 < n)` from `¬(n < 3)` is the same missing direction again, now with
+  negation on both sides.
+
+So the honest next step is **two** library facts, not one, and the second is
+where the real work is:
+
+1. `u64_lt_iff_false_of_lt` above (the `Fin` order's own `not_lt` direction);
+2. a form the simplifier can use with a **negated** hypothesis — `simp` will
+   not use a `↔ False` theorem to discharge `¬(b < a)` when what is in context
+   is `¬(a < b)`, so this needs `Nat.lt_of_not_ge`/`Fin` trichotomy in the
+   other direction, or the ladder needs a rung that runs the toNat rewrite and
+   then lets `omega` do the trichotomy (which is what the landed
+   `simp_all_toNat` rung does, and it is why `bounds_index` closed and `mini`
+   did not).
+
+Then `abspos` needs the same pair PLUS its goal is an **equality** over `Fin`,
+and this toolchain has no `UInt64.eq_iff_toNat_eq` (measured: both
+`UInt64.ge_iff_toNat_ge` and `UInt64.eq_iff_toNat_eq` are absent), so its goal
+needs `congrArg UInt64.toNat` or a library lemma. `clamped` is the doc's own
+estimate: three postconditions over a two-way selection on two parameters, so
+`2^2 · 3` branches.
+
+**All of that is a `lib/ProofLib.lean` change plus a rebuild, so it is not this
+worker's to land** — the library build is 7.8 GB at `-j 4` and
+`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` records the 8 GB
+ceiling breach for exactly this build. Hand to a worker who can afford it.
+
+**The verdict stays UNKNOWN for all three and says so.** That is still the
+load-bearing half of this document, and it is now a weaker requirement than it
+was: the ladder's reach is no longer "ground goals only", but the requirement
+it must meet was never "proves everything" — it is "never reports a reach as a
+pass", and `wrong_clampv` still refusing is what holds that line.
