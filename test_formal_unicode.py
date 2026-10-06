@@ -1265,6 +1265,46 @@ def model_checks():
            'def f():\n'
            '    """prose."""\n'
            '    printf("%s", "héllo")\n')), ["héllo"])
+
+    # ── this repository's OWN host modules must scan as ASCII ──
+    #
+    # `bugs/FORMAL_string_value_model.md`'s last section recorded that
+    # `formal/hostmods/os/_syscalls.mojo` and `formal/hostmods/struct.mojo` are
+    # written with em-dashes and that FOUR registered suites were red on master
+    # for that one reason. **Both halves of that are now false, and this row is
+    # the measurement of the false half**, because the repair the section
+    # recommends — ASCII-folding the prose — is what would make the doc true and
+    # is not needed: the exclusion tested two rows above means those 93 non-ASCII
+    # lines are docstrings and `#` comments, neither of which is a string a
+    # program can name, so no image that imports them is non-ASCII.
+    #
+    # So the durable obligation is not "keep the prose ASCII" — it is "keep every
+    # host module's string VALUES ASCII", and this asks the reader the build
+    # asks rather than counting bytes: a hostmod written with a non-ASCII
+    # docstring is fine and one written with a non-ASCII VALUE is not, and only
+    # the reader tells them apart. One such value would make `d[i]`,
+    # `len(s)` and `printf("%<w>s", s)` refuse in every image whose closure
+    # reaches the module, which is every image that imports `os` — the 174 checks
+    # over four suites the doc counted, re-derivable here in about a second.
+    import os as _os
+    _hostmods = _os.path.join(HERE, "formal", "hostmods")
+    _dirty = []
+    for _root, _dirs, _files in _os.walk(_hostmods):
+        for _f in sorted(_files):
+            if not _f.endswith(".mojo"):
+                continue
+            _p = _os.path.join(_root, _f)
+            try:
+                _stmts = F.Parser(F.py_tokenize(
+                    open(_p, encoding="utf-8").read())).parse_module()
+            except Exception as _e:                      # noqa: BLE001
+                _dirty.append(f"{_os.path.relpath(_p, HERE)}: {_e}")
+                continue
+            _found = M.non_ascii_strings_in(_stmts)
+            if _found:
+                _dirty.append(f"{_os.path.relpath(_p, HERE)}: {_found[:2]}")
+    ok("every formal/hostmods module has no non-ASCII string VALUE",
+       _dirty, [])
     # The predicate itself, asked directly rather than through the walk, because
     # it is the answer to a question TWO places now ask
     # (`module_body` and the scan) and two answers would be the failure this
