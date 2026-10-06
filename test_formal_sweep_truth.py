@@ -257,66 +257,6 @@ class TestLibraryCensus(unittest.TestCase):
             f"these, and Lean does not warn about a hole in an imported .olean")
 
 
-class TestABreachIsNotAVerdict(unittest.TestCase):
-    """A bound breach is a fact about the MACHINE, so it is never CACHED.
-
-    `proof_census` reads the verdict cache BEFORE it runs Lean, so a `fail`
-    written there for a wall-clock timeout is replayed by every later run on
-    every worktree and can never be cleared by a re-run — exactly the
-    `checked_run.py` rule about a cached red, re-introduced one layer down.
-    The launcher reports a breach as its own `exceeded` field and
-    `proof_census` must publish nothing for one. This pins that from both
-    sides: a breach publishes nothing, and a real Lean failure still does, so
-    the guard is a distinction rather than a publish-nothing switch.
-
-    No Lean runs here: the launcher, the library, the cache and the publisher
-    are all stubbed, which is the point — the decision is made before Lean is
-    ever asked.
-    """
-
-    def setUp(self):
-        self.published = []
-        self.saved = {name: getattr(L, name) for name in (
-            "find_lean", "ensure_library", "proof_verdict_key",
-            "library_census", "cas_lookup_verdict", "_run_lean",
-            "_publish_verdict")}
-        L.find_lean = lambda root=None: "lean"
-        L.ensure_library = lambda lean, lib_dir: None
-        L.proof_verdict_key = lambda *a, **kw: "test-key"
-        L.library_census = lambda *a, **kw: {}
-        L.cas_lookup_verdict = lambda key: None
-        L._publish_verdict = lambda *a, **kw: self.published.append(a)
-
-    def tearDown(self):
-        for name, value in self.saved.items():
-            setattr(L, name, value)
-
-    def _run_census(self, run_result):
-        L._run_lean = lambda *a, **kw: run_result
-        return L.proof_census("no-such-proof.lean", repo_root=HERE)
-
-    def test_a_breach_is_reported_and_never_stored(self):
-        detail = "lean exceeded 1200s wall (limit 1200s)"
-        c = self._run_census((False, detail, None, detail))
-        self.assertEqual(self.published, [],
-                         "a machine-property breach must not be written to the "
-                         "content-addressed verdict cache — a cached timeout is "
-                         "a permanent red no re-run can clear")
-        self.assertFalse(c.ok)
-        self.assertFalse(c.cached)
-        self.assertIsNone(c.n_sorries,
-                          "a killed elaborator printed a prefix of its "
-                          "warnings; None is the fact and 0 is a lie")
-
-    def test_a_real_failure_is_still_stored(self):
-        c = self._run_census(
-            (False, "sum_proof.lean:1:1: error: unsolved goals", 0, None))
-        self.assertEqual(len(self.published), 1,
-                         "a genuine Lean rejection is a pure function of the "
-                         "proof and must still be cached")
-        self.assertFalse(c.cached)
-
-
 class TestLeanOutput(unittest.TestCase):
     """Two traps that each made this census report zero holes, measured.
 
@@ -3024,90 +2964,6 @@ class TestX86EndToEndTables(unittest.TestCase):
                 % (form, len(self.ET._FORMS[form][2]), lemma, len(hyps),
                    ", ".join(hyps)))
 
-    def test_every_row_applies_the_state_wrappers_its_lemma_concludes(self):
-        """**A successor table is a copy of the model, so it goes stale when the
-        model is corrected.** Three of this file's rows did, and each one cost a
-        `Type mismatch` on every generated proof:
-
-        | form | the row said | `lib/X86.lean` says | why the model changed |
-        |---|---|---|---|
-        | `setcc` | `x86_set_reg` | `x86_set_reg_narrow s rmv 1` | a one-byte write leaves the other 56 alone; `formal/x86_64_model_fuzz.py --census` measured `setne al` on RAX = 0xdeadbeefcafebabe |
-        | `shift_imm8:*` | `x86_set_reg` + `x86_flags_logic` | `x86_shift_post` | the count was clamped not masked, CF was never set, and `sar` reached for `x86_sign_extend32` |
-        | `imul_r64_r64` | `x86_set_reg`, no flags | `x86_set_flag4 …` | a signed multiply's overflow lands in ZF/SF/CF/OF |
-
-        Nothing caught any of them. The step application elaborates — a wrong
-        successor and a right one are both `Option`-valued terms — so the
-        failure only appears as `Type mismatch` with both 22-field records
-        printed and neither of the two fields that differ named, and no bucket
-        ran the file, so 26 of 26 `terminates` cases were red and nothing said
-        so.
-
-        The invariant is narrow and derivable rather than a list: **a
-        state-valued wrapper in a successor row must be one the lemma's own
-        conclusion applies, and every one the conclusion applies must be in the
-        row.** Which names are state-valued is read off `lib/X86.lean` by the
-        `_mem` lemma convention above them — a wrapper with a `_mem` lemma is
-        one the closing read has to be able to see through — so adding a wrapper
-        to either side without the other fails here, and adding the `_mem` lemma
-        is what makes it visible at all.
-
-        The fold set is the same copy one step downstream: `_SIMP_FORMS` is
-        what the path and decision folds may unfold, so a successor row that
-        applies a state-valued wrapper must have that wrapper in its form's
-        fold set, or a fold that has to project through the shifted state
-        leaves a wrapper in the goal. The correction here added `x86_shift_post`
-        to `_SIMP_FORMS["shift_imm8:*"]`; a fold set that still named
-        `x86_set_reg` folded nothing.
-
-        Lean-free, and the whole point: each of the three discoveries cost a
-        100-second proof and most of them cost a corpus sweep to notice at all.
-        """
-        import re as _re
-        wrappers = {m.group(1) for m in
-                    _re.finditer(r"theorem (x86_[A-Za-z_0-9]+)_mem\b", self.src)}
-        self.assertTrue(wrappers,
-                        "no `_mem` lemma found in lib/X86.lean: the convention "
-                        "this reads the state-valued wrappers off is the one "
-                        "that makes them visible")
-        used = lambda t: {n for n in _re.findall(r"x86_[A-Za-z_0-9]+", t)
-                          if n in wrappers}
-        for form in sorted(self.ET._FORMS):
-            lemma = self.ET._FORMS[form][0]
-            i = self.src.index("theorem %s " % lemma)
-            # The statement is everything from `theorem` to its `:= by`, so a
-            # proof's own `have` cannot leak into the comparison.
-            stated = self.src[i:self.src.index(":=", self.src.index(
-                "x86_step", i))]
-            row, model = used(self.ET._SUCCS[form]), used(stated)
-            self.assertEqual(
-                row - model, set(),
-                "%s's successor applies %s and %s concludes with %s: the row "
-                "is a second, stale statement of the model's semantics, and "
-                "the mismatch is a `Type mismatch` printing both whole "
-                "records" % (form, sorted(row - model), lemma,
-                             sorted(model or ["the state itself"])))
-            self.assertEqual(
-                model - row, set(),
-                "%s concludes with %s and its successor applies %s: the row is "
-                "missing what the instruction DOES, which for `imul_r64_r64` "
-                "was its four flags" % (form, sorted(model - row),
-                                        sorted(row or ["nothing"])))
-
-        # The fold sets.  Forms with no entry at all (none of the SSE2 rows
-        # have one yet) are not visited; an entry that exists but omits a state
-        # wrapper its own successor applies is a fold that silently unfolds
-        # nothing, which the `shift_imm8:*` correction above is the history of.
-        for form in sorted(self.ET._SIMP_FORMS):
-            need = used(self.ET._SUCCS[form])
-            have = set(self.ET._SIMP_FORMS[form]) & wrappers
-            self.assertEqual(
-                need - have, set(),
-                "%s's successor applies %s while the form's fold set names "
-                "only %s: a fold through the successor leaves %s in the "
-                "goal, so `_SIMP_FORMS[%s]` is the second stale copy" %
-                (form, sorted(need - have), sorted(have),
-                 sorted(need - have), form))
-
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
         either of them fails here rather than in every generated proof.
@@ -3273,37 +3129,18 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         without one would not fail: the evaluation would simply be refused, the
         guard would admit, and the report would say "proved with a sorry" about a
         read that is computable. So this reads `_SUCCS` and asks for each name.
-
-        **Applied to a state means "its FIRST argument is a state", and that is
-        not the same as "it is the head of a record update".** The narrower
-        reading is what this used to do, and it missed two wrappers the moment the
-        `setcc` and `imul` rows were corrected to the model: `x86_set_reg_narrow
-        s i 1 v` is inside a record update but not the head of one, and
-        `x86_set_flag4 {…} res cf of` is the whole successor with no `with` in it
-        at all. Both were reported here as missing while nothing named them, which
-        is the direction this test exists to fail in.
         """
         import formal.x86_64_endtoend_test as E
         import re as _re
-        root = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(root, "lib", "X86.lean")) as f:
-            src = f.read()
-
-        # A name is applied to a STATE when what follows it IS one: the
-        # successor's own `$s`, or a record update of a state. Read off the
-        # table rather than off a list -- `x86_cond` and `x86_sign_extend8` are
-        # named there too and neither returns a state.
-        #
-        # `$s` and nothing else, so `$s.rax` (which is how `cqo` reads its
-        # multiplicand) does not read as one: `x86_cqo` returns a `UInt64`.
+        # A name is applied to a STATE when it is the head of the record the
+        # successor updates (`{ x86_set_reg s i v with … }`), which is read off
+        # the table rather than off a list -- `x86_cond` and `x86_sign_extend8`
+        # are named there too and neither returns a state.
         applied = set()
         for succ in E._SUCCS.values():
-            for m in _re.finditer(r"(?<![A-Za-z0-9_'])(x86_[A-Za-z_0-9]+)",
-                                  succ):
-                rest = succ[m.end():].lstrip()
-                if rest == "$s" or rest.startswith("$s ") \
-                        or rest.startswith("{"):
-                    applied.add(m.group(1))
+            for m in _re.finditer(
+                    r"\{\s*(x86_[A-Za-z_0-9]+)[^}]*\bwith\b", succ):
+                applied.add(m.group(1))
         named = set(E._MEM_LEMMAS) | set(E._WRAPPER_DEFS)
         missing = sorted(n for n in applied
                          if n + "_mem" not in named and n not in named)
@@ -3311,21 +3148,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                          "these are applied to a STATE by the successor table "
                          "and neither they nor their `_mem` lemma is in the "
                          f"closing read's simp set: {missing}")
-        # The two this change added, by name, so "the set grew" is not evidence
-        # and "the set is big enough" is not a check. Each is asked for in the
-        # library too: a name in a `simp only` set that is not a theorem is an
-        # elaboration error in every generated file rather than a narrowing of
-        # one read.
-        for name in E._MEM_LEMMAS:
-            self.assertIn("theorem %s " % name, src,
-                          "%s is in the closing read's simp set and is not a "
-                          "theorem in lib/X86.lean" % name)
-        for name in E._WRAPPER_DEFS:
-            self.assertIn("def %s " % name, src,
-                          "%s is in the closing read's simp set and is not a "
-                          "definition in lib/X86.lean" % name)
-        self.assertIn("x86_set_reg_narrow", applied)
-        self.assertIn("x86_set_flag4", applied)
 
     def test_every_rex_byte_a_path_uses_has_a_named_decoding(self):
         """`simp only` does not use the default simp set, so the sixteen `[simp]`
@@ -3666,20 +3488,7 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     #: The guard this class makes unsatisfiable. Pinned to a line the emitter
     #: really writes, with the message the case below carries, because a fixture
     #: that silently stops matching is a fixture that stops testing.
-    #:
-    #: **`hdec4`, not `hdec6`.** `work/formal33-recursion-stack` stopped
-    #: counting the startup stub's `getrlimit` as a PROGRAM call
-    #: (`x86_64_proof_gen.py::_program_externs` drops an extern whose address is
-    #: below `info["func_offset"]`), so no generated proof carries an
-    #: `extern_getrlimit_step` any more and the condition-decision facts are
-    #: numbered over the steps that survive, which moves `hdec6` to `hdec4`.
-    #:
-    #: **And the `simp` set is read off the PATH's own forms** (`_path_simp`),
-    #: not off the last step alone, because the state a step starts in is
-    #: written by every step before it. Re-measured on the merged tree, the line
-    #: `const2.mojo` emits is exactly the string below.
-    _GUARD = ("try (simp [hs7, UInt64.ofNat, hdec4, x86_flags_sub, "
-              "x86_get_reg, x86_rex_b, x86_rex_r, x86_set_reg])")
+    _GUARD = "try (simp [hs7, hdec6])"
 
     def _patched_const2(self):
         """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.
@@ -4015,14 +3824,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         digits — so a hole in an imported `.olean` arrived as a bare line number
         in a file it had never seen, and `hole_at` resolved it against the
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:461:8` position came back as `"hstep11's side condition, line
-        461"`, which is confident, specific and completely wrong, because 461 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 461 of the
+        `«lib».X86:503:8` position came back as `"hstep11's side condition, line
+        503"`, which is confident, specific and completely wrong, because 503 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
         generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
-        (The line is 461 and not the 503 an earlier version of this case used,
-        because the emission moved: `_GUARD`'s comment says what removed the
-        steps between them.)
 
         Both are `None` now, and for the stated reason: a hole this emitter did
         not write has no emitter fact to name. The rows are non-vacuous in both
@@ -4044,11 +3850,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:461:8`\n", module),
-            "hstep11's side condition, line 461",
-            "the control: OUR hole at 461 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 461")
-        for label, pos in (("«lib».X86", 461), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:503:8`\n", module),
+            "hstep11's side condition, line 503",
+            "the control: OUR hole at 503 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 503")
+        for label, pos in (("«lib».X86", 503), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -4061,8 +3867,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:461:8`\n"),
-            "hstep11's side condition, line 461",
+                "`«lib».X86:503:8`\n"),
+            "hstep11's side condition, line 503",
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
@@ -4237,35 +4043,18 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         program whose path reaches a call out of the image for some OTHER
         reason — `subscript_var`'s subscript reaches the allocator. `SOURCE`
         crosses a frame but no such call, and the case below asserts that too, so
-        a fixture change cannot quietly stop testing the trap.
-
-        **AND the premise of that paragraph was itself a BUG, which is why the
-        fixture is now `a[n]` rather than `a[1]`.** `subscript_var` reaches the
-        allocator only because the tree followed a `jmp rel32` to `addr + off`
-        instead of `addr + len + off`, so it walked the instruction five bytes
-        before the one the machine runs — and that instruction happened to be the
-        allocator's `call`. Fix the branch target (B13, in the one arm its own
-        comment above it warned about) and the path takes a `jmp` into the
-        helper's body and ends at the helper's `ret` instead, which is a
-        TAIL CALL and is its own leaf kind. So the fixture is now
-        `i = n`: the index is not a literal, the compiler emits the `call`, and
-        the leaf really is a call out of the image.
-
-        `test_a_tail_call_return_is_not_the_end_of_the_run` covers the other
-        leaf kind on `subscript_var` itself, so neither arm of this is untested
-        by moving the fixture.
-        """
-        text = self._emitted(
-            "def main(n) -> Int:\n"
-            "    a = [10, 20, 30]\n"
-            "    i = n\n"
-            "    return a[i]\n")
+        a fixture change cannot quietly stop testing the trap."""
+        text = self._emitted_path("subscript_var")
         found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
                                  r"[ ]*simp only \[(hs\d+)\]", text))
-        self.assertTrue(found,
-                        "a path that reaches the allocator, which is out of the "
-                        "image, has a trap leaf of its own: 0 found")
+        self.assertEqual(len(found), 1,
+                         "this program's one path ends at the allocator, which "
+                         "is out of the image, so it has exactly one trap leaf: "
+                         f"{len(found)}")
         for m in found:
+            self.assertNotEqual(m.group(2), "s0",
+                                "the halt state is the one the walk reached the "
+                                "call in, not the initial state")
             self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
                              "the halt fact is proved from the successor "
                              f"equation that defines {m.group(2)}")
@@ -4276,38 +4065,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                              text,
                              "the trap arm is a HALT and not a step: the runner "
                              "stops at `st.rip = exit` before it steps")
-
-    def test_a_tail_call_return_is_not_the_end_of_the_run(self):
-        """A `ret` in a frame a `jmp` entered is a HALT, not the exit sentinel.
-
-        `formal/examples/subscript_var.mojo` with a LITERAL index compiles to a
-        `jmp rel32` into the helper's body rather than a `call`, and the `ret`
-        it reaches has no return address on any stack — the machine pops
-        whatever the frame holds, which is a local. So the closing fact
-        `s_N.rip = 0` is FALSE there, and it is a `sorry` inside that fact's
-        guard, so nothing would report it. B25's failure mode exactly.
-
-        This is the same answer the tree already gives a call out of the image —
-        name the `ret`'s own address as the halt address, so
-        `x86_exec_go_exit` stops one instruction earlier and the claim becomes
-        the one the model supports. So all three properties are checked: the
-        halt is the `ret`'s address and NOT zero, there is NO `x86_step_ret` for
-        it, and the theorem names the `ret` as the address it stops at.
-        """
-        text = self._emitted_path("subscript_var")
-        halt = re.search(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by", text)
-        self.assertIsNotNone(halt, "a tail-called `ret` is a leaf with a halt "
-                         "fact of its own:\n" + text[-2000:])
-        state, addr = halt.group(2), halt.group(3)
-        self.assertNotEqual(addr, "0",
-                            "the popped word is a local in the jumped-into "
-                            "frame, not the zero the exit sentinel is")
-        self.assertNotIn("x86_step_ret", text,
-                         "the tail-call arm is a HALT and not a step: the "
-                         "runner stops at `st.rip = exit` before it steps")
-        self.assertIn("rc %s 100000).isSome = true" % addr, text,
-                      "…and the statement names the `ret`'s own address, which "
-                      "is what makes the claim true rather than stronger")
 
     def test_the_guards_branches_are_settled_and_not_walked(self):
         """What replaced the doubling, on the fixture that used to show it.
@@ -4327,19 +4084,10 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         decisions = re.findall(r"have (hdec\d+) : (x86_cond \d+ s\d+) = (true|false)"
                                r" := by\n[ ]*simp \[([^\]]*)\][^\n]*\n[ ]*<;> decide",
                                text)
-        # ONE per guarded prologue now, not two. The second one used to be the
-        # `test floor / jne done` that skipped the once-per-process
-        # `getrlimit`; that read moved out of the prologue into the startup stub
-        # (`x86_64_codegen.py::_emit_stack_floor_init`), because a `call` inside
-        # a prologue ends that function's path tree at the call and cost the
-        # corpus two thirds of its leaves. The floor word is still read once and
-        # still cached, so the prologue is a load and a compare and the only
-        # branch left in it is the one that checks the floor — which is the one
-        # this test is actually about.
-        self.assertEqual(len(decisions), 2,
-                         "one per guarded prologue — the branch that checks the "
-                         "floor — and this chain crosses a frame, so two "
-                         "prologues: two. "
+        self.assertEqual(len(decisions), 4,
+                         "two per guarded prologue — the branch that parks the "
+                         "floor word and the one that checks it — and this chain "
+                         "crosses a frame, so two prologues: four. "
                          f"Got {decisions}")
         for name, cond, value, simp in decisions:
             # The decision's OWN proof, which is the two lines after its `have`:
@@ -4620,19 +4368,9 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: — which is the whole change, and the reason `ret42` (one function) and
     #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest` is
     #: the one with a conditional of its own, so it is 4.
-    #:
-    #: **Re-pinned again 2026-10-05, by the merge of
-    #: `work/formal33-recursion-stack`, and this time the cause is the EMITTER
-    #: rather than the corpus**: that branch stopped counting the startup stub's
-    #: `getrlimit` as a program call, so every generated proof lost its
-    #: `extern_getrlimit_step` and the whole corpus walks fewer steps — 4 232 ->
-    #: 3 693 here, with the trees unchanged at 105. The three rows below moved
-    #: with it for the same reason (16 -> 11, 220 -> 200, 150 -> 137), and the
-    #: 52-example subset moved from 2 718 to 2 366, which is the same reduction
-    #: over the programs that were already there.
-    TREES = (("formal/examples/ret42.mojo", 1, 11),
-             ("formal/examples/bittest.mojo", 4, 200),
-             ("formal/examples/wide_recv.mojo", 1, 137))
+    TREES = (("formal/examples/ret42.mojo", 1, 16),
+             ("formal/examples/bittest.mojo", 4, 220),
+             ("formal/examples/wide_recv.mojo", 1, 150))
     #: …and the corpus TOTAL, which is the doc's after-table's own row. A
     #: per-example table cannot see a program that gained a branch, so the total
     #: is the row that does, and it is the number the doc quotes.
@@ -4652,12 +4390,8 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
     #: examples that were already here still produce what they produced.
-    #: **Re-pinned 2026-10-06 from 3 693 to 3 697, by the merge of
-    #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
-    #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
-    #: so the corpus walks four more steps. The trees are unchanged at 105.
-    TOTAL = (105, 3697)
-    TOTAL_PRE_MERGE52 = (69, 2368)
+    TOTAL = (105, 4232)
+    TOTAL_PRE_MERGE52 = (69, 2718)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

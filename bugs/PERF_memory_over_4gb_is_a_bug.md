@@ -50,28 +50,6 @@ is not fixable at its own site — its size IS the leak count.
 | round 3 (rejected) | 44.9 GB | root-level `os/` shadowed CPython's `os` |
 | round 5 (aborted) | 51.2 GB | `mojo/middle/coro.py` `_compute_no_wd_forward` |
 
-### The 2026-10-07 gate: a smaller number that is NOT a smaller footprint
-
-The full gate on master 8df5b273 (61 passed) measured `native-dumpfull` at **1.4 GB** and
-`selfhost-memory-fire` at **0.5 GB**, against 31.3 and 12.2 GB recorded. Neither is a saving.
-Running the binary directly (`./mojoc fire.py --dump-full`, 0.5 GB, exit 1) prints
-`Error generating --dump-full: TypeError: object is not iterable` and writes no `fire.ci`: the
-self-hosted compiler dies early, so the peak is how far it got, not what it needs.
-`native-dumpfull` fails ("produced NO fire.ci") for that reason, and `selfhost-memory-fire`
-PASSES because `test_selfhost_memory.py` asserts only the peak against its budget and never the
-exit code or the artifact, so it cannot see a binary that stopped early. Both keep their
-recorded class (`program`, `module`) and the 31.3 / 12.2 GB figures until a run in which
-`--dump-full` completes measures them again. `tools/suite.py --apply-peaks` refuses to believe
-a job that failed or ran under 2 s for exactly this reason. The next step for
-`selfhost-memory-fire` is to make it fail on a non-zero exit (blocked on the dump-full bug).
-
-The same gate re-measured the rest of the table; the classes that moved are in
-`tools/suite.py`'s `MEASURED_PEAK_GB`/`MEASURED_RUN`. Two jobs now measure OVER the 4 GB line
-and carry a `memwhy` pointing here: `mojoc` (4.9 GB, was 3.7) and `selfhost` (4.4 GB, was
-3.7), both `small`; the whole-closure self-compile grew about 20% between the two gates.
-To refresh the table after any gate: `python3 tools/suite.py --apply-peaks build/suite.log
-[--dry-run]`, then re-class what it names.
-
 So the landed state is ~28-34 GB and the excursions to 45-51 GB were regressions the gate
 caught. The regressions matter less than the baseline: a healthy 28 GB is 7-9x the standard.
 
@@ -85,38 +63,6 @@ Other measured footprints (same gates):
   **30-43 GB** and not terminating in round 5's coroutine-lowering regression.
 - `lean` proof checks: ~1.1-1.7 GB each, but several run at once and they can outlive their
   test for hours.
-- The two corpus sweeps, measured one at a time on 2026-10-09 (`memcap`, and both of
-  them were RESOURCE-capped before that, so the number understates how broken the class
-  was rather than overstating the cost):
-  - `formal` (`test_formal.py`, the 93-proof arm64 corpus, up to 32 Lean processes at
-    once): **46.2 GB over 1129 s**, at `small` (8 GB) it was killed in 2.4 s. It exits 1
-    on a stale expected-failure row of its own report, having finished all 93 proofs, so
-    the peak is what it needs rather than how far it got.
-  - `formal-x86` (the same corpus on the x86-64 backend): **24.8 GB over 80 s**, likewise
-    capped at `small`.
-  - `stdlib-tests` (`test_stdlib.py`, all 321 stdlib test/benchmark files through the
-    interpreter and the JIT): **34.9 GB and 52.2 GB on two runs of the identical corpus**
-    at the same 2163 s wall, also capped at `small`. A 1.5x spread between two
-    deterministic runs is the scheduler, not the workload — see
-    `PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md`.
-  The 46.2 and 52.2 are memcap's SUMMED tree RSS, which `procrun.tree_usage` documents
-  as an over-count when many processes share pages, so they are upper bounds and the
-  unique-pages measurement that would settle both classes is written down in
-  `PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md`. What is NOT in doubt is the
-  shape: a per-file compile summed over a corpus, which is the same arithmetic as
-  `ab-native` below at 779 files.
-- `formal-x86-endtoend` (`formal/x86_64_endtoend_test.py`, 93 generated proofs, one after
-  another): **6.1 GB peak across the process tree** (memcap, 2026-10-05), which is
-  4x the next largest row here. It is one `lean` plus the python driver, and
-  Lean's own `-M 6144` is the ceiling actually reached — so the 6.1 is the
-  generated proof, not concurrency. **The cause is `mem_read_bytes`'s `ite` chain
-  over a 113-equation successor nest**, which `formal/x86_64_endtoend_test.py`'s
-  `_concrete_read` rebuilds to evaluate one closing read;
-  `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` measures
-  where it crosses (`const2` 19 equations / 1.4 GB, an 8-argument call 113 / 6.5 GB
-  and an ABORT). It is a per-step-invariant problem and not a size problem, so
-  raising `-M` would move the ceiling and not the curve. Registered as `module`
-  because that is `PEAK_HEADROOM`'s arithmetic on 6.1 and carries a `memwhy`.
 
 ## Why this is one bug and not many
 
@@ -130,16 +76,8 @@ compiler's passes free what they finish with (arena per pass or per function, or
 
 ## Next steps, in order
 
-"1. **Record peak RSS for every job** (`tools/suite.py`), so a regression shows up as a number
-   in the tally and not as a collapsed machine. In progress (`memcap-coverage-3`). Every
-   registry job now has a measured peak or a written reason it does not: 26 of the 36 that
-   had never been measured were measured on 2026-10-09, and the ten that were not are
-   named in `MEASURED_PEAK_GB`'s own comments — the four `ab-*` and three `bootstrap-*`
-   rows (the integrator's), and the two `selfhost-memory*` rows, whose `deps=['mojoc']`
-   means measuring them requires first building the whole-closure self-compile they exist
-   to measure. Two of the measurements turned out to be jobs that could never have passed:
-   `formal`, `formal-x86` and `stdlib-tests` were all registered at `small` (8 GB) against
-   24.8-52.2 GB peaks, so every run of them was a guaranteed RESOURCE.
+1. **Record peak RSS for every job** (`tools/suite.py`), so a regression shows up as a number
+   in the tally and not as a collapsed machine. In progress (`memcap-coverage-3`).
 2. **Leak-hunt on the WORST CASE: the self-hosted compiler compiling the compiler's own source.**
    That is `./mojoc --dump-full fire.py` (or the stage2 binary doing the same; the file the
    project's docs still call `mojo.py` is `fire.py` since the rename). It is the largest input
