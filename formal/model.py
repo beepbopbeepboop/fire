@@ -4627,7 +4627,7 @@ def _facts_merge(left: dict, right) -> dict:
 #     case [a] as w:     evaluates `… as w`, which is not an operator
 #
 # and every one of them binds nothing, which is the opposite of what this
-# compiler's OWN free-variable analysis already says they do
+# compiler's OWN free-variable analysis already says the first five do
 # (`test_new_syntax_parsing.py::test_match`: `match_seq_pattern_binds`,
 # `match_dict_pattern_binds`, `match_or_of_literals_has_no_names`,
 # `match_as_binds_both_and_guard_is_a_use` — "In `match` semantics a bare name
@@ -4643,8 +4643,14 @@ def _facts_merge(left: dict, right) -> dict:
 # pattern means, and the Lean model each of them carries is a model of the SAME
 # compares and branches (`formal/build.py` emits an `if`/`==` chain and the
 # existing conditional proof applies to it unchanged).
+#
+# The kinds `match_pattern_kind` returns that this path will NOT lower. A tuple
+# and not a set because nothing iterates it yet and a reader looking for "what
+# is refused" should find the whole list in one place; the refusal sentence for
+# each is in `match_pattern_refusal`, which is keyed by the same strings and
+# raises `KeyError` on one that is not here — so a kind added to one and not the
+# other fails at the first pattern that carries it.
 MATCH_REFUSED_KINDS = (
-    # (node test is a `kind` returned by `match_pattern_kind`, the sentence)
     "or-pattern",
     "sequence pattern",
     "mapping pattern",
@@ -4666,7 +4672,7 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
       for exactly the guard clause that needs something to test).
     * `"name"` — a bare name that IS bound: an ordinary read, compared with
       `==`. `bound` is the caller's answer to "is it bound"; see
-      `formal/build.py::_match_bound_names`.
+      `formal/build.py::_match_scope_names`.
     * `"value"` — anything else that is an ordinary expression: a literal, a
       unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
       with `==`, which is CPython's own reading of a literal or dotted pattern.

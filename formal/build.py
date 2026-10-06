@@ -18456,8 +18456,8 @@ def _rewrite_match_statements(fn, module_names) -> None:
                 return name
 
     fn.body = _lower_match_stmts(
-        getattr(fn, "body", None), fn,
-        _match_scope_names(fn, module_names), fresh, fn, module_names)
+        getattr(fn, "body", None), _match_scope_names(fn, module_names),
+        fresh, fn, module_names)
 
 
 def _match_scope_names(fn, module_names) -> set:
@@ -18553,8 +18553,7 @@ def _statement_binds(stmt) -> set:
     return set()
 
 
-def _lower_match_stmts(stmts: list, parent_fn, bound: set, fresh, fn,
-                       module_names) -> list:
+def _lower_match_stmts(stmts: list, bound: set, fresh, fn, module_names) -> list:
     """`stmts` with every `match` REPLACED by the chain it lowers to.
 
     `bound` is threaded through the list IN ORDER and MUTATED, because "is this
@@ -18564,25 +18563,26 @@ def _lower_match_stmts(stmts: list, parent_fn, bound: set, fresh, fn,
     of that ordering, and it is why this cannot be `_rewrite_stmt_lists` with a
     visitor — that one has no state to thread.
 
-    `parent_fn` is the function this list belongs to, and it is NOT `fn` when
-    the list is a NESTED `def`'s body: the nested function's own parameters bind
-    there, and not the enclosing frame's locals (see `_match_scope_names`).
+    `fn` is the OUTERMOST function — the one the temporaries are collision-checked
+    against and the one a refusal names — and it stays that one through a nested
+    `def`, because a nested body's captures are that nested function's locals and
+    the enclosing frame's names are inherited through `bound` rather than
+    through the function identity (see `_lower_match_descend`).
     """
     out = []
     for stmt in (stmts or []):
         if isinstance(stmt, F.MatchStmt):
             pieces, bound = _lower_one_match(stmt, bound, fresh, fn,
-                                            parent_fn, module_names)
+                                            module_names)
             out.extend(pieces)
             continue
-        _lower_match_descend(stmt, bound, fresh, fn, module_names, parent_fn)
+        _lower_match_descend(stmt, bound, fresh, fn, module_names)
         bound |= _statement_binds(stmt)
         out.append(stmt)
     return out
 
 
-def _lower_match_descend(stmt, bound: set, fresh, fn, module_names,
-                         parent_fn) -> None:
+def _lower_match_descend(stmt, bound: set, fresh, fn, module_names) -> None:
     """Recurse into `stmt`'s statement containers, threading `bound` in order.
 
     The containers are the two tables `_rewrite_stmt_lists` already owns
@@ -18596,11 +18596,12 @@ def _lower_match_descend(stmt, bound: set, fresh, fn, module_names,
     interpreter's rule rather than CPython's: `myinterpreter.py`'s
     `self.scope.has(pattern.name)` walks the scope chain, so a name an
     ENCLOSING function bound is found and the pattern is a value comparison.
-    Measured on `bound_local_is_a_value_comparison` — with `K` a local of the
-    enclosing function, `fire.py run` prints the value-comparison answer and
-    CPython prints the capture answer, and the reference interpreter is the
-    authority for this compiler's `match` (`fire_compiler.py`'s `MatchStmt`
-    docstring is explicit that it is not PEP 634).
+    Measured on `bound_local_of_an_enclosing_function_is_a_value_comparison` —
+    with `K` a local of the enclosing function, `fire.py run` prints the
+    value-comparison answer and CPython prints the capture answer, and the
+    reference interpreter is the authority for this compiler's `match`
+    (`fire_compiler.py`'s `MatchStmt` docstring is explicit that it is not
+    PEP 634).
 
     The consequence on this path is that the read is of a CLOSURE CAPTURE:
     `_flatten_closures` runs after this loop, sees `K` read in the nested body
@@ -18624,25 +18625,24 @@ def _lower_match_descend(stmt, bound: set, fresh, fn, module_names,
                 # here would hand a CASE to a function that treats what it is
                 # given as a statement.
                 for case in value:
-                    _lower_match_descend(case, bound, fresh, fn, module_names,
-                                         parent_fn)
+                    _lower_match_descend(case, bound, fresh, fn,
+                                         module_names)
                 continue
-            value[:] = _lower_match_stmts(value, parent_fn, bound, fresh, fn,
+            value[:] = _lower_match_stmts(value, bound, fresh, fn,
                                           module_names)
     for field in _STMT_TUPLE_LIST_FIELDS.get(kind, ()):
         for pair in (getattr(stmt, field, None) or []):
             if isinstance(pair, (list, tuple)) and len(pair) == 2 \
                     and isinstance(pair[1], list):
-                pair[1][:] = _lower_match_stmts(pair[1], parent_fn, bound,
-                                                fresh, fn, module_names)
+                pair[1][:] = _lower_match_stmts(pair[1], bound, fresh, fn,
+                                                module_names)
     if isinstance(stmt, F.FunctionDef) and stmt is not fn:
         nested = set(bound) | _match_scope_names(stmt, module_names)
-        stmt.body = _lower_match_stmts(stmt.body, stmt, nested, fresh, fn,
+        stmt.body = _lower_match_stmts(stmt.body, nested, fresh, fn,
                                        module_names)
 
 
-def _lower_one_match(stmt, bound: set, fresh, fn, parent_fn,
-                     module_names) -> tuple:
+def _lower_one_match(stmt, bound: set, fresh, fn, module_names) -> tuple:
     """One `match` as `(statements, bound_after)`.
 
     The shape it emits, for `match s:` over cases `[c0, c1]` — a decision tree
@@ -18673,7 +18673,8 @@ def _lower_one_match(stmt, bound: set, fresh, fn, parent_fn,
     nested tests.** `case p1, p2:` must evaluate `p1`, compare, and evaluate `p2`
     only if `p1` did not match — that is `myinterpreter.py`'s loop over
     `match_case.patterns` and it is observable whenever a pattern has a side
-    effect (`or_comma_short_circuits` / `or_comma_evaluates_until_one_matches`).
+    effect (`or_comma_short_circuits_before_a_bad_read` /
+    `or_comma_second_pattern_matches`, the two rows that can see it at all).
     `(p1 == s) or (p2 == s)` in this AST is a `BinaryOp('or')`, which both
     emitters already lower as a short-circuit chain with its own branch, so the
     arm and the rest-of-the-match stay one decision per pattern and the emitted
@@ -18712,8 +18713,7 @@ def _lower_one_match(stmt, bound: set, fresh, fn, parent_fn,
     cases = list(getattr(stmt, "cases", None) or [])
     for case in cases:
         case.body = _lower_match_stmts(list(getattr(case, "body", None) or []),
-                                       parent_fn, set(bound), fresh, fn,
-                                       module_names)
+                                       set(bound), fresh, fn, module_names)
     if isinstance(subject, F.IdentExpr):
         tmp, head = None, []
         subject_ref = subject
