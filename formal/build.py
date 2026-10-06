@@ -17681,7 +17681,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             fn, structs_by_name,
             lambda fn=fn, st=st: _bound_receiver_structs(
                 fn, framed, _image_function_names, st, one_field,
-                own_scope=True))
+                own_scope=True),
+            functions=_functions_by_name, owner=st)
         # A one-field struct's mutator that rebinds its receiver to a name of its
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
@@ -18490,7 +18491,8 @@ def _fn_spelled_names(fn) -> set:
 
 
 def _rewrite_with_statements(fn, structs_by_name: dict,
-                             bound_receiver_structs=None) -> None:
+                             bound_receiver_structs=None,
+                             functions=None, owner=None) -> None:
     """Every `with` in `fn` becomes the protocol, or is refused by name.
 
     What it emits, for one item, is CPython's own order:
@@ -18556,10 +18558,22 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
                 used.add(name)
                 return name
 
-    def receiver_table():
+    def receiver_evidence():
+        """`{bound, functions, owner}`, memoised, and the `bound` half lazy.
+
+        `bound` is the expensive member — a walk of every binding in the
+        function — so it is what the thunk produces and what is only asked for
+        when a `with` actually turns up.  The other two are a dict and an
+        attribute read on a value already in hand.
+        """
         if not asked:
-            asked.append(bound_receiver_structs()
-                         if bound_receiver_structs is not None else {})
+            asked.append({
+                "bound": bound_receiver_structs()
+                         if bound_receiver_structs is not None else {},
+                "functions": functions,
+                "owner": owner,
+                "fn": fn,
+            })
         return asked[0]
 
     def visit(stmt):
@@ -18575,14 +18589,14 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
         result = list(stmt.body or [])
         for item in reversed(items):
             result = _one_with_item(fn, item, result, structs_by_name,
-                                    fresh_name, receiver_table())
+                                    fresh_name, receiver_evidence())
         return result
 
     fn.body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
 
 
 def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
-                   receiver_table: dict):
+                   evidence: dict):
     """One `with` item, wrapped around `body`. Raises CodegenError if it cannot.
 
     Three protocols and one order.  CPython's is `__enter__` binds the name and
@@ -18591,16 +18605,22 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
     (`model.resource_context_manager_exit`, i.e. `open`) gets the same two
     positions filled by the facts that builtin's value model already states:
     `__enter__` IS the value, and `__exit__` is the builtin in that table.  The
-    third arm is the refusal, and it is unchanged — a `with` whose context is a
-    field read or a call to a function this image cannot resolve still has no
-    type, and `refuse_unlowerable_with` still says so by name.
+    third arm is the refusal, and it is a `with` whose context nothing names a
+    struct for — a callee in another module, a name bound to two layouts, a
+    binding made in a nested `def`.
 
-    `receiver_table` is `{local: struct}` for this function's own bindings,
-    which is what makes the first arm answer for a NAME as well as for a
-    construction; `model.with_expr_struct` is the single reader of both.
+    `evidence` is this function's caller evidence as one dict — `bound`,
+    `functions`, `owner` — handed to `model.with_expr_struct`, which is the
+    SINGLE reader of "what struct does this expression name".  One dict rather
+    than four parameters because the thunk that builds `bound` is the only
+    expensive member and it must stay the thing that is asked at most once; see
+    `_rewrite_with_statements`.
     """
     struct = M.with_expr_struct(item.expr, structs_by_name,
-                                bound=receiver_table)
+                                functions=evidence.get("functions"),
+                                bound=evidence.get("bound"),
+                                fn=evidence.get("fn"),
+                                owner=evidence.get("owner"))
     resource_exit = M.resource_context_manager_exit(item.expr)
     if struct is None or not M.struct_is_context_manager(struct):
         if resource_exit is None:

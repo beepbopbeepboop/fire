@@ -468,6 +468,144 @@ FILE_CASES = [
 ]
 
 
+# ── the DECLARED-type rows: shapes whose two halves are different texts ────
+#
+# (name, mojo source, cpython source)
+#
+# Everything above runs the SAME program text through both engines, which is
+# what makes a row an oracle rather than a transliteration written here.  These
+# three cannot: a DECLARED field or a declared return type is spelled `var mgr:
+# Ctx` / `fn make() -> Ctx` in Mojo and `mgr: Ctx` / `def make(self) -> Ctx` in
+# Python, and the Mojo half needs the declarations to be declarations — a `var`
+# whose value is a constructor call is refused before any type is read, and a
+# field with no annotation has no declared type at all.  So each row supplies
+# both texts, and the difference is the declaration spelling and nothing else:
+# same struct, same fields, same constructor, same protocol.
+#
+# They are here because the `with` context can be named in three ways this path
+# used to refuse, and each is a spelling a reader meets in real code: a function
+# that BUILDS a manager (`redirect_stdout(sys.stdout) as f:`), a manager held in
+# a field (`with self.mgr as v:`), and a manager passed in as a parameter
+# (`def use(c: Ctx)`).  Each is answered from a DECLARED type — the strongest
+# evidence the source can carry — through the one reader a field access already
+# uses.
+DECLARED = [
+    # `make()` returns a manager: the callee's own `-> T` says which struct, and
+    # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
+    # of every factory a reader writes for a resource.
+    ("a_call_whose_declared_return_type_is_a_context_manager",
+     CTX_MOJO + "def make() -> Ctx:\n"
+     "    return Ctx()\n"
+     "\n"
+     "def main(n):\n"
+     "    with make() as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n",
+     CTX_PY + "def make() -> Ctx:\n"
+     "    return Ctx()\n"
+     "\n"
+     "def main(n):\n"
+     "    with make() as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the exit runs on the way out of it, because the `finally` belongs to
+    # the rewrite and not to how the context was spelled.
+    ("return_out_of_a_call_context_runs_the_exit",
+     CTX_MOJO + "def make() -> Ctx:\n"
+     "    return Ctx()\n"
+     "\n"
+     "def main(n):\n"
+     "    with make() as v:\n"
+     "        print('body')\n"
+     "        return 6\n"
+     "    return 0\n",
+     CTX_PY + "def make() -> Ctx:\n"
+     "    return Ctx()\n"
+     "\n"
+     "def main(n):\n"
+     "    with make() as v:\n"
+     "        print('body')\n"
+     "        return 6\n"
+     "    return 0\n", 3),
+    # A manager in a DECLARED field: `struct_field_declared_type` is what says
+    # which struct `h.mgr` holds, and it is a fact about the declaration rather
+    # than about the function — so it holds across every function that reads it.
+    ("a_field_declared_as_a_context_manager",
+     CTX_MOJO + "class Holder:\n"
+     "    var mgr: Ctx\n"
+     "    var other: Int\n"
+     "    def __init__(self):\n"
+     "        self.mgr = Ctx()\n"
+     "        self.other = 0\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    with h.mgr as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n",
+     CTX_PY + "class Holder:\n"
+     "    mgr: Ctx\n"
+     "    other: int\n"
+     "    def __init__(self):\n"
+     "        self.mgr = Ctx()\n"
+     "        self.other = 0\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    with h.mgr as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # A manager passed IN as a parameter: `def use(c: Ctx): with c as v:`.  The
+    # declaration says the type and the CALLER says the value, and the two agree
+    # for every well-typed program — which is the same evidence every parameter
+    # of this backend is read with.
+    ("a_parameter_declared_as_a_context_manager",
+     CTX_MOJO + "def use(c: Ctx):\n"
+     "    with c as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    use(Ctx())\n"
+     "    return 0\n",
+     CTX_PY + "def use(c: Ctx):\n"
+     "    with c as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    use(Ctx())\n"
+     "    return 0\n", 3),
+    # …and the SECOND declaration matters as much as the first: a parameter with
+    # no struct annotation names no struct, so this stays a refusal and the
+    # refusal is the honest answer.  It is checked as a REFUSAL below, and this
+    # row is the ANSWERED half it is defined against.
+    ("a_parameter_declared_as_a_context_manager_runs_the_protocol",
+     CTX_MOJO + "def use(c: Ctx):\n"
+     "    with c as v:\n"
+     "        print('body', v)\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    use(Ctx())\n"
+     "    return 0\n",
+     CTX_PY + "def use(c: Ctx):\n"
+     "    with c as v:\n"
+     "        print('body', v)\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    use(Ctx())\n"
+     "    return 0\n", 3),
+]
+
+
 # ── the REFUSED table ───────────────────────────────────────────────────────
 #
 # (name, mojo source, needle)
@@ -644,6 +782,24 @@ REFUSALS = [
      "    m = make()\n"
      "    with m as v:\n"
      "        print('body')\n"
+     "    return 0\n",
+     "this build cannot answer what type it is",
+     "names somewhere this path cannot put the word"),
+    # A PARAMETER with no struct annotation, which is the boundary the DECLARED
+    # table's parameter rows are defined against: `receiver_struct`'s parameter
+    # row needs `parameter_declared_structs`, and a bare `c` is in no
+    # declaration.  This is the honest refusal rather than a missing arm — the
+    # callee's caller is the only thing that knows what word arrives, which is
+    # the same limit `_seed_one_word_bindings` states for the one-word frame
+    # table.
+    ("a_parameter_with_no_struct_annotation_is_refused_as_untyped",
+     CTX_MOJO + "def use(c):\n"
+     "    with c as v:\n"
+     "        print('body')\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    use(Ctx())\n"
      "    return 0\n",
      "this build cannot answer what type it is",
      "names somewhere this path cannot put the word"),
@@ -864,6 +1020,11 @@ def main():
             if want and name not in want:
                 continue
             run_pair(name, mojo(body), python(body), arg, tmpdir, args.verbose)
+
+        for name, source, cpython_source, arg in DECLARED:
+            if want and name not in want:
+                continue
+            run_pair(name, source, cpython_source, arg, tmpdir, args.verbose)
 
         for name, body, paths in FILE_CASES:
             if want and name not in want:

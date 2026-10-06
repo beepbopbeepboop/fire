@@ -45073,59 +45073,77 @@ def with_alias_bare_name(item):
 
 
 def with_expr_struct(expr, structs_by_name: dict, functions: dict = None,
-                     bound: dict = None):
+                     bound: dict = None, fn=None, owner=None, elems=None):
     """The struct a `with` item's EXPRESSION holds, or None if undecidable.
 
-    Two sources, and both are the SAME evidence read twice rather than two
-    guesses: the expression CONSTRUCTS a struct spelled `S(...)` or `mod.S(...)`,
-    or it is a bare NAME whose only binding in this function is such a
-    construction (`bound`, which is `build.py`'s `_bound_receiver_structs` —
-    the table that already decides `o.get()` lifts to `Outer_get`).  Every other
-    spelling answers None, which the caller turns into the refusal below.
+    Two sources, in this order, and the order is a fact about what each can
+    answer rather than a preference:
 
-    **The NAME arm is the natural spelling and it was missing.**  `mgr = Ctx()`
-    on one line and `with mgr as v:` two lines later is how a reader writes it
-    when the manager is built from arguments, and it was refused with "this
-    build cannot answer what type it is" — a sentence that is false about the
-    build, which knows exactly what it holds: the same binding fact
-    `receiver_struct`'s bare-NAME row already reads for a field access.
+      * a CONSTRUCTION the source wrote, spelled `S(...)` or `mod.S(...)` — read
+        here, because `mod.S(...)` names a struct through an IMPORT ALIAS, which
+        is a spelling `receiver_struct`'s field row does not have (that row needs
+        a single-field chain rooted at a local).  `tempfile.TemporaryDirectory` is
+        224 `with` sites in this repository's own corpus and every one of them is
+        this spelling, so it cannot be left to the reader below.
+      * everything `model.receiver_struct` answers for a field access — a bare
+        NAME bound from a construction, a name bound from a CALL to a function of
+        this unit whose declared return type names a struct, a FIELD whose
+        declared type names one, a declared parameter, a method call's own `-> T`,
+        a list element.
 
-    The narrowness that remains is deliberate and is the part that matters.  A
-    context manager is entered through its type, so the question "what type is
-    this value" has to have an answer that is a fact rather than a guess, and
-    both sources here are facts about the SOURCE: a constructor the source wrote,
-    or a name the source bound from one and never rebound.  What is NOT here is
-    a call to another function, a field read (`with self.mgr as v:`), a
-    subscript, or a parameter: each would need a return-type table this image
-    does not have for values that cross a dylib boundary, and each guess is a
-    program that enters the wrong `__enter__`.
+    **The second source is the point, and it is a DELEGATION rather than a new
+    inference.**  "What struct does this receiver name" already has exactly one
+    reader in this file, and a `with` asks it the same question a field access
+    does — with more at stake, because the answer picks which `__enter__` runs.
+    Two readers would be two answers, and the pair that disagree is exactly how
+    the two architectures used to answer `with` differently.  So `with` is a
+    CONSUMER of that reader, and this function's construction arm is the one
+    thing it adds.
 
-    `bound` defaults to None, which means "no evidence in hand from the
-    caller" and not "no names are context managers" — a caller with nothing gets
-    the construction arm alone, which is the whole of what this function did
-    before 2026-10-05.
+    `one_field=False` waives `receiver_struct`'s one-field gate, which is the
+    gate that says "this is a value, not a name" — and a context manager is a
+    name: `struct_is_context_manager` then requires the struct to be FRAMED, so
+    a one-field struct is still refused, with the one-field sentence, by the
+    caller.  That gate and this one ask different questions and both are applied.
+
+    The narrowing that remains is deliberate.  A context manager is entered
+    through its type, so "what type is this value" has to be answered by a fact
+    rather than a guess, and both sources are facts about the SOURCE: a
+    constructor it wrote, a binding it made, or a type it DECLARED.  What is not
+    here is a callee from another module or a dylib, a name bound to two
+    different structs, and a binding made in a nested `def` — each would need
+    evidence this image does not have, and each guess is a program that enters
+    the wrong `__enter__`.
+
+    `bound`, `fn`, `owner` and `elems` default to None, which for
+    `receiver_struct` means "no evidence in hand from the caller" and not
+    "nothing is a receiver" — a caller with nothing gets the construction arm
+    alone, which is the whole of what this function did before 2026-10-05.
     """
     if isinstance(expr, tuple):        # a parenthesised expression
         expr = expr[0] if expr else None
-    if bound and isinstance(expr, F.IdentExpr):
-        st = bound.get(expr.name)
-        if st is not None:
-            return st
     callee = getattr(expr, "func", None)
-    if callee is None:
+    if callee is not None:
+        # `mod.S(...)` is a `MemberExpr`, whose `member` is a plain string — the
+        # same two spellings `_with_item_alias_name` has to ask about, and read
+        # here rather than through a helper so this function answers for the AST
+        # it is handed.  `mod.S(...)` resolves through the same table as
+        # `S(...)` on purpose: a context manager published by a host module
+        # (`tempfile.TemporaryDirectory`) is a struct of THIS image too, because
+        # `formal/build.py` compiles the imported module's own declarations into
+        # `structs_by_name` before this runs.
+        name = getattr(callee, "name", None) or getattr(callee, "member", None)
+        if isinstance(name, str) and name:
+            st = structs_by_name.get(name)
+            if st is not None:
+                return st
+    if fn is None and bound is None and owner is None:
+        # No caller evidence at all: the construction arm is all there is, and
+        # asking `receiver_struct` with nothing would be a reader run for its
+        # own sake.
         return None
-    # `mod.S(...)` is a `MemberExpr`, whose `member` is a plain string — the
-    # same two spellings `_with_item_alias_name` has to ask about, and read
-    # here rather than through a helper so this function answers for the AST it
-    # is handed.  `mod.S(...)` resolves through the same table as `S(...)` on
-    # purpose: a context manager published by a host module
-    # (`tempfile.TemporaryDirectory`) is a struct of THIS image too, because
-    # `formal/build.py` compiles the imported module's own declarations into
-    # `structs_by_name` before this runs.
-    name = getattr(callee, "name", None) or getattr(callee, "member", None)
-    if not isinstance(name, str) or not name:
-        return None
-    return structs_by_name.get(name)
+    return receiver_struct(expr, fn, structs_by_name, owner=owner, bound=bound,
+                           elems=elems, functions=functions, one_field=False)
 
 
 def with_context_manager_defect(struct_def) -> str:
