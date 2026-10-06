@@ -10,8 +10,12 @@ different thing over `lib/X86.lean` and shares none of this code.
 **Status 2026-10-05 (`work/formal54-docs`): the reader the per-block
 decomposition needs is FIXED and TESTED, and the decomposition's own premise is
 MEASURED and does not hold. The 16 s is two giant `simp only [...]` sets, not
-the walk — and per-block splitting of either of them buys nothing.** In the order
-a reader needs them; the sections below are unchanged and are what these four
+the walk — and per-block splitting of either of them buys nothing. And the
+fix's own reach is MEASURED and is narrower than the fix reads: `r=30: ZERO` over
+the whole example corpus, so it is a correctness PREREQUISITE on a shape that
+does not yet occur, not a contributor to the 19.5 s (§"HOW FAR THAT DEFECT
+COULD ACTUALLY REACH").** In the order a reader needs them; the sections below
+are unchanged and are what these four
 measurements correct or add.
 
 * **THE COST IS TWO `simp only` SETS, AND ONE OF THEM IS A CONSTRUCT THIS
@@ -122,6 +126,49 @@ measurements correct or add.
   concludes the load's own expression and checks with 0 `sorry`), and it is the
   precondition for the decomposition above — which is still worth attempting on
   a file where the measurement says it will not pay.
+
+* **HOW FAR THAT DEFECT COULD ACTUALLY REACH, MEASURED, AND IT IS FURTHER THAN
+  THE PARAGRAPH ABOVE READS (2026-10-05, `work/formal54-docs`).** The paragraph
+  above measures the reader by calling `_emit_reg_chain` **directly**, which is
+  what the regression test does. **Through the real generator the case does not
+  arise**, and that is a fact about the corpus, not about the fix:
+
+  ```
+  every formal/examples/*.mojo, compiled prove=True arch=arm64, instrumenting
+  _emit_reg_chain:
+
+    100 programs;  _emit_reg_chain called 7 times, in 4 of them
+      countdown 2   sum_range 1   wdiff 2   wge 2
+    every one of the 7 is  r=19 or r=0.  r=30: ZERO.
+  ```
+
+  So **no generated proof in the example corpus contains an `x30` register
+  chain**, the epilogue's `ldp x29, x30, [sp], #16` never reaches this reader,
+  and the false "unchanged" conclusion above cannot currently arise in any
+  proof the compiler emits. Two consequences, and the second is the one that
+  matters for planning:
+
+  1. **The fix is behaviour-preserving on the whole reachable corpus, and that
+     is now MEASURED rather than assumed.** Byte-identical generated `.lean`
+     for all 100 programs, before vs after (SHA-256 of the proof file, the fix
+     applied and reverse-applied), and all 7 chain conclusions character-for-
+     character identical. So it is not "probably inert" — it is inert on
+     everything that runs, and it is a prerequisite rather than a speedup.
+  2. **So the priority of this fix is LOWER than the paragraph above implies,
+     and it must not be counted toward doc 8's attribution.** The two giant
+     `simp only [...]` sites measured above (~6.6 s and ~6.4 s) are where the
+     19.5 s goes; this is a correctness prerequisite on a shape that does not
+     yet occur, in exchange for which item 1's decomposition would stop being
+     *wrong*. Anyone reading "false claim, fixed, and it is the precondition for
+     item 1" as "and it makes proofs faster" has misread it — it makes item 1
+     *possible*, and item 1 is still unmeasured.
+
+  **The measurement that would make this defect live is the one item 1 needs
+  anyway**: a per-block `have` for a file with an epilogue at the end of a
+  block. Building that is what puts `r=30` on the reachable path, and the fix is
+  already in place for it — which is the honest order of work. **Conversely, any
+  claim that this defect explains part of doc 8's 19.5 s is refuted by the `r=30:
+  ZERO` line above.**
 
   Corpus reach: over all 93 `formal/examples` builds, `_emit_reg_chain` is called
   **7** times and **no** emitted step is a false "unchanged" claim either before
