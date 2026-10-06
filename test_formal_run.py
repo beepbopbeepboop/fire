@@ -12869,6 +12869,26 @@ SUBSCRIPT_CASES = [
      "    return 0\n",
      "refuse:None of its 2 element(s) names something this image can resolve "
      "to a declaration (StaticString, ImmStaticOrigin)", None),
+    # …and that row's sentence now carries the SAME clause the mixed case does,
+    # which is the point of the row: two unresolved names leave the reader with
+    # two candidates and the actionable fact is that a bare name has two SHAPES
+    # here, one of which is a `comptime` alias in a module this build cannot
+    # fold. It used to be named only in the mixed case, and this is the shape
+    # `std/sys/arg.mojo` actually gets — `StaticString` is in neither
+    # `type_constructor_kind`, nor `POINTER_TYPE_CTORS`, nor the struct table
+    # this unit compiles, nor the 220 structs `formal/imports.py`'s
+    # `imported_struct_defs` reaches from that file, so the contrast never fires
+    # there and the reader was left to guess which element was the interesting
+    # one. Pinned with the SPELLING as well as the clause, because the sentence
+    # is what names the file and the module whose binding is the actual cause.
+    ("sub_multi_index_comptime_params_with_nothing_resolvable_names_the_two_shapes",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:a `comptime` ALIAS whose initializer does not fold — measured on "
+     "`std/sys/arg.mojo`'s `Span[StaticString, ImmStaticOrigin]`", None),
     # A BRACKETED type as an element — `List[Int]` — is a type, and it is the
     # case a first version of the classifier got wrong by asking
     # `subscript_is_a_type_application`, which answers about the WHOLE

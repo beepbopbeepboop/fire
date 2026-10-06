@@ -2374,15 +2374,14 @@ def _comptime_param_element_kind(node, structs_by_name=None) -> str:
     resolve to a declaration" — **not** "not a type".
 
     That direction is the whole point, and it is the opposite of the reader's
-    first guess. `Span[StaticString, ImmStaticOrigin]` has a first element that
-    IS a type and a second that is a bare name, and a message that said "the
-    second is not a type" would be a claim this call cannot make — it never
-    resolved `StaticString` either, it only knows the name is not in a table it
-    holds. So `'name'` says what is knowable, and the refusal that uses it says
-    which of the two shapes a name can be: a type this image could not resolve,
-    or a `comptime` alias whose initializer does not fold — and
-    `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
-    measured the second, on the second element of exactly this bracket list.
+    first guess. `Span[StaticString, ImmStaticOrigin]` — the bracket
+    `std/sys/arg.mojo:51` spells — has a first element this call resolves as a
+    bare name too, and a message that said "the second is not a type" would be a
+    claim this call cannot make: it only knows the name is not in a table it
+    holds. So `'name'` says what is knowable, `_UNRESOLVABLE_NAME_SHAPES` says
+    which of the two shapes a name can be — a type this image could not resolve,
+    or a `comptime` alias whose initializer does not fold — and the second of
+    those is measured on the second element of exactly this bracket list.
     """
     if isinstance(node, F.SubscriptExpr):
         # `subscript_is_a_type_application` is the right QUESTION and the wrong
@@ -2430,10 +2429,25 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
     **The sentence is emitted only when it can name a culprit**, which is the
     condition that keeps it from being a guess. It fires when at least one
     element is a `'name'` AND at least one is positively classified, because
-    only then is the contrast informative: a list of two names says the reader
-    has to resolve both, and a list of two types says the refusal is about the
-    LIST and not about an element (which is the `size_of[type, target]` case the
-    old sentence already served correctly, and it is still served).
+    only then is the contrast informative: a list of two types says the refusal
+    is about the LIST and not about an element (which is the `size_of[type,
+    target]` case the old sentence already served correctly, and it is still
+    served). **When NO element resolves there is no culprit to name, and the
+    sentence says the reader has two to resolve instead** — which is the honest
+    answer and not a weaker one, because it is followed by the same
+    `_UNRESOLVABLE_NAME_SHAPES` clause either way: a bare name has exactly two
+    shapes here, and naming them is what tells the reader of
+    `Span[StaticString, ImmStaticOrigin]` that the second one may be a `comptime`
+    alias whose initializer is an MLIR attribute template in a module this build
+    cannot fold — which is the whole of what can be said about it.
+
+    **The clause is ONE string in both branches, not one per branch.** It used to
+    live only in the mixed case, so the all-names case — which is what
+    `std/sys/arg.mojo` gets, measured, because `StaticString` is in neither
+    `type_constructor_kind` nor `POINTER_TYPE_CTORS` nor the struct table this
+    unit compiled nor the 220 structs `formal/imports.py::imported_struct_defs`
+    reaches from that file — named the two unresolved elements and stopped there.
+    The reader was left to guess which of them was the interesting one.
     """
     els = list(getattr(getattr(e, "index", None), "elements", ()) or ())
     kinds = [_comptime_param_element_kind(x, structs_by_name) for x in els]
@@ -2443,7 +2457,7 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
         return (f" None of its {len(kinds)} element(s) names something this "
                 f"image can resolve to a declaration "
                 f"({', '.join(_spell(x) for x in els)}), so there is no word "
-                f"to bind for any of them.")
+                f"to bind for any of them.{_UNRESOLVABLE_NAME_SHAPES}")
     shown, cls = [], []
     for i, (x, k) in enumerate(zip(els, kinds), 1):
         if k == "type":
@@ -2455,12 +2469,34 @@ def _comptime_param_element_sentence(e, structs_by_name=None) -> str:
     return (f" Of its {len(kinds)} element(s): {'; '.join(cls)}; and "
             f"{' and '.join(named)} {'is a bare name' if len(named) == 1 else 'are bare names'}"
             f" this image cannot resolve to a declaration. That is where the "
-            f"missing word is, and it has two shapes: a TYPE this unit does not "
-            f"declare, or a `comptime` ALIAS whose initializer does not fold "
-            f"(measured on `std/sys/arg.mojo`'s "
-            f"`Span[StaticString, ImmStaticOrigin]` — see "
-            f"`bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template"
-            f".md`, which is what this sentence exists for).")
+            f"missing word is.{_UNRESOLVABLE_NAME_SHAPES}")
+
+
+#: What a bare name in a comptime parameter list can BE, for a reader who has to
+#: decide what to do about it. **One string, in both branches of
+#: `_comptime_param_element_sentence`,** because a reader who is told "element 2
+#: is unresolvable" and a reader who is told "both elements are unresolvable" are
+#: in the same position: neither this call nor this backend can say which of the
+#: two shapes the name has, and saying so is what stops the search.
+#:
+#: The second shape is the measured one and it is a fact about a module this
+#: repository does not own: `std/sys/arg.mojo:51` spells
+#: `Span[StaticString, ImmStaticOrigin]()`, where `ImmStaticOrigin` is a
+#: `comptime` ALIAS in `std/origin/__init__.mojo` whose initializer is
+#: `Origin[_mlir_attr[...]]()` — an MLIR attribute template, and that module does
+#: not build here. So the word is missing because ANOTHER module's comptime
+#: binding cannot be folded, not because this backend lacks a capability, and a
+#: reader sent to look for a compiler limit would be looking in the wrong place.
+_UNRESOLVABLE_NAME_SHAPES = (
+    " A bare name has two shapes here, and this path cannot tell them apart: a "
+    "TYPE this unit does not declare, or a `comptime` ALIAS whose initializer "
+    "does not fold — measured on `std/sys/arg.mojo`'s "
+    "`Span[StaticString, ImmStaticOrigin]`, whose second element is exactly the "
+    "second shape, because `std/origin/__init__.mojo` binds it to "
+    "`Origin[_mlir_attr[…]]()` and that module does not build. The word is "
+    "missing because of a binding in another module, not because of a capability "
+    "here."
+)
 
 
 def multi_index_refusal(kind: str, spelled: str, elements_note: str = "") -> str:
