@@ -1999,6 +1999,78 @@ class TestCallProofs(unittest.TestCase):
                                "a return address")
         self.assertIn("RECURSION", why)
 
+    def test_a_callee_that_calls_out_of_the_image_is_not_called_recursion(self):
+        """The same check, the other half, and the message is the whole point.
+
+        A callee whose body is `printf` has a `BL` in it too, and the first
+        version of the refusal called that RECURSION — a word about a program
+        that has none, sent to a reader who then goes looking for recursion. The
+        two halves are different questions: a `BL` back into this image is
+        recursion, and a `BL` out of it is the halt-address family, whose
+        terminal and the callee's return address are two different answers.
+        """
+        import tempfile
+        import formal.arm64_proof_gen as G
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-leaf-")
+        try:
+            path = os.path.join(tmp, "p.mojo")
+            with open(path, "w") as f:
+                f.write("def helper(n):\n"
+                        "    printf(\"hi\\n\")\n"
+                        "    return n * 2\n"
+                        "def main(x):\n"
+                        "    return helper(x)\n")
+            r = fb.compile_formal(path, arch="arm64",
+                                  output=os.path.join(tmp, "p.aout"),
+                                  prove=False, check=False)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        entry = r["info"]["labels"].get(r["info"]["func_name"],
+                                        r["info"]["base_addr"])
+        got, why = G._same_image_call_plan(r["code"], r["info"]["base_addr"],
+                                          entry)
+        self.assertIsNone(got, "a callee that calls out of the image is not a "
+                               "return address")
+        self.assertIn("OUT of the image", why)
+        self.assertNotIn("RECURSION", why,
+                         f"a `printf` in the callee is not recursion, and a "
+                         f"reader sent looking for recursion will not find "
+                         f"any: {why}")
+
+    def test_a_loop_inside_the_callee_is_refused_rather_than_proved(self):
+        """The plan answers the RETURN ADDRESS; the walk still has to answer the
+        loop, and a loop is not a return address.
+
+        `helper` with a `while` in it gets a plan — the `BL` is the only call and
+        `x30` at the callee's `RET` is still a constant — and the walk then
+        declines, because a countdown loop's fuel obligation needs the loop's own
+        test to be known FALSE and that fact comes from the ENTRY's AST
+        conditions, which the callee's blocks do not have. The row that matters
+        is that it DECLINES: a walk that treated the callee's back edge as the
+        caller's own loop contract would emit a theorem about a run it has not
+        composed.
+        """
+        tmp = tempfile.mkdtemp(prefix="a2-loopcallee-")
+        try:
+            p, err = _generate(tmp, "def helper(n):\n"
+                                     "    var i = 0\n"
+                                     "    while i < n:\n"
+                                     "        i = i + 1\n"
+                                     "    return i * 2\n"
+                                     "def main(x):\n"
+                                     "    return helper(x)\n",
+                              "loopcallee")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIsNone(p, "a loop inside the callee must not produce a proof")
+        self.assertNotIn("recursion argument bound", err,
+                         "the refusal must not be the recursion error, which "
+                         "describes a program with no recursion in it")
+        self.assertIn("loop back-edge", err,
+                      f"the refusal must name the loop, since the return "
+                      f"address map is not what declined: {err}")
+
     def test_two_calls_out_of_the_image_are_refused_by_name(self):
         """TWO opaque calls, and the refusal has to be about the halt ADDRESS.
 

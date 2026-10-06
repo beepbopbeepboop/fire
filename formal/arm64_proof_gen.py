@@ -6066,11 +6066,36 @@ def _same_image_call_plan(code: bytes, base: int, func_entry: int,
     inner = [pc for pc, w in words.items()
              if c["target"] <= pc < end and _step_branch_index(w) == 15]
     if inner:
+        # Two different things, and the refusal must not call both of them
+        # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
+        # to follow again (and its frame bound and fuel descent with it), while a
+        # `BL` out of it is a call the model stops at — which is the halt-address
+        # family's own question, decided by `_unfollowable_calls` above. Saying
+        # "recursion" about a `printf` sends a reader after a program that has
+        # none.
+        again, outside = [], []
+        for pc in inner:
+            tgt = _branch_target(words, pc)
+            (again if (tgt is not None and func_entry <= tgt < end)
+             else outside).append(pc)
+        what = []
+        if again:
+            what.append(
+                f"it calls back into this image at "
+                f"{', '.join(hex(p) for p in again)}, which is RECURSION and not "
+                f"a return-address map: the frame bound and the fuel descent of "
+                f"the recursion contract would have to be re-proved for a second "
+                f"function")
+        if outside:
+            what.append(
+                f"it calls OUT of the image at "
+                f"{', '.join(hex(p) for p in outside)}, so the run stops there "
+                f"and the theorem becomes reachability of that call — which the "
+                f"callee's own return address cannot also be, because the two "
+                f"answers are about different terminals")
         return None, (
-            f"the callee calls out of itself at {', '.join(hex(p) for p in inner)}, "
-            f"so following it is RECURSION and not a return-address map: the "
-            f"frame bound and the fuel descent of the recursion contract would "
-            f"have to be re-proved for a second function")
+            f"the callee is not a straight-line leaf, because "
+            + "; and ".join(what))
     if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
         return None, (
             f"the caller has no return of its own before {c['target']:#x}, so "
