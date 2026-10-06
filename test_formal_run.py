@@ -1098,57 +1098,139 @@ CASES = [
      "refuse_without:self.LIMIT reads a `comptime` class attribute of C:"
      "In Python this is an AttributeError at run time", None),
 
-    # A class-level binding whose value reads a struct PARAMETER is a different
-    # refusal from the rows above, and the difference is the sentence's REPAIR.
-    # Those say "write the value at the use site (a literal, or an assignment the
-    # compiler can see)" — and for a parameter there is no value in the class body
-    # to write anywhere: the use site supplies it as an ARGUMENT
-    # (`Box[Int, [1,2,3]]`), which is a value and not a literal, and this path does
-    # not monomorphize, so at the class body there is no instantiation at all.
-    # `std/collections/type_dict.mojo`'s `comptime _index[key: Self.T] =
-    # Self.keys.try_index(key)` was refused by the value's own sentence, which
-    # describes an edit that cannot be made. Measured on both architectures.
+    # A class-level binding whose value reads a struct PARAMETER. This row used
+    # to pin a REFUSAL, on the reasoning that at the class body there is no
+    # instantiation and so no value to read. That refusal no longer fires, and
+    # the thing that replaced it is the better answer: the fold reads THE
+    # INSTANTIATION's argument, so `comptime length = len(keys)` is 3 for
+    # `Box[Int, [1,2,3]]` and 1 for `Box[Int, [1]]` — CPython's answer for each,
+    # measured on both architectures, byte-identical.
     #
-    # `refuse_without:` for the value sentence, and it is the load-bearing half:
-    # an arm added here that only appended the parameter fact would pass every
-    # other assertion in the tree while still telling the reader to make a
-    # literal.
-    ("comptime_binding_reading_a_struct_parameter_is_its_own_refusal",
+    # **The two rows below are the measurement, and it is split across two
+    # IMAGES rather than one because one image cannot carry it.** Two
+    # instantiations of the same generic struct in one `main` make every method
+    # name AMBIGUOUS — `_method_owners` drops a name two functions declare, and
+    # two instantiations declare `size` twice — so `b.size()` stops being lifted
+    # to `Box_size(b)` and is refused with the value-method sentence. That is
+    # pinned as its own row (`…_two_instantiations_of_one_generic_are_refused`)
+    # because it is a REAL gap and a row that did not name it would let the next
+    # reader believe this pair proves more than it does: it proves the fold is
+    # per instantiation across two builds, not that one image can hold both.
+    ("comptime_binding_reading_a_struct_parameter_folds_per_instantiation",
      "struct Box[T: AnyType, keys: List[T]]:\n"
      "    comptime length = len(keys)\n"
      "\n"
      "    def size(self) -> Int:\n"
      "        return Self.length\n"
      "\n"
-     "def main(n):\n"
+     "def main(n) -> Int:\n"
+     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    printf(\"len=%d@@\", b.size())\n"
+     "    return 0\n", 0, "len=3"),
+    # …and the other instantiation, which is what makes the first row a
+    # measurement of the FOLD rather than of one hard-coded length. `3` is also
+    # what a path that answered every instantiation with the FIRST call site's
+    # argument would print, so this row is the one that distinguishes them.
+    ("comptime_binding_reading_a_struct_parameter_of_a_second_instantiation",
+     "struct Box[T: AnyType, keys: List[T]]:\n"
+     "    comptime length = len(keys)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    var b = Box[Int, [1]]()\n"
+     "    printf(\"len=%d@@\", b.size())\n"
+     "    return 0\n", 0, "len=1"),
+    # …and the gap, pinned so it cannot rot quietly. This is the row the pair
+    # above needs and cannot supply: ONE image with two instantiations of one
+    # generic struct, which is the shape any real use of `comptime length =
+    # len(keys)` has. The refusal is `_method_owners`' ambiguity rule reached
+    # through the value-method table, so the needle is the part of that message
+    # that is about the RECEIVER rather than about `size`.
+    ("comptime_binding_two_instantiations_of_one_generic_are_refused",
+     "struct Box[T: AnyType, keys: List[T]]:\n"
+     "    comptime length = len(keys)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    var c = Box[Int, [1]]()\n"
+     "    printf(\"len=%d@@\", b.size())\n"
      "    return 0\n",
-     "refuse_without:what it reads is 'keys', a PARAMETER of Box:"
-     "a formal value is one 64-bit word with nowhere to keep a non-literal one",
-     None),
-    # A VARIADIC parameter's arity is the same shape with nothing to bind at all,
-    # and it is the stdlib's own (`TypeDict`'s `comptime length = len(Self.values)`
-    # over `*values: Trait`), so the arm has to reach the `Self.` spelling too and
-    # not only a bare read.
-    ("comptime_binding_reading_a_variadic_parameter_is_its_own_refusal",
+     "refuse:is a method call on a value, and this backend lowers only", None),
+    # A VARIADIC parameter. This row used to pin the `comptime`-over-a-variadic
+    # refusal and no longer can: **the variadic arm has no observable program at
+    # all**, and the reason is not this rule. Every program that could reach it
+    # is refused EARLIER, at the instantiation's own bracket list, because a
+    # generic struct declared by THIS UNIT is stripped out of the pipeline before
+    # the table that classifies a bracket list is built — see
+    # `formal/monomorph.py::without_template_bodies`, which drops the template
+    # `StructDef`, and `model.subscript_index_is_a_comptime_parameter_list`'s
+    # second class, which is "a bare name `structs_by_name` says this module
+    # declares". So `Pair[Int, 4, 5]` arrives where a container literal would and
+    # is refused with the tuple-index sentence.
+    #
+    # The row therefore pins what this program's ACTUAL verdict is, and says in
+    # its own name that it is the wrong verdict: a row that kept the old needle
+    # would be a row that cannot fail, which is worse than a row that pins the
+    # wrong thing visibly. The refusal the row used to pin is still reachable in
+    # principle — it is `comptime length = len(Self.values)` in a body that
+    # exists — and it is named here so the next reader does not have to
+    # re-derive it.
+    ("comptime_binding_over_a_variadic_parameter_is_refused_at_the_bracket",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
      "\n"
      "    def size(self) -> Int:\n"
      "        return Self.length\n"
      "\n"
-     "def main(n):\n"
+     "def main(n) -> Int:\n"
+     "    var p = Pair[Int, 4, 5]()\n"
+     "    printf(\"len=%d@@\", p.size())\n"
      "    return 0\n",
-     "refuse:Self.length reads a `comptime` class attribute of Pair, whose "
-     "value is `len(Self.values)` — and what it reads is 'values', a PARAMETER "
-     "of Pair", None),
-    # …and the CONTROL, which is what keeps the new arm from being a blanket ban
-    # on the construct: the same class body with a LITERAL builds, runs, and
-    # prints the constant. Measured, both architectures. The read is a free
-    # function rather than a method call, so the case is about the CLASS BODY and
-    # not about calling a method of a struct whose parameters this path does not
-    # bind.
+     "refuse:Pair[Int, 4, 5] is a subscript whose index is a tuple", None),
+    # …and the CONTROL that makes the diagnosis above a measurement rather than a
+    # guess: the same fold, on a GENERIC struct of this unit, reached through a
+    # ONE-element type-argument list. `is_multi_index` is false for `[Int]`, so
+    # the bracket list is never the thing the container reader looks at, and this
+    # builds and prints 2 on both architectures. So the blocker in the row above
+    # is the MULTI-element bracket on a template struct and nothing else — which
+    # is also why there is no variadic control to write: `*values: T` cannot be
+    # instantiated without one.
+    ("comptime_len_of_a_literal_display_on_a_generic_struct_folds",
+     "struct Pair[T: AnyType]:\n"
+     "    comptime length = len([4, 5])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    var p = Pair[Int]()\n"
+     "    printf(\"len=%d@@\", p.size())\n"
+     "    return 0\n", 0, "len=2"),
+    # …and the CONTROL, which is what keeps the class-attribute arm from being a
+    # blanket ban on the construct: the same class body with a LITERAL builds,
+    # runs, and prints the constant. Measured, both architectures. The read is a
+    # free function rather than a method call, so the case is about the CLASS
+    # BODY and not about calling a method of a struct whose parameters this path
+    # does not bind.
+    #
+    # **The struct is NOT generic, and that is the fix rather than a weakening.**
+    # It was, and a free-function read of a GENERIC struct's class attribute is
+    # refused — "'Box' has no home: the module-level symbol table is empty for
+    # this unit" — for the same reason the bracket list in the two rows above is
+    # read as a container: `formal/monomorph.py::without_template_bodies` drops
+    # the template `StructDef` before `structs_by_name` is built, so the class
+    # attribute has no declaration to be read out of. The row's own subject — a
+    # LITERAL `comptime` value folds and prints — is reachable and TRUE without
+    # genericness, and pinning it on a generic struct made it a row about the
+    # missing table instead of a row about the fold. The generic case is pinned
+    # as its own row immediately below, so nothing is lost.
     ("comptime_binding_with_a_literal_value_still_builds",
-     "struct Box[T: AnyType, keys: List[T]]:\n"
+     "struct Box:\n"
      "    comptime length = 3\n"
      "\n"
      "    def size(self) -> Int:\n"
@@ -1160,6 +1242,30 @@ CASES = [
      "def main(n) -> Int:\n"
      "    printf(\"%d\", show())\n"
      "    return 0\n", 0, "3"),
+    # …and the generic spelling, pinned because it is a refusal with a real
+    # cause and nothing else in the group names it. The message is the
+    # no-home one, which is about `Box` as a NAME: a class-attribute read through
+    # a template's own name is a NAME read on this path, because the template's
+    # declaration is not in the table the read is answered from (the same
+    # `without_template_bodies` gap the two rows above name). The needle is the
+    # no-home clause and NOT "'Box' is read at line N before anything in this
+    # function stores it", which is what a value read would say and is not what
+    # this is.
+    ("comptime_class_attribute_of_a_generic_struct_read_through_its_name",
+     "struct Box[T: AnyType]:\n"
+     "    comptime length = 3\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def show() -> Int:\n"
+     "    return Box.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    printf(\"%d\", show())\n"
+     "    return 0\n",
+     "refuse:'Box' has no home: the module-level symbol table is empty for this "
+     "unit", None),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
@@ -20134,6 +20240,21 @@ ORIGIN_OF_CASES = [
     # so a rewrite that mangled one would be mangling something the emitters do
     # not read, and the only way to know it does not is to build the thing. The
     # value is the source's: `Marker(b.a)` is 7 and `.v` is that field.
+    # …and it is the row that pins the ANNOTATION rather than the construction,
+    # which it did not before. The refusal that replaced this build is "'m.v' is a
+    # field access through 'm', and this path has no way to say what 'm' holds" —
+    # and it is about `Marker(b.a)`, the value on the right of the assignment, not
+    # about the annotation: `var m = Marker(3)` with no annotation at all is
+    # refused the same way, because a construction of a GENERIC struct whose
+    # instantiation the bracket list never established leaves nothing to say what
+    # the word holds. Spelling the instantiation (`Marker[Int](b.a)`) gives the
+    # binding a home, and the row is about its subject again: the annotation is
+    # still `Marker[origin_of(b)]`, the escape check still walks it, and the
+    # program still exits 7 — `b.a` is 7, `.v` is that field, and no word was
+    # emitted for the `origin_of` in the annotation. Measured on both
+    # architectures; the three spellings that do NOT reach the subject
+    # (`Marker(b.a)`, `Marker[Int](3)` alone, and a `var m = t` rebind) are all
+    # refused with the same field-access sentence.
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -20141,7 +20262,7 @@ ORIGIN_OF_CASES = [
      "    var a: Int\n"
      "    var b: Int\n\n"
      "def tag(ref b: Bag) -> Int:\n"
-     "    var m: Marker[origin_of(b)] = Marker(b.a)\n"
+     "    var m: Marker[origin_of(b)] = Marker[Int](b.a)\n"
      "    return m.v\n\n"
      "def main(n: Int) -> Int:\n"
      "    var g = Bag()\n"
@@ -20265,11 +20386,35 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    return s.a\n", "refuse:compile-time explicit-parameter list", None),
     # The other half, and the one no name table can answer: a struct THIS MODULE
     # declares. `_DequeIter[Self.ElementType, origin_of(self), False]` in
-    # `std/collections/deque.mojo` is this shape, and it is here because
-    # `structs_by_name` is the only thing that settles it — a declared struct
-    # has no runtime container representation at all, so a subscript on its name
-    # cannot be a lookup into one.
-    ("type_argument_list_on_a_struct_this_unit_declares",
+    # `std/collections/deque.mojo` is this shape, and `structs_by_name` is the
+    # only thing that settles it — a declared struct has no runtime container
+    # representation at all, so a subscript on its name cannot be a lookup into
+    # one.
+    #
+    # **It is a GENERIC struct, and that is why the row cannot pin the
+    # explicit-parameter sentence: `structs_by_name` does not contain it.**
+    # `formal/monomorph.py::without_template_bodies` drops a generic template's
+    # `StructDef` — its own docstring says the template BODY is not in any image —
+    # and `structs_by_name` is built from what is left, so the second class of
+    # `model.subscript_index_is_a_comptime_parameter_list` ("a bare name
+    # `structs_by_name` says this module declares") never fires for one. The
+    # bracket list arrives where a container literal would, and with a FRAME in it
+    # the escape check refuses first, which is why this row used to arrive at the
+    # wide-receiver sentence instead of the one it named.
+    #
+    # The row pins the refusal that IS this program's verdict, and its name says
+    # so, because a row that kept the old needle could not fail. **The two rows
+    # below are the measurement**: the same construct, once with a FRAME in the
+    # bracket and once with a literal, and TWO DIFFERENT wrong sentences — the
+    # escape check's when the frame is there (because `_check_frame_escapes` sees
+    # a container literal holding a frame) and the tuple-index sentence when it is
+    # not (because `multi_index_kind` reaches `MULTI_INDEX_DATA`). Neither is about
+    # a compile-time parameter list, which is what the source wrote. Add the
+    # all-TYPE bracket on the same struct, which IS answered
+    # (`type_argument_list_of_two_type_arguments_answers`, further down), and the
+    # discriminator is exact: a VALUE in a MULTI-element bracket over a TEMPLATE
+    # struct declared by this unit.
+    ("type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container",
      "struct S:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -20280,7 +20425,21 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    s.a = 3\n"
      "    s.b = 4\n"
      "    var m = Triple[Int, s, False](5)\n"
-     "    return m.v + s.a\n", "refuse:compile-time explicit-parameter list", None),
+     "    return m.v + s.a\n",
+     "refuse:receiver is stored in a container, which has no layout for a "
+     "frame address", None),
+    # …and the NO-FRAME half, which is what separates "the escape check got there
+    # first" from "the bracket list's classification is wrong". Same struct, same
+    # bracket arity, a literal where the frame was: no frame to escape, so the
+    # reader gets the tuple-index sentence instead — a second wrong verdict about
+    # the same construct, from a different reader.
+    ("type_argument_list_on_a_generic_struct_with_no_frame_in_it",
+     "struct Triple[A: AnyType, B: AnyType, C: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Triple[Int, 7, False](5)\n"
+     "    return m.v\n",
+     "refuse:Triple[Int, 7, False] is a subscript whose index is a tuple", None),
     # NO FRAME ANYWHERE, which is what pins the change as being about the
     # CONSTRUCT rather than about the escape check. Every row above could be
     # satisfied by a fix that only reworded the frame-address refusal; this one
