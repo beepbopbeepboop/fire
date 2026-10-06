@@ -157,6 +157,21 @@ class TestGeneratorSource(unittest.TestCase):
         The two are paired with CFG blocks BY POSITION, so a disagreement
         between them is not a weaker proof but a proof about the wrong
         condition, which is exactly what the short-circuit bug was.
+
+        **Both sides are asked in the SAME environment, and that is the whole
+        of a defect this row had from 2026-10-03** (`eeea79f0` gave `_cond_nodes`
+        an `env` parameter of its own and this row kept passing `{}` in that
+        position, where the walk reads it as "nothing is bound"). Every example
+        then raised out of `_cmp_go` —
+
+            NotImplementedError: model: `n` is read here and this generator
+            binds it to nothing (the model's environment is [])
+
+        — which is the generator's own refusal for an unbound name, raised by a
+        row that was checking something else, so it read as a failing test rather
+        than as a row that stopped testing. It went unnoticed because this file
+        is not in any bucket: nothing ran it between then and 2026-10-05, when
+        it was found by running it.
         """
         import formal.arm64_proof_gen as G
         from formal.build import parse_module
@@ -168,9 +183,10 @@ class TestGeneratorSource(unittest.TestCase):
             for fn in [f for f in parse_module(src)
                        if isinstance(f, F.FunctionDef) and f.params]:
                 p = fn.params[0][0]
-                rendered = G._collect_conds(fn, p, {p: p}, {}, {})
-                walked = [G._norm_uint(G._cmp_go(node, p, env, {}, {}, None))
-                          for node, env in G._cond_nodes(fn, p, {}, {}, None)]
+                env = {p: p}
+                rendered = G._collect_conds(fn, p, env, {}, {})
+                walked = [G._norm_uint(G._cmp_go(node, p, node_env, {}, {}, None))
+                          for node, node_env in G._cond_nodes(fn, p, env, {}, {})]
                 self.assertEqual(rendered, walked,
                                  f"{stem}.{fn.name}: the condition walk and "
                                  f"its renderer disagree, so a condition is "

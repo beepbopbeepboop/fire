@@ -1,5 +1,51 @@
 # FORMAL_nested_short_circuit_chain_in_a_condition: `((a or b) or c)` is still unproved
 
+**Status 2026-10-05 (`work/formal71-docs`): NOT FIXED, and the reason is the
+2026-10-04 section's — the area is not VERIFIABLE on this tree — but the
+measurement behind that reason is WIDER than this document records, and the file
+that would have caught the change was ERRORING.** Two things a next session
+should not re-derive, both measured today:
+
+* **`test_formal_short_circuit_cond.py` had been failing with an ERROR rather
+  than running, since 2026-10-03** (`eeea79f0` gave `_cond_nodes` an `env`
+  parameter of its own and `test_cond_nodes_agrees_with_collect_conds` kept
+  passing `{}` in that position, where the walk reads it as "nothing is bound").
+  Every example then raised the generator's own refusal out of `_cmp_go` —
+  `model: `n` is read here and this generator binds it to nothing` — so the row
+  that exists to prove the condition walk and its renderer agree had stopped
+  checking that, and read as a failing test rather than as a dead one. Both sides
+  are now asked in the same environment and the group is green (5 rows).
+  **It went unnoticed because this file is in no bucket and in no
+  `test_suite.py`'s `UNREGISTERED` entry**, which is a hole in the estate check
+  and not in this file: the check walks `**/test_*.py` and this one is not named
+  anywhere, so nothing said so. That is `tools/suite.py` / `test_suite.py`'s
+  subject and not this branch's (its task says not to touch the registry).
+* **The premise holds, and it holds for MORE than this document says.** Measured
+  through `formal/lean.py::check_proof_cached` on this tree, arm64, Lean
+  4.32.2, `lib/*.olean` current: **all four** proofs this file generates fail the
+  same way, not the two `formal/examples/` ones —
+
+      both:       both_proof.lean:2684:8: error: (kernel) excessive memory consumption detected
+      either:     either_proof.lean:2684:8: (the same line, the same error)
+      short_and:  short_and_proof.lean:2684:8: (the same)
+      short_or:   short_or_proof.lean:2684:8: (the same)
+      → peak 7.0 GB across 2 processes, 907 s for the four
+
+  — so the two hand-written two-line PROGRAMS are unproved too, and the canary
+  this document keeps naming is not proving anything on this tree. The line has
+  moved from the 2600 the 2026-10-04 section recorded (the generator grew), and
+  the cost is at the kernel's own ceiling rather than at the guard's.
+
+**So the conclusion the 2026-10-04 section reached is confirmed and not acted
+on**, for the reason it gives: a generator change in `formal/arm64_proof_gen.py`
+or in `_cond_pairs` cannot be checked while every proof it emits is refused by
+the kernel, and the project's own rule names a generator that emits statements
+which look right and are not proved as the worst outcome. The subject of the
+memory ceiling is `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_
+rejected.md`, which is claimed by another branch; the `_cond_pairs` recording
+this document asks for — one entry per CHAIN rather than one per condition — is
+unchanged and is still the next step once that ceiling is under it.
+
 `if a or b:` and `if a and b:` as a whole condition are **proved** (the
 per-path entry statement they needed is in `formal/arm64_proof_gen.py`).
 A chain NESTED inside a chain is not, and this says why and what closes it.
