@@ -149,12 +149,31 @@ class Box:
         print('box-enter')
         return self
 
+    def use(self):
+        print('use')
+        return self.tag
+
     def __exit__(self):
         print('box-exit')
 """
 
 CTX_PY = CTX_MOJO.replace("    def __exit__(self):",
                           "    def __exit__(self, exc_type, exc_val, tb):")
+
+# A SECOND struct declaring a method Box also declares, so the NAME-based
+# dispatch a `with` alias gets (it has no declared type of its own) has two
+# owners to choose between.  `use` is the one both declare.
+RIVAL = """class Rival:
+    def __init__(self):
+        self.tag = 3
+        self.log = 0
+
+    def use(self):
+        return self.tag
+
+    def __exit__(self):
+        print('rival-exit')
+"""
 
 
 def mojo(body):
@@ -209,6 +228,35 @@ CASES = [
      "    with Box() as b:\n"
      "        print('body')\n"
      "    print('after')\n"
+     "    return 0\n", 3),
+    # **The alias is a VALUE, not a name-shaped hole.**  A context manager you
+    # cannot read a field of or call a method on is a protocol half-lowered: the
+    # enter/exit pair works and the body is unusable, which for every real
+    # manager is the same as not having it.  `Box.__enter__` returns the
+    # receiver here, so `b.tag` is a load at the frame address the alias holds.
+    ("a_field_read_through_the_alias_lowers",
+     "    with Box() as b:\n"
+     "        t = b.tag\n"
+     "        print('body', t)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and a METHOD call, which is dispatched by NAME because the alias has no
+    # DECLARED type of its own.  `use` is declared by one struct in this image,
+    # so there is one owner to dispatch to; the two-structs-declare-it case is a
+    # REFUSED row below, and it is refused rather than picked.
+    ("a_method_call_through_the_alias_lowers",
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # The alias is STILL BOUND after the block, which is CPython's own scoping
+    # (`with` does not introduce a scope) and the reason a manager can be set up
+    # in one function and read in the next statement of the same one.
+    ("the_alias_is_still_bound_after_the_block",
+     "    with Box() as b:\n"
+     "        pass\n"
+     "    t = b.tag\n"
+     "    print('after', t)\n"
      "    return 0\n", 3),
     # ── several items ──────────────────────────────────────────────────────
     # LEFT to right in, RIGHT to left out.  Two `exit` lines with no ordering
@@ -705,6 +753,24 @@ REFUSALS = [
      "    return 0\n",
      "names somewhere this path cannot put the word",
      "this build cannot answer what type it is"),
+    # A METHOD through the alias whose NAME a second struct also declares.  The
+    # alias carries no declared type — `Box___enter__(tmp)` returns one word and
+    # nothing says which struct it is a frame of — so dispatch is by NAME, and
+    # `use` has two owners.  CPython resolves it through the object's own type.
+    # Here `_method_owners` pops an ambiguous name on purpose (a name TWO structs
+    # declare is absent, and that absence is what makes the lift decline), so
+    # the call lands in the receiverless arm and is refused rather than picked —
+    # with the "would be a guess about what it means" sentence, which IS the
+    # property: a build that picked silently would print this same program's
+    # answer against the OTHER struct's field layout, and a wrong layout is the
+    # failure nothing else on this path can see.  This row's whole claim is the
+    # refusal, so it passes "" for the forbidden clause.
+    ("a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     "would be a guess about what it means on", ""),
     # A SUBSCRIPT alias, `as holder[0]`, is the third shape one word does not go
     # and the one a reader is most likely to try after the other two are
     # refused.
@@ -981,7 +1047,8 @@ def run_file_pair(name, body, paths, tmpdir, verbose):
 def run_refusal(name, source, needle, forbid, tmpdir, verbose):
     """Both backends must REFUSE, with the needle in and the forbidden out.
 
-    `forbid` is the other half and it is not decoration.  `__exit__` appears in
+    `forbid` is the other half WHERE THERE IS one, and it is not decoration; a
+    row whose whole claim is the refusal itself passes "".  `__exit__` appears in
     the tail of EVERY message in this family ("give the value a struct with
     `__enter__` and `__exit__`"), so a row whose needle is merely `__exit__` is
     satisfied by a refusal that blames the wrong dunder — which is precisely the
@@ -1001,9 +1068,10 @@ def run_refusal(name, source, needle, forbid, tmpdir, verbose):
               f"{name} on {backend} says {needle!r}",
               f"the message does not contain it: "
               f"{text.strip()[-300:]}")
-        check(forbid not in text,
-              f"{name} on {backend} does not blame {forbid!r}",
-              f"the message contains it: {text.strip()[-300:]}")
+        if forbid:
+            check(forbid not in text,
+                  f"{name} on {backend} does not blame {forbid!r}",
+                  f"the message contains it: {text.strip()[-300:]}")
     if len(seen) == 2 and verbose:
         print(f"      arm64 and x86-64 agree: {needle!r}")
 
