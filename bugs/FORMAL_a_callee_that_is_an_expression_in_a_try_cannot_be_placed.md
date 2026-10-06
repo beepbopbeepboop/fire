@@ -5,10 +5,12 @@
 `("other", "")` key — and `formal/imports.py`'s `CrossModuleRaises` for the
 cases it still cannot answer. Both backends. **Status: OPEN, filed 2026-10-05,
 and it is the successor to
-`FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md` (deleted with its
-fix), not a duplicate of it.** That doc's residual was "a callee this pass
-cannot place"; the cross-module half of that is closed and measured, and what
-is left is a list, of which this is the only entry that is a live hazard.
+the doc whose subject was "a callee this pass cannot RESOLVE is not asked
+whether that callee raises" — deleted with its fix in `6db5461a`, `a try around
+another image's raiser is refused, on both backends` — and not a duplicate of
+it.** That doc's residual was "a callee this pass cannot place"; the
+cross-module half of that is closed and measured, and what is left is a list, of
+which this is the only entry that is a live hazard.
 
 ## What is closed, and what this is
 
@@ -24,8 +26,8 @@ to declare:
 | `f(…)` in an image function that calls `mod.f(…)` | not part of the fixed point at all | seeded into it, so the local `f` raises too |
 | `b.f(…)` on a linked struct | a method declared HERE | `CrossModuleRaises.method`, by bare name |
 
-`bugs/FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md`'s own census is
-what decided the order, and it was right about the decision it recorded: the
+The deleted doc's own census is what decided the order, and it was right about
+the decision it recorded: the
 certain tier moved 51 files and the **corpus cost is zero files**, because every
 one of those 51 is already refused for an unresolvable import, which
 `_resolve_imports` reports after and which outranks this check (that ordering is

@@ -27175,6 +27175,128 @@ CPYTHON_EXCEPTION_BASES = frozenset({
 BUILTIN_EXCEPTION_FIELDS = ("args",)
 
 
+def _cpython_exception_bases() -> dict:
+    """`{exception class: (its direct bases, …)}`, read off THIS interpreter.
+
+    The SUBGRAPH of `CPYTHON_EXCEPTION_BASES`, and it is the answer to the
+    question `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 calls
+    the one design question in that document with no answer in the code: whether
+    the unwinder's status word is "this is exactly `ZeroDivisionError`" or "this
+    is a `ZeroDivisionError`", because the second question is what CPython's own
+    `except` answers and the first is what an integer cannot.
+
+    Generated rather than hand-kept, for the reason `CPYTHON_EXCEPTION_BASES`
+    above states: the hierarchy is a fact about CPython, and a hand-kept list of
+    the edges somebody remembered is a list that goes stale silently — in the one
+    place where a stale edge decides whether an arm runs. The direct bases are
+    read rather than the full ancestor set so the table says what CPython's MRO
+    was BUILT from, which is the thing a declared class has to be reconciled
+    with.
+
+    Only the classes in `CPYTHON_EXCEPTION_BASES` are walked, so a name this
+    backend does not treat as a CPython exception contributes nothing — the same
+    boundary that table draws.
+    """
+    import builtins as _b
+    out = {}
+    for name in CPYTHON_EXCEPTION_BASES:
+        cls = getattr(_b, name, None)
+        if not isinstance(cls, type) or not issubclass(cls, BaseException):
+            continue
+        out[name] = tuple(b.__name__ for b in cls.__bases__
+                          if b.__name__ in CPYTHON_EXCEPTION_BASES)
+    # …and EVERY SPELLING of a class gets its bases, which is the half the first
+    # pass over this table got wrong and which the CPython oracle in
+    # `test_formal_exceptions.py` found: 36 of the grid's 4356 pairs. Python 3
+    # keeps `OSError`'s historical names as ALIASES of it — `EnvironmentError`
+    # and `IOError` are the same class object under three names — and a reader
+    # that keyed the table by `__name__` gave the alias its own empty base list,
+    # so `except EnvironmentError:` stopped matching `BlockingIOError`. The
+    # aliases are grouped by IDENTITY (`is`), not by name, and every name in a
+    # group gets the one answer.
+    for name, cls in list(out.items()):
+        for other in CPYTHON_EXCEPTION_BASES:
+            if other != name and getattr(_b, other, None) is cls:
+                out[other] = out[name]
+    return out
+
+
+CPYTHON_EXCEPTION_SUBCLASSES = _cpython_exception_bases()
+
+
+def _exception_aliases() -> dict:
+    """`{every spelling: the canonical name}` for CPython's aliased exceptions.
+
+    The companion to the table above, and it exists because giving every alias
+    the right base list is only half of it. A WALK compares a base against the
+    arm the reader wrote, and `except EnvironmentError:` reaching
+    `BlockingIOError -> OSError` compares `"OSError"` with `"EnvironmentError"`
+    and misses — the alias is a different SPELLING of the same class object, and
+    the walk has to see through it at both ends. Keyed off object identity
+    (`is`), with the canonical name being the first spelling in
+    `CPYTHON_EXCEPTION_BASES` that resolves to that class, so the answer does not
+    depend on the iteration order of a set.
+    """
+    import builtins as _b
+    canonical = {}
+    for name in sorted(CPYTHON_EXCEPTION_BASES):
+        cls = getattr(_b, name, None)
+        if not isinstance(cls, type) or not issubclass(cls, BaseException):
+            continue
+        for other in sorted(CPYTHON_EXCEPTION_BASES):
+            if getattr(_b, other, None) is cls:
+                canonical[other] = name
+    return canonical
+
+
+CPYTHON_EXCEPTION_ALIAS = _exception_aliases()
+
+
+def exception_catches(arm: str, raised: str) -> bool:
+    """Would `except arm:` catch a `raise` of class `raised`?
+
+    **CPython's own rule, read off the tables above rather than restated:**
+    an arm matches the raised class and every class that INHERITS from it, by
+    walking bases. That is the fact which decides the unwinder's status word
+    (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4): a small
+    integer that says "this is exactly `ZeroDivisionError`" cannot answer it, so
+    the word carries the kind AND the dispatch walks the same base chain this
+    walks — which is why the answer here is a bool over a TABLE rather than a
+    pointer chase at run time.
+
+    Both ends go through `CPYTHON_EXCEPTION_ALIAS`, because Python 3 keeps
+    `OSError`'s historical names as the same class under three spellings and a
+    walk that compared one spelling with another would answer `False` for 36 of
+    the 4356 pairs in the oracle that pins this — measured, not anticipated.
+
+    `False` for a class either table does not know, and that is the honest
+    direction for this question: an unknown class is one this image did not
+    declare, and the arm's own refusal is what reports it — this function is not
+    asked to guess a hierarchy CPython does not have here. A class DECLARED in
+    this image is resolved by its own `bases` before it reaches here, because
+    the tables are about CPython's builtins and nothing else.
+    """
+    if not arm or not raised:
+        return False
+    alias = CPYTHON_EXCEPTION_ALIAS
+    arm = alias.get(arm, arm)
+    raised = alias.get(raised, raised)
+    if arm == raised:
+        return True
+    seen, queue = set(), [raised]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for base in CPYTHON_EXCEPTION_SUBCLASSES.get(name, ()):
+            base = alias.get(base, base)
+            if base == arm:
+                return True
+            queue.append(base)
+    return False
+
+
 def builtin_base_fields(base: str) -> tuple:
     """The instance fields a base THIS IMAGE does not declare contributes.
 

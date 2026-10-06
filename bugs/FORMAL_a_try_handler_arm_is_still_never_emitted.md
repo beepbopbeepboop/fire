@@ -2,10 +2,94 @@
 # fixing in one function is that EVERY arm in this repository calls something
 
 **Area:** FORMAL, exceptions. Claim `project33:exceptions`, measured 2026-10-05
-on `work/formal33-exceptions`. **OPEN.** The uncaught half of the exception
-contract landed on that branch (three commits: `raise` of a class leaving with
-CPython's status, a float `/` by a zero divisor leaving, and a failing `assert`
-running its message and its enclosing `finally`) and this is the remainder.
+on `work/formal33-exceptions`. **OPEN, and step 1 of §5 — the design question §4
+calls the only one in this document with no answer in the code — is ANSWERED and
+LANDED (2026-10-05, `work/formal59-docs`).** Step 2's table is half of it, and
+the half that decides the matching rule is now generated off the interpreter and
+pinned against CPython itself; the KIND NUMBERING is still unmade. Steps 3-6 are
+untouched. The uncaught half of the exception contract landed earlier (three
+commits: `raise` of a class leaving with CPython's status, a float `/` by a zero
+divisor leaving, and a failing `assert` running its message and its enclosing
+`finally`) and this is the remainder.
+
+## 2026-10-05 (`work/formal59-docs`): §4's TWO design questions are answered,
+## and the answer to the first is a TABLE pinned against CPython
+
+§4 ends by naming one question as unanswerable from the code and saying "decide
+this before writing the emitters". Both are decided here, with the measurement
+that decided each, and the first one landed as code rather than as prose.
+
+### The superclass question: the word is a KIND and the dispatch walks a base
+### CHAIN. It cannot be "this is exactly `ZeroDivisionError`".
+
+`ZeroDivisionError` is a subclass of `ArithmeticError`, which is a subclass of
+`Exception`; `KeyError` and `IndexError` are both `LookupError`. So
+`except Exception:` — the commonest arm in real code, and the reason §4 refuses
+to leave the cheap version — does not reduce to "the kinds are equal", and a
+status word carrying only an equality test cannot answer it.
+
+**The answer is the second option §4 offers, with the cheap half made cheap
+rather than the semantics made wrong:** the word carries a small integer KIND
+(no pointer, so no frame per raise site and no `_blob_cap` question), and the
+DISPATCH walks the same base chain CPython walks. The chain is a table, not a
+run-time chase, so the cost is one compare per arm in source order at a branch
+that only exists on the exceptional path.
+
+**And the chain is not a tree, which is the row that settles it.**
+`GeneratorExit` derives from `BaseException` DIRECTLY, not from `Exception`, so
+an implementation that flattened the hierarchy would run `except Exception:`'s
+arm for it. `CPYTHON_EXCEPTION_SUBCLASSES` therefore keeps DIRECT bases and
+`exception_catches` walks them, and that shape is asserted directly rather than
+described — see the oracle below.
+
+**The table is generated off the running interpreter, and it is pinned by
+CPython itself rather than by a hand-written expectation.**
+`test_formal_exceptions.py`'s `run_matching_oracle` asks CPython to actually
+CATCH, for **every** `(arm, raised)` pair over the 66 classes CPython will
+construct bare — 4356 pairs — and compares that with `exception_catches`. The
+whole grid, because the failure mode of a hand-kept hierarchy is an edge nobody
+remembered, and `test_formal_exceptions.py` already runs before every backend
+assertion in the file.
+
+**That oracle earned its cost immediately: it found a real bug in the table as
+first written.** 36 of the 4356 pairs disagreed, all of one kind — Python 3
+keeps `OSError`'s historical names as ALIASES of the same class object
+(`EnvironmentError`, `IOError`), and a table keyed by `__name__` gave the alias
+its own empty base list, so `except EnvironmentError:` stopped matching
+`BlockingIOError`. Fixed in two places, because giving the alias the right base
+list is only half: a walk COMPARES a base with the arm the reader wrote, so both
+ends go through `CPYTHON_EXCEPTION_ALIAS` (`{spelling: canonical}`, grouped by
+object identity). This is the strongest argument in this document for pinning
+the rule against the interpreter rather than against a list.
+
+### The `as e` question: bind `e` to the WORD, and REFUSE any read of it.
+
+§4 lists three options and says none is free. The answer is the second, and it
+is free because of a fact already in the tree: `model.BUILTIN_EXCEPTION_FIELDS`
+is `("args",)`, and `args` is where CPython puts the message. So an exception
+object on this path is a class with ONE slot, and giving `e` a real object means
+a frame allocation at every raise site — `_blob_cap`, a frame-lifetime question
+and a memory question, for a spelling whose only observable use is `str(e)`.
+
+So: **`except E as e` binds `e` to the status word itself, and every READ of `e`
+is refused by name.** `raise` and `continue` in an arm are already legal and
+already change no answer; a read of `e` is refused rather than given the word,
+because printing a word where CPython prints the message is the
+wrong-but-exit-0 artifact this backend exists to make impossible, and refusing
+costs one diagnostic on a construct whose correct lowering needs the frame that
+is the NEXT step's cost. When the frame lands, the refusal is deleted with the
+refusal that named it, and nothing else moves: the binding was already the word.
+
+### What is NOT answered, and it is the smaller half of step 2
+
+**The KIND NUMBERING is still unmade** — which class gets which integer — and it
+is genuinely unmade until the word has a home, because the numbering has to be
+stable across a dylib boundary and nothing states what a library publishes. The
+table that IS landed (`CPYTHON_EXCEPTION_SUBCLASSES`, `CPYTHON_EXCEPTION_ALIAS`,
+`exception_catches`) is the part that does not depend on it: it is a fact about
+CPython, so it is right before any word exists and unchanged after. Steps 3-6
+are untouched, and §3's measurement still says the same thing: in-function
+routing moves 0 files.
 
 **Read this before planning the work.** The obvious plan — emit the arms, route
 a `raise` inside the same function to the arm that matches — is measurably
@@ -170,9 +254,12 @@ a FRAME on this path and copying one per raise site is a frame-budget question
 
 ## 5. The exact next steps, in order
 
-1. **Decide §4's superclass question and the `as e` question.** Both are
-   design, both block the emitters, and neither is discoverable by reading more
-   code. Write the answers here.
+1. ~~**Decide §4's superclass question and the `as e` question.**~~ **DONE
+   2026-10-05 (`work/formal59-docs`) — both answered at the top of this
+   document, and the first one landed as `CPYTHON_EXCEPTION_SUBCLASSES` /
+   `CPYTHON_EXCEPTION_ALIAS` / `exception_catches` with CPython itself as the
+   oracle over all 4356 `(arm, raised)` pairs.** The part of step 2 below that
+   does not depend on the numbering is therefore already in place.
 2. **The kind table** in `formal/model.py`: `{class name -> integer}`, from
    `CPYTHON_EXCEPTION_BASES` plus this unit's declarations, published in
    `info` so both emitters and both proof generators read ONE list. This is
