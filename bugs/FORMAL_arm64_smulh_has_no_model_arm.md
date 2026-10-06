@@ -1,5 +1,15 @@
 # FORMAL_arm64_smulh_has_no_model_arm: the high half of a multiply is emitted and modelled nowhere
 
+**Blocked on the build, measured 2026-10-05: every one of the four things below
+is a `lib/ProofLib.lean` change, and that module's `.olean` does not fit a
+bounded worker** — `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at the tree's
+own `-j 4`, against `lib/Refine.lean`'s 1.2 GB from the same call in the same
+minute. The measurement, its method and the control are in
+`FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §"the build wall is
+CONFIRMED". This doc's next step is unchanged and is still the right one; it
+needs a worker who can afford the build, or the integrator's `prooflib` job to
+run first.
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census this tree did not have: `encode_smulh_xd_xn_xm` is called by
 `formal/arm64_codegen.py`, has a byte-exact `as` differential, and is drawn by

@@ -9,6 +9,62 @@ but not sufficient.** The reduced goal is quoted verbatim from a real run, the
 what has to be added first. Everything else in this file — the two error sites,
 the measurement table, the five affected examples, the peel machinery that
 exists — was re-confirmed on this tree and still stands.
+
+**RE-MEASURED 2026-10-05 (`work/formal42-2`) on this tree: five diagnostics,
+all five goals quoted, and the next step is now PRICED — this one is NOT behind
+the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
+
+```
+$ python3 tools/memslot.py --gb 8 --label lean -- python3 -c "…check_proof_cached…"
+count_p2.lean:2671:16: error: Tactic `rfl` failed: The left-hand side
+count_p2.lean:2705:22: error: Tactic `introN` failed  ×4
+```
+
+Five diagnostics for five goals, and they are all the SAME goal with a different
+slot: `⊢ mem_read_u64 (four `sp`-relative frame stores, then one store at the
+ABSOLUTE address `4294968008 - (4294968008 % 4096 - 1024*4096 + 8)`) (st.sp - K)
+= st.xR` for `K` = 32/24/16/8 and `xR` = x19/x20/x29/x30, plus `hx30fr`'s own
+`K = 8`. That is the doc's thesis, counted: the two error SITES are five goals
+of one shape, and **closing the shape closes both sites** — the four
+`introN` failures are the `FrameOk` register conjuncts left open by the same
+unclosed goal, so §"step 2" (per-conjunct tactics) is not separate work here and
+step 1's premise is what makes them close.
+
+**What the premise has to be, measured rather than sketched.** One hypothesis
+covers all five: the frame sits entirely above the data page, i.e.
+`<floor address> + 2016 ≤ st.sp.toNat` (`2016` = the frame's deepest slot
+`1984` + the widest `K` `32`). From it `omega` derives
+`<floor address> ≠ (st.sp - K).toNat` for each of `K` ∈ {8,16,24,32}, which is
+exactly what `mem_read_after_write_u64_ne` needs to peel the absolute store and
+what `mem_read_after_write_u64` / `…_slot'` then need to peel the frame stores —
+so the whole chain closes and no new LIBRARY lemma is involved. The generator
+computes both numbers already: `formal/model.py::stack_floor_address` is what
+puts the address in the chain, and the frame's deepest slot is what
+`ctx["stores"]` holds.
+
+**Why it is cheap here and is not behind the build wall.** §"What this costs the
+fix" offers `FrameBound`'s sibling in `lib/Refine.lean`, and that is the right
+place for the MEMORY form
+(`FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` §"The
+next step: a MEMORY hypothesis, not a constant" is the same fact and wants the
+same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
+tree at `5e547907`, same `ensure_library` call, same minute, against
+`lib/ProofLib.lean`'s `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at the
+tree's own `-j 4`; method and control in
+`FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §"the build wall is
+CONFIRMED". **So the `sp` form is a generator-only change (this file's decision
+1, "a sibling binder on the theorem is a generator change with none"), and the
+memory form is affordable too — what is NOT affordable is ProofLib, which is
+where the CSEL/smulh/FP rows all sit.**
+
+**What is still a design decision, and it is the one this file already names:**
+the premise is a restriction of the class of `st` the contract quantifies over,
+and the concrete entry state satisfies it (`sp ≈ 2^64 - 131168`, floor address
+`0x100400008`), so nothing about the concrete claim weakens — but nothing
+references `count_compiles_correctly_universal` to discharge it either, which is
+why §"What this costs the fix" item 3 calls that shape dangerous. A landing has
+to say where the premise is discharged; a premise nobody discharges is a weaker
+theorem that reads as a stronger one.
 Found 2026-10-03 by
 `tools/formal_proof_breadth.py`'s proof-breadth census
 (`bugs/FORMAL_proof_coverage_census_2026-10-03.md`), which is the first thing
