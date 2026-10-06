@@ -745,8 +745,9 @@ def _memory_samples():
 #: check**, and it was one for every row here before the `init` became
 #: per-row.
 #:
-#: `(form, encoding, probe, state)` -- `probe` is `X86State -> (Nat x UInt64)`,
-#: the `rip` and the ONE field the instruction writes, and `state` is the
+#: `(form, encoding, probe, state)` -- `probe` is
+#: `X86State -> (Nat x UInt64 x Bool x Bool x Bool x Bool)`: the `rip`, the ONE
+#: field the instruction writes, and ALL FOUR FLAGS; and `state` is the
 #: `X86State.init` term the row runs at, i.e. which register values make the
 #: difference VISIBLE.  `probe` is a fact about the instruction, not a copy of
 #: the successor, so the check stays non-circular: it compares the model's step
@@ -765,17 +766,44 @@ SUCCESSOR_FORMS = (
     # `X86State.init` cannot supply that -- RAX is one of the fifteen registers
     # it zeroes -- so this row names its own state, and that is the difference
     # between a check and a green.
-    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)",
-     "{ X86State.init 10 %d with rax := 0x8000000000000000 }"),
+    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx, t.zf, t.sf, t.cf, t.of_)",
+     "{ X86State.init 10 %d with rax := 0x8000000000000000, zf := true, sf := true, cf := true, of_ := true }"),
     ("movq_xmm_rm64", X.encode_movq_xmm_rm64(3, X.Reg.RDI),
-     "fun t => (t.rip, t.xmm3)", "X86State.init 10 %d"),
+     "fun t => (t.rip, t.xmm3, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     # `setcc al` (`0F 9C C0`), the condition `n > n`, and the destination RAX at
     # a value with its high bytes set: the model narrows to
     # `0xdeadbeefcafebabf` and a whole-register write answers `1`.  `rm = 0` is
     # RAX and NOT RDI, so this row has to supply the destination's value itself
     # for the same reason the `cqo` row does.
-    ("setcc", X.encode_setle(R.RAX), "fun t => (t.rip, t.rax)",
-     "{ X86State.init 10 %d with rax := 0xdeadbeefcafebabe }"),
+    ("setcc", X.encode_setle(R.RAX), "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)",
+     "{ X86State.init 10 %d with rax := 0xdeadbeefcafebabe, zf := true, sf := true, cf := true, of_ := true }"),
+    # **The shift and the register ALU, added 2026-10-05 because the corpus
+    # sweep found their rows drifted too and nothing had asked.**  `e54d2f4e`
+    # was not the only commit to change the model: the shift's `CF`/`OF` have
+    # been computed by `x86_shift_post` for longer than the emitter's
+    # `shift_imm8:*` rows have existed, and those rows set only `zf` and `sf`
+    # with a comment saying the shifts "leave CF and OF alone".  The corpus
+    # reported `FAIL lean exited 1: error: Type mismatch | x86_step_shl_imm8 s18`
+    # on `shift_by_var` and `shiftlr` because of it, and it was INVISIBLE behind
+    # the `setcc` elaboration error that killed every file first.
+    #
+    # These rows are what make that class countable rather than discovered: with
+    # `shift_imm8:shl` here, the row reports the drift by name and this file is
+    # red until the successor is corrected.
+    ("shift_imm8:shl", X.encode_shift_r64_imm8("<<", R.RAX, 2),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("shift_imm8:shr", X.encode_shift_r64_imm8(">>", R.R12, 3),
+     "fun t => (t.rip, t.r12, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("shift_imm8:sar", X.encode_shift_r64_imm8(">>signed", R.RAX, 63),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:add", X.encode_add_r64_r64(R.RAX, R.RBX),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:xor", X.encode_xor_r64_r64(R.R12, R.R13),
+     "fun t => (t.rip, t.r12, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:cmp", X.encode_cmp_r64_r64(R.RAX, R.RBX),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_ri8:cmp", X.encode_cmp_r64_imm8(R.RAX, 7),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     # The stack-floor guard's two, and the reason they are HERE rather than
     # only in `_FORMS`.  Both are forms every image emits and neither had a
     # successor row, so `_plan` refused the whole corpus by name before any of
@@ -792,9 +820,9 @@ SUCCESSOR_FORMS = (
     # result is `-immediate` rather than `0` -- so `init` is the right state for
     # these two and the per-row one is only for the rows that need it.)
     ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(R.R10, 0x780000),
-     "fun t => (t.rip, t.r10)", "X86State.init 10 %d"),
+     "fun t => (t.rip, t.r10, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("lea_r64_rip", X.encode_lea_r64_rip(R.R11, 0x3ffc24),
-     "fun t => (t.rip, t.r11)", "X86State.init 10 %d"),
+     "fun t => (t.rip, t.r11, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
 )
 
 
@@ -1264,7 +1292,18 @@ def successor_lean_source(forms):
     is not decidable and `native_decide` reports "failed to synthesize Decidable"
     -- which is an error, so it is caught, but it says nothing about the
     successor.  Mapping both sides through a probe puts them in
-    `Option (Nat x UInt64)`, which is decidable and computable.
+    `Option (Nat x UInt64 x Bool x Bool x Bool x Bool)`, which is decidable and
+    computable.
+
+    **The probe carries ALL FOUR FLAGS and every row's state has all four SET,
+    and both are load-bearing.** A probe of `rip` and one register cannot see a
+    successor that disagrees about a FLAG, and a state with the flags CLEAR
+    cannot see one either -- `x86_shift_post` writing `cf := false` and a
+    successor leaving `cf` alone are the same state when `cf` was already
+    false.  That is not hypothetical: the shift rows set only `zf` and `sf`
+    while `x86_shift_post` sets four, the corpus reported
+    `Type mismatch | x86_step_shl_imm8 s18` on two examples, and every row of
+    this check was GREEN until the probe grew the flags.
 
     **The state's `%d` is the ENTRY ADDRESS and the row's `state` is the register
     file it runs at**, so a row can put a value in a register `X86State.init`
