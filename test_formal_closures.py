@@ -125,6 +125,65 @@ CASES = [
      "def main():\n"
      "    print(outer(10))\n"
      "    return 0\n"),
+    # ── a capture of a LOOP TARGET, which is a local of the enclosing
+    # function like any other and used not to be one ──
+    #
+    # CPython answers 3: `get()` is called inside the iteration that defined
+    # it, so it reads the current `i` (0, then 1, then 2), and the by-value
+    # capture ABI answers exactly that for an ordinary local — which is what
+    # the two rows above are about. This one was REFUSED on both architectures
+    # with `'i' has no home`, a sentence about the register allocator for what
+    # is a fact about the closure pass: a `ForStmt` target never entered
+    # `enriched_scope`, the map every inferred capture is filtered against, so
+    # the capture was dropped and the LIFTED body read a name with no home.
+    # One arm on that loop, reading the target through
+    # `fire_compiler.for_target_names` — the reader the parser's own target
+    # spellings need, and not a second walk of them.
+    #
+    # It is an ANSWERED row because the answer equals CPython's. It was a
+    # refusal row first, deliberately, with a needle that made it fail loudly
+    # the moment the pass learned the loop variable — which is what happened,
+    # and what moved it here rather than leaving it to be re-derived.
+    ("a_nested_def_capturing_a_loop_variable",
+     "def main():\n"
+     "    s = 0\n"
+     "    for i in range(3):\n"
+     "        def get():\n"
+     "            return i\n"
+     "        s = s + get()\n"
+     "    print(s)\n"
+     "    return 0\n"),
+    # The SAME shape with the `def` OUTSIDE the loop, so the capture has to
+    # cross the loop's boundary rather than be made inside it. CPython answers 2
+    # (`get()` is called after the loop, and the loop ran to completion), and so
+    # does this path — which is the row that says the capture is read at the
+    # CALL and not frozen when the closure is lifted. It is the shape
+    # `enriched_scope` cannot answer by position: the target is bound by a
+    # statement that comes after the `def`, so an implementation that captured
+    # "the value the target had at lift time" would answer 0 or refuse.
+    ("a_nested_def_reading_a_loop_target_bound_after_it",
+     "def main():\n"
+     "    def get():\n"
+     "        return s\n"
+     "    for s in range(3):\n"
+     "        pass\n"
+     "    print(get())\n"
+     "    return 0\n"),
+    # A UNPACKED target, `for a, b in pairs:`, so the row is about the target
+    # SPELLING rather than about the loop: `ForStmt.target` is a `str`,
+    # an `IdentExpr`, or a `TupleExpr`/`ListExpr` of those, and the pass reads
+    # it through `fire_compiler.for_target_names` for that reason. The answer is
+    # the sum over three pairs (1+10) + (2+20) + (3+30) = 66, so a reader that
+    # captured only one leaf of the pair, or none of them, cannot produce it.
+    ("a_nested_def_capturing_an_unpacked_loop_target",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, b in [(1, 10), (2, 20), (3, 30)]:\n"
+     "        def get():\n"
+     "            return a + b\n"
+     "        s = s + get()\n"
+     "    print(s)\n"
+     "    return 0\n"),
     # A nested `def` with NO capture, which is the shape that must keep working
     # for the rows above to mean anything: if the lifting machinery refused
     # every nested def, this would fail with them.
@@ -521,37 +580,39 @@ REFUSALS = [
      "    return 0\n",
      ["`m`", "a lambda has no environment to be given them"]),
 
-    # ── a nested `def` capturing a LOOP variable ──
+    # ── a nested `def` capturing a loop variable and then STORED ──
     #
-    # CPython answers 3 (`get()` is called inside the iteration that defined it,
-    # so it reads the current `i`) and the by-value capture ABI answers exactly
-    # this for an ordinary local — so the shape "should" work and does not. The
-    # root cause is one arm missing from a loop in
-    # `mojo/middle/closures.py::discover_closures`: a `ForStmt` target never
-    # enters `enriched_scope`, which is the map every inferred capture is
-    # filtered against, so the capture is dropped and the lifted body reads a
-    # name with no home.
+    # The hazard the capture fix introduces, kept as a refusal on purpose. Every
+    # element of `fs` closes over the SAME loop cell in CPython, so this prints
+    # `2 2 2`; a capture ABI that binds by value at lift time prints `0 1 2`.
+    # Three different wrong numbers rather than one, which is why the shape must
+    # stay refused rather than be answered — the by-value ABI cannot express
+    # late binding at all.
     #
-    # The needle is that name in the ALLOCATOR's spelling, which is not the right
-    # sentence — it is a fact about the closure pass, not about the register
-    # allocator — and pinning it deliberately: the row fails loudly the moment
-    # the pass learns the loop target, so whoever fixes it moves this row into the
-    # ANSWERED group instead of re-deriving what it should say. Filed as
-    # `bugs/FORMAL_a_nested_def_capturing_a_for_target_is_not_a_capture.md`, which
-    # also records why the fix was not landed in the round that measured it (the
-    # file is shared with the compiled backend and owes a full gate) and the
-    # late-binding hazard a by-value capture would introduce for the STORED
-    # spelling of the same construct.
-    ("a_nested_def_capturing_a_loop_variable",
+    # It IS refused, and the sentence says why in the reader's own terms: a
+    # lifted function's value is not its address, because the lift prepends its
+    # captures as parameters, so a word holding `main_g` would have to carry an
+    # environment as well as a code address. That is a fact about the closure
+    # ABI and not about this row, which is why the needles name the LIFT rather
+    # than the loop variable — the `a_lambda_closing_over_a_loop_variable_binds_
+    # late` row below is the same trap written with a lambda and is refused by
+    # the lambda's own sentence.
+    #
+    # Pinned because nothing about the capture change protects it: the fix made
+    # `i` a capture, and this program's failure is about handing a lifted
+    # function back as a value.
+    ("a_nested_def_captured_in_a_loop_and_stored_in_a_list",
      "def main():\n"
-     "    s = 0\n"
+     "    fs = []\n"
      "    for i in range(3):\n"
-     "        def get():\n"
+     "        def g():\n"
      "            return i\n"
-     "        s = s + get()\n"
-     "    print(s)\n"
+     "        fs.append(g)\n"
+     "    r0 = fs[0]()\n"
+     "    print(r0)\n"
      "    return 0\n",
-     ["'i'", "main_get"]),
+     ["is a nested `def`",
+      "the lift prepends its captures"]),
 
     # ── a callable stored in a container and read back ──
     # The result is BOUND before it is printed, and that is not incidental:

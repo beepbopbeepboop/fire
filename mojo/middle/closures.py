@@ -25,6 +25,7 @@ from fire_compiler import (
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
     TryStmt, VarDecl,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
+    for_target_names,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
 from mojo.middle.exprtypes import _walk_ast, _struct_name_of
@@ -203,6 +204,66 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                         t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     ctx.var_types[bstmt.name] = t
+            elif isinstance(bstmt, ForStmt):
+                # A loop TARGET is a local of the enclosing function like any
+                # other, and it was in neither arm above — so a nested `def`
+                # that reads one was not a capture, the pass dropped the name,
+                # and the lift produced a function whose body read a name with
+                # no home anywhere. The symptom was a sentence about the
+                # register allocator ('i' has no home) for what is a fact
+                # about this pass:
+                #
+                #     def main():
+                #         s = 0
+                #         for i in range(3):
+                #             def get():
+                #                 return i
+                #             s = s + get()
+                #         return s
+                #
+                # CPython answers 3 and this path refused, identically on both
+                # architectures. By value is the right ABI here and is what an
+                # ordinary local already got (`capture_read_directly_in_the_
+                # enclosing_scope`, test_formal_closures.py).
+                #
+                # `fire_compiler.for_target_names` is the reader, not a second
+                # walk: `ForStmt.target` is a `str`, an `IdentExpr`, or a
+                # `TupleExpr`/`ListExpr` of those, and this file already spelled
+                # that walk out by hand twenty lines below for the INNER
+                # function's own targets — which is a second copy of a question
+                # the parser has one answer for, and it handled only `str` and
+                # `hasattr(tgt, 'name')`, so `for a, b in pairs:` inside a
+                # nested def was mis-read there too.
+                #
+                # The type is the `VarDecl` arm's `'int64_t'`-when-there-is-no-
+                # initializer default, because a loop counter on this path IS a
+                # 64-bit word and there is nothing to ask: `for i in xs` has no
+                # initializer expression at all. A name already in
+                # `enriched_scope` is left alone, so a target that SHADOWS a
+                # parameter keeps the parameter's type — the same rule the two
+                # arms above follow.
+                #
+                # What this is not is late binding. `fs = []` then a `def g`
+                # appended to `fs` per iteration is ONE cell and THREE closures,
+                # and this ABI cannot express it: `for_target_names` gives three
+                # by-value captures, so `fs[0]()` would answer the first value.
+                # That shape stays refused, and it is refused by a different
+                # construct — `model.value_bracket_reading_refusal`, a container
+                # element read back and called — which
+                # `test_formal_closures.py::a_closure_stored_in_a_container_is_
+                # refused_rather_than_called_through_a_readback` pins, because
+                # nothing about a capture change obviously protects it.
+                #
+                # A `Comprehension` is a separate scope and its targets are NOT
+                # enclosing-scope locals: `_gmi_all_stmts_nonfunc` walks
+                # statements and a comprehension is an expression, so none of
+                # its targets can reach here — and getting it wrong in the
+                # other direction would capture a comprehension's loop variable
+                # into a closure and shadow it.
+                for _lt in for_target_names(bstmt.target):
+                    if _lt not in enriched_scope:
+                        enriched_scope[_lt] = 'int64_t'
+                        ctx.var_types[_lt] = 'int64_t'
         ctx.var_types = _saved_vt2
         # Parallel structures instead of a list-of-3-tuples: a tuple element
         # indexed on the self-hosted compiled path erases to `int64_t`, and
@@ -257,11 +318,15 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     if bstmt.target.name not in _inner_nonlocals:
                         inner_assign_targets.add(bstmt.target.name)
                 elif isinstance(bstmt, ForStmt):
-                    tgt = bstmt.target
-                    if isinstance(tgt, str):
-                        inner_assign_targets.add(tgt)
-                    elif hasattr(tgt, 'name'):
-                        inner_assign_targets.add(tgt.name)
+                    # `for_target_names`, the reader the OUTER function's loop
+                    # targets use too, and not the hand-rolled walk this was:
+                    # that one handled only a `str` target and anything with a
+                    # `name` attribute, so `for a, b in pairs:` contributed
+                    # NOTHING here and `a`/`b` were then free names of this def
+                    # — which is a capture of a local this def binds itself.
+                    for _tgt in for_target_names(bstmt.target):
+                        if _tgt not in _inner_nonlocals:
+                            inner_assign_targets.add(_tgt)
             # A PLAIN for-loop unpack (`for _pn, _pt in inner.params:`),
             # NOT a comprehension (`{pn for pn, _ in ...}` — tuple-unpack-
             # in-a-comprehension boxes `pn` to int64_t self-hosted) and
