@@ -1214,15 +1214,16 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
     needs to know whether a newline inside the literal is content, and whether
     the literal has to be collapsed to a placeholder). The second of those was
-the defect `cca2a17f` fixed: `fire_compiler.py` refusing a PEP 701 f-string
-    whose replacement field spans **lines**, which `test_formal_libc_symbol.py`
-    was the one file in the 2026-10-04 sweep to meet (its refusal read
-    `unterminated string literal`), and whose fix is recorded at
-    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row (fixed 2026-10-05; the test
-    is `test_string_literal_lexing.py`'s `LITERALS` block). With no shared
-    predicate the scanner asked "is there a line end here?" without ever asking
-    "am I inside code?", and CPython's rule for a replacement field is that it
-    MAY span lines.
+    a bug of its own, and it is named by what it did rather than by a doc
+    path: `fire_compiler.py` refused a PEP 701 f-string whose replacement
+    field spans **lines**, which `test_formal_libc_symbol.py` was the one
+    file in the 2026-10-04 sweep to meet (its refusal read `unterminated
+    string literal`). It is fixed — at `cca2a17f`, recorded at
+    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
+    and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
+    there. With no shared predicate the scanner asked "is there a line end
+    here?" without ever asking "am I inside code?", and CPython's rule for
+    a replacement field is that it MAY span lines.
 
     Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
     `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
@@ -2214,13 +2215,11 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # per multi-line f-string. What makes such a literal
                     # possible at all is `_scan_string_end`'s replacement-field
                     # depth; without that this branch is dead code, which is the
-                    # shape of the bug
-# `cca2a17f` fixed — the bug `fire_compiler.py` refusing a
-                    # PEP 701 f-string whose replacement field spans lines,
-                    # which the `b13` round's `§5` (now
-                    # `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row,
-                    # `§1.13`'s `#### 1.5`) records: the first of the two halves
-                    # was missing and this is the second.
+                    # shape the bug had — the first of the two halves was
+                    # missing and this is the second. Fixed at `cca2a17f` (the
+                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
+                    # §3.1's `b13` row), and held by
+                    # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])
                     end = _scan_string_end(src, i, c, False, interpolated)
                     if end < 0:

@@ -253,6 +253,19 @@ CASES = [
     ("(?i)z|(?-i:B)", "B", 0, "a global flag on one option, a scoped clear on "
                                 "the other"),
     ("b|(?i:z)", "b", 0, "the second option does not disturb the first"),
+    # Three rows `work/formal27-5` measured against CPython and this list was
+    # missing, kept because they are shapes and not repeats: the one whose
+    # answer differs in the SPAN rather than in the status, a NESTED scoped
+    # group, and a scoped group inside a CAPTURING one (this list had the
+    # capture inside the group, which is the other nesting).
+    ("(?x: a) c", "ac", 0, "and the answer differs in the SPAN rather than in "
+                           "the status: VERBOSE leaked past the `)` matches "
+                           "`ac`, and with the flag stopped the match ends "
+                           "after the space"),
+    ("(?i:(?-i:a))b", "aB", 0, "a NESTED scoped group: the inner clear wins "
+                               "inside and the outer fold is back for the `b`"),
+    ("((?i:a)b)", "aB", 0, "a scoped group inside a CAPTURING group, so the "
+                           "group number and the flag are independent"),
 ]
 
 
@@ -1043,6 +1056,38 @@ def test_inline_flags_that_cpython_refuses_are_refused_here(tmpdir):
           % len(INLINE_FLAG_REFUSED), "got %s" % out)
 
 
+def _scoped_status_program(pairs):
+    """One line per scoped row: the STATUS and the whole match's span.
+
+    The span is half the test. `(?x: a) c` matches on both of its subjects if
+    VERBOSE leaks, so a status-only comparison would call a leaked flag correct
+    on the one row that is about leaking; the spans differ ((0, 3) against
+    (0, 2)) and that is what says the flag stopped at the `)`.
+    """
+    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
+    for index, (pat, flag, subj, _what) in enumerate(pairs):
+        lines.append("    p%d = %s" % (index, mojo_str(pat)))
+        lines.append("    s%d = %s" % (index, mojo_str(subj)))
+        lines.append("    st%d = [0, 0, 0, 0, 0, 0]" % index)
+    for index, (pat, flag, subj, _what) in enumerate(pairs):
+        lines.append("    r%d = re.search(st%d, 6, p%d, s%d, %d)"
+                     % (index, index, index, index, flag))
+        lines.append("    emit(0, r%d)" % index)
+        lines.append("    emit(0, st%d[0])" % index)
+        lines.append("    emit(0, st%d[1])" % index)
+        lines.append("    printf(\"%s\", re.nl())")
+    lines.append("    return 0")
+    return "\n".join(lines) + "\n"
+
+
+def _scoped_expected(case):
+    """CPython's own `[status, start, end]` for one scoped row."""
+    m = re.search(case[0], case[2], case[1])
+    if m is None:
+        return [0, -1, -1]
+    return [1, m.start(), m.end()]
+
+
 def test_the_scoped_flag_form_answers_like_cpython(tmpdir):
     """`(?i: … )` is compiled, and answers what CPython answers.
 
@@ -1060,21 +1105,64 @@ def test_the_scoped_flag_form_answers_like_cpython(tmpdir):
     answers the same thing, so a module that implemented the feature twice and
     wired only one of them up would pass a table of the argument spellings.
 
-    The statuses are compared against CPython rather than against a list, so
-    the table cannot rot into "these are the answers we happen to give".
+    **The SPAN is compared as well as the status, and both are taken from
+    CPython rather than from a list**, so the table cannot rot into "these are
+    the answers we happen to give". Two premises are asserted before the image
+    is built, because a table taken on trust measures nothing:
+
+      * every pattern COMPILES in CPython — a shape CPython also refused would
+        be a shared limit rather than a divergence;
+      * every pattern asked twice has CPython answers that DIFFER between its
+        two rows, and at least one pattern is asked twice, so the rule is not
+        vacuous on a table someone has deduplicated. A flag that leaked out of
+        its group, or was not restored on the way out, answers the SAME for
+        both subjects, so a row whose two subjects agree cannot see the defect
+        it exists to catch: the point of `(?i:a)b` is the `b` after the group,
+        and the point of `(?x: a) c` is the space after it.
+
+    **Both backends**, because the cause is a host MODULE and the two emitters
+    lower it differently, and the scoped form's cost is a new arm in the
+    parser, which is exactly the shape of change one of them can get right and
+    the other wrong.
     """
     pairs = SCOPED_FLAG_PAIRS
-    src = _inline_status_program(pairs)
-    want = [1 if re.search(pat, subj, flag) else 0 for pat, flag, subj, _w in pairs]
-    try:
-        out = build_and_run(tmpdir, "scopedflags", src)
-    except AssertionError as e:
-        check(False, "the scoped-flag program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    check(out == want,
-          "every scoped flag group answers as CPython does (%d spellings)"
-          % len(want), "got %s, CPython %s" % (out, want))
+    for pat, _flag, _subj, _what in pairs:
+        try:
+            re.compile(pat)
+        except re.error as e:
+            check(False, "%r compiles in CPython, so this table is measuring a "
+                         "divergence and not a shared limit" % pat, str(e))
+    seen = {}
+    for case in pairs:
+        seen.setdefault(case[0], []).append(tuple(_scoped_expected(case)))
+    repeated = 0
+    for pat, answers in sorted(seen.items()):
+        if len(answers) < 2:
+            continue
+        repeated += 1
+        check(len(set(answers)) > 1,
+              "CPython answers %r differently on its own two subjects, so the "
+              "row can see a flag that leaked" % pat,
+              "both rows answer %r" % (answers,))
+    check(repeated > 0,
+          "the table has %d pattern(s) asked twice, so the anti-leak rule above "
+          "is not vacuous" % repeated)
+    src = _scoped_status_program(pairs)
+    want = [_scoped_expected(c) for c in pairs]
+    for backend in (None, "x86_64"):
+        tag = backend or "arm64"
+        try:
+            out = build_and_run(tmpdir, "scopedflags%s" % tag, src,
+                                backend=backend)
+        except AssertionError as e:
+            check(False, "[%s] the scoped-flag program builds" % tag,
+                  str(e)[:400])
+            continue
+        got = [[int(tok) for tok in line.split()] for line in out]
+        check(got == want,
+              "[%s] every scoped flag group answers as CPython does, status "
+              "and span (%d spellings)" % (tag, len(want)),
+              "got %s\nwant %s" % (got, want))
     # The GROUP COUNT is the other half of "this is `(?: … )`": CPython numbers
     # nothing inside `(?i: … )`, so `(?i:(a))` has one group and `(?i:a)` none,
     # and a scoped group that numbered itself would shift every later group.

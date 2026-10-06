@@ -24,6 +24,14 @@ unchanged and item 4 was filed by its own branch
 features §2 names are still `formal19-1`'s and `formal16-2`'s and the per-file
 table is still §2's. §0.2 is what changed, and §0.1 (item 1) before it.
 
+**Status (2026-10-05, `work/formal27-5`): §6 item 2 is CLOSED too — the
+constants-only refusal was false in both of its clauses and no longer is, with
+cases on both architectures. The FEATURE it was standing in for is still
+`formal16-2`'s and still unlanded, so this document still has no fix of its own
+in it; what landed is the sentence.** §0.1 below is item 1, item 3 is unchanged,
+and item 4 was filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_
+nearer_leaf`, `formal21-1`).
+
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
@@ -216,6 +224,15 @@ word to bind for it. A near-identical program with a comptime argument that
 sit behind it, so it was worth a doc rather than a mention — and the doc it
 needed to be is not the one `FORMAL_generic_monomorph_scope.md` §"what is not
 covered" was going to become. **The stop is the tool's documented limit** —
+
+**…and the shape has a doc of its OWN as well**, filed the same day by
+`work/formal27-5`: `bugs/FORMAL_an_explicit_parameter_list_naming_a_
+comptime_value.md`, which measures the wall itself — a one-element type
+bracket builds and runs, so this is NOT the bare-call-inference row and
+NOT `FORMAL_generic_monomorph_scope.md`'s row read from the other side, and
+§8 of that doc does not in fact list it. The alias doc above names what the
+second bracket argument is; this one names what the demand walk cannot
+substitute for.
 neutering a module removes the names its users call — and it is now detected and
 reported as such rather than as 43 files refusing a construct (§4).
 
@@ -562,6 +579,46 @@ still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
     The six files behind this row now have a next step and an owner instead of
     a dead end, which is what this item asked for.
 
+
+   **The two clauses that sentence got wrong, because the second is the
+   sharper half and the summary above only says the first:**
+
+   * "There is nothing an importer could bind, and **nothing this backend
+     could add**" — false, and false about a CAPABILITY rather than about
+     the file. The two things that would answer it are not declarations this
+     module is missing: a value model for a container-valued module constant
+     inlined at the use site (`FORMAL_module_state_no_storage.md`) and the
+     rule that a module nothing binds needs no library at all. The second of
+     those is **not even a new capability** — `_namespace_library` already
+     emits a real library with an EMPTY export trie for a package `__init__`
+     that declares nothing, for the same reason, and its gate is
+     `_declares_nothing_but_a_package_body`. The refusal's author was one
+     predicate away from the answer and the message told the reader the
+     answer did not exist.
+   * "only module-level constants, **which are inlined at their use site**
+     and cross no boundary" — false in the same breath: nothing is inlined,
+     because the module is REFUSED and no library is ever built. A sentence
+     describing a mechanism this path did not take sends the reader looking
+     for the inline.
+
+   **The verdict is unchanged and the test says so first** — a test that
+   wanted the module to build would be asking for `formal16-2`'s feature and
+   would be testing the wrong thing. `test_formal_monomorph.py`'s
+   `a constants-only module is refused without saying nothing could be added`
+   is the pin, on arm64 and x86-64, and it asserts the two NEGATIVES
+   (`"nothing this backend could add"`, `"are inlined at their use site"`)
+   as well as the two names, so a reword that brings either false clause
+   back goes red. **The sweep's own hand-copy of the sentence was the second
+   place it was false**: `test_formal_sweep.py`'s `EXPORTS` fixture quoted the
+   old wording verbatim to pin the cause label, so the reword left it
+   matching a string nothing emitted while the test that exists to catch
+   exactly that reported green. That fixture is now **generated** —
+   `formal.build.no_public_api_reason` called on a two-line module — which
+   is the treatment the `b11` round's §5.4 gives the two samples it could
+   generate (that round is indexed at `bugs/FORMAL_sweep_work_map.md`
+   §3.1), and the three fixtures that quote messages this tree only reaches
+   through a 700-file sweep keep their hand-copies because there is nothing
+   to call.
 3. ~~**The chain walk stops at link 4 and cannot be pushed further by this
    tool.**~~ **CLOSED — §0.2, and the premise was wrong as well as the tool.**
    The stop was never the tool's limit: it was one deleted line of a

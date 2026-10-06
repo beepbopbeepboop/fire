@@ -12740,9 +12740,14 @@ def _with_imported_constants(symbols: dict, sites: dict) -> dict:
         if lit is None or getattr(sym, "site", None) != "imported":
             out[name] = sym
         else:
+            # `defining` is carried over rather than dropped: this rebuild adds
+            # a folded literal to an IMPORTED name, and a name whose defining
+            # spelling is lost here is a name no reader can ask the export
+            # table about (`imported_function_as_a_value_refusal`).
             out[name] = M.GlobalSymbol(name, lit, "imported",
                                        getattr(sym, "module", None),
-                                       getattr(sym, "line", 0) or 0)
+                                       getattr(sym, "line", 0) or 0,
+                                       defining=getattr(sym, "defining", None))
     return out
 
 
@@ -15765,10 +15770,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # question through the same published-name table before falling
                 # through to the generic arm, which is the honest report for a
                 # name the module does not publish at all.
+                # …and the name the question is asked about is the DEFINING
+                # one, which is a different string from `name` exactly when the
+                # import has an `as`. `from os import environ as e` binds `e`
+                # and `os`'s export table is keyed by `environ`, so asking it
+                # about the local spelling answers "no" and the generic arm
+                # below wins with the sentence this arm exists to replace. The
+                # message still speaks the LOCAL name, because that is what the
+                # reader's own source says.
                 _why = M.imported_function_as_a_value_refusal(
                     name, getattr(sym, "module", None) or "", fn.name,
                     _module_published_names(getattr(sym, "module", None),
-                                            link_line))
+                                            link_line),
+                    getattr(sym, "defining", None))
                 raise CodegenError(_why or M.module_global_refusal(
                     name, sym, fn.name,
                     *_published_shape(getattr(sym, "module", None), link_line)))
@@ -19335,10 +19349,16 @@ def dylib_export_lists(dylibs: list) -> list:
 #     failure this would have been the other way round: a refusal for a call
 #     that should have compiled.
 #
-#   * An ELF image gets nothing. `build_elf` carries one `lib_name` and no
-#     dependency list, and `formal/elf.py` is not this file's to grow. A
-#     `mojo_*` call on an ELF target is still refused, by the same shared rule
-#     and the same words, and the refusal now says why.
+#   * An ELF image gets nothing, and the reason is the CONTAINER rather than the
+#     link line. `build_elf` takes a `deps` list and writes one `DT_NEEDED` per
+#     entry — that is how an ELF image imports a module library — so this bullet
+#     used to say `build_elf` "carries one `lib_name` and no dependency list",
+#     which stopped being true when the ELF emitter landed and sent the next
+#     reader to a limitation that is not there. What is missing is an ELF build
+#     of `runtime/` beside `build_stdlib_dylib.runtime_dylib`, which is a Mach-O
+#     dylib. A `mojo_*` call on an ELF target is still refused, by the same
+#     shared rule and the same words, and the refusal now says the container
+#     rather than the link line.
 
 
 _MH_MAGIC_64 = 0xFEEDFACF
@@ -19563,12 +19583,21 @@ def runtime_library(arch: str, fmt: str):
     downstream can tell the runtime from an imported module, and nothing
     downstream has to know.
 
-    `fmt != "macho"` returns None. That is not a shrug: `build_elf` carries one
-    `lib_name` and no dependency list, so an ELF image genuinely cannot name a
-    second library, and the caller falls back to the shared refusal, which says
-    so. Returning None and letting the refusal speak is the honest failure; the
-    alternative — silently linking nothing and reporting a successful build —
-    is the failure class this whole programme exists to remove.
+    `fmt != "macho"` returns None, and the reason is the CONTAINER rather than
+    the link line's capacity. `build_elf` takes a `deps` list and writes one
+    `DT_NEEDED` per entry, which is how an ELF image imports a module library
+    today, so "an ELF image cannot name a second library" was never true and
+    the docstring said it for as long as this function existed. What does not
+    exist is an ELF BUILD of `runtime/`: `build_stdlib_dylib.runtime_dylib`
+    builds a Mach-O dylib — its own `_arch_or_die` checks the Mach-O that came
+    out — and there is no ELF counterpart beside it. So the manifest this
+    function would hand back names a file an ELF loader cannot open, which is
+    exactly what `_audit_link_line_containers` exists to refuse, four bytes of
+    magic from each file; the caller falls back to the shared refusal, which
+    names the container rather than the link line. Returning None and letting
+    the refusal speak is the honest failure; the alternative — silently linking
+    nothing and reporting a successful build — is the failure class this whole
+    programme exists to remove.
 
     A Mach-O target that cannot BUILD the library is an error rather than a
     None. `runtime_dylib` needs a working host toolchain, and on a host without
@@ -20134,7 +20163,20 @@ def no_public_api_reason(source_paths: list) -> str:
 
       * it declares nothing at all (module-level `comptime` constants only —
         `std/sys/_io.mojo`'s `stdin`/`stdout`/`stderr`): there is no
-        function and no type to cross, and there never will be;
+        function and no type to cross, and there never will be. **This
+        branch's message used to close with "nothing this backend could
+        add", and that was FALSE in both of its clauses** — a
+        container-valued constant is exactly what a value model would
+        inline at the use site, and "skip the library for a module nothing
+        binds" is a rule rather than a declaration. The message now names
+        those two and says they do not exist yet, because a reader who is
+        told there is nothing to add stops, and 6 of one stdlib scope's 46
+        files and 56 of the corpus sit behind this sentence
+        (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6
+        item 2, which is where the fix was asked for). The same sentence
+        also claimed the constants "are inlined at their use site", which
+        is not true of a module this path refuses: nothing is inlined,
+        because the library is never built.
       * every public function is a GENERIC template (`std/stat/stat.mojo`'s
         seven `S_ISxxx[intable: Intable]`): doc/ABI.md is explicit that a
         generic is not a single boundary symbol, each INSTANTIATION is. This
@@ -20214,18 +20256,20 @@ def no_public_api_reason(source_paths: list) -> str:
                     f"another module.")
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
-                f"constants, which are inlined at their use site and cross no "
-                f"boundary. There is nothing an importer could bind, so the "
-                f"refusal itself is correct. What would remove it is not more "
-                f"work on the module but a decision about the BACKEND: those "
-                f"constants are already inlined at their use sites by the "
-                f"module-constant substitution, and what is absent is a rule "
-                f"that a module with nothing to export needs no dylib at all — "
-                f"an importer reading the constant directly instead of linking "
-                f"a library for it. That is one feature, and "
-                f"`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib"
-                f".md` is where it is written down, so nothing here is waiting "
-                f"on this file.")
+                f"constants, and a constant is not a boundary symbol: there is "
+                f"no address an importer could bind, so the refusal itself is "
+                f"correct. What would remove it is not a declaration this file "
+                f"is missing, and saying so is the point: the two things that "
+                f"would answer it are a value model for a container-valued "
+                f"module constant — inline it at the use site, which needs "
+                f"storage this path does not have "
+                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a rule that "
+                f"a module nothing binds needs no library at all, an importer "
+                f"reading the constant directly instead of linking a library "
+                f"for it (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_"
+                f"a_dylib.md`). Neither exists here, so this is refused at the "
+                f"build rather than linked as a library with nothing in it, and "
+                f"nothing here is waiting on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and

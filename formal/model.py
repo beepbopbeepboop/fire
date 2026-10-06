@@ -20625,22 +20625,43 @@ def gimple_runtime_refusal(name: str) -> str:
         # Reached only when the library is NOT on this image's link line, which
         # is now a much narrower condition than it was: the linker puts the
         # runtime library on the line for exactly this case. So the two reasons
-        # left are an image that cannot carry a library at all (an ELF target —
-        # `build_elf` has one `lib_name` and no dependency list) and a name the
-        # library does not export, of which `py_tokenize` is the standing
-        # example: fire_runtime.h declares it, the dylib does not define it, and
-        # `build_stdlib_dylib.runtime_export_entries` already reports that as
-        # UNDEFINED. The message says so rather than implying the mechanism is
-        # broken, because on this tree it is not.
+        # left are both facts about the LINK LINE rather than about the call,
+        # and the sentence below used to name a third one that does not exist:
+        # "an image that cannot carry a library at all (an ELF target —
+        # `build_elf` has one `lib_name` and no dependency list)". `build_elf`
+        # has taken a `deps` list and written one `DT_NEEDED` per entry since
+        # the ELF emitter landed — that is how an ELF image imports a module
+        # library today — so a reader sent looking for the link line's capacity
+        # was sent to look for a parameter that has been there all along. What
+        # is actually true for a non-Mach-O image is the CONTAINER:
+        # `build_stdlib_dylib.runtime_dylib` builds a Mach-O dylib and there is
+        # no ELF build of `runtime/` beside it, and
+        # `formal/build.py::_audit_link_line_containers` is what refuses to
+        # write a line whose libraries are in the wrong one. The other real
+        # reason is a name the library does not export, of which `py_tokenize`
+        # is the standing example: fire_runtime.h declares it, the dylib does
+        # not define it, and `build_stdlib_dylib.runtime_export_entries` already
+        # reports that as UNDEFINED. Both are named, and neither pretends the
+        # mechanism is broken, because on this tree it is not.
         return (
             f"{lead} This one is the reachable half: every argument and the "
             f"return value is a single word — `{entry['signature']}` — and a "
             f"single word is exactly what a value is on this path, so a formal "
             f"image could make the call. Nothing about the CALL stops it. What "
             f"is missing is the library, and only that: nothing on this image's "
-            f"link line defines {name}, so this image is either one that cannot "
-            f"carry a library or one whose library does not export this name."
-            f"{tail}")
+            f"link line defines {name}. There are two ways that is so and "
+            f"neither is a fact about the call. The library "
+            f"`formal/build.py` puts on the line for exactly this case is a "
+            f"Mach-O dylib, one per architecture, and an image in the other "
+            f"container cannot be given it at all — "
+            f"`formal/build.py::_audit_link_line_containers` is what refuses to "
+            f"write such a line, from four bytes of magic per file, because "
+            f"the loader would be told to open a file it cannot open. Or the "
+            f"library is on the line and does not export this name, which is a "
+            f"different fact: fire_runtime.h declares `py_tokenize` and the "
+            f"dylib does not define it, and "
+            f"`build_stdlib_dylib.runtime_export_entries` reports that as "
+            f"UNDEFINED.{tail}")
     why = ' and '.join(_box_why(*b) for b in entry['boxes'])
     return (
         f"{lead} It could not be answered by linking that library either: "
@@ -24850,7 +24871,7 @@ def _value_operations_repair(module: str, attr: str, published, leaf: str) -> st
 
 
 def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
-                                         published):
+                                         published, defining: str = None):
     """`from mod import name` then an operation on `name` — or None.
 
     **The FROM-IMPORT half of `dylib_value_member_refusal`, and it answers the
@@ -24870,22 +24891,37 @@ def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
     to it. None — and the caller falls through to the generic arm, which is the
     honest report — for a name the module does NOT publish, which is the case
     where the generic sentence is true.
+
+    **`defining` is the ALIAS, and it is the whole of the third case this
+    function had.** `from os import environ as e` binds `e`, and the export
+    table of `os` is keyed by `environ`, so asking it about `e` answers "no"
+    and the generic arm won with the false sentence again — the same defect one
+    spelling along, reached by adding four characters to the import. So the
+    question is asked about `defining` when there is one, the REPAIR prefix is
+    `defining_` (it is the module's own spelling of the operations), and the
+    message speaks the LOCAL name, because that is what the reader's own source
+    says. With no alias this function's wording is unchanged, which is what lets
+    the cases in `test_formal_module_attr.py` stay as they are.
     """
-    if not published or name not in published:
+    key = defining or name
+    if not published or key not in published:
         return None
     ops = set(published)
-    repair = _value_operations_repair(mod, name, ops, f"{name}.…")
+    repair = _value_operations_repair(mod, key, ops, f"{name}.…")
     who = f"{fn_name}: " if fn_name else ""
-    return (f"{who}{name!r} is imported from `{mod}`, and it is one of that "
-            f"module's published FUNCTIONS — importing it and CALLING it lowers "
-            f"today (`{mod}.{name}(...)` or `{name}(...)`), so the import is not "
-            f"what is refused. What is refused is an OPERATION on it: a function "
-            f"is not a value this path can place, so `{name}.…` is a call "
-            f"through a VALUE and there is no symbol for it to bind. A dylib publishes functions, not the objects "
-            f"they are called on, so an operation on a value a module hands back "
-            f"cannot be spelled as a member of it; {repair}. "
+    aliased = (f" under the name `{key}`" if key != name else "")
+    return (f"{who}{name!r} is imported from `{mod}`{aliased}, and it is one of "
+            f"that module's published FUNCTIONS — importing it and CALLING it "
+            f"lowers today (`{mod}.{key}(...)` or `{name}(...)`), so the import "
+            f"is not what is refused. What is refused is an OPERATION on it: a "
+            f"function is not a value this path can place, so `{name}.…` is a "
+            f"call through a VALUE and there is no symbol for it to bind. A "
+            f"dylib publishes functions, not the objects they are called on, so "
+            f"an operation on a value a module hands back cannot be spelled as a "
+            f"member of it; {repair}. "
             f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
             f"cannot cross a dylib boundary at all")
+
 
 
 def module_spine_link_resolves(qualifier: str, by_module: dict,
@@ -39445,18 +39481,32 @@ class GlobalSymbol:
     time the node exists. It is kept here rather than re-derived at each use
     site because the one construct that can observe the difference is a
     comparison, and a comparison that answered "0 == 0 is True" for a `None`
-    would be a wrong answer rather than a refusal."""
+    would be a wrong answer rather than a refusal.
 
-    __slots__ = ("name", "literal", "site", "module", "line", "none_valued")
+    `defining` is the name the DEFINING module spells this one, and it is
+    different from `name` exactly when the import has an `as`. Both are needed
+    and neither is derivable from the other: every read and every call site in
+    this unit spells the LOCAL name, while the export table of the linked
+    library is keyed by the DEFINING one — so a reader that asks "does this
+    module publish that name" with the local spelling answers about a name
+    nobody publishes. `import_bindings` has reported both since it was written
+    ("the DEFINING name, which is only ever different from the local one when
+    there is an `as`, and which is the name the export table is keyed by"), and
+    this is the field that keeps that promise load-bearing for a diagnostic
+    rather than only for a call."""
+
+    __slots__ = ("name", "literal", "site", "module", "line", "none_valued",
+                 "defining")
 
     def __init__(self, name, literal=None, site="assigned", module=None,
-                 line=0, none_valued=False):
+                 line=0, none_valued=False, defining=None):
         self.name = name
         self.literal = literal
         self.site = site
         self.module = module
         self.line = line
         self.none_valued = none_valued
+        self.defining = defining
 
     def __repr__(self):
         return (f"GlobalSymbol({self.name!r}, literal="
@@ -40033,10 +40083,10 @@ def collect_module_symbols(stmts: list, source_path: str = None) -> dict:
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
-            for name, module in _imported_names(stmt):
+            for name, module, defining in _imported_names(stmt):
                 table.setdefault(name, GlobalSymbol(
                     name, None, "imported", module,
-                    getattr(stmt, "line", 0) or 0))
+                    getattr(stmt, "line", 0) or 0, defining=defining))
             continue
         name = _module_binding_name(stmt)
         if name is None:
@@ -41118,8 +41168,15 @@ def import_bindings(stmt) -> list:
 
 
 def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
-    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
+    """`[(bound name, module, name defined there)]` for one module-level import.
+
+    The third element is `import_bindings`' own DEFINING name, kept rather than
+    dropped: it is the key the linked library's export table uses, so a
+    diagnostic that asks whether the module publishes this name has to ask it
+    about that one and not about the local spelling. `GlobalSymbol.defining`
+    says why that matters.
+    """
+    return list(import_bindings(stmt))
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on
@@ -42457,8 +42514,13 @@ def body_has_conditional_branch(fn) -> bool:
         one's — the same rule `ValueKinds._scan` follows for the same reason.
 
     Under-counting is the safe direction and is where the residual lives:
-    `tools/formal_call_depth_census.py`'s `no-brch` column is what this
-    predicate's complement leaves unguarded, measured over the corpus.
+    `tools/formal_call_depth_census.py`'s `unguard` column is what this
+    predicate's complement leaves unguarded, measured over the corpus. (It was
+    written `no-brch`, which is a name the census does not print — the column is
+    `unguard`, and it is the DEPTH of the deepest chain through unguarded
+    bodies rather than a per-image flag. Fixed 2026-10-05, with the residual
+    re-measured the same day: **7 frames**, unchanged, which is what
+    `stack_floor_guarded_names`'s own paragraph above states.)
     """
     body = getattr(fn, "body", None)
     if body is None:
@@ -42534,10 +42596,19 @@ def stack_floor_guarded_names(functions, structs: dict = None,
         constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
         the cycle rule left a DAG of DISTINCT functions free to walk straight
         past it. Measured over this repository and the stdlib with
-        `tools/formal_call_depth_census.py`: the deepest single image is **76
-        frames** (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`),
-        which is 1.3x what the arm64 budget affords. So this is not a stated
-        limit with no work behind it; it is one the corpus is already inside.
+        `python3 tools/formal_call_depth_census.py` (12 s, no build): the
+        deepest single image is **89 frames** (`formal/arm64_codegen.py`, and
+        **78** for `x86_64_codegen.py`), which is 1.5x what the arm64 budget
+        affords. So this is not a stated limit with no work behind it; it is
+        one the corpus is already inside.
+
+        **Those figures were 76 and 69 (1.3x) until 2026-10-05, and the number
+        is a MEASUREMENT of the tree rather than a property of the rule** — the
+        repository has grown from 413 to 474 images since, and the two deepest
+        are still the two this backend's own codegen lives in. It is written
+        here with the command that produces it for that reason: a figure quoted
+        without one cannot be re-measured by the next reader, and a stale one is
+        indistinguishable from a true one until something goes wrong.
 
     **And the second rule costs nothing the first one was careful not to.** The
     per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
