@@ -221,14 +221,27 @@ ARGUMENT_METHODS = {
 #: are the rows a signature check has to be able to tell apart: the same call
 #: with one argument, with two and with three is a different answer each time,
 #: so "this path takes exactly one argument" is an honest refusal only if the
-#: source asked for the one it can answer. The negative `start` and the
-#: end-before-start window are CPython's own clamping rules and are here so a
-#: fold cannot quietly get them wrong by ignoring the arguments.
+#: message says WHICH parameter it is refusing and why. The negative `start` and
+#: the end-before-start window are CPython's own clamping rules and are here so
+#: a row cannot be satisfied by ignoring the extra arguments.
+#:
+#: Each entry is `(name, source, needle)` where `needle` is what the refusal has
+#: to contain, and `None` means the row expects CPython's ANSWER. The window
+#: rows are refusals today; the `find`/`count` one-argument rows are in
+#: `ARGUMENT_METHODS`, and the split is the point of the group.
 RANGE_CASES = [
-    "find_b_one", "find_b_zero", "find_a_past_end", "find_b_negative",
-    "find_c_window", "find_b_window", "find_b_backwards_window",
-    "count_b_from1", "count_b_from0", "count_b_window", "count_a_past_end",
-    "count_empty_from1",
+    ("find_b_one", '"abcabc".find("b", 1)', "`start`"),
+    ("find_b_zero", '"abcabc".find("b", 0)', "`start`"),
+    ("find_a_past_end", '"abc".find("a", 99)', "`start`"),
+    ("find_b_negative", '"abcabc".find("b", 0 - 2)', "`start`"),
+    ("find_c_window", '"abcabc".find("c", 1, 5)', "`start`"),
+    ("find_b_window", '"abcabc".find("b", 0, 2)', "`end`"),
+    ("find_b_backwards_window", '"abcabc".find("b", 4, 2)', "`end`"),
+    ("count_b_from1", '"abcabc".count("b", 1)', "`start`"),
+    ("count_b_from0", '"abcabc".count("b", 0)', "`start`"),
+    ("count_b_window", '"abcabc".count("b", 1, 5)', "`end`"),
+    ("count_a_past_end", '"abc".count("a", 99)', "`start`"),
+    ("count_empty_from1", '"abc".count("", 1)', "`start`"),
 ]
 
 #: Shapes CPython ACCEPTS and this path must not silently answer differently.
@@ -239,45 +252,36 @@ GUARD_CASES = [
     # The four measured crashes/wrong answers. `"abc".find(98)` reached the
     # libc call with 98 in the pointer register and the image took SIGSEGV —
     # exit 139, measured, on BOTH architectures, from a green build.
-    ("guard_find_int_needle", '"abc".find(98)', "its needle"),
-    ("guard_count_int_needle", '"abc".count(98)', "its needle"),
-    ("guard_startswith_int", '"abc".startswith(97)', "its affix"),
-    ("guard_endswith_int", '"abc".endswith(99)', "its affix"),
-    ("guard_lstrip_int_chars", '"xxaxx".lstrip(120)', "its chars"),
+    # The needles below are CPython's OWN parameter names — `sub`, `prefix`,
+    # `suffix`, `chars` — because that is what the refusal quotes and what a
+    # reader will look the method up under. A row that pinned the English word
+    # "needle" instead would be pinning this file's phrasing rather than the
+    # thing the message is for.
+    ("guard_find_int_needle", '"abc".find(98)', "`sub` of kind"),
+    ("guard_count_int_needle", '"abc".count(98)', "`sub` of kind"),
+    ("guard_startswith_int", '"abc".startswith(97)', "`prefix` of kind"),
+    ("guard_endswith_int", '"abc".endswith(99)', "`suffix` of kind"),
+    ("guard_lstrip_int_chars", '"xxaxx".lstrip(120)', "`chars` of kind"),
     # A tuple bound to a NAME cannot be folded — the build cannot see which
     # literals it holds — and cannot be walked either, so it is refused. It is
     # here because it is the shape that separates "the build can see the
     # affixes" from "the build cannot", and an answer that only handled the
     # literal would be right about the wrong reason.
     ("guard_startswith_tuple_name",
-     '    t = ("z", "a")\n    printf("%lld' + REC + '", "abc".startswith(t))',
+     't = ("z", "a")\nprintf("%lld' + REC + '", "abc".startswith(t))',
      "tuple"),
     ("guard_endswith_tuple_name",
-     '    t = ("z", "c")\n    printf("%lld' + REC + '", "abc".endswith(t))',
+     't = ("z", "c")\nprintf("%lld' + REC + '", "abc".endswith(t))',
      "tuple"),
     ("guard_startswith_list", '"abc".startswith(["a"])', "tuple"),
     # Arity CPython does not have: `lstrip` takes at most one argument, and a
     # two-argument call is a TypeError rather than a strip.
-    ("guard_lstrip_two_args", '"xxaxx".lstrip("x", "y")', "one argument"),
+    ("guard_lstrip_two_args", '"xxaxx".lstrip("x", "y")', "at most 1 argument"),
 ]
 
-#: The `start`/`end` expressions, paired with `RANGE_CASES`. Kept as source
-#: text rather than as values because the whole point is that CPython
-#: computes the answer from this text and this file states nothing.
-RANGE_SOURCES = [
-    '"abcabc".find("b", 1)',
-    '"abcabc".find("b", 0)',
-    '"abc".find("a", 99)',
-    '"abcabc".find("b", 0 - 2)',
-    '"abcabc".find("c", 1, 5)',
-    '"abcabc".find("b", 0, 2)',
-    '"abcabc".find("b", 4, 2)',
-    '"abcabc".count("b", 1)',
-    '"abcabc".count("b", 0)',
-    '"abcabc".count("b", 1, 5)',
-    '"abc".count("a", 99)',
-    '"abc".count("", 1)',
-]
+#: The `start`/`end` expressions are in `RANGE_CASES` beside their expectations;
+#: they are source text rather than values because the whole point is that
+#: CPython computes the answer from that text and this file states nothing.
 
 
 def _mojo(text):
@@ -537,7 +541,8 @@ def answer_rows():
 
 
 def range_rows():
-    return [Case(n, e, "range") for n, e in zip(RANGE_CASES, RANGE_SOURCES)]
+    return [Case(n, e, "range", refusal=needle)
+            for n, e, needle in RANGE_CASES]
 
 
 def guard_rows():
