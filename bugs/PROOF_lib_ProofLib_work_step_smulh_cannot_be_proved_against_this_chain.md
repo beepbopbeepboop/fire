@@ -103,8 +103,9 @@ One file, one lemma, and a decision about the tactic:
      file already has. That removes the `Int` from the statement and with it the
      reason `bv_decide` calls the definition noncomputable — which is the more
      likely of the two to work and the one whose result is the same theorem.
-4. Re-land the +54 in `bugs/FORMAL_native_decide_axiom.md` and `FORMAL.md` §7
-   row 10 when the lemma elaborates, and NOT before: the ledger's own rule is
+4. Re-land the +54 in FORMAL.md §7 row 10 and in
+   `test_formal_admitted.py::LIBRARY_TRUST` when the lemma elaborates, and NOT
+   before: the ledger's own rule is
    that an arrival is recorded as debt when it exists, and a `bv_decide` site in
    a file that does not compile is not a site.
 

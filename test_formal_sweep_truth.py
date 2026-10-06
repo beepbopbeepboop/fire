@@ -2222,9 +2222,9 @@ class TestLeanLaunchEstate(unittest.TestCase):
 class TestAxiomClosureCensus(unittest.TestCase):
     """What a proof in `lib/` actually RESTS ON, which no text scan can read.
 
-    `bugs/FORMAL_native_decide_axiom.md` named this the measurement a text
-    census cannot make and left it unrun, and it is the number FORMAL.md §7
-    publishes in row 10. It also named the wrong AXIOM: Lean 4.32.2's
+    This is the measurement a text census cannot make, and it is the number
+    FORMAL.md §7 publishes in row 10. It also settles the wrong AXIOM: Lean
+    4.32.2's
     `native_decide`/`bv_decide` each declare a fresh axiom per USE, named after
     the declaration and the tactic (`t32s_t8s._native.bv_decide.ax_1_5`), and
     `#print axioms` over all 375 theorems in `lib/` reports `Lean.ofReduceBool`

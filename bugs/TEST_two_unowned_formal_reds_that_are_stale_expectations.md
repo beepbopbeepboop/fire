@@ -71,8 +71,8 @@ table.
 ## Why it is not fixed here
 
 The fix is one line of bookkeeping per row, and `AXIOM_CLOSURE` belongs to the
-axiom-census work (`bugs/FORMAL_native_decide_axiom.md`, unclaimed) rather than
-to this worker's write set. It was found while running the narrow suites for two
+axiom-census work (`test_formal_admitted.py`'s own tables, where the ceiling and
+the closure census both live) rather than to this worker's write set. It was found while running the narrow suites for two
 unrelated FORMAL fixes, and "the suite I am running is red for a reason that is
 not my change" is a measurement to report rather than a thing to absorb into a
 branch that has nothing to do with it. The measurements are above so that it
