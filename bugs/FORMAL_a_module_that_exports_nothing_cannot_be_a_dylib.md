@@ -1,5 +1,5 @@
 # FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib: `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it
-**Status: PARTIALLY FIXED 2026-10-05 (`work/formal41-exports-and-strings`,
+**Status: PARTIALLY FIXED 2026-10-05 (`work/formal41-exports-and-strings`; re-measured the same day, row UNCHANGED and the remainder owned by `formal28-4`'s `FORMAL_module_state_no_storage.md` — see §0.3,
 `9722edb7` + `57412b76`) — the `std/math/constants.mojo` terminal cause on this
 row is GONE (33 of 59 files, measured on both architectures) and the gate is now
 a rule with a tested boundary. The row's TOTAL did not move and no file builds:
@@ -8,6 +8,46 @@ the 33 went one level deeper to `_io.mojo`, which is the same row. The
 §3 describes still stands.** §0 records the measurement in full, including the
 part of it that is unflattering; nothing below has been re-derived and the
 analysis is the 2026-10-03 one.
+
+## 0.3 Re-measured 2026-10-05: this row is UNCHANGED, and what is left on it is
+##       another worker's claim
+
+This round was given the doc and did not move the row. §0 is a good record of
+why, and the re-measurement confirms it rather than adding to it, so what is
+worth writing down is **which claim owns the remainder** — a reader deciding
+whether to start needs to know that starting here means starting somewhere else.
+
+**This document's own subject has not moved.** `_unicode.mojo` still refuses,
+byte for byte as §1 recorded it, on the same export gate:
+
+```
+build: _unicode.mojo imports 'std.collections.string._unicode_lookups', which
+cannot be built either: _unicode_lookups.mojo: formal dylib has no public
+functions: _unicode_lookups.mojo exports nothing under doc/ABI.md's rules
+because it declares no function and no type at all — only module-level
+constants, which are ...
+```
+
+**And §0's own conclusion still holds: 56 of the row's 59 files are stopped by
+ONE storage feature, and that feature is not this row's.** §0.1 and §4 step 1
+both name it — `FORMAL_module_state_no_storage.md` §(2), "a module constant whose
+value is not a word needs a real `__DATA` home" — and `python3 tools/control.py
+claims` puts that doc on **`formal28-4`**, not on this worker. So the three
+remaining walls (§3 wall 1½, wall 2's MLIR row, and this row's export gate) are
+each either that feature or downstream of it, and none of them can be closed from
+here without editing an area another live claim holds.
+
+**Why this is not filed as a new bug**: it is not a new finding, it is this
+document's §4 next step, already written down with the two walls named and the
+"do not add a stub function" warning attached. A second doc saying the same thing
+under a different name is the duplicate the queue rules exist to prevent.
+
+**What a worker WITH the claim should know, which §0 does not say**: the storage
+feature is now worth more than this row. §0 moved 33 files off one blocker and
+onto another of the same row, and §0 says so plainly ("a row count is an upper
+bound and not a coverage number"). So `FORMAL_module_state_no_storage.md` §(2) is
+the cheapest open thing on 56 files, and this doc is the evidence for that claim
+rather than a separate piece of work.
 
 ## 0. 2026-10-05: the `constants.mojo` terminal cause is gone, the row is not
 
