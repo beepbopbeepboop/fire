@@ -146,7 +146,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_module_names_are_not_classified.md` | `formal40-6` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal40-6` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | `formal40-7` | what is left, which of it is reachable, and why four of the next six are not this wave's |
-| `FORMAL_a_comptime_class_attribute_of_a_generic_struct_read_through_its_template_name.md` | **unclaimed** | `TypeDict.length`: a `comptime` class attribute of a generic struct, read through the TEMPLATE's name |
 | `FORMAL_a_linked_library_path_is_in_the_image.md` | **unclaimed** | one image cannot be byte-identical across two CAS roots, and the reason is dyld |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 

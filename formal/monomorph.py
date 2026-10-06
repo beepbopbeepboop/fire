@@ -898,15 +898,54 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     with the sentence that is true of it.  Reading the bracket differently here
     than in `all_instantiation_calls` would be the one way a rewrite could name a
     definition the library was never asked for.
+
+    **AND IT REWRITES A CLASS-ATTRIBUTE READ, which is the same table rather
+    than a second one.** `TypeDict.length` — a `comptime` class attribute of a
+    generic struct — is a `MemberExpr` whose base is the TEMPLATE's own name, so
+    neither this loop nor `all_instantiation_calls` saw it: the demand walk
+    reads CALL SITES, and a read is not one. The instantiated declaration was
+    already published and borrowed (the program also writes
+    `TypeDict[Int, [1, 2, 3, 4]]()`, which is a call site), so the read found
+    the BARE template instead and hit
+    `model.comptime_class_attribute_parameter_refusal` — "`TypeDict.length` reads
+    a `comptime` class attribute … and what it reads is 'values', a PARAMETER
+    of TypeDict" — for a program whose value the build had already computed.
+    Measured on both architectures before this: the refusal; after it, CPython's
+    answer.
+
+    **ONE instantiation, or none at all.** The read spells no type arguments,
+    so the instantiation it means is not written at the read site — it is the
+    one this consumer demanded, and a consumer that demands a template under
+    two different argument lists has two of them and the read is genuinely
+    ambiguous. So the table is inverted once into `{base: mangled}` for the
+    bases demanded EXACTLY ONCE, and every other read is left exactly as the
+    source spelled it, to keep the refusal that is true of it. Guessing here
+    would be a fabricated value, which is the one outcome this whole module
+    treats as its worst (`bugs/FORMAL_known_limits.md`: "a false PASS").
     """
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     module_level = set(M.collect_module_symbols(stmts) or {})
+    # `{base: mangled}` for the bases this consumer demanded ONCE, computed from
+    # `demap` rather than from a walk of its own so the two cannot disagree about
+    # what was demanded. `unique_reads` is the one reader of that shape.
+    unique = unique_reads(demap)
     n = 0
     for st in stmts:
         values = _names_bound_in(st) \
             if isinstance(st, F.FunctionDef) else module_level
         for node in M.iter_nodes(st):
+            if isinstance(node, F.MemberExpr) \
+                    and isinstance(node.obj, F.IdentExpr):
+                mangled = unique.get(node.obj.name)
+                if mangled is None:
+                    continue
+                node.obj = F.IdentExpr(
+                    name=mangled,
+                    line=getattr(node.obj, "line", 0),
+                    col=getattr(node.obj, "col", 0))
+                n += 1
+                continue
             if not isinstance(node, F.CallExpr):
                 continue
             base = _callee_base(node)
@@ -921,6 +960,28 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
                                     col=getattr(node.func.obj, "col", 0))
             n += 1
     return n
+
+
+def unique_reads(demap: dict) -> dict:
+    """`{base: mangled}` for the bases `demap` holds EXACTLY ONE entry for.
+
+    The table a `Template.<attribute>` read is resolved through, and the
+    ambiguity rule in one place: a base demanded under two different argument
+    lists is ABSENT from the answer, not resolved to either. `TypeDict` with one
+    `TypeDict[Int, [1, 2, 3, 4]]` in the consumer has one instantiation and the
+    read means it; with a second, `TypeDict[String, ["a", "b"]]` also in the
+    consumer, the read names nothing in particular and the honest answer is the
+    refusal the source already gets.
+
+    A duplicate is counted per `(base, args)` KEY and not per entry, so a table
+    that carries the same key twice — which `demap_from` cannot produce, and
+    which a caller assembling one by hand might — is still one instantiation.
+    """
+    counts: dict = {}
+    for base, _args in demap:
+        counts[base] = counts.get(base, 0) + 1
+    return {base: mangled for (base, _args), mangled in demap.items()
+            if counts.get(base) == 1}
 
 
 def _consumer_statements(consumer_src: str) -> list:
