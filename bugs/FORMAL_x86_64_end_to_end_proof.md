@@ -1,5 +1,66 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
+## Status (2026-10-05 — `work/formal42-5`: TWO successor rows had drifted from the model, and 26 of 26 `terminates` cases were dead on arrival)
+
+**The companion doc's next step, followed literally, found the whole of the 26
+elaboration failures — and a second live drift behind them.**
+`bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`
+recorded 26 of 26 `terminates` cases failing on `Type mismatch |
+x86_step_setcc_r8 sN` and named the next step as "compare
+`x86_step_setcc_r8`'s stated signature with what `x86_step` concludes … If it
+states a width the model does not produce, that is the same class of bug and the
+fix is in the lemma."  It is B2's mechanism exactly — **a successor table is a
+copy of the model, and `e54d2f4e` (2026-10-04) changed the model in three places
+and this was the fourth** — but the drift was in the *other* file:
+
+| row | `_SUCCS` said | `lib/X86.lean` says | since |
+|---|---|---|---|
+| `setcc` | `x86_set_reg $s $rmv …` | `x86_set_reg_narrow $s $rmv 1 …` | `e54d2f4e`, the NARROW register write |
+| `imul_r64_r64` | no flags at all | `x86_set_flag4 {…} lo ovf ovf` | `e54d2f4e`, `imul`'s four flags |
+
+Both are corrected now, and correcting the first **revealed** the second: a file
+that dies at its first elaboration error does not reach its second, so one stale
+successor hid the next.  Twelve examples emit a three-operand `imul`.
+
+**And the consequence is the generalisation this file keeps relearning, one
+level up.**  A successor written as a *wrapper call* rather than as a literal
+record update cannot be projected through, and three proofs depend on doing that
+projection: the `x86_exec_go_exit_step` side condition (`¬ (the state).rip =
+exit`), the next step's own `rip` side condition, and `_concrete_read`'s
+`.mem`.  All three took their `simp` set from the LAST step's form; they now take
+it from `_path_simp(fs_path, …)` — the definitions of **every** step on the path,
+which is exactly the set the state they are folding is made of.  Measured on
+`powexpr` after the `imul` row was corrected: `x86_set_reg` reduces on its own
+(its `match` is on a literal index), `x86_set_flag4` does not, and the side
+condition was left holding a 30-field record.
+
+`lib/X86.lean` gains the two `_mem` facts the closing read needed for the same
+reason (`x86_set_reg_narrow_mem`, `x86_set_flag4_mem`), because a `.mem`
+projection stops at a wrapper with no `_mem` fact and puts `rdi` — the program's
+input — into a term `native_decide` refuses.  `AXIOM_CLOSURE`'s `X86` row moves
+144/141 → 150/147 across the three passes of this work.
+
+**What this does NOT do, and it is the same list as before.** The ten loop
+examples, `group3:idiv`, the value theorem's 12 open, and the `hpop` separation.
+The one thing that got BETTER by accident is the hole count: `powexpr`,
+`localmul` and `pair` each went from *one live hole at `hrip`* to **no live
+hole**, because `_WRAPPER_DEFS` now names the two wrappers the closing read had
+to see through.  **NOT RE-MEASURED as a corpus number by this section** — the
+45-example sweep is a heavy run and the numbers in every older section stand as
+written; `terminates proved with no sorry` is the prediction to check and
+`test_formal_sweep_truth.py::TestX86EndToEndEmitter` pins it Lean-free.
+
+**And the instrument, which is the part that was missing.**
+`formal/x86_64_model_coverage_test.py`'s `SUCCESSOR_FORMS` is the only thing in
+the tree that compares a successor against the model, it had no `setcc` row, and
+every row it had ran at `X86State.init 10 _` — where `x86_set_reg_narrow s 7 1
+1` and `x86_set_reg s 7 1` both answer `1`, so it could not have seen this.  The
+state is per row now, and `cqo` carries RAX at `0x8000000000000000` for the same
+reason: **its row was vacuous**, because `x86_cqo 0` and `x86_sign_extend32 0`
+are both `0`.  Three mutants measured caught against one green row before:
+`setcc`'s pre-`e54d2f4e` row, `cqo`'s pre-`da151f0c` row, and `alu_ri32:sub_reg`
+with `+imm` for `-imm`.
+
 ## Status (2026-10-04 — B30/B31: the guard did not admit, and a dead `lean` read as a proof)
 
 Two more of the same kind, both from making the emitter's own largest fixture
