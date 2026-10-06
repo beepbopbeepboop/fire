@@ -5370,11 +5370,23 @@ def test_the_formal_doc_index_is_current():
     regression — so the tree's facts (the document list, the areas, the titles)
     are compared and the machine's are reported as a number.
 
-    Three checks, each shown to fail on a planted defect:
+    Excluding a COLUMN is not the same as excluding everything it decides, and
+    that is the fourth check: `formal_doc_index.render()` sorts each area by
+    `(not claimed_by, name)`, so which documents are live decides the ORDER, and
+    blanking the cell does not put the order back. Measured 2026-10-05: the
+    block was regenerated, and within the hour `--check` was red again with no
+    edit to `bugs/` at all — only workers finishing. So the reduction also puts
+    the rows back in name order, and the check below is what stops that from
+    being deleted as unnecessary: it requires the ON-DISK order to differ from
+    name order (or there is nothing for the sort to undo) AND the reduced order
+    to be name order (or the sort is not there).
+
+    Four checks, each shown to fail on a planted defect:
       - the block in OPEN_WORK.md is current;
       - `--check` is not vacuous: adding a document makes it fail;
       - it is not blind either: rewriting every claim in the file leaves it
-        green (and `--strict`, which is the full comparison, red).
+        green (and `--strict`, which is the full comparison, red);
+      - and the reduction undoes the CLAIM-dependent ORDER, in both directions.
     """
     import shutil
     sys.path.insert(0, os.path.join(HERE, 'tools'))
@@ -5467,6 +5479,38 @@ def test_the_formal_doc_index_is_current():
           rc_after == 0 and out_after == out,
           'the planted-document probe must put the file back exactly, or this '
           'check has a side effect on the tree it is checking')
+
+    # The CLAIM-dependent ORDER, asserted from both ends so neither half can be
+    # deleted alone. `render()` sorts each area by `(not claimed_by, name)`, so
+    # the ON-DISK order is name order only where no area happens to mix claimed
+    # and unclaimed documents; requiring the two to DIFFER is what stops this
+    # from passing vacuously on a tree where they happen to agree, and
+    # requiring the reduced order to BE name order is what stops the sort being
+    # dropped as dead code. Read from `block`, the file as it is: `planted` has
+    # had every `**unclaimed**` rewritten to a worker name, so there is nothing
+    # mixed left in it to look at.
+    def row_order(block):
+        return [[ln for ln in part.splitlines() if F._is_row(ln)]
+                for part in re.split(r'^### ', block, flags=re.M)]
+
+    on_disk = row_order(block)
+    after = row_order(F.without_claims(block))
+    mixed = [grp for grp in on_disk
+             if any('**unclaimed**' in ln for ln in grp)
+             and any('**unclaimed**' not in ln for ln in grp)]
+    check('formal doc index: the reduction puts the CLAIM-dependent ORDER back, '
+          'and the sort it undoes is really there',
+          bool(mixed)
+          and any(grp != sorted(grp) for grp in on_disk)
+          and all(grp == sorted(grp) for grp in after)
+          and F.without_claims(rendered).strip() == reduced.strip(),
+          'a check that excludes the claim COLUMN still sees what the claim '
+          'DECIDES, because `render()` sorts by `(not claimed_by, name)`: a '
+          'worker starting then reorders the table and `--check` goes red with '
+          'no edit to `bugs/` at all. `without_claims` must therefore restore '
+          'name order within each area, and this check is asymmetric on '
+          'purpose — it fails both if the sort is missing and if there was '
+          'nothing to undo')
 
 
 def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():

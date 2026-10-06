@@ -305,6 +305,11 @@ def block_in(text):
 # column — so "neither is in `FORMAL_x86_64_end_to_end_proof`" became "neither is
 # in `—`" and the comparison stopped being about the claim column. Only a table
 # row's SECOND cell is the claim, so only that cell is replaced.
+def _is_row(line):
+    """A table row of the generated block, as opposed to its header."""
+    return line.startswith('| `') and line.count('|') >= 4
+
+
 def without_claims(block):
     """The block with the CLAIMED-BY cell of every row blanked, and the two
     counts that are functions of it.
@@ -313,21 +318,52 @@ def without_claims(block):
     "N documents, M claimed" in the header. NOT blanked: the document list, the
     areas, the titles, the total — those are facts about the tree and they are
     what `--check` is for.
+
+    **The rows are also put back in NAME order**, and that is the second half
+    of "ignoring the claim column" rather than an extra strictness. `render()`
+    sorts each area by `(not claimed_by, name)` — claimed first, because a
+    claimed document belongs to whoever holds it — so WHICH documents are live
+    decides the ORDER, and blanking the cell does not put the order back. The
+    consequence was that a worker starting or finishing turned
+    `formal doc index: OPEN_WORK.md's generated block is current` red with a
+    document list that had not changed by one row, and took
+    `test_suite.py`'s other two `formal doc index` checks down with it (the
+    reduction probe compares the planted block against `render()`, and
+    "the file is byte-identical afterwards" asserts `--check` exits 0). Measured
+    2026-10-05 on a merge whose only change to the tree was three new files in
+    `tools/`: `--check` red, `--write` then green, `--check` red again within the
+    hour as the queue turned over, with nothing about `bugs/` edited at all.
+
+    Sorting the reduced rows is the fix that keeps the promise the tool's own
+    `--check` help, its block header and `test_suite.py`'s check name all make:
+    *a claim-only edit is invisible to it*. The alternative — dropping
+    `not claimed_by` from `render()`'s sort — would make that true by deleting
+    the readability the block states it wants ("a claimed one belongs to whoever
+    holds the claim"), so the ORDER is canonicalised in the REDUCTION instead,
+    which is where the machine is supposed to stop mattering.
+
+    Rows are sorted WITHIN each contiguous run, not globally: the runs are the
+    per-area tables, and a global sort would interleave two areas' rows and hide
+    a document that moved between them.
     """
     out = []
+    run = []
     for line in block.splitlines():
-        if line.startswith('| `') and line.count('|') >= 4:
+        if _is_row(line):
             cells = line.split('|')
             cells[2] = ' — '
-            line = '|'.join(cells)
-        else:
-            line = re.sub(r', \d+ claimed\b', ', — claimed', line)
-            line = re.sub(r'^(\*\*)\d+ documents about the formal backend, '
-                          r'\d+ of them CLAIMED[^.]*\.',
-                          r'\1N documents about the formal backend.', line)
-            line = re.sub(r'^(\*\*)\d+ documents, \d+ claimed\.',
-                          r'\1N documents, — claimed.', line)
+            run.append('|'.join(cells))
+            continue
+        out.extend(sorted(run))
+        run = []
+        line = re.sub(r', \d+ claimed\b', ', — claimed', line)
+        line = re.sub(r'^(\*\*)\d+ documents about the formal backend, '
+                      r'\d+ of them CLAIMED[^.]*\.',
+                      r'\1N documents about the formal backend.', line)
+        line = re.sub(r'^(\*\*)\d+ documents, \d+ claimed\.',
+                      r'\1N documents, — claimed.', line)
         out.append(line)
+    out.extend(sorted(run))
     return '\n'.join(out)
 
 
