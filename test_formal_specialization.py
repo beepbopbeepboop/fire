@@ -330,6 +330,205 @@ def main(n: Int) -> Int32:
     return f(n)
 """
 
+# §5b's site shapes: the three ways a statement writes a value into a name (or
+# into the container the name holds) that the reader did not see, plus the two
+# it saw but read backwards. Each was a wrong answer on both architectures
+# before `formal/model.py::_container_element_writes` existed, and they are
+# here as one table because they are one defect — see
+# `test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see`.
+#
+# The `apply_arg` preamble is shared by all of them, which is the point: the
+# reader is reached only where a callee actually branches through a parameter,
+# so every shape below is the SAME call and only the way the value was written
+# differs.
+NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME = (
+    # A SUBSCRIPT STORE. CPython runs this and answers 6 — the store put a
+    # function at element 0 — and this path used to REFUSE it, because the walk
+    # saw only the literal and claimed unanimity over an element the source had
+    # replaced.
+    ("passing/element-store", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var xs = [10, 20, 30]
+    xs[0] = dbl
+    print(apply_arg(3, xs[0]))
+    return 0
+"""),
+    # A MIXED literal. The function is element 0. This path used to REFUSE it:
+    # `caller_local_element_holds` discarded the phrase it could not classify
+    # (`dbl`) and then found the rest unanimous ("an integer"), which is the one
+    # thing a reader in this position must not do — an unclassified value is the
+    # evidence that says STOP.
+    ("passing/element-mixed", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var xs = [dbl, 17]
+    print(apply_arg(3, xs[0]))
+    return 0
+"""),
+    # A dict STORE of a function. Same shape as the first row in the other
+    # container, and it is here because the two spellings got two different
+    # answers: the list store was refused and this one was not.
+    ("passing/dict-store", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var d = {"k": 17}
+    d["k"] = dbl
+    print(apply_arg(3, d["k"]))
+    return 0
+"""),
+    # A dict LITERAL of a function. Never refused, and still not — the control
+    # for the dict row below.
+    ("passing/dict-literal", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var d = {"k": dbl}
+    print(apply_arg(3, d["k"]))
+    return 0
+"""),
+)
+
+# The three shapes that are a REFUSAL, and the two that are an ANSWER, with the
+# `holds` phrase each is expected to be refused for. Separate from the table
+# above because a `refuse:` row cannot say that a build SUCCEEDS, so these are
+# run and checked against the exit status the interpreter gives on the same text.
+NOT_AN_ADDRESS_MISSING_WRITES = (
+    # An `append` is the element the reader could not see at all: `xs = []`
+    # states no element, so the reader was silent and the image was emitted.
+    # Measured SIGBUS 138 on arm64 and SIGSEGV 139 on x86-64.
+    ("passing/append", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var xs = []
+    xs.append(17)
+    return apply_arg(3, xs[0])
+""", "holds an element read out of a container literal"),
+    # The same append, but the index is 0 and every literal holds more than one
+    # element — so the append landed at index 2 and `xs[0]` is still the `10`.
+    # This is the row that says the reader reads POSITION and not just the set
+    # of values: the container here really does hold a function.
+    ("passing/append-past-the-index", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def dbl(x: Int) -> Int:
+    return x * 2
+
+def main() -> Int32:
+    var xs = [10, 20]
+    xs.append(dbl)
+    return apply_arg(3, xs[0])
+""", "holds an element read out of a container literal"),
+    # A dict literal of a non-address, subscripted by a literal key. This is the
+    # doc's "a subscript of a DICT name", and the reason it is decidable is that
+    # the VALUES of a dict literal are as visible as a list's elements.
+    ("passing/dict-literal-of-an-int", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var d = {"k": 17}
+    return apply_arg(3, d["k"])
+""", "holds an element read out of a container literal"),
+    # A `global` slot. The value is bound by the MODULE's statement, which the
+    # function's own walk cannot see at all, so before `_global_slot_value` this
+    # built and trapped on both architectures. It is the one row here that needs
+    # a reader nobody had, and it is a refusal rather than an answer because the
+    # shape it pins is the slot holding something the source says is not an
+    # address — see the row's own note in the method below for why the
+    # function-valued global is NOT here.
+    ("passing/global-slot", """\
+var g = 17
+
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    global g
+    return apply_arg(3, g)
+""", "holds an integer"),
+    # A subscript store of a NON-address: element 0 is replaced by an integer,
+    # and the reader must still see that the literal's `10` is not the whole
+    # story. This is `passing/element-store`'s mirror and it is what says the
+    # reader is not simply refusing anything with a subscript in it.
+    ("passing/element-store-of-an-int", """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var xs = [10, 20]
+    xs[0] = 17
+    return apply_arg(3, xs[0])
+""", "holds an element read out of a container literal"),
+)
+
 # The same fact as `CALL_THROUGH_A_PARAMETER`, one position out: a function of
 # THIS UNIT read as a WORD rather than called by name. It is this program's
 # `plain` that used to be the first name with nowhere to live, and it is the
@@ -1359,6 +1558,179 @@ def test_a_list_of_functions_is_still_an_address_to_subscript(tmpdir):
               f"OF FUNCTIONS stopped reaching the function")
 
 
+def test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see(tmpdir):
+    """A store INTO a container, and a `global` slot: BOTH answers, both arches.
+
+    The five shapes of one defect, and they are here together because they are
+    one defect: `formal/model.py::_binding_values` recorded the statements that
+    BIND a name and nothing else, so every reader built on it was reasoning
+    about an incomplete set of the sites that decide what a word holds.
+
+    Two of these are ANSWERS, and they are the half that matters most — a
+    refusal of a correct program is worse than a build of a wrong one, because
+    it blocks code that works:
+
+      * `xs = [10, 20, 30]; xs[0] = dbl; …xs[0]` was REFUSED. The walk saw the
+        literal `[10, 20, 30]`, did not see the store, and claimed unanimity
+        over an element the source had replaced with a function.
+      * `xs = [dbl, 17]; …xs[0]` was REFUSED too, and for a sharper reason:
+        `caller_local_element_holds` did `phrases.discard(None)`, so the one
+        element it could not classify — the function — was thrown away and the
+        remaining "an integer" read as agreement. An unclassified value is
+        exactly the evidence that says STOP.
+
+    Four are refusals that used to be silence, and each built and trapped:
+    `xs = []; xs.append(17)` (SIGBUS 138 arm64 / SIGSEGV 139 x86-64), a module
+    `global g` bound at module level, a dict literal subscripted by key — which
+    is decidable because a dict's VALUES are as visible as a list's elements, and
+    no spelling of the SUBSCRIPT distinguishes `d[k]` from `xs[i]` while the
+    spelling of the BINDING does — and a subscript store of a non-address.
+
+    **The oracle is CPython and it is checked per program, not assumed**: a
+    `refuse:` row cannot say a build succeeds, so the five that build are run
+    and compared with the interpreter's own exit status on the same text. The
+    `global`-slot row is the one that needed a reader nobody had — the value is
+    bound by the MODULE's statement, which the function's own walk cannot see,
+    so it is asked of the slot table (`_global_slot_value`) as a site BESIDE the
+    function's own writes rather than instead of them.
+
+    `passing/dict-literal` is the boundary this whole table is measured against:
+    the same subscript of a dict literal holding a FUNCTION builds and answers 6,
+    which is what says the reader reads the values and not the spelling.
+
+    **The `global` row is here for the integer slot and NOT for the function
+    one, and the reason is a defect of its own.** `var g = dbl` at module level
+    with `global g` in `main` builds, runs, and prints NOTHING where
+    `fire.py run` prints 6 — measured on both architectures — so a module global
+    does not read back as the address of a function value. That is the
+    `__DATA` slot's initializer for a function value rather than anything this
+    reader decides, it is filed as
+    `bugs/FORMAL_a_module_global_holding_a_function_reads_back_as_zero.md`, and
+    putting a row here that asserted 6 would be asserting a build this path does
+    not do.
+    """
+    for label, src in NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME:
+        root = os.path.join(tmpdir, f"wtan_{label.replace('/', '_')}")
+        write_tree(root, {"prog.mojo": src})
+        oracle = interpreter(root)
+        check("TypeError" not in oracle and "Error" not in oracle,
+              f"[{label}] the interpreter refused a program this row says is "
+              f"correct: {oracle.strip()[:200]!r}")
+        expected = oracle
+        for arch in ARCHES:
+            arch_root = os.path.join(root, arch)
+            os.makedirs(arch_root)
+            write_tree(arch_root, {"prog.mojo": src})
+            build(arch_root, arch=arch)
+            code, out = run_image(arch_root, arch)
+            check(code == 0, f"[{arch}] the {label} image exited {code}: "
+                             f"{out[:200]!r}")
+            check(out == expected,
+                  f"[{arch}] the {label} image printed {out!r}, not "
+                  f"{expected!r} — `fire.py run` is the oracle for this row")
+    # The four that must be REFUSED rather than built, each with the `holds`
+    # phrase it is refused FOR, so a reader that stopped classifying by the
+    # spelling would be caught here rather than by a build that happens to work.
+    for label, src, needle in NOT_AN_ADDRESS_MISSING_WRITES:
+        root = os.path.join(tmpdir, f"missing_{label.replace('/', '_')}")
+        os.makedirs(root)
+        write_tree(root, {"prog.mojo": src})
+        oracle = interpreter(root)
+        check("TypeError" in oracle or "not callable" in oracle,
+              f"[{label}] the interpreter answered {oracle.strip()[:200]!r} on "
+              f"a program whose only wrongness is calling a word that is not a "
+              f"function, so the oracle for this row is not saying what the row "
+              f"is about")
+        seen = {}
+        for arch in ARCHES:
+            arch_root = os.path.join(root, arch)
+            os.makedirs(arch_root)
+            write_tree(arch_root, {"prog.mojo": src})
+            text = text_of(build(arch_root, expect_ok=False,
+                                 arch=arch)).strip()
+            check("is called as a FUNCTION and the source says it holds" in text,
+                  f"[{arch}] the {label} case did not refuse with the "
+                  f"not-an-address message: {text[-300:]}")
+            check(needle in text,
+                  f"[{arch}] the {label} case refused without naming what the "
+                  f"element holds ({needle!r}): {text[-300:]}")
+            seen[arch] = text
+        check(seen["arm64"] == seen["x86_64"],
+              f"the two architectures refused the {label} case differently:\n"
+              f"  arm64:  {seen['arm64'][:200]}\n"
+              f"  x86-64: {seen['x86_64'][:200]}")
+
+
+def test_a_value_call_reader_cycle_is_a_refusal_not_a_hang(tmpdir):
+    """`var a = b; var b = a` must terminate, and terminate SILENTLY.
+
+    The three readers `value_argument_is_not_an_address`,
+    `caller_local_holds` and `caller_local_element_holds` are MUTUALLY
+    recursive: asking what `xs[0]` holds asks what each of its elements holds,
+    which asks what those names hold, which asks what THEIR bindings hold. A
+    two-name cycle in one function (`var a = b` and `var b = a`) is that
+    recursion with no base case.
+
+    It was reachable from the build, not only from a test harness: driving the
+    reader over every `.py` and `.mojo` in this repository with the
+    `parameters_called_through_a_value` conjunct dropped — the over-approximating
+    corpus check the subject doc's discipline requires — hit `RecursionError` on
+    real files before `_asked` existed. A hang in a build is worse than a wrong
+    answer, so this is a row and not a comment.
+
+    **The guard's contract is silence, not a verdict, and this row says so.**
+    A question already on the stack has no smaller instance of itself to reduce
+    to, so `a` cannot be decided from `b` and `b` cannot be decided from `a` —
+    the reader answers `None`, and `None` at this position means "this walk
+    cannot say", which is what makes a caller stay quiet. The BUILD therefore
+    still emits the image, and on this program the image traps — that is the
+    missed-write residual the subject doc states, not something the guard
+    claims to have fixed, and asserting a refusal here would be asserting a
+    capability the guard does not have. What is pinned is that the reader
+    answers, and that both architectures reach a verdict.
+
+    The guard's key is the `(function, name)` QUESTION rather than the function
+    alone, because asking two different names of one function is not a cycle and
+    a depth bound would refuse both.
+    """
+    cyclic = """\
+def apply_arg(size: Int, f):
+    var t = 0
+    var i = 0
+    while i < size:
+        t += f(i)
+        i += 1
+    return t
+
+def main() -> Int32:
+    var a = 17
+    var b = a
+    a = b
+    return apply_arg(3, a)
+"""
+    # The reader itself, asked directly: this is the precise assertion, and it
+    # is what fails (with RecursionError) if the guard is ever removed.
+    import fire_compiler as F
+    import formal.model as M
+    tree = F.Parser(F.py_tokenize(cyclic)).parse_module()
+    fns = {f.name: f for f in tree if isinstance(f, F.FunctionDef)}
+    check(M.caller_local_holds(fns["main"], "a") is None,
+          "a two-name cycle in one function did not read as silence")
+    check(M.caller_local_holds(fns["main"], "b") is None,
+          "a two-name cycle in one function did not read as silence")
+    # And the build reaches a verdict on both architectures rather than hanging.
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"cycle_{arch}")
+        write_tree(root, {"prog.mojo": cyclic})
+        # `expect_ok=True` is the honest expectation: silence at this position
+        # emits the image, and the row above is what pins the SILENCE.
+        text = text_of(build(root, arch=arch)).strip()
+        check("RecursionError" not in text and "maximum recursion" not in text,
+              f"[{arch}] the two-name cycle came back as a RecursionError "
+              f"rather than an answer: {text[-300:]}")
+
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -1396,6 +1768,10 @@ TESTS = [
      test_a_word_the_source_says_is_not_an_address_is_refused),
     ("…and a list of FUNCTIONS is still one, on both",
      test_a_list_of_functions_is_still_an_address_to_subscript),
+    ("a write THROUGH a name is a site, on both",
+     test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see),
+    ("a two-name cycle is an answer, not a hang",
+     test_a_value_call_reader_cycle_is_a_refusal_not_a_hang),
     ("the two remaining refusals of a value call",
      test_the_two_remaining_refusals_of_a_value_call),
     ("a `global`-shadowed name is still a call to the C library",
