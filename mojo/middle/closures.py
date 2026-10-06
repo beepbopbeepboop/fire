@@ -25,6 +25,7 @@ from fire_compiler import (
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
     TryStmt, VarDecl,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
+    for_target_names,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
 from mojo.middle.exprtypes import _walk_ast, _struct_name_of
@@ -75,6 +76,36 @@ def closure_lifted_name(outer_name: str, inner_name: str) -> str:
     nobody reads, which looks exactly like no fix at all.
     """
     return f"{outer_name}_{inner_name}"
+
+
+def _for_target_names(target) -> list:
+    """The LEAF names a `for` target binds, as `str`.
+
+    One reader for "what names does this loop bind", because this file had two
+    inline spellings that could not both be right. `ForStmt.target` is always a
+    plain `str` — `"i"`, or the tuple-target spelling `"(a, b)"` including
+    nested `"(a, (b, c))"` — never an `IdentExpr`, so the `hasattr(tgt, 'name')`
+    branch an inline version tested for was unreachable, and the `str` branch used
+    the string AS a name: a multi-target loop read as binding the literal name
+    `"(a, b)"`, which no read can resolve. See the call site for the measured
+    shapes and for what that does and does not establish about the answer.
+
+    The walk itself is `fire_compiler.for_target_names`, which is the same reader
+    `mojo/middle/boundnames.py::_lbn_target_names` uses, and for the reason that
+    function's docstring gives: the representation is `fire_compiler.py`'s to own
+    and a private copy is how a 1-tuple target and a parenthesised single name
+    become indistinguishable. What is added here is the starred-leaf rule, which
+    is a BINDING rule and not a spelling — `*rest` binds `rest`.
+
+    `_as_str` on each leaf because this file is compiled by the self-hosted
+    backend as well as interpreted, and a list of boxed values is what the
+    self-host tuple erasure turns names into.
+    """
+    out: list = []
+    for _n in for_target_names(target):
+        _n = _as_str(_n)
+        out.append(_n[1:].strip() if _n.startswith('*') else _n)
+    return out
 
 
 def _gmi_all_stmts_nonfunc(stmts) -> list:
@@ -203,6 +234,28 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                         t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     ctx.var_types[bstmt.name] = t
+            elif isinstance(bstmt, ForStmt):
+                # A `for` TARGET is a local of this function like any other, and
+                # it was in neither arm above — so `i` was not in
+                # `enriched_scope`, `i` was free in the nested `def`'s body, and
+                # the capture filter (`if v in enriched_scope`) dropped it. The
+                # lift then produced a function whose body read a name with no
+                # home anywhere, and the symptom was a REGISTER-ALLOCATOR
+                # sentence about a fact about this pass: "main_get: 'i' has no
+                # home", naming the allocator rather than the capture
+                # (`bugs/FORMAL_a_nested_def_capturing_a_for_target_is_not_a_
+                # capture.md`).
+                #
+                # The type is the `VarDecl` arm's own default, `'int64_t'` for a
+                # target with no initializer — which is what a `range` counter
+                # is. Deliberately NOT inferred from the iterable: a loop over a
+                # container of structs would then claim an `int64_t` the slot
+                # does not hold, and this table is read by a capture filter whose
+                # failure mode is a wrong env-struct field.
+                for _tgt in _for_target_names(bstmt.target):
+                    if _tgt not in enriched_scope:
+                        enriched_scope[_tgt] = 'int64_t'
+                        ctx.var_types[_tgt] = 'int64_t'
         ctx.var_types = _saved_vt2
         # Parallel structures instead of a list-of-3-tuples: a tuple element
         # indexed on the self-hosted compiled path erases to `int64_t`, and
@@ -257,11 +310,34 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     if bstmt.target.name not in _inner_nonlocals:
                         inner_assign_targets.add(bstmt.target.name)
                 elif isinstance(bstmt, ForStmt):
-                    tgt = bstmt.target
-                    if isinstance(tgt, str):
-                        inner_assign_targets.add(tgt)
-                    elif hasattr(tgt, 'name'):
-                        inner_assign_targets.add(tgt.name)
+                    # `_for_target_names`, not a third spelling of "the names
+                    # this loop binds". The inline version this replaces tested
+                    # `isinstance(tgt, str)` and then used the string AS a name,
+                    # and `ForStmt.target` is always a `str` — so
+                    # `for a, b in xs:` bound the name `"(a, b)"`, which no read
+                    # can resolve, and a starred target bound the name
+                    # `"*rest"`. Measured against `_for_target_names` on the
+                    # shapes the parser produces:
+                    #
+                    #     for i in x:          'i'        -> ['i']
+                    #     for a, b in x:       '(a, b)'   -> ['a', 'b']
+                    #     for (a,(b,c)) in x:  '(a, (b, c))' -> ['a','b','c']
+                    #     for *rest in x:      '*rest'    -> ['rest']
+                    #
+                    # **Whether that wrongness reached an ANSWER is not
+                    # established**, and this comment does not claim it: five
+                    # programs built to try to make it visible (a tuple target
+                    # captured by a nested `def`; the target read after the loop;
+                    # a shadowing parameter of the same name; a target read only
+                    # inside a `def`; a two-name target summed in a nested body)
+                    # all answered the same on both backends with either
+                    # spelling, so what this buys is that the two sites cannot
+                    # drift — the same argument `module_slot_for` is shared for —
+                    # rather than a fixed wrong number. The reader is
+                    # `fire_compiler.for_target_names`, which is what
+                    # `mojo/middle/boundnames.py::_lbn_target_names` uses, so
+                    # the representation stays `fire_compiler.py`'s to own.
+                    inner_assign_targets.update(_for_target_names(bstmt.target))
             # A PLAIN for-loop unpack (`for _pn, _pt in inner.params:`),
             # NOT a comprehension (`{pn for pn, _ in ...}` — tuple-unpack-
             # in-a-comprehension boxes `pn` to int64_t self-hosted) and
