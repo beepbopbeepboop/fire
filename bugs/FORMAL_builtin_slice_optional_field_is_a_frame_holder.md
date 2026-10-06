@@ -1,5 +1,106 @@
 # A struct-typed FIELD cannot be initialised from an argument, and a struct PARAMETER cannot be stored in one
 
+**Status 2026-10-05 (`work/formal40-4`): the LAST item is CLOSED. A method that
+is not `__init__` may assign a frame-typed field — the lifetime argument this
+document said had never been written down now exists, and the shape builds and
+answers CPython on both backends.** The rest of the document is the record of
+how the question got here; everything above this paragraph predates the answer.
+
+**What landed, in one rule.** `formal/model.py`'s
+`init_stores_a_parameter_struct` — the DELEGATING predicate, which read only
+`__init__`'s stores — is now `field_stores_a_caller_frame(..., only_init=…)`,
+one rule asked about two method sets, and `formal/build.py`'s
+`_typed_nested_frame` asks it about **every** method. The lifetime argument it
+now rests on, which is the one `__init__`'s version always rested on with a
+false premise attached:
+
+> every store of the field is a bare NAME that is a parameter of *the method
+> that writes it*, annotated with that struct's type — so the frame in the slot
+> is one the CALLER reserved in the caller's own scratch and passed down; and
+> the object it went into is the RECEIVER, which is storage the caller owns (the
+> frame checks are what refuse to let a receiver be anything else). Both die
+> together, so no read of the slot can name reclaimed stack.
+
+`__init__` was never a premise of that. It was one writer among several, and the
+reason it was the only one considered is history.
+
+| | was | is |
+|---|---|---|
+| `Box.set(out self, o: Opt): self.inner = o` + `get` reading `self.inner.v` | refused: *"`self.inner.v` reads through `self.inner` … but a method of Box ASSIGNS it, so the word in the slot is a frame belonging to whichever function ran the assignment"* | **builds and prints `41`** = CPython, on arm64 AND on x86-64 |
+| the same, read through a local copy (`var t = self.inner`) | refused, same `_REASSIGNED` | **builds and prints `41`**, both backends |
+| a writer that stores a CONSTRUCTION (`self.inner = Opt()`) | refused, `_REASSIGNED` | **still refused**, with the advice naming the shape that works |
+| `b.inner = o` where `b` is a LOCAL that is returned | refused at the STORE (`_frame_field_store_is_sound`) | **still refused**, and the predicate cannot reach it: it counts only `self.<field>` stores |
+
+**The advice string changed with it, because it was naming a narrower spelling
+than the one that works** — its tail said "a method that assigns the field puts
+in a frame belonging to whichever function ran the assignment and nothing here
+says the two lifetimes agree", which is false of `Box.set`. That is the
+promise-nobody-checked defect this document's own family is named for, so the
+tail now says what the rule is: a parameter of the method that stores it,
+annotated with that struct's type, from EVERY method that writes the field.
+
+**Two existing refusal rows were RE-POINTED rather than deleted, and that is the
+half of this change worth reading twice.** Both pinned a program whose setter
+stored its own annotated parameter — which now builds — so the refusal they
+pinned had ceased to exist. Their writer is now a CONSTRUCTION
+(`self.inner = Opt()`), which is the writer the predicate still refuses, and the
+two shapes that now build got their own EXECUTED rows against CPython on both
+backends. A refusal whose program no longer refuses is a hole; a re-pointed one
+is the anti-rot working.
+
+**Consolidation, not a second implementation.** The scan behind both readers is
+now `_method_field_stores` (one method body); `_init_field_assignments` and the
+new `method_field_assignments` are the `__init__`-only and all-methods
+projections of it, and the reader of the scan no longer decides the rule for
+itself — `init_stores_a_parameter_struct` is now the narrow question asked by
+the narrow caller (`struct_nested_frame_fields`, where PLACEMENT is the
+constructor's job) rather than a second copy of the rule.
+
+**What it is worth, measured.** **Zero swept files**, which this document has
+said four times about this row and which is still true: the 13-file row behind
+`builtin_slice.mojo` refuses on `FormatStruct`'s missing export
+(`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`,
+claimed), and a 12-file stdlib slice re-measured before and after on both
+backends gives **24/24 identical verdicts**. What it buys is a construct that
+stopped being a limit — and a refusal that stopped being *wrong* about a class of
+correct programs, which is the same thing §"What landed" in
+`FORMAL_callee_no_def_ceiling_zero.md` paid for at a ceiling of zero.
+
+**Behaviour-preserving for everything that already built, measured rather than
+argued.** All **52 `formal/examples/*.mojo` × 2 backends = 104 images** are
+byte-identical against `HEAD`'s `formal/build.py` and `formal/model.py`
+installed in process. That is a fact about the rule rather than luck: the new
+predicate is a strict SUPERSET of the old one, `_typed_nested_frame` asks
+placement before it asks delegation, and `struct_nested_frame_fields` leaves a
+field written outside `__init__` unplaced — so the only programs whose verdict
+can change are ones that were **refused** and now build, and a refusal produced
+no image to compare.
+
+**This document stays**, for the reason `FORMAL_callee_no_def_ceiling_zero.md`
+gives for itself: nine files cite it, two of them for the PROVENANCE of a design
+decision in code (`formal/model.py:25939` and
+`test_formal_bracketed_method_field_set.py:27`), and deleting it would strip
+that provenance off the code that depends on it.
+
+## What was run
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+python3 tools/memslot.py --gb 8 --label t   -- python3 test_formal_method_param_field.py  # 38/38
+python3 tools/memslot.py --gb 8 --label tfrun -- python3 test_formal_run.py               # 1124 PASS / 5 FAIL
+python3 tools/memslot.py --gb 8 --label t   -- python3 test_formal_value_model.py         # 99/99
+python3 tools/memslot.py --gb 8 --label t   -- python3 test_formal_frame_field_census.py  # OK
+python3 tools/memslot.py --gb 8 --label t   -- python3 test_formal_bracketed_method_field_set.py  # 26/26
+```
+
+**`test_formal_run.py`'s five failures are PRE-EXISTING on `HEAD`**, confirmed by
+running the same five cases with `HEAD`'s `formal/build.py` and
+`formal/model.py` in place and getting the same five messages; the same is true
+of `test_formal_x86_64_parity.py`'s one (`printf_float_operand_read_from_an_xmm_register`,
+an arm64 float `printf`). None of them is a frame-field refusal.
+
+## The original document, and where its remaining item stood
+
 **Area:** FORMAL (the wide-receiver family; struct-typed fields). Found
 2026-10-01 on `work/formal-re-refusal` while working the `other refusal` row of
 the x86-64 sweep. **NOT FIXED, and not a one-construct change** — but the
@@ -374,7 +475,10 @@ exempts, and the reason it is sound is that predicate's own argument — the onl
 assignment is the constructor's and its argument is the CALLER's frame, so the
 two die together.
 
-**What is refused, and why it is a LIFETIME question.** The delegating form
+**What is refused, and why it is a LIFETIME question** (CLOSED 2026-10-05 — see
+the Status at the top; the argument below is kept because it is the reasoning
+the new rule supersedes, and a reader who wants to know what changed should be
+able to see what it changed FROM). The delegating form
 builds and answers `g=41` = CPython on both backends; what is refused is a
 NON-CONSTRUCTOR method that assigns the frame-typed field and another method
 that reads it back through `self`:

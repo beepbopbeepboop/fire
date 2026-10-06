@@ -31298,6 +31298,79 @@ def one_word_field_struct(struct_def, name, decls: dict):
     return (st, "assigned") if st is not None else (None, None)
 
 
+def field_stores_a_caller_frame(struct_def, name, decls: dict, only_init=False):
+    """The `StructDef` of this module every `self.<name>` store hands the CALLER
+    a frame of, or None.
+
+    **THE LIFETIME ARGUMENT, and it is one rule asked about two method sets.**
+    A field whose declared type names a framed struct of this module holds a
+    FRAME ADDRESS, and the question every reader of such a field has to answer
+    is *whose* frame — because the one thing that makes the address safe is that
+    the frame outlives nothing that can read the slot. When every store of the
+    field is a bare NAME that is a parameter of the writing method, annotated
+    with a struct of this module, the frame in the slot is one the CALLER
+    reserved in the caller's own scratch and passed down; and the object it is
+    stored into is the RECEIVER, which is storage the caller owns (the frame
+    checks are what refuse to let a receiver be anything else). Both die
+    together, so no read of the slot can name reclaimed stack. `__init__` is not
+    a premise of any of that — it is one writer among several, and the reason it
+    was the only one considered is history, not lifetime.
+
+    `only_init=True` narrows the question to `__init__`, which is what
+    `struct_nested_frame_fields` asks: PLACEMENT is the constructor's job, so
+    whether the constructor builds a block there is a question about the
+    constructor and not about the writers. `only_init=False` — every method — is
+    what a READ asks, because a read cannot know which writer ran.
+
+    Unanimous-or-nothing, as everywhere else on this axis, and the negative
+    direction is the one that keeps the refusal: any stored value that is not a
+    bare parameter NAME — a construction `R()`, a call `mk(4)`, a ternary, a
+    nested field `other.inner`, a name the parameter table does not resolve, an
+    `AugAssignStmt` — answers None, and so does a field no method writes. This is
+    deliberately the same CONSERVATIVE rule `init_stores_a_parameter_struct`
+    applied to the shape it already covered, so lifting this to every method
+    cannot also widen what counts as a delegating store.
+
+    **`only_init=False` is what `formal/build.py`'s `_typed_nested_frame` asks**,
+    and it is the same argument that predicate's own comment made while it
+    exempted the `__init__` case: "the only assignment is `__init__`'s, and its
+    argument is the CALLER's, so the two die together" reads as a statement
+    about `__init__` and is a statement about every writer. What it is NOT is
+    licensed for a store into anything but the receiver — `b.inner = o` where
+    `b` is a LOCAL, and `b` is returned, hands a frame that dies with this call
+    to an object that outlives it, so that shape has no writer this predicate
+    counts and keeps its refusal.
+    """
+    stores = _init_field_assignments(struct_def).get(name) or [] \
+        if only_init else method_field_assignments(struct_def, name)
+    if not stores:
+        return None
+    params_by_method = {}
+    named = set()
+    for entry in stores:
+        m, v = (None, entry) if only_init else entry
+        if not (isinstance(v, F.IdentExpr) and v.name != "None"):
+            return None
+        if only_init:
+            table = params_by_method.get(None)
+            if table is None:
+                table = params_by_method[None] = _init_declared_parameters(
+                    struct_def, decls)
+        else:
+            key = id(m)
+            table = params_by_method.get(key)
+            if table is None:
+                table = params_by_method[key] = parameter_declared_structs(
+                    m, decls or {}, owner=struct_def)
+        st = table.get(v.name)
+        if st is None:
+            return None
+        named.add(st.name)
+    if len(named) != 1:
+        return None
+    return structs_declared(named.pop(), decls)
+
+
 def init_stores_a_parameter_struct(struct_def, name, decls: dict):
     """The `StructDef` of this module a `__init__` field store is a NAME of, or
     None.
@@ -31331,37 +31404,16 @@ def init_stores_a_parameter_struct(struct_def, name, decls: dict):
     `_frame_field_store_is_sound` already makes and which the placement was
     cancelling out.
 
-    Unanimous-or-nothing, as everywhere else on this axis, and the negative
-    direction is the one that keeps the old behaviour: any assigned value that
-    is not a bare NAME of an `__init__` parameter annotated with a struct of this
-    module — a construction `R()`, a call, a ternary, a name the parameter table
-    does not resolve — leaves the field PLACED, because that is the shape the
-    placement was built for and this predicate is not a rewrite of it. It is
-    asked only of a field `struct_nested_frame_fields` has already agreed is a
-    nested frame of this module, so it can only ever REMOVE a placement, never
-    invent one.
+    The rule itself is `field_stores_a_caller_frame(..., only_init=True)`, and
+    this is the narrower question asked by the narrower caller: whether the
+    CONSTRUCTOR builds a block there is a question about the constructor, even
+    though the lifetime argument is about the caller and holds for every writer.
 
     `one_word_field_struct` is the other reader of the same evidence and calls
     this, rather than the two walking `__init__`'s body separately and one of
     them learning about a spelling the other does not.
     """
-    values = _init_field_assignments(struct_def).get(name) or []
-    if not values:
-        return None
-    params = None
-    named = set()
-    for v in values:
-        if not (isinstance(v, F.IdentExpr) and v.name != "None"):
-            return None
-        if params is None:
-            params = _init_declared_parameters(struct_def, decls)
-        st = params.get(v.name)
-        if st is None:
-            return None
-        named.add(st.name)
-    if len(named) != 1:
-        return None
-    return structs_declared(named.pop(), decls)
+    return field_stores_a_caller_frame(struct_def, name, decls, only_init=True)
 
 
 def _init_declared_parameters(struct_def, decls: dict) -> dict:
@@ -31745,13 +31797,13 @@ MAX_NESTED_FRAME_DEPTH = 4
 # dangerous direction — by accident.  A call to something else, a name, a
 # literal, an augmented assignment: all of them yield no evidence, which is the
 # absent answer, and the field stays refused with the disagreement spelled.
-def _init_field_assignments(struct_def) -> dict:
-    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
+def _method_field_stores(m, receivers) -> list:
+    """`[(field_name, value_node), …]` — one method's `self.<name> = …` stores.
 
-    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
-    UNION of a field's assignments rather than the last one seen: unanimity is
-    decided by `struct_init_field_types`, and it can only be decided over all
-    of them.
+    The scan, over ONE method body, and the only place it is written: the two
+    questions asked of it differ in *which methods they ask about* and agree
+    about everything else, so a second scanner would be a second thing that
+    could learn a spelling the first one does not read.
 
     Both assignment spellings matter and only one of them is a `MemberExpr`
     target of a plain `AssignStmt`: `self.a, self.b = limit, [], 0` parses as an
@@ -31761,41 +31813,66 @@ def _init_field_assignments(struct_def) -> dict:
     table `init_body_stores` inlines from — so a type can never be read out of a
     store the emitter is going to refuse.
 
-    `MultiAssignStmt` (`a = b = v`) is the other shape, and the parser gives
-    the chain ONE node with a `targets` list rather than a chain of nodes, so
+    `MultiAssignStmt` (`a = b = v`) is the other shape, and the parser gives the
+    chain ONE node with a `targets` list rather than a chain of nodes, so
     `iter_nodes` alone would miss every target on it.
 
     An `AugAssignStmt` contributes the FIELD and no value: `self.n += 1` in
     `__init__` says the slot is a counter and says nothing about its type.
     """
+    out = []
+    for node in iter_nodes(getattr(m, "body", None)):
+        if isinstance(node, F.AssignStmt):
+            for target, value in _init_statement_field_stores(node,
+                                                              receivers) or ():
+                out.append((target.member, value))
+            continue
+        if isinstance(node, F.MultiAssignStmt):
+            # `a = b = v` is a chain of `AssignStmt` in this AST, and the
+            # parser gives the chain ONE node with a `targets` list, so this
+            # is the shape `iter_nodes` alone would miss.  Every target here
+            # is a plain name or a member — the grammar does not admit a
+            # chain of tuple targets — so one value serves them all.
+            for t in (getattr(node, "targets", None) or []):
+                if isinstance(t, F.MemberExpr) and isinstance(t.obj, F.IdentExpr) \
+                        and t.obj.name in receivers:
+                    out.append((t.member, node.value))
+    return out
+
+
+def _init_field_assignments(struct_def) -> dict:
+    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
+
+    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
+    UNION of a field's assignments rather than the last one seen: unanimity is
+    decided by `struct_init_field_types`, and it can only be decided over all
+    of them.  The scan itself is `_method_field_stores`; what is narrow here is
+    the method set, and `field_stores_a_caller_frame` asks the same scan about
+    every method for the same reason this one asks it about one.
+    """
     out: dict = {}
     for m in struct_methods(struct_def):
         if m.name != "__init__":
             continue
-        receivers = struct_receivers(struct_def)
-
-        def record(name, value):
+        for name, value in _method_field_stores(m, struct_receivers(struct_def)):
             out.setdefault(name, []).append(value)
-
-        for node in iter_nodes(getattr(m, "body", None)):
-            if isinstance(node, F.AssignStmt):
-                for target, value in _init_statement_field_stores(node,
-                                                                   receivers) \
-                        or ():
-                    record(target.member, value)
-                continue
-            if isinstance(node, F.MultiAssignStmt):
-                # `a = b = v` is a chain of `AssignStmt` in this AST, and the
-                # parser gives the chain ONE node with a `targets` list, so this
-                # is the shape `iter_nodes` alone would miss.  Every target here
-                # is a plain name or a member — the grammar does not admit a
-                # chain of tuple targets — so one value serves them all.
-                for t in (getattr(node, "targets", None) or []):
-                    if isinstance(t, F.MemberExpr) and isinstance(t.obj,
-                                                                 F.IdentExpr) \
-                            and t.obj.name in receivers:
-                        record(t.member, node.value)
     return out
+
+
+def method_field_assignments(struct_def, name) -> list:
+    """`[(method, value_node), …]` — every method's `self.<name> = …`.
+
+    The all-methods projection of the same scan `_init_field_assignments` reads,
+    and it carries the METHOD because the reader needs it: `field_stores_a_caller_frame`
+    asks whether the stored value is one of *that method's own* annotated
+    parameters, and a value read without knowing which method wrote it cannot be
+    looked up in the right parameter table.
+    """
+    receivers = struct_receivers(struct_def)
+    return [(m, value)
+            for m in struct_methods(struct_def)
+            for fname, value in _method_field_stores(m, receivers)
+            if fname == name]
 
 
 # The type NAME an assigned value provably has, for the rows the classifier can

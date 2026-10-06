@@ -7391,25 +7391,40 @@ _UNPLACED = object()
 # Opt; def __init__(out self, o: Opt): self.inner = o; def get(out self) ->
 # Int: return self.inner.v * 10 + self.inner.has }` with `Box(mk(4))` builds
 # and prints CPython's `41` on arm64 AND on x86-64. It is the DELEGATING field —
-# `model.init_stores_a_parameter_struct`, the predicate `_typed_nested_frame`
-# already exempts a few lines above the refusal — and the reason it is sound is
-# the one that predicate's own comment makes: the only assignment is
-# `__init__`'s and its argument is the CALLER's, so the frame in the slot and the
-# frame the caller is reached through die together. A method that is not
-# `__init__` assigning the field is exactly the case with two independent
-# lifetimes, which is the refusal.
+# `model.field_stores_a_caller_frame`, the predicate `_typed_nested_frame`
+# exempts a few lines below the refusal — and the reason it is sound is the one
+# that predicate's own comment makes: every store of the field is a parameter
+# the CALLER supplied, and the object it went into is the RECEIVER, which the
+# caller owns, so the frame in the slot and the object die together. `__init__`
+# is one writer among several and the argument never mentioned it.
 #
-# What it does NOT claim: that a non-constructor assigner becomes answerable, or
-# that the read-through-a-local spelling works. Both are separate gaps, named
-# here so the next reader of either of them knows they were measured rather than
+# `model.field_stores_a_caller_frame` asks about EVERY method rather than about
+# `__init__` alone, which is what makes a setter delegating too, so this advice
+# has to name the setter form or it is naming a spelling narrower than the one
+# that works. It did, for one commit: the tail of this string said "a method
+# that assigns the field puts in a frame belonging to whichever function ran the
+# assignment and nothing here says the two lifetimes agree", which is false of
+# `Box.set(mut self, o: Opt)` — measured building and answering `41` on both
+# backends — and a refusal that names a narrower spelling than the one that
+# works is the same promise-nobody-checked defect the rest of this comment is
+# about.
+#
+# What it does NOT claim: that a store into anything but the receiver is
+# delegating. `b.inner = o` where `b` is a LOCAL that is then returned hands a
+# frame that dies with this call to an object that outlives it, so that shape is
+# refused at the STORE (`_frame_field_store_is_sound`) and neither this advice
+# nor the predicate behind it reaches it. Nor that a local copy of the field can
+# be read through — `var t = self.inner; t.v` is a separate gap, named here so
+# the next reader of either of them knows they were measured rather than
 # assumed.
 DELEGATING_FIELD_ADVICE = (
-    "Assign the field in __init__ from a parameter of __init__ and read it "
-    "through the field, which is the same program with a lifetime this "
-    "analysis can see: a constructor's argument is the frame the CALLER "
-    "reached, so the two die together, while a method that assigns the field "
-    "puts in a frame belonging to whichever function ran the assignment and "
-    "nothing here says the two lifetimes agree"
+    "Store the field from a PARAMETER of the method that stores it, annotated "
+    "with that struct's type: a constructor's argument is the frame the CALLER "
+    "reached, so the two die together, and a setter's argument is the caller's "
+    "for the same reason. EVERY method that writes the field has to do it -- "
+    "one writer that stores a constructed value, a call, or another field's word "
+    "puts in a frame this analysis cannot place, and it refuses the whole field "
+    "rather than part of it"
 )
 
 
@@ -7532,8 +7547,9 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     #
     # **A DELEGATING field is the one thing that is a nested frame WITHOUT being
     # placed, and it has to be asked here rather than inferred from the
-    # placement's absence.** `model.init_stores_a_parameter_struct` is the
-    # predicate: `self.src = r` where `r: R` is `__init__`'s own annotated
+    # placement's absence.** `model.field_stores_a_caller_frame` is the
+    # predicate, asked about EVERY method rather than about `__init__` alone:
+    # `self.src = r` where `r: R` is the writing method's own annotated
     # parameter, and nothing else writes `src`. The slot holds a frame address —
     # the CALLER's — so a read is `[slot + 8k]` exactly as it is for a placed
     # one and `walked`/`nested_fields` want the struct back. What it is NOT is a
@@ -7545,19 +7561,29 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # (`_frame_field_store_is_sound`), and the store's soundness is what says the
     # slot is a pointer.
     #
-    # Returning `_REASSIGNED` here instead would be the wrong ANSWER rather than
-    # a cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
+    # **Asking it about every method is what a READ has to do, and `__init__` is
+    # not where the lifetime argument comes from.** That argument is "the frame
+    # in the slot is one the CALLER reserved and passed down, and the object it
+    # went into is the RECEIVER, which the caller owns, so the two die together"
+    # — and it holds for a setter exactly as it holds for a constructor:
+    # `Box.set(mut self, o: Opt)` puts the caller's `o` into the caller's `Box`,
+    # so nothing that reads the slot afterwards can name reclaimed stack. What
+    # the argument does NOT license is a store into anything but the receiver,
+    # and `field_stores_a_caller_frame` counts only `self.<field>` stores, so
+    # `b.inner = o` with `b` a LOCAL that is then RETURNED keeps its refusal
+    # (`formal/model.py`'s docstring is the statement of which shape that is).
+    #
+    # Returning `_REASSIGNED` here instead is the wrong ANSWER rather than a
+    # cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
     # whichever function ran the assignment", and for a delegating field the
-    # only assignment is `__init__`'s, whose argument the caller supplies. So
-    # the frame in the slot is the caller's, the caller is the frame the object
-    # itself is reached through, and the two die together — which is the whole
-    # argument `_frame_field_store_is_sound` already makes.
+    # frame is the caller's whichever function ran it — so the caller is the
+    # frame the object itself is reached through, and the two die together,
+    # which is the whole argument `_frame_field_store_is_sound` already makes.
     for st in cands:
         if any(name == field for name, _slot, _child
                in M.struct_nested_frame_fields(st, structs_by_name)):
             continue
-        if M.init_stores_a_parameter_struct(st, field,
-                                            structs_by_name) is not None:
+        if M.field_stores_a_caller_frame(st, field, structs_by_name) is not None:
             continue
         return _REASSIGNED
     return nested
