@@ -1,11 +1,107 @@
 [
- {"key": "match-statements", "title": "match statements", "text": "PATTERN MATCHING. Measure what the formal backend does with Python 3.10 `match`/`case` (literal, capture, wildcard, or-patterns, guards, sequence and mapping and class patterns): CPython-oracle table first (test_formal_match.py), then implement the missing/silently wrong ones in slices on both backends with a sound lowering (decision-tree to compares and branches), the Lean model carrying it. Refusals must name the construct."},
- {"key": "with-statements", "title": "with statements and context managers", "text": "CONTEXT MANAGERS. Measure `with` (single and multiple items, `as` targets, `__enter__`/`__exit__` on user classes, exceptions leaving the block, `return`/`break`/`continue` inside, contextlib.contextmanager style, nested) against CPython: oracle table first (test_formal_with.py), then fix and implement in slices on both backends; the Lean model carries the exit-on-every-path guarantee."},
- {"key": "dataclass-enum-namedtuple", "title": "dataclass / Enum / NamedTuple end to end", "text": "VALUE TYPES END TO END. Programs (not just hostmod conformance) that define and USE @dataclass (defaults, frozen, order, field(), __post_init__, repr/eq), enum.Enum/IntEnum/Flag (members, values, iteration, by-value lookup, comparison), typing.NamedTuple/collections.namedtuple (unpacking, _replace, _asdict, repr): CPython-oracle table, find every refusal/divergence on both backends and fix at the root."},
- {"key": "file-io", "title": "file I/O semantics", "text": "FILE I/O. open()/read/readline/readlines/write/seek/tell/truncate/close, text vs binary mode, newline handling, context-managed files, os.path and pathlib file operations, errors (FileNotFoundError, PermissionError, IsADirectoryError, closed-file ValueError) in a temp directory: CPython-oracle tests on both backends, honest models of the syscalls in formal/hostmods with admitted contracts where the host's answer is the contract; fix divergences at the root."},
- {"key": "builtins-conformance", "title": "builtins conformance tables", "text": "BUILTINS. Build a generated CPython-oracle conformance table for the builtin functions over containers and edge inputs: sorted (key, reverse, stability), min/max (key, default, ties), sum (start), any/all, zip (strict, uneven), enumerate (start), reversed, map/filter, range (negative step, empty, huge), len, abs, divmod, round (banker's), pow, isinstance/issubclass, iter/next with default, slice objects, hash of ints/strs/tuples where observable. Run each on both backends (test_formal_builtins_conformance.py), classify every divergence/refusal, fix at the root."},
- {"key": "str-methods", "title": "str methods conformance", "text": "STR METHODS. A generated CPython-oracle conformance table (including non-ASCII once the unicode work allows, and the refusal contract where it does not) for every str method: split/rsplit (maxsplit, sep None), join, strip/lstrip/rstrip (chars), find/rfind/index/count (start/end), replace (count), startswith/endswith (tuple), partition/rpartition, upper/lower/title/capitalize/swapcase/casefold, isalpha/isdigit/isspace/..., zfill/center/ljust/rjust, format and %-formatting, splitlines (keepends), encode/decode: test_formal_str_methods.py on both backends; fix each divergence at the root."},
- {"key": "container-methods", "title": "list/dict/set method conformance", "text": "CONTAINER METHODS. A generated CPython-oracle table for every list/dict/set/tuple/frozenset method and operator: list (append/extend/insert/pop/remove/index/count/sort/reverse/copy/clear, slicing and slice assignment and deletion, *, +, in, comparison), dict (get/setdefault/pop/popitem/update/items/keys/values, insertion ORDER, deletion during iteration RuntimeError, | and |=), set (add/discard/remove/pop/union/intersection/difference/symmetric_difference/issubset, operators), tuple (count/index, hashing/compare): both backends, aliasing and mutation-through-reference cases included: test_formal_container_methods.py; fix every divergence at the root."},
- {"key": "format-and-repr", "title": "print/repr/format of every value kind", "text": "FORMATTING. print(), str(), repr(), format() and f-strings over EVERY value kind the backend supports (ints incl. negative/huge, floats incl. nan/inf/-0.0/repr round-trip, bools, None, str with quotes/escapes/non-ASCII, bytes, lists/dicts/sets/tuples nested, user classes with __repr__/__str__/__format__): the format-spec mini-language (fill/align/sign/#/0/width/,/_/.precision/type: d x X o b e f g % c s) and `!r !s !a`, sep/end/file args of print: CPython-oracle table (test_formal_format_conformance.py) on both backends; fix every divergence at the root."},
- {"key": "loop-invariants", "title": "automatic loop invariants", "text": "PROOF AUTOMATION FOR LOOPS. For simple counted loops (for i in range(n) / while i < n with accumulators) the proof generator currently needs per-example tactics or admits the Total obligation. Implement invariant SYNTHESIS for the common shapes: sum/product/count accumulators, min/max scans, linear search, array fill/copy, gcd/collatz-style while loops with a decreasing measure: derive a candidate invariant and variant from the model, discharge them with the bounded tactic ladder (omega/simp/decide/bv_decide within run_lean's bounds), and report proved/unknown (never silent). Add the loops to the proof-regression baseline; negative controls must reject wrong invariants."}
+ {
+  "key": "match-statements",
+  "title": "match statements",
+  "text": "PATTERN MATCHING. Measure what the formal backend does with Python 3.10 `match`/`case` (literal, capture, wildcard, or-patterns, guards, sequence and mapping and class patterns): CPython-oracle table first (test_formal_match.py), then implement the missing/silently wrong ones in slices on both backends with a sound lowering (decision-tree to compares and branches), the Lean model carrying it. Refusals must name the construct."
+ },
+ {
+  "key": "with-statements",
+  "title": "with statements and context managers",
+  "text": "CONTEXT MANAGERS. Measure `with` (single and multiple items, `as` targets, `__enter__`/`__exit__` on user classes, exceptions leaving the block, `return`/`break`/`continue` inside, contextlib.contextmanager style, nested) against CPython: oracle table first (test_formal_with.py), then fix and implement in slices on both backends; the Lean model carries the exit-on-every-path guarantee."
+ },
+ {
+  "key": "dataclass-enum-namedtuple",
+  "title": "dataclass / Enum / NamedTuple end to end",
+  "text": "VALUE TYPES END TO END. Programs (not just hostmod conformance) that define and USE @dataclass (defaults, frozen, order, field(), __post_init__, repr/eq), enum.Enum/IntEnum/Flag (members, values, iteration, by-value lookup, comparison), typing.NamedTuple/collections.namedtuple (unpacking, _replace, _asdict, repr): CPython-oracle table, find every refusal/divergence on both backends and fix at the root."
+ },
+ {
+  "key": "file-io",
+  "title": "file I/O semantics",
+  "text": "FILE I/O. open()/read/readline/readlines/write/seek/tell/truncate/close, text vs binary mode, newline handling, context-managed files, os.path and pathlib file operations, errors (FileNotFoundError, PermissionError, IsADirectoryError, closed-file ValueError) in a temp directory: CPython-oracle tests on both backends, honest models of the syscalls in formal/hostmods with admitted contracts where the host's answer is the contract; fix divergences at the root."
+ },
+ {
+  "key": "builtins-conformance",
+  "title": "builtins conformance tables",
+  "text": "BUILTINS. Build a generated CPython-oracle conformance table for the builtin functions over containers and edge inputs: sorted (key, reverse, stability), min/max (key, default, ties), sum (start), any/all, zip (strict, uneven), enumerate (start), reversed, map/filter, range (negative step, empty, huge), len, abs, divmod, round (banker's), pow, isinstance/issubclass, iter/next with default, slice objects, hash of ints/strs/tuples where observable. Run each on both backends (test_formal_builtins_conformance.py), classify every divergence/refusal, fix at the root."
+ },
+ {
+  "key": "str-methods",
+  "title": "str methods conformance",
+  "text": "STR METHODS. A generated CPython-oracle conformance table (including non-ASCII once the unicode work allows, and the refusal contract where it does not) for every str method: split/rsplit (maxsplit, sep None), join, strip/lstrip/rstrip (chars), find/rfind/index/count (start/end), replace (count), startswith/endswith (tuple), partition/rpartition, upper/lower/title/capitalize/swapcase/casefold, isalpha/isdigit/isspace/..., zfill/center/ljust/rjust, format and %-formatting, splitlines (keepends), encode/decode: test_formal_str_methods.py on both backends; fix each divergence at the root."
+ },
+ {
+  "key": "container-methods",
+  "title": "list/dict/set method conformance",
+  "text": "CONTAINER METHODS. A generated CPython-oracle table for every list/dict/set/tuple/frozenset method and operator: list (append/extend/insert/pop/remove/index/count/sort/reverse/copy/clear, slicing and slice assignment and deletion, *, +, in, comparison), dict (get/setdefault/pop/popitem/update/items/keys/values, insertion ORDER, deletion during iteration RuntimeError, | and |=), set (add/discard/remove/pop/union/intersection/difference/symmetric_difference/issubset, operators), tuple (count/index, hashing/compare): both backends, aliasing and mutation-through-reference cases included: test_formal_container_methods.py; fix every divergence at the root."
+ },
+ {
+  "key": "format-and-repr",
+  "title": "print/repr/format of every value kind",
+  "text": "FORMATTING. print(), str(), repr(), format() and f-strings over EVERY value kind the backend supports (ints incl. negative/huge, floats incl. nan/inf/-0.0/repr round-trip, bools, None, str with quotes/escapes/non-ASCII, bytes, lists/dicts/sets/tuples nested, user classes with __repr__/__str__/__format__): the format-spec mini-language (fill/align/sign/#/0/width/,/_/.precision/type: d x X o b e f g % c s) and `!r !s !a`, sep/end/file args of print: CPython-oracle table (test_formal_format_conformance.py) on both backends; fix every divergence at the root."
+ },
+ {
+  "key": "loop-invariants",
+  "title": "automatic loop invariants",
+  "text": "PROOF AUTOMATION FOR LOOPS. For simple counted loops (for i in range(n) / while i < n with accumulators) the proof generator currently needs per-example tactics or admits the Total obligation. Implement invariant SYNTHESIS for the common shapes: sum/product/count accumulators, min/max scans, linear search, array fill/copy, gcd/collatz-style while loops with a decreasing measure: derive a candidate invariant and variant from the model, discharge them with the bounded tactic ladder (omega/simp/decide/bv_decide within run_lean's bounds), and report proved/unknown (never silent). Add the loops to the proof-regression baseline; negative controls must reject wrong invariants."
+ },
+ {
+  "key": "comprehensions-and-generators",
+  "title": "list/dict/set comprehensions and generator expressions",
+  "text": "COMPREHENSIONS. Measure nested comprehensions, conditions, multiple `for` clauses, walrus inside, dict/set comprehension key collisions, and generator expressions consumed by sum/any/all/min/max/list/sorted. CPython-oracle table first (test_formal_comprehensions.py), then fix the missing/wrong ones on both backends with the Lean model carrying them; refusals name the construct."
+ },
+ {
+  "key": "exceptions-semantics",
+  "title": "exception semantics beyond the happy path",
+  "text": "EXCEPTIONS. Measure try/except/else/finally ordering, nested handlers, re-raise, `raise ... from`, exception chaining/`__context__`, custom exception hierarchies with attributes, `except (A, B)`, exceptions out of `with`, and exit status/stderr text of an uncaught one. CPython-oracle table first, then implement slices on both backends; Lean model must carry any new control-flow edge."
+ },
+ {
+  "key": "integer-semantics",
+  "title": "integer arithmetic edge cases",
+  "text": "INT SEMANTICS. Measure floor division/modulo with negative operands, `**` with negative/zero exponents, shifts by >= 64 and by negative counts, bitwise ops on negatives, int()/abs()/divmod/pow(a,b,m), bool-as-int, and overflow beyond 64 bits (what is refused vs wrapped). CPython-oracle table first; fix what is silently wrong (wrong answer is worse than a refusal); both backends and the Lean model."
+ },
+ {
+  "key": "string-formatting-full",
+  "title": "str.format, %-format and f-string specs",
+  "text": "FORMAT SPECS. Measure every format-spec feature (fill/align/sign/#/0/width/grouping/precision/type) for int/float/str/bool in f-strings, str.format (positional, named, nested, `!r/!s/!a`) and %-formatting. CPython-oracle table (test_formal_format_specs.py), then implement the missing ones; anything not representable is a refusal that names the spec."
+ },
+ {
+  "key": "slicing-and-sequences",
+  "title": "slices, negative indices, sequence ops",
+  "text": "SEQUENCES. Measure slicing with every start/stop/step combination (negative, omitted, out of range, step<0) on str/list/bytes/tuple, index errors, `in`, `+`/`*`, `reversed`, `enumerate`, `zip` with unequal lengths, `sorted(key=, reverse=)` stability, min/max with key/default. CPython-oracle table first; fix wrong answers; both backends and the Lean model."
+ },
+ {
+  "key": "closures-and-scoping",
+  "title": "closures, nonlocal/global, default args",
+  "text": "SCOPING. Measure nested functions, closures over loop variables (late binding), `nonlocal`/`global`, default-argument evaluation time (mutable defaults), keyword-only/positional-only parameters, *args/**kwargs forwarding, recursion through closures, lambdas in comprehensions. CPython-oracle table first; implement the missing slices on both backends with a sound Lean story."
+ },
+ {
+  "key": "classes-and-dunder-methods",
+  "title": "classes, inheritance and dunder methods",
+  "text": "CLASSES. Measure inheritance and `super()`, class vs instance attributes, @property/@staticmethod/@classmethod, __eq__/__hash__/__lt__ and total ordering, __repr__/__str__, __len__/__iter__/__getitem__/__contains__, __enter__/__exit__, __call__, operator overloading (__add__ etc. and reflected forms). CPython-oracle table first; implement slices on both backends."
+ },
+ {
+  "key": "bytes-and-bytearray",
+  "title": "bytes, bytearray, memoryview and encodings",
+  "text": "BYTES. Measure bytes/bytearray construction, indexing/slicing, methods (find/split/join/replace/hex/fromhex), encode/decode for utf-8/ascii/latin-1 with errors=, struct.pack/unpack round trips, int.to_bytes/from_bytes, and bytes-vs-str refusals. CPython-oracle table first; both backends and the Lean model."
+ },
+ {
+  "key": "integer-and-float-conversions",
+  "title": "float semantics and conversions",
+  "text": "FLOAT. Measure float arithmetic edge cases (inf/nan propagation and comparison, -0.0, round-half-even in round(), int(float) truncation, float(str) parsing, repr shortest-round-trip printing, `//` and `%` on floats, math.floor/ceil/trunc/fsum/isclose). CPython-oracle table first; fix wrong answers; state precisely what the Lean model says about floats (binary64) and where it admits."
+ },
+ {
+  "key": "sets-dicts-ordering",
+  "title": "dict/set semantics and ordering",
+  "text": "DICT/SET. Measure dict insertion order, deletion during iteration (the error), setdefault/get/pop/popitem/update/|=, dict views (keys/values/items) as live views, set algebra (| & - ^ and in-place forms), frozenset, hash of tuples, key equality across int/float/bool (1 == 1.0 == True). CPython-oracle table first; implement slices on both backends."
+ },
+ {
+  "key": "while-loops-and-control-flow",
+  "title": "loops, break/continue/else, early return",
+  "text": "CONTROL FLOW. Measure for/while with else, break/continue in nested loops and inside try/finally and with-blocks, early return from nested loops, chained comparisons (short-circuit and single evaluation), conditional expressions nested, `and`/`or` value-returning semantics, assert with messages. CPython-oracle table first; both backends and the Lean model's edge cases."
+ },
+ {
+  "key": "os-and-pathlib-hostmods",
+  "title": "os/pathlib/shutil/tempfile host modules",
+  "text": "HOST MODULES. Take formal/hostmods os, pathlib, shutil, tempfile, glob, fnmatch: write build-and-run CPython-oracle tests for each public function against a scratch directory (create/list/stat/rename/remove, relative vs absolute, errors), find the functions that build but misbehave, and fix or refuse them. Admitted contracts only where the OS is the semantics; say so in formal/admitted.py."
+ }
 ]
