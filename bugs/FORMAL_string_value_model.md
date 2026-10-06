@@ -1104,6 +1104,35 @@ in arithmetic; the `\xHH` spelling; the `0x7F` boundary) and eight refused, the
 three refusals' reasons being unrelated enough that one message would have made
 at least two of them false.
 
+**And all twelve were RED on 2026-10-05 afternoon, for one reason that has
+nothing to do with encoding** — recorded here because this paragraph is the
+only place that says the rows are pinned, and a reader who believed it would
+have gone looking for a `str` bug. `model.not_lowered_builtin_refusal` landed
+that morning (`27bd1f5d`): a pre-pass that refuses a call to a name in
+`NOT_LOWERED_BUILTINS` before any emitter runs, so that `sorted`/`map`/`filter`
+stop with a sentence about the construct instead of the link audit's sentence
+about a symbol four stages later. **`ord` and `chr` are in `EMITTER_BUILTINS` as
+well as in `NOT_LOWERED_BUILTINS`** — `_emit_text_builtin` folds a literal's one
+character and refuses `chr` with a reason that is about it — and the pre-pass
+had no exclusion for a name an emitter lowers, only for `float`. So
+`ord("A")` was refused by name with the generic "write the operation out in the
+source" advice, on both architectures, where it used to print 65.
+
+Measured, on `master` before the fix and on the tree after:
+
+| | `python3 test_formal_unicode.py` | `ord("A")` |
+|---|---|---|
+| before | **PASS=140 FAIL=9** (the 4 fold rows, the arithmetic fold, `\xHH`, `0x7F`, and 5 `ord`/`chr` refusals whose needles are the emitter's sentences) | refused by name |
+| after | **PASS=150 FAIL=0** | builds and prints **65**, both architectures, where CPython prints 65 |
+
+`not_lowered_builtin_refusal` now asks `emitter_lowers(name)` — the emitters'
+own question — before refusing, rather than consulting a second hand-kept list,
+and `LOWERED_CALL_SHAPED_BUILTINS` keeps only `float` because that one is
+lowered through the conversion path and `emitter_lowers` cannot see it. **The
+general shape is the one this document's other rows keep arriving at: a name
+can be in two tables because it is two facts about it, and the reader that asks
+one question must not answer the other's.**
+
 ## The encoding condition is a fact about the IMAGE, not about the MODULE
 
 Wave 9's condition is "this unit holds no non-ASCII string literal", and a unit
@@ -1150,47 +1179,64 @@ that stops a "refuse anything non-ASCII in the closure" fix from taking it), and
 an all-ASCII image that must not see any of it (the condition is "a non-ASCII
 literal exists somewhere", not "there are imports").
 
-## Measured 2026-10-05 (`formal29-2-r2`, while working the float value model):
-## the compiler's OWN host modules carry non-ASCII literals, so four registered
-## suites are red on master for this reason and nothing says so
+## Measured 2026-10-05 (`formal29-2-r2`), re-measured 2026-10-05 later the same
+## day: the four red suites were the DOCSTRING EXCLUSION's before-fix state, and
+## the repair this section recommends is not needed
 
-The condition above is "this IMAGE holds a non-ASCII string literal"
-(`publish_non_ascii_strings`), and the image includes every imported module's
-docstrings — so a non-ASCII literal in **this repository's own host modules**
-refuses every file that imports one of them. `formal/hostmods/os/_syscalls.mojo`
-is written with em-dashes (`—`) throughout its prose and quotes `len("日本")` by
-name, both of which are string literals in its docstrings:
+**This section was written against a tree where `is_docstring_statement` was not
+yet consulted by the scan, and every number in it is now false.** Recorded as
+corrected rather than deleted because the claim it made — "four registered
+suites are red on master and nothing says so" — is exactly the kind of sentence
+that costs the next reader an afternoon, and the correction is the thing worth
+having.
 
-```
-$ python3 -c "print([ (i, l) for i, l in enumerate(
-      open('formal/hostmods/os/_syscalls.mojo', encoding='utf-8').read().splitlines(), 1)
-      if any(ord(c) > 127 for c in l) ][:3])"
-[(9, '  platform.mojo` needs the string primitives below for its own reasons — a'), …]
-```
+The original reading was: the condition is "this IMAGE holds a non-ASCII string
+literal" (`publish_non_ascii_strings`), the image includes every imported
+module's docstrings, `formal/hostmods/os/_syscalls.mojo` is written with
+em-dashes (`—`) throughout its prose and quotes `len("日本")` by name, and the
+result is `d[i] is refused on a string whose text is not ASCII` in every image
+that imports it:
 
-Every one of those images is refused at `d[i]`, and the suites that build them
-are red for that one reason:
-
-| suite | measured | the reason, on every failing group |
+| suite | as measured then | **measured now** |
 |---|---|---|
-| `python3 test_formal_os.py` | **1/7** | `d[i] is refused on a string whose text is not ASCII` |
-| `python3 test_formal_math.py` | **7/8** | the same, from `math`'s `os.path` import |
-| `python3 test_formal_time.py` | **3/5** | the same |
-| `python3 test_struct_formal.py` | **28/191** | the same, from `from struct import calcsize` |
+| `python3 test_formal_os.py` | 1/7 | **7/7** |
+| `python3 test_formal_math.py` | 7/8 | **8/8** |
+| `python3 test_formal_time.py` | 3/5 | **5/5** |
+| `python3 test_struct_formal.py` | 28/191 | **193/193** |
 
-**This is pre-existing and not attributable to any change of mine** —
-`formal/hostmods/os/_syscalls.mojo` is byte-identical to `master`
-(`git diff --quiet master -- formal/hostmods/os/_syscalls.mojo`), and the
-refusal text is the `s[i]` bullet above, quoted with its own advice
-("keep the text ASCII, which is what every other answer here assumes"). It is
-recorded here because nothing ELSE records it: four red suite jobs, each with a
-`build failed: …` line that ends mid-sentence in the middle of the message, and
-no marker on any of the four, so a reader re-running them spends the time
-rediscovering that it is one fact and not 174.
+**The cause is that a DOCSTRING is not a string a program can name**, and
+`non_ascii_strings_in` asks `is_docstring_statement` before it publishes one
+(`formal/model.py`, whose own docstring records that the scan "used to publish
+it anyway" and that one em-dash in a docstring "refused every string operation
+in the module … and in the 229 files whose import closure reaches it"). Measured
+on this tree, over every module of `formal/hostmods/`:
 
-**Two directions, and they are not the same size.** The one that is a repair:
-ASCII-fold the prose in that module (the em-dashes are punctuation in
-docstrings, not text any test reads), which unblocks every group above with no
-change to the string value model at all. The one that is a project: the
-`d[i]` refusal itself, which is this document's subject and is what the em-dash
-removal only avoids.
+```
+formal/hostmods/os/_syscalls.mojo      93 non-ASCII lines  ->  []  (no values)
+formal/hostmods/struct.mojo            31 non-ASCII lines  ->  []
+formal/hostmods/os/__init__.mojo                          ->  []
+formal/hostmods/os/path/__init__.mojo                     ->  []
+formal/hostmods/math.mojo                                 ->  []
+```
+
+Every one of those lines is prose in a docstring or a `#` comment, and neither
+is a value: a docstring has no name bound to it (`__doc__` is on
+`_UNRESOLVED_NAME_ALLOWED`) and a comment is not a literal at all. **So the
+93 lines cost nothing and the repair this section recommended — ASCII-fold the
+prose — would have been the wrong fix**: it edits the readability of five files
+to answer a question the model already answers correctly.
+
+**What replaces it is an obligation, and it is now a test row.** "Keep the prose
+ASCII" was the wrong rule, because a non-ASCII docstring is exactly what the
+files are full of and it is legitimate. The rule that matters is **"keep every
+host module's string VALUES ASCII"**, and that is one row in
+`test_formal_unicode.py::model_checks`, which walks every `formal/hostmods/**`
+module with the reader the build uses and requires the scan to come back empty —
+so a future non-ASCII *value* in a hostmod, which WOULD refuse `d[i]`,
+`len(s)` and `printf("%<w>s", s)` in every image whose closure reaches the
+module, is caught in about a second instead of by a reader re-running four
+suites and rediscovering that 174 checks were one fact.
+
+**And the project half is unchanged and still is one:** the `d[i]` refusal
+itself, which is this document's subject. What changed is only that the
+repository's own modules are no longer standing in the way of measuring it.
