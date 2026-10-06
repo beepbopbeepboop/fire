@@ -4,9 +4,8 @@
 
 **The companion doc's next step, followed literally, found the whole of the 26
 elaboration failures — and a second live drift behind them.**
-`bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`
-recorded 26 of 26 `terminates` cases failing on `Type mismatch |
-x86_step_setcc_r8 sN` and named the next step as "compare
+A sibling doc recorded 26 of 26 `terminates` cases failing on `Type mismatch |
+x86_step_setcc_r8 sN`, named the next step as "compare
 `x86_step_setcc_r8`'s stated signature with what `x86_step` concludes … If it
 states a width the model does not produce, that is the same class of bug and the
 fix is in the lemma."  It is B2's mechanism exactly — **a successor table is a

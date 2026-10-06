@@ -766,8 +766,11 @@ _SUCCS = {
     # this being the fourth: the coverage test's `SUCCESSOR_FORMS` is the only
     # instrument that compares a successor against the model, and it held no
     # `setcc` row — so 26 of 26 `terminates` cases failed on elaboration with
-    # nothing reporting that the successor table had drifted.  See
-    # `bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`.
+    # nothing reporting that the successor table had drifted.  The doc that
+    # recorded that is deleted with these fixes (`work/formal42-5`), and the
+    # measurement is this file's own: `sle8` and `twoifs` go from `FAIL lean
+    # exited 1: error: Type mismatch | x86_step_setcc_r8` to `terminates: proved`
+    # in 25.6 s and 51.9 s.
     "setcc":
         "{ x86_set_reg_narrow $s $rmv 1 (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",

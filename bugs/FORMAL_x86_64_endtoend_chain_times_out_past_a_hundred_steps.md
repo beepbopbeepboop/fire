@@ -1,5 +1,44 @@
 # the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable
 
+## Status (2026-10-05 — `work/formal42-5`: the two successor rows that had drifted are corrected, and `wide_recv` is still the one file that aborts)
+
+**The doc's own subject — the per-step separation and the `hpop` proof — is
+UNCHANGED, and `formal/examples/wide_recv.mojo` still dies in Lean's allocator.
+Measured after this pass's three commits:** `terminates: FAIL lean exited -6:
+libc++abi: terminating due to uncaught exception of type
+lean::memory_exception: excessive memory consumption detected at 'interpreter'`,
+**313.2 s, 6.1 GB**, with **five admitted facts** — `hpop56`, `hpop91`,
+`hpop115`, `hpop141` and `hrip` — and **1 278 guarded side conditions**. Before
+this pass the same file did not get that far: it failed to ELABORATE, on a
+`Type mismatch | x86_step_setcc_r8`, so its 115 equations were never reached at
+all. **That is the only thing that changed for it, and it is worth knowing that
+`e54d2f4e` (2026-10-04) put this file back to where it was on 2026-10-03** —
+two successor rows stopped matching the model and took the whole corpus's
+`terminates` theorems with them.
+
+**What changed in the emitter that bears on this doc**, and it is one thing:
+the `x86_exec_go_exit_step` side condition and the next step's own `rip` side
+condition now take their `simp` set from `_path_simp(fs_path, …)` — the
+definitions of every step on the path — instead of from the last step's form
+alone. Both are projections through the whole chain, so both need the whole
+chain's definitions, and both are the kind of proof the `hpop` work needs to be
+affordable anyway.
+
+**The other measurement this pass produced, and it is the one the doc's option 1
+predicted:** `powexpr`, `localmul` and `pair` each went from *one live hole at
+`hrip`* to **no live hole**, because `_WRAPPER_DEFS`'s new
+`x86_set_reg_narrow_mem` / `x86_set_flag4_mem` let `_concrete_read` project
+through the two new wrappers. Those are the short chains this doc's boundary is
+about — 24 to 77 equations — and none of them crosses `_MAX_UNFOLD = 64` with a
+`call` in it, so **they say nothing about the 115-equation file** and the table
+in the Status above stands.
+
+**Still open, unchanged and still the whole of this doc:** the `hpop` proof,
+which needs the separation carried across the callee's N steps at a literal read
+address, which needs the emitter-side stack/frame tracker. `wide_recv`'s
+measurement above is the number that work starts from.
+
+
 **Area:** FORMAL (the x86-64 end-to-end prover). **Status: the premise is wrong
 and the premise was the bug; the read at a `ret` is now EVALUATED rather than
 simplified and closed where the chain is short, two guards that could not work
