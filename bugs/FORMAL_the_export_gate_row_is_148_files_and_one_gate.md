@@ -158,6 +158,15 @@ distinct scopes: 12
     1  _convert_f32_to_float8_scalar   1  main
 ```
 
+**And the same twelve off the committed sweep log rather than off the
+instrument** (the three unnamed rows are the `_io.mojo` refusal, which is the
+other row):
+
+```console
+$ python3 -c "…read .tmp/eg-arm3.txt, take whatever precedes ': \`X\` is called'…"
+the 148 sweep rows, by the site each names:  named=145  unnamed=3
+```
+
 **145 of 145 name a scope, and the twelve scopes ARE the row's buckets**:
 `Allocation.write_to` + `Slice.write_to` + `ComplexSIMD.write_repr_to` +
 `ThinAllocation_1_T_1_T.write_to` is the 103-file `FormatStruct` group,
@@ -194,6 +203,11 @@ terminal (module, callee) table identical: True
            ('std.bit.mask','is_negative'): 8, …}                      # byte-identical
 PY
 ```
+
+**The log is the committed tree's, not an intermediate one's** — which is worth
+saying because the first version of this fix was measured on a log it did not
+match (see §3.1), and re-running the 148 files with the final code is what
+turned "135 named" into "145 named".
 
 **The tests** are two rows in `test_formal_imports.py`, beside
 `a bare call to a template is refused by the export rule` — the case whose
