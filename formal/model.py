@@ -31400,6 +31400,11 @@ def _binding_values(fn, name: str) -> list:
     here is the TARGET — `fire_compiler.for_target_names`, the parser's own
     representation reader — and nothing about the walk itself.
 
+    **The walk is `_binding_sites_index`'s and this function is its one-name
+    reader**, so the two cannot disagree about which statements bind a name and
+    the index is paid for once per function rather than once per name — the
+    cost that decided it, with the measurement, is in that function's docstring.
+
     **The residual is stated rather than implied**: a site shape this walk does
     not name is a site this walk does not see, and a name bound at one of those
     and at an integer elsewhere would be refused on the strength of the integer
@@ -31409,29 +31414,75 @@ def _binding_values(fn, name: str) -> list:
     below requires the value model's UNANIMITY as well, which is what catches
     the disagreement rather than the missed shape.
     """
-    sites = []
+    return list(_binding_sites_index(fn).get(name) or ())
+
+
+def _binding_sites_index(fn) -> dict:
+    """`{name: [site, …]}` — every name `fn` binds, and what each site writes.
+
+    **One walk for the whole function, which is the whole point, and `_binding_values`
+    is the one-name reader over this table.** It was a walk PER NAME, so a reader
+    that follows a chain of names paid O(names × body) on a module with many
+    locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
+    `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
+    walk and 2.24 s with this one (best of three each), and the standard this is
+    measured against is `bugs/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    residues left open were 0.094 s and 0.003 s on the largest file in the
+    repository, and both were declined rather than taken.  There is one dispatch
+    below and `_binding_values` reads it, so the two cannot disagree about which
+    statements bind a name — the failure `_binding_values`'s own docstring names.
+
+    Cached on `fn` beside `_declared_annotations`'s own cache and for its reason:
+    the AST is fixed by the time any of this runs, so the answer cannot change,
+    and every caller would otherwise re-derive the same table.
+    """
+    cached = getattr(fn, "_binding_sites_index", None)
+    if cached is not None:
+        return cached
+    out: dict = {}
+
+    def add(name, site):
+        if name:
+            out.setdefault(name, []).append(site)
+
     for node in iter_nodes(getattr(fn, "body", None) or []):
         if isinstance(node, F.AssignStmt):
-            sites += _one_target_site(node.target, name, node.value)
+            for name in _sole_target_leaf(node.target):
+                add(name, node.value)
         elif isinstance(node, F.MultiAssignStmt):
             for target in node.targets or ():
-                sites += _one_target_site(target, name, node.value)
+                for name in _sole_target_leaf(target):
+                    add(name, node.value)
         elif isinstance(node, F.AugAssignStmt):
             # `f += 1` writes `f + 1`, so what lands in the name depends on what
             # was there — the one site whose result no single expression states.
-            if name in _target_leaves(node.target):
-                sites.append(None)
+            for name in _target_leaves(node.target):
+                add(name, None)
         elif isinstance(node, F.VarDecl):
-            if node.name == name:
-                sites.append(node.value)
+            add(node.name, node.value)
         elif isinstance(node, (F.ForStmt, F.ComptimeForStmt, F.Comprehension)):
-            if name in _target_leaves(getattr(node, "target", None)):
-                sites.append(None)
+            for name in _target_leaves(getattr(node, "target", None)):
+                add(name, None)
         elif isinstance(node, F.WithStmt):
             for item in node.items or ():
-                if name in _target_leaves(getattr(item, "alias", None)):
-                    sites.append(None)
-    return sites
+                for name in _target_leaves(getattr(item, "alias", None)):
+                    add(name, None)
+    fn._binding_sites_index = out
+    return out
+
+
+def _sole_target_leaf(target) -> list:
+    """`[name]` when the target binds exactly one name, else `[]`.
+
+    A target that binds SEVERAL names binds ELEMENTS, so the whole value is not
+    what any one of them receives and the site is undecided — which is why the
+    unpack case records nothing rather than recording the container. That was
+    `_one_target_site`'s rule asked one name at a time, and it is gone with the
+    per-name walk rather than left beside the index as a second copy of the same
+    test.
+    """
+    leaves = _target_leaves(target)
+    return leaves if len(leaves) == 1 else []
 
 
 def _target_leaves(target) -> list:
@@ -31440,19 +31491,6 @@ def _target_leaves(target) -> list:
         return [n.lstrip("*").strip() for n in F.for_target_names(target)]
     except Exception:
         return []
-
-
-def _one_target_site(target, name: str, value) -> list:
-    """`[value]` when `target` binds `name` to it outright, `[]` otherwise.
-
-    A target that binds SEVERAL names binds ELEMENTS, so the whole value is not
-    what any one of them receives and the site is undecided — which is why the
-    unpack case records nothing rather than recording the container.
-    """
-    leaves = _target_leaves(target)
-    if name not in leaves or len(leaves) != 1:
-        return []
-    return [value]
 
 
 # The shapes whose ELEMENT is a value the container itself was not: a subscript
