@@ -370,16 +370,32 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     three, so a PROVED verdict told the reader a contract was closed with a
     tactic the proof never ran.  That is the failure this file exists to
     prevent, committed inside the module that exists to prevent it, which is
-    why it is a row rather than something to notice by reading."""
+    why it is a row rather than something to notice by reading.
+
+    The assertion is on the SPELLING, not the name, and it is stronger for it:
+    `simp_all_toNat` is spelled `simp_all [...] <;> omega`, and a rung whose
+    name appears in the script while a DIFFERENT tactic runs under it is the
+    same drift this row was written for, wearing the name as camouflage.  So
+    every rung's rendered spelling must occur exactly once, and the script must
+    not contain a tactic that no rung spells."""
     from formal import contracts as CT
     script = CT._ladder_script("h0, m_go, sKey")
-    check("the_script_mentions_every_rung",
-          all(r in script for r in CT.LADDER), f"{CT.LADDER} vs\n{script}")
-    for rung in CT.LADDER:
-        check(f"the_script_spellings_one_{rung}",
-              script.count(rung) == 1, script)
+    spellings = [spelling.format(lemmas="h0, m_go, sKey", extra=CT._EXTRA_SIMP)
+                 for _name, spelling in CT.LADDER]
+    check("the_script_spellings_every_rung",
+          all(sp in script for sp in spellings), f"{CT.LADDER} vs\n{script}")
+    for (name, _spelling), sp in zip(CT.LADDER, spellings):
+        check(f"the_script_spellings_one_{name}",
+              script.count(sp) == 1, script)
     check("the_script_names_no_unlisted_tactic",
           "bv_decide" not in script, script)
+    # A rung's NAME is what `Verdict.why` prints, so every name has to be one
+    # word a reader can be shown, and the list must not be empty or a single
+    # rung (`first` with one alternative is not a ladder).
+    names = [name for name, _ in CT.LADDER]
+    check("the_rungs_are_named_for_the_reader",
+          all(n and " " not in n for n in names) and len(names) >= 2,
+          f"{names}")
     src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
            "def cl(n):\n"
            "    if n < 0:\n        return 0\n"
@@ -389,11 +405,11 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     body = e.lean.split(":= by")[-1]
     check("the_EMITTED_theorem_uses_the_listed_rungs",
-          all(r in body for r in CT.LADDER), body)
+          all(sp in body for sp in spellings), body)
     check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
     v = CT.classify(e, lean_ok=True)
     check("the_PROVED_reason_names_the_rungs_that_ran",
-          all(r in v.why for r in CT.LADDER), v.why)
+          all(n in v.why for n in names), v.why)
 
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
@@ -754,17 +770,21 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
               "run with --lean only where one exists")
         return
     lib = os.path.join(HERE, "lib")
-    # `mini2` is the example the ladder REACHES and `wrong_clampv` the one it
-    # must refuse.  Both directions matter and one file cannot carry both: a
-    # theorem that closes proves the emitter writes a real proof, and one that
-    # does not prove it is not a `sorry` wearing a `theorem` header.
+    # `mini2` is the example the ladder reached before `simp_all_toNat` and
+    # `bounds_index` is the one it reaches only because of it -- so the pair
+    # says the new rung ADDED reach rather than replacing it.  And
+    # `wrong_clampv` is the one it must still refuse.
     #
-    # `mini.mojo`, `clamped.mojo`, `abspos.mojo` and `bounds_index.mojo` are
-    # NOT in this list because their contracts are UNREACHED by the ladder and
-    # their verdict is UNKNOWN.  That is the honest answer and
-    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` is what holds the line; the
-    # reason it happens is in `bugs/FORMAL_contract_ladder_reach.md`.
+    # `mini.mojo`, `clamped.mojo` and `abspos.mojo` are still NOT in this list:
+    # their contracts remain UNREACHED and their verdict UNKNOWN, which is the
+    # honest answer and `test_UNKNOWN_is_reachable_and_is_not_a_pass` is what
+    # holds the line.  `clamped` is three postconditions over a two-way
+    # selection on two parameters (`2^2 · 3` branches); `abspos`'s clause
+    # contains `abs`, a selection the simplifier must evaluate at a symbolic
+    # `n`.  Both are named in `bugs/FORMAL_contract_ladder_reach.md`'s Status,
+    # which is what records them.
     cases = [("mini2.mojo", "mini2", True),
+             ("bounds_index.mojo", "at_offset", True),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
         path = os.path.join(EXAMPLES, name)

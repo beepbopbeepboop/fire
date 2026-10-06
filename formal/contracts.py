@@ -804,15 +804,63 @@ _MASK = (1 << 64) - 1
 # takes the first rung that CLOSES it; the last rung is `omega`, whose failure
 # is an error, so the script either proves the contract or fails with the
 # theorem named.
-LADDER = ("simp_all", "omega", "decide")
+#
+# Each rung is a (NAME, SPELLING) pair, and it is a pair because a rung is a
+# tactic SEQUENCE and only its first tactic is a name: `simp_all_toNat` is
+# spelled `simp_all [...] <;> omega`, and a verdict that printed that whole
+# sequence would bury the three names a reader actually needs.  `Verdict.why`
+# prints the NAME; `_ladder_script` emits the SPELLING, and
+# `test_formal_contracts.py` checks the spelling is in the emitted theorem --
+# which is the anti-drift property that matters, and is STRONGER than checking
+# the name, because a name can be present in a script that runs a different
+# tactic under it.
+#
+# `simp_all_toNat` LEADS, and that order is measured rather than tidied: with
+# the bare `simp_all` rung first, `simp_all_toNat` never runs and the ladder is
+# back to 1 of 6.  A rung that makes progress without closing the goal does not
+# hand its rewrites to the next rung -- `first` restores the goal -- so a
+# partially-successful earlier rung does not "help along" the later one; and a
+# `simp_all` that has already rewritten the goal has consumed the `<;> omega`
+# it would have needed.  Measured both orders on the corpus: toNat-first closes
+# `bounds_index`, bare-first does not.
+LADDER = (
+    ("simp_all_toNat", "simp_all [{lemmas}, {extra}] <;> omega"),
+    ("simp_all", "simp_all [{lemmas}]"),
+    ("omega", "omega"),
+    ("decide", "decide"),
+)
 
-# How each rung is SPELLED, one place.  `simp_all` is the only one that needs
-# the lemma set, and `simp_all` is also the only one whose spelling differs
-# from its name (it is `simp_all [...]`, not `simp_all`).  A rung with no entry
-# here is written bare, which is right for the other two and would be wrong for
-# anything needing a simp set -- so a new rung that needs one has to be added
-# here rather than to the `first` block.
-_LADDER_LEMMAS = {"simp_all"}
+# The lemma set `simp_all_toNat` adds, and WHY it is the whole fix.
+#
+# The comparison every clause in this module is stated over is SIGNED, so it is
+# rendered through `sKey` -- and `sKey x` is `x ^^^ 0x8000000000000000`, a
+# `UInt64`, which is `Lean.UInt64` = `Fin (2^64)`.  `omega` has NO arithmetic
+# over `Fin` (it says so: "No usable constraints found"), `simp_all` cannot use
+# a relation between two variables as a rewrite, and `decide` cannot decide a
+# goal with free variables.  That is why the ladder's reach was, until this
+# rung, exactly "the goal becomes ground after splitting over the model's own
+# branches", and why `bounds_index`'s body -- which has no branch at all -- was
+# unreachable: there was nothing to split on AND nothing to reason with.
+#
+# `UInt64.lt_iff_toNat_lt` and `UInt64.le_iff_toNat_le` are the library's own
+# bridges from the `Fin` order to `Nat`'s (used throughout `lib/ProofLib.lean`),
+# so putting them in the simp set turns every hypothesis and the goal into `Nat`
+# inequalities, which is the arithmetic `omega` has.  Then `<;> omega`: the
+# hypotheses have to be REWRITTEN before `omega` runs, and `first` does not
+# carry a failed rung's rewrites forward to the next one, so the rewrite and
+# the arithmetic it enables have to be ONE rung.
+#
+# `bugs/FORMAL_contract_ladder_reach.md` §4 prescribed a lemma here instead --
+# `sKey_lt_iff : sKey a < sKey b ↔ a < b`, to be added to `lib/work.lean`.  That
+# lemma is FALSE, and it is worth recording why because the doc's reasoning is
+# right and only its conclusion is wrong: `sKey` flips the top bit, so
+# `sKey a < sKey b` is the SIGNED reading of `a < b`, not the unsigned one
+# `Fin` gives.  Measured, `decide` refutes it: at `a = 0` and
+# `b = 0xffffffffffffffff`, `sKey a < sKey b` is FALSE (flipping the top bit
+# makes 0 the larger) while `a < b` is TRUE.  The ladder does not need it
+# either -- it needs transitivity of `<` into `≤`, and `Nat.le_of_lt` after the
+# `toNat` rewrite is that fact, already in core.
+_EXTRA_SIMP = "UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le"
 
 
 def _ladder_script(simp: str) -> str:
@@ -821,12 +869,15 @@ def _ladder_script(simp: str) -> str:
     Exists so `LADDER` and the emitted script cannot disagree, which they did
     once: `LADDER` named `bv_decide`, the script did not contain it, and every
     PROVED verdict therefore quoted a tactic the proof never ran.
+
+    Every rung is parenthesised, including the bare `omega` and `decide`: a
+    bare `| omega` alternative cannot carry a `<;>`-sequence, and one rung here
+    does.
     """
     lines = ["first"]
-    for rung in LADDER:
-        text = f"{rung} [{simp}]" if rung in _LADDER_LEMMAS else rung
-        lines.append(f"    | {text}" if rung not in _LADDER_LEMMAS
-                     else f"    | ({text})")
+    for _name, spelling in LADDER:
+        text = spelling.format(lemmas=simp, extra=_EXTRA_SIMP)
+        lines.append(f"    | ({text})")
     return "\n".join(lines)
 
 
@@ -1621,7 +1672,8 @@ def classify(emission, lean_ok=None, lean_detail="", counterexample=None,
                 lean_detail=lean_detail, theorem=emission.lean)
         return Verdict(name, PROVED,
                        f"Lean closed `{name}_contract` with the ladder "
-                       f"({' → '.join(LADDER)}) and the bounded search found "
+                       f"({' → '.join(name for name, _ in LADDER)}) and the "
+                       f"bounded search found "
                        f"no counterexample among "
                        f"{len(BOUNDARY_INPUTS) + SEARCH_RANGE} inputs "
                        f"(the search is a check, not part of the proof)"
