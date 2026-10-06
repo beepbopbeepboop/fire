@@ -879,6 +879,73 @@ group(
     ],
 )
 
+# ── subscript and slice ─────────────────────────────────────────────────────
+#
+# `xs[i]` and `xs[a:b:c]` are `__getitem__`, so they are builtins, and they are
+# the container operations this path DOES answer — which makes them the place a
+# second-backend disagreement shows up, and one did.
+#
+# The gate that decided whether a subscript's BASE was a blob at all was an
+# allow-list of expression shapes, and `F.SliceExpr` was missing from it while
+# being present in this backend's own `in`/`not in` gate eleven hundred lines
+# below. So `xs[1:3][0]` was refused on arm64 with "subscript base must be a
+# list/tuple name or literal … (got SliceExpr)" and computed on x86-64, which
+# answered 2 where CPython answers 2: two architectures of one implementation
+# disagreeing about a legitimate program. The tell was that binding the slice to
+# a name first made it work on BOTH backends, so the difference was the spelling
+# and nothing the lowering could not do.
+group(
+    "subscript",
+    "`xs[i]` and `xs[a:b:c]` are `__getitem__`, so they are builtins, and they "
+    "are the container operations this path DOES answer — which makes this the "
+    "group where a second-backend disagreement shows up. One did: the gate that "
+    "decided whether a subscript's base was a blob at all was an allow-list of "
+    "expression SHAPES, and `F.SliceExpr` was missing from it while being "
+    "present in this backend's own `in`/`not in` gate eleven hundred lines "
+    "below. `xs[1:3][0]` was refused on arm64 and computed on x86-64.",
+    [
+        ("index_of_a_list", ["var xs = [1, 2, 3]", "printf(\"L%lld\\n\", xs[1])"]),
+        ("negative_index_of_a_list",
+         ["var xs = [1, 2, 3]", "printf(\"L%lld\\n\", xs[0 - 1])"]),
+        # An index past the end is NOT a build-time refusal: it builds, and it
+        # EXITS 1 at run time on both backends, which is the same exit status
+        # CPython's `IndexError` gives. So these are `run` cases comparing stdout
+        # and exit status, and they pin a property worth pinning — the failure
+        # mode for a bounds violation is a non-zero exit rather than a read
+        # through the end of the blob, which is what the emitter's `oob_label`
+        # exists to prevent.
+        ("index_past_the_end_exits_non_zero",
+         ["var xs = [1, 2, 3]", "printf(\"L%lld\\n\", xs[5])"]),
+        ("index_well_past_the_end_exits_non_zero",
+         ["var xs = [1, 2, 3]", "printf(\"L%lld\\n\", xs[0 - 9])"]),
+        ("index_of_an_empty_list_exits_non_zero",
+         ["var xs = []", "printf(\"L%lld\\n\", xs[0])"]),
+        ("index_of_a_dict", ["var d = {\"a\": 1, \"b\": 2}",
+                             "printf(\"L%lld\\n\", d[\"b\"])"]),
+        # The slice half, and then the SLICE'S OWN SUBSCRIPT, which is the shape
+        # the arm64 gate refused. Every one of these is the same program with a
+        # different spelling of the base, so a gate that names a shape rather
+        # than a capability is visible as a difference between them.
+        ("of_a_bound_slice",
+         ["var xs = [1, 2, 3]", "var ys = xs[1:3]",
+          "printf(\"L%lld\\n\", ys[0])"]),
+        ("of_an_inline_slice",
+         ["var xs = [1, 2, 3, 4, 5]", "printf(\"L%lld\\n\", xs[1:3][0])"]),
+        ("of_a_slice_with_a_step",
+         ["var xs = [1, 2, 3, 4, 5]",
+          "printf(\"L%lld %lld\\n\", len(xs[0:5:2]), xs[0:5:2][2])"]),
+        ("of_a_reversing_slice",
+         ["var xs = [1, 2, 3, 4, 5]", "printf(\"L%lld\\n\", xs[::-1][0])"]),
+        ("of_a_slice_of_a_slice",
+         ["var xs = [1, 2, 3, 4, 5]", "printf(\"L%lld\\n\", xs[1:4][1:2][0])"]),
+        ("of_a_subscript_of_a_comprehension",
+         ["printf(\"L%lld\\n\", [i * 2 for i in [1, 2, 3]][2])"]),
+        ("index_of_a_dict_holding_a_list",
+         ["var d = {\"a\": [1, 2], \"b\": [3]}",
+          "printf(\"L%lld\\n\", d[\"b\"][0])"]),
+    ],
+)
+
 # ── hash, stated rather than skipped ────────────────────────────────────────
 #
 # Its own group because the reason is a property of the ORACLE and not of this
@@ -1045,13 +1112,38 @@ def run_image(image, backend):
 
 
 def cpython_answer(lines, tmpdir, tag):
+    """`(exit status, stdout, raised)`: CPython's own answer to the case's text.
+
+    **`raised` is the EXCEPTION'S NAME, and it is a label rather than a veto**,
+    which is the whole of this function's one design decision. An uncaught
+    exception in CPython is a real answer — empty stdout and exit status 1 — and
+    two of this table's cases are exactly that: an index past the end of a list
+    is an `IndexError` there, and this backend's own bounds check EXITS 1, so
+    the two agree and the agreement is worth recording. Vetoing the comparison
+    because CPython's side ended in a traceback would have thrown those two away
+    and, worse, would have hidden any case where CPython raises and the image
+    answers a number.
+
+    So the comparison always runs, and `raised` rides along to be printed when
+    the comparison FAILS — which is where it earns its keep, because a case whose
+    oracle died of a `printf` format error and an image that printed a number are
+    the same failure with two very different causes, and the label says which.
+    """
     path = os.path.join(tmpdir, f"{tag}.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(cpython_source(mojo_source(lines)))
     result = subprocess.run([sys.executable, path], capture_output=True,
                             timeout=RUN_TIMEOUT)
-    return result.returncode, result.stdout, result.stderr.decode(
-        "utf-8", "replace")
+    stderr = result.stderr.decode("utf-8", "replace")
+    raised = None
+    if stderr.strip():
+        # CPython's own last line, minus the `ExcName: message` prefix. Only
+        # used as a label, so a coarse read is enough — and the alternative,
+        # matching an exception name out of the traceback text, is a second
+        # parser to keep right.
+        last = stderr.strip().splitlines()[-1]
+        raised = last.split(":", 1)[0].strip() if ":" in last else last
+    return result.returncode, result.stdout, raised
 
 
 def _case_spec(entry):
@@ -1080,10 +1172,10 @@ def run_group(entry, backends, tmpdir, verbose):
     cpython_raises = 0
     for case in entry["cases"]:
         name, lines, kind, needle = _case_spec(case)
-        want_exit, want_out, err = cpython_answer(lines, tmpdir, name)
-        if err.strip() and want_exit != 0:
-            # CPython RAISES on this case: `range(0, 5, 0)` is a `ValueError`
-            # and `max([1, 2], 0)` is a `TypeError`.
+        want_exit, want_out, raised = cpython_answer(lines, tmpdir, name)
+        if raised is not None:
+            # CPython RAISES on this case: `range(0, 5, 0)` is a `ValueError`,
+            # `max([1, 2], 0)` a `TypeError`, `xs[5]` an `IndexError`.
             #
             # For a `refuse` case that is the AGREEMENT, not a problem — both
             # engines decline the program, and the fact that CPython declines it
@@ -1093,18 +1185,12 @@ def run_group(entry, backends, tmpdir, verbose):
             # of them CPython also refuses would be reporting a smaller number
             # than it measured.
             #
-            # **AND THE CASE IS STILL BUILT.** Skipping it would leave a hole the
-            # exact size of every case whose CPython side objects, which is the
-            # shape of the failure this whole file was written to avoid: a
-            # coverage table that quietly stops covering. Only a `run` case gives
-            # up here, because a run case is one CPython answers and one it
-            # raises on has no oracle to compare against.
-            if kind != "refuse":
-                failures.append(f"{name}: CPython itself raises "
-                                f"({err.strip().splitlines()[-1][:120]}), so "
-                                f"there is no oracle for this case; a `run` case "
-                                f"is one CPython answers")
-                continue
+            # **AND THE CASE IS STILL BUILT AND COMPARED.** Skipping it would
+            # leave a hole the exact size of every case whose CPython side
+            # objects, which is the shape of the failure this whole file was
+            # written to avoid: a coverage table that quietly stops covering.
+            # The comparison below runs either way and `raised` rides along to
+            # name the cause if it fails.
             cpython_raises += 1
         built = {}
         for backend in backends:
@@ -1131,9 +1217,12 @@ def run_group(entry, backends, tmpdir, verbose):
                                 f"oracle comparison can see")
                 continue
             if arm != (want_exit, want_out):
+                because = (f" — and CPython's own side RAISED {raised}, so this "
+                           f"is a case whose oracle died rather than one whose "
+                           f"answer differs" if raised else "")
                 failures.append(f"{name}: answered {arm[1]!r} exit={arm[0]} "
                                 f"where CPython answers {want_out!r} "
-                                f"exit={want_exit}")
+                                f"exit={want_exit}{because}")
                 continue
             agreed += 1
             if verbose:
@@ -1284,7 +1373,7 @@ def run_harvested(backends, tmpdir, verbose):
         if coarse_lowered:
             lines = [f'printf("L%lld\\n", {call})']
         else:
-            lines = [f'var v = {call}', 'printf("L%lld\\n", 1)']
+            lines = [f'var v = {call}', 'printf("L%lld\\n\", 1)']
         image, message = build(mojo_source(lines), f"h{index}", "arm64", tmpdir)
         if image is not None:
             if not coarse_lowered:

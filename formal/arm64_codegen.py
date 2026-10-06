@@ -5491,9 +5491,31 @@ ctor_field_value=self._ctor_field_value_for(name),
         # the one thing this pair may not do. A string base is not here
         # because it never reaches this gate: `_is_string_subscript` above
         # takes it as a byte load.
+        #
+        # **A SLICE joins them here for the same reason, and its absence was the
+        # same bug one shape over.** `xs[1:3][0]` was REFUSED on arm64 with
+        # "subscript base must be a list/tuple name or literal … (got
+        # SliceExpr)" and computed on x86-64, which answered 2 where CPython
+        # answers 2 — two architectures of one implementation disagreeing about
+        # a legitimate program, and the two ways of saying so is the whole of
+        # this gate. Three facts say it is an oversight rather than a policy:
+        #
+        #   * a slice produces a blob of EXACTLY the shape the walk below reads,
+        #     and `model.kind_of`'s `SliceExpr` arm says so — "a slice is a NEW
+        #     BLOB holding the selected elements, so its kind is the sliced
+        #     expression's kind narrowed to its element kind";
+        #   * this backend's own `in`/`not in` gate, eleven hundred lines below,
+        #     ALREADY lists `F.SliceExpr`, so the two gates disagreed about the
+        #     same question about the same construct;
+        #   * binding the slice to a name first made it work — `ys = xs[1:3];
+        #     ys[0]` built and answered on BOTH backends — which is the
+        #     signature of a gate that names an EXPRESSION SHAPE rather than of
+        #     a shape the lowering cannot do. `var ys = xs[0:5:2]; ys[2]` was
+        #     measured working on both before this row was added, so the
+        #     difference was the spelling and nothing else.
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                  F.TupleExpr, F.Comprehension, F.MemberExpr,
-                                 F.SubscriptExpr)
+                                 F.SubscriptExpr, F.SliceExpr)
         if not obj_ok:
             raise CodegenError(
                 "subscript base must be a list/tuple name or literal on "
