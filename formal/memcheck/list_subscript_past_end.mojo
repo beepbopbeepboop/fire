@@ -5,39 +5,32 @@
 # bounds check".  That is WRONG, and the correction is the reason the row
 # exists.  `formal/arm64_codegen.py`'s `_emit_subscript_addr` loads the blob's
 # own count, applies Python's negative-index rule, and takes an `oob_label` arm
-# unless `count > index` unsigned; the x86-64 emitter has the mirror of it
-# (`_emit_bounds_check`).  The check is there and it is correct.
+# unless `count > index` unsigned; the x86-64 emitter has the mirror of it in
+# `_emit_bounds_check`.  The check is there and it is correct.
 #
-# What the row DID find, on both architectures identically, was that the stop
-# said nothing:
+# What it used to do instead, on both architectures, identically: stop.  The
+# image printed the two in-range elements and exited 1 having written NOTHING
+# AT ALL -- not stdout, not stderr (measured: 0 bytes on stderr) -- while every
+# other bounded stop on this path called `_emit_overflow_diagnostic` first and
+# said which bound was hit.  A program whose only symptom is that it stopped is
+# the worst of the three answers this backend can give, and it is also the one
+# a stdout/exit-status oracle cannot see: this row reports MATCH both before
+# and after, which is exactly why the silence needed its own bug doc rather
+# than a memcheck verdict.
 #
-#     ./list_subscript_past_end.arm64 ; echo $?
-#     10
-#     30
-#     formal: a[3] is out of range -- index 3 is not below the 3 elements the
-#     blob holds. CPython raises `IndexError: list index out of range` ...
-#     1
-#     2>&1 1>/dev/null | wc -c   ->   0
+# NOW IT SAYS SO, on both architectures and with the same bytes:
 #
-# and it does now:
+#     formal: subscript a[3] is out of range. This path reads the container's
+#     own element count out of its blob header, ... and nothing has been read.
+#     ... CPython answers the same program with `IndexError: list index out of
+#     range` on stderr.
 #
-#     ./list_subscript_past_end.arm64 2>&1 1>/dev/null
-#     formal: `a[3]` is out of range for this list: the subscript asked for an
-#     element at or past the end of what the list holds, ...
-#
-# `model.subscript_out_of_range_message` is the text and BOTH emitters print
-# it through `_emit_overflow_diagnostic`, so the two architectures say the same
-# sentence byte for byte; `test_formal_run.py`'s `STDERR_CASES` rows
-# `subscript_out_of_range_is_loud` (read), `subscript_store_out_of_range_is_loud`
-# (store) and `subscript_out_of_range_negative_is_loud` (`a[-4]`) are what keep
-# it that way.
-#
-# The row STAYS, and the reason is the sentence above it: a memcheck sweep
-# compares stdout and the exit status, so a bounds check that stops the program
-# is indistinguishable from a correct one -- this row was reported `MATCH` while
-# the stop printed nothing at all.  That is also why the message needs a suite
-# that looks at stderr and not this one, and why a reader who takes the FIRST
-# comment at its word will go looking for a check that is already there.
+# `formal/model.py`'s `subscript_out_of_range_message` is the one text, so the
+# two machines cannot name this limit differently, and
+# `test_formal_run.py`'s `out_of_range_subscript_is_loud` /
+# `out_of_range_negative_subscript_is_loud` rows assert it on both
+# architectures byte for byte.  The row here stays because a reader who takes
+# the OLD comment at its word will go looking for a check that is already there.
 def main(n: Int) -> Int:
     var a = [10, 20, 30]
     printf("%d\n", a[0])
