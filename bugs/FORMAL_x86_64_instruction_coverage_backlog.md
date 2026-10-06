@@ -55,6 +55,60 @@ architectures, which is cheap (104 compiles, ~5 s).
 It is one document rather than eight because the gaps are not eight problems.
 They are three shapes, and the shapes are what a reader wants.
 
+## Status (2026-10-05, `work/formal69-docs`): a FOURTH shape, and it was the only one the three tools in this file could not see
+
+**The three shapes below are all gaps between the EMITTER and the MODEL — a form
+the backend can encode that the decoder, the model or the fuzz pool cannot name.
+There is a fourth, in the other direction, and it is the one that hid the two
+forms this pass closed:**
+
+| | decoded by `x86_64_decode.py` | stepped by `lib/X86.lean` | a sample in `x86_64_model_coverage_test.py` | a row in the end-to-end prover's `_FORMS` |
+|---|---|---|---|---|
+| `group3:not`, `group3:neg` | yes | **yes** | **yes** | **NO** |
+
+So all three of the tools this file is about — the decoder, the ISA census, the
+coverage test — reported those two forms as covered, and six corpus examples
+were refused by name anyway:
+
+```console
+$ python3 - <<'EOF'
+… E._plan() over formal/examples/*.mojo, grouped by the refusal's form …
+<form not wired>          5  augassign_floordiv floordiv mod_by_var neg udivmod
+<group3:not>              1  unary_ops
+<movsxd_r64_r32>          1  printf_int
+<idiv>                    2  digits precedence
+<str_len: body does not decode>  1
+EOF
+```
+
+`no step lemma wired for: neg` reads like the model cannot do a negation. It can;
+`lib/X86.lean`'s `F7 /3` arm has been there from the start. What was missing was
+`x86_step_neg_r64`, `x86_step_not_r64` and two `_SUCCS` rows, and both lemmas are
+one `simp` each over the existing arm — the same five minutes `x86_step_setcc_r8`
+took except that `not` is the FIRST test in the arm's `digit = …` chain and so
+needs no exclusion hypotheses at all, while `neg` needs exactly one (`neg`'s
+successor also has to name four flags, which is why it is not the same five
+minutes).
+
+**Why no existing check could see it**, and this is the useful part:
+
+* the ISA census asks whether a form has a decoder arm, a model sample and an
+  exemption — all three were true;
+* `formal/x86_64_model_coverage_test.py` asks whether `x86_step` can STEP the
+  form — it could;
+* `SUCCESSOR_FORMS` compares the emitter's successor against the model for the
+  forms it lists, and it listed neither;
+* the emitter's own tables were consistent — `_FORMS` and `_SUCCS` hold the same
+  keys, and `test_formal_sweep_truth.py` checks it — because a form missing from
+  BOTH is not an inconsistency.
+
+**The next step for this shape is one line of tooling: derive the coverage
+question from `_FORMS` rather than from a hand-built list.** The four rows above
+are a table an instrument could compute — for every form in `_FORMS`, does the
+corpus actually reach it, and does a corpus example's image contain it — and the
+answer for this tree is that `group3:not` was reachable by `unary_ops` and nobody
+had asked.
+
 ## What I ran
 
 ```

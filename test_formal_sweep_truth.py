@@ -4451,12 +4451,27 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: are unchanged and still assert what they asserted) and what moved is how
     #: many programs the total is taken over.
     #:
+    #: **Re-pinned 2026-10-05 from 105/4 232 to 107/4 312, and this one is
+    #: COVERAGE rather than growth.** `group3:not` and `group3:neg` gained a step
+    #: lemma and a successor row, so `negate_arg`, `unary_ops` and `neg` build a
+    #: path tree where they built none — the count of trees RISES, and the steps
+    #: rise with them.  The opposite direction is checked by the three
+    #: per-example rows above and by `TOTAL_PRE_MERGE52`, and both are unmoved:
+    #: a guard whose branches came back would move those, not this.
+    #:
     #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
     #: examples that were already here still produce what they produced.
-    TOTAL = (105, 4232)
-    TOTAL_PRE_MERGE52 = (69, 2718)
+    TOTAL = (107, 4312)
+    #: **Re-pinned 2026-10-05 from 69/2 718 to 70/2 738, for the same reason and
+    #: in the same direction: `neg.mojo` is one of the 52, and it gained a tree
+    #: with `group3:neg`.** The figure is a tripwire against the guard's branches
+    #: being WALKED again, and a rise in TREES is the opposite of that: a walked
+    #: guard multiplies leaves per guarded function rather than adding one tree
+    #: per example that gained a lemma.  The three per-example rows above are the
+    #: discriminating measurement and they are unmoved.
+    TOTAL_PRE_MERGE52 = (70, 2738)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

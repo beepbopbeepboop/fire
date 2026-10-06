@@ -1348,16 +1348,19 @@ AXIOM_CLOSURE = {
     # somebody typed.
     "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    # +6 asked and +6 clean, with `reaches` and `closure_only` unmoved.  Four
-    # are the projection facts a successor that is not `{s with …}` needs
-    # (`x86_set_reg_narrow_mem`, `x86_shift_post_mem`, `x86_set_reg_rip`,
-    # `x86_set_flag4_mem`) and two are the ones they are stated in terms of
-    # (`x86_set_flag4_rip`, `x86_shift_post_rip`).  All six are kernel-checked
-    # -- `rfl`, an application of another fact, or a `split` over a two-arm
-    # `if` -- so nothing reaches an axiom and nothing is reached through another
-    # theorem, which is the property that keeps this row an equality: a module
-    # that gains PROOFS should move in `asked` and `clean` and nowhere else.
-    "X86": (150, 2, 147, 0, 1, 0),
+    # +8 asked and +8 clean, with `reaches` and `closure_only` unmoved.  Two of
+    # the eight are `x86_step_not_r64` and `x86_step_neg_r64` -- the group-3
+    # step lemmas six corpus examples were refused by name for -- and both are
+    # `simp` over an arm that was already there.  Four are the projection facts
+    # a successor that is not `{s with …}` needs (`x86_set_reg_narrow_mem`,
+    # `x86_shift_post_mem`, `x86_set_reg_rip`, `x86_set_flag4_mem`) and two are
+    # the ones those are stated in terms of (`x86_set_flag4_rip`,
+    # `x86_shift_post_rip`).  All eight are kernel-checked -- `rfl`, a `simp`, an
+    # application of another fact, or a `split` over a two-arm `if` -- so nothing
+    # reaches an axiom and nothing is reached through another theorem, which is
+    # the property that keeps this row an equality: a module that gains PROOFS
+    # should move in `asked` and `clean` and nowhere else.
+    "X86": (152, 2, 149, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and

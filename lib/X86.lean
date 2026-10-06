@@ -1931,6 +1931,82 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
         h_rip, h_b0, h_b1, h_b2, h_b3, h_op2, h_rex, h_w, h_mod, h_reg, h_rm,
         h_dst, h_dst_lt]
 
+/-- `not r/m64` (REX.W F7 /2, mod=3): bitwise complement, no flags.
+
+    One of the TWO forms the model has always stepped and the end-to-end prover
+    had no row for, so the six corpus examples that use `not` or `neg` had no
+    path tree at all and reported `no step lemma wired for` — a REFUSAL, which is
+    this file's way of being honest, and also a statement that the form is not
+    wired when the arithmetic is already here.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`'s
+    "three shapes" does not include this one, which is the reason it survived:
+    the decoder named the form and the ISA census counted it covered, so the
+    only thing that could see the gap was asking `_FORMS`.
+
+    `not` sets no flag (Intel SDM: `NOT` affects no flags), so the successor is
+    the register and the rip and nothing else. -/
+theorem x86_step_not_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xf7)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 2)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : rm + x86_rex_b rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      { x86_set_reg s dst
+          (x86_get_reg s dst ^^^ 0xffffffffffffffff)
+        with rip := m + 3 } := by
+  -- `h_digit` is the ONLY exclusion this needs, and that is the arm's own
+  -- shape: `F7` is a chain of `if digit = …` and `not` is the FIRST test, so
+  -- `digit = 2` settles the rest without naming the other six.  That is the
+  -- difference from `x86_step_setcc_r8`, whose four hypotheses are all
+  -- exclusions, and it is why this is a five-minute lemma and that one was not.
+  -- `x86_rex_b` is DELIBERATELY ABSENT, and that cost one iteration to find:
+  -- naming it unfolds it to `if rex.toNat % 2 = 1 then 8 else 0`, and by then
+  -- `h_dst`'s `rm + x86_rex_b rex` no longer matches anything, so the model's own
+  -- register index is left as a `match` on an unreduced sum.  Left out, `h_dst`
+  -- rewrites the index to `dst` first and both sides carry the same variable.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm,
+        h_dst, h_dst_lt]
+
+/-- `neg r/m64` (REX.W F7 /3, mod=3): two's-complement negation, four flags.
+
+    The same shape as `not` with the flags `x86_flags_sub s 0 a res` computes —
+    `0 - a`, which is what the arm does and what makes CF "a is not zero" and OF
+    "a is `-2^63`".  The flags are quoted through `x86_flags_sub` rather than
+    spread over the record for the reason every other row does it: the field
+    values come out of one function, so one source and one spelling. -/
+theorem x86_step_neg_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xf7)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 3)
+    (h_ndigit2 : ¬ ((modrm.toNat >>> 3) &&& 7 = 2))
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : rm + x86_rex_b rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      { x86_set_reg s dst ((0 : UInt64) - x86_get_reg s dst) with
+        rip := m + 3,
+        zf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).zf,
+        sf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).sf,
+        cf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).cf,
+        of_ := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).of_ } := by
+  -- `h_ndigit2` is the price of being the SECOND test in the chain rather than
+  -- the first, and it is the whole reason `neg` is not the same five minutes
+  -- `not` was: the simplifier evaluates the chain top down, so it has to be
+  -- told the first arm did not run before it will take the second.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_ndigit2, h_rm,
+        h_dst, h_dst_lt]
+
 /-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/
 theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
     (rex modrm : UInt8) (reg rm : Nat)

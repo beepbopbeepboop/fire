@@ -486,6 +486,37 @@ _FORMS = {
     # wiring half of a pair is still worth having: `cqo` alone makes udivmod's
     # tree one form short rather than two, which is a measurement.
     "cqo": ("x86_step_cqo", False, ["rip", "b0", "b1", "rex", "w"]),
+    # `F7 /2` and `F7 /3`, the two group-3 forms the model had always stepped
+    # and this table had no row for.  They are here because SIX of the corpus's
+    # 93 examples were refused by name for them -- `no step lemma wired for:
+    # neg` / `not` -- which is this file's honest way of saying the form is not
+    # wired, and is also a statement that the ARITHMETIC is missing when it is
+    # not: `lib/X86.lean`'s arm computes both and `x86_step_not_r64` /
+    # `x86_step_neg_r64` are two `simp` proofs over it.
+    #
+    # The ISA census could not see this gap: it counts a form covered when the
+    # DECODER names it and `x86_64_model_coverage_test.py` has a sample, and
+    # both were already true.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`
+    # names three shapes of gap and this is a FOURTH -- decoded, stepped,
+    # sampled, and unreachable by the prover -- which is what asking `_FORMS`
+    # directly is for.
+    #
+    # `ndigit2` is `neg`'s own extra exclusion and `not`'s is nothing: the arm
+    # tests `digit = 2` FIRST, so `not` needs only that, and `neg` must also be
+    # told the first arm did not run.  `dst` is concrete for the reason
+    # `imul_r64_r64`'s is: `x86_set_reg` is a `match` on its index.
+    #
+    # The names are the DECODER's (`group3:` prefix, `formal/x86_64_decode.py`'s
+    # `_GROUP3`), which is the whole reason this row could be missing for as long
+    # as the arithmetic was already here: `_plan`'s refusal prints the decoder's
+    # name, and a reader looking for `not` in a table of `not` does not find
+    # `group3:not` alarming.
+    "group3:not": ("x86_step_not_r64", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit", "rm",
+                    "dst", "dst_lt"]),
+    "group3:neg": ("x86_step_neg_r64", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                    "ndigit2", "rm", "dst", "dst_lt"]),
     # `66 REX.W 0F 6E /r`, `movq xmm, r64`: the GPR-to-SSE move a floating
     # `printf` needs, and the first instruction in this corpus that crosses from
     # one register FILE into another.  Four hypotheses pin the PREFIXES and the
@@ -856,6 +887,22 @@ _SUCCS = {
     # it.  A successor table is a copy of the model, so the model was changed in
     # three places and this was the fourth.
     "cqo": "{ $s with rdx := x86_cqo $s.rax, rip := $next }",
+    # `F7 /2`: bitwise complement, and NO FLAGS at all -- which is the whole
+    # difference from `neg`'s row below and the reason the two are not one row.
+    # The value is `^^^ 0xffffffffffffffff`, which is `x86_set_reg`'s own
+    # `x86_set_reg s i (v ^^^ 0xffffffffffffffff)` -- the model's spelling, not a
+    # `(~v)` this file computed, for B3's reason.
+    "group3:not":
+        "{ x86_set_reg $s $dst (x86_get_reg $s $dst ^^^ 0xffffffffffffffff)"
+        " with rip := $next }",
+    # `F7 /3`: two's-complement negation, which is `0 - a`, and FOUR flags, which
+    # the model computes with `x86_flags_sub s 0 a (0 - a)` -- one function, four
+    # field values, and quoting it four times with the subtraction spelled four
+    # times would be four things to keep in step with the model.
+    "group3:neg":
+        "{ x86_set_reg $s $dst ((0 : UInt64) - x86_get_reg $s $dst) with "
+        "rip := $next, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, "
+        "of_ := ($fs).of_ }",
     # The successor QUOTES the model's own expressions (`x86_set_xmm` over the
     # ModRM's `reg` and `rm + x86_rex_b rex`), which is B3's rule for a
     # successor table and is not optional here: `x86_set_xmm` is a `match` on
@@ -1106,7 +1153,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
-                   "not66", "digit"):
+                   "not66", "digit", "ndigit2"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
@@ -1278,6 +1325,25 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # quotes the model's own expression (see `_SUCCS`), and `$tgt`/`$ret`
         # would only be substituting pre-computed arithmetic for it.
         extra_succ = {"$off": "(%d)" % off}
+    elif form in ("group3:not", "group3:neg"):
+        # `REX.W F7 /digit`, so the ModRM is `raw[2]` and the DIGIT is its reg
+        # field -- the operation, the same sense `shl`/`shr`/`sar` use, and here
+        # it is fixed: the decoder names the form by it, so digit 2 is `not` and
+        # digit 3 is `neg` by the time we are here.  The register is the rm field
+        # (+REX.B), and the decoder has already refused a memory operand for this
+        # family, so `mod` is always 3.
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        dst = rm + (8 if rex & 1 else 0)
+        extra_args = " %d %d %d %d %d" % (rex, modrm, digit, rm, dst)
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$dst": str(dst)}
+        if form == "group3:neg":
+            # `$fs` is the model's `x86_flags_sub s 0 a (0 - a)` with `a` spelled
+            # once, so the four field values the successor reads cannot disagree
+            # with each other about what was negated.
+            extra_succ["$fs"] = ("x86_flags_sub $s (0 : UInt64) "
+                                 "(x86_get_reg $s $dst) "
+                                 "((0 : UInt64) - x86_get_reg $s $dst)")
     elif form == "cqo":
         # REX 99: the only byte after the prefix, so there is no ModRM and
         # nothing to read out of the encoding but the REX itself.  `b1` is the
@@ -2180,6 +2246,8 @@ _SIMP_FORMS = {
                      "x86_sign_extend64", "x86_signed", "x86_split128",
                      "x86_two64", "UInt64.ofNat"),
     "cqo": ("x86_cqo",),
+    "group3:not": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
+    "group3:neg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_sub"),
     # NOT `x86_trunc32`, which is what this row named until the successor was
     # corrected to the model's narrow write: `x86_trunc32` is the 4-byte
     # zero-extending store, a DIFFERENT instruction's rule, and it is absent from

@@ -780,6 +780,22 @@ SUCCESSOR_FORMS = (
     ("imul_r64_r64", X.encode_imul_r64_r64(X.Reg.RAX, X.Reg.RBX),
      "fun t => (t.rip, (if t.zf then 2 else 0) + (if t.sf then 4 else 0)"
      " + (if t.cf then 8 else 0) + (if t.of_ then 16 else 0))"),
+    # The two group-3 forms whose step lemmas and successor rows landed on this
+    # tree with NO check of this kind behind them, which is the same hole the two
+    # rows above were in: the decoder named them, the model stepped them, the ISA
+    # census counted them covered, and `_FORMS` had no row at all -- so six corpus
+    # examples were refused by name for arithmetic that was already there.
+    #
+    # `not` needs no fourth field: it writes `0 - 1` or `a ^^^ ~0`, and at the
+    # default state (RBX = 0) the complement is all ones, which no successor that
+    # forgot the operation can produce.  `neg`'s probe reads the FOUR FLAGS, for
+    # `imul`'s reason: the destination is `0 - a` either way and only the flags
+    # separate a row that computes them from one that does not.
+    ("group3:not", X.encode_not_r64(X.Reg.RBX), "fun t => (t.rip, t.rbx)"),
+    ("group3:neg", X.encode_neg_r64(X.Reg.RBX),
+     "fun t => (t.rip, (if t.zf then 2 else 0) + (if t.sf then 4 else 0)"
+     " + (if t.cf then 8 else 0) + (if t.of_ then 16 else 0))",
+     "{ X86State.init 10 %d with rbx := 7 }"),
 )
 
 

@@ -99,6 +99,18 @@ x86_step_shl_imm8` to `terminates: proved, 1 live hole (hrip's own admission)` �
 the single admission every chain-crossing program carries, and what is left is
 `bugs/FORMAL_a_register_read_out_of_a_shift_has_no_projection_fact.md`.
 
+**B36 — and TWO forms the model had always stepped had no row at all**, which
+is how B35 was found. `group3:not` and `group3:neg` (`F7 /2` and `F7 /3`) are in
+`lib/X86.lean`'s arm, in the decoder's `_GROUP3`, and in the ISA census as
+covered; `_FORMS` had no row for either, so six corpus examples were refused by
+name — `no step lemma wired for: neg` reads like the model cannot negate, and it
+can. `x86_step_not_r64` and `x86_step_neg_r64` are one `simp` each over the
+existing arm, and `negate_arg`, `unary_ops` and `neg` now PROVE with no `sorry`.
+The fourth shape of coverage gap — decoded, stepped, sampled, and unreachable by
+the prover — is written up in
+`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, which had three shapes and
+none of them was this one.
+
 **Why nothing caught any of them, which is the part worth keeping.** Each model
 was corrected for a MEASURED reason by the fuzzer, and each correction changed no
 example's ANSWER — nothing in `formal/examples` reads a flag after a multiply, or
@@ -143,7 +155,9 @@ and the tree shapes (`wide_recv` 5 functions / 1 leaf, `bittest` 4 leaves):
 | `formal/x86_64_endtoend_test.py localmul sle8 twoifs` | 3 `terminates: PROVED`, `failing: 0`, **after B34** — and `sle8` closes with no `sorry` at all, which it did not before B32 |
 | `… vardecl ret42 const2 bittest` | 3 `PROVED` with no admitted fact, and `wide_recv` `FAIL lean exited -6: lean::memory_exception` — the pre-existing OOM this doc does not own |
 | `… shiftlr shift_by_var` | both were `Type mismatch` before B35; both are now `proved, 1 live hole (hrip)` — see `bugs/FORMAL_a_register_read_out_of_a_shift_has_no_projection_fact.md` |
-| `formal/x86_64_model_coverage_test.py` (7 s) | 185 samples / 67 forms all steppable; **6** successor rows; 25 lemmas / 52 encodings / 523 hypotheses; 16 divide, 21 shift, **17 multiply** cases — every one as the arithmetic says |
+| `… negate_arg unary_ops neg` | all three were `no step lemma wired for` before B36; all three are `terminates: PROVED` with **no** admitted fact |
+| the corpus path-tree census (Lean-free) | **67** trees / 107 leaves / 4 312 steps, up from 65/105/4 232 — three more examples build a tree, which is what B36 is |
+| `formal/x86_64_model_coverage_test.py` (7 s) | 185 samples / 67 forms all steppable; **8** successor rows; 25 lemmas / 52 encodings / 523 hypotheses; 16 divide, 21 shift, **17 multiply** cases — every one as the arithmetic says |
 | `python3 test_formal_sweep_truth.py` | 137 tests, 0 failures (was 136) |
 | the axiom census's `X86` row | `144/2/141` → **`150/2/147`**, `reaches` and `closure_only` unmoved: `lib/X86.lean` gains six kernel-checked projection facts |
 

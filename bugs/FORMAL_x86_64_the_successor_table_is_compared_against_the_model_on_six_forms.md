@@ -1,4 +1,4 @@
-# `formal/x86_64_model_coverage_test.py` compares the emitter's SUCCESSOR against the model on 6 of the 43 forms, and the two that were stale were both among the other 37
+# `formal/x86_64_model_coverage_test.py` compares the emitter's SUCCESSOR against the model on 6 of the 43 forms (8 since the pass that filed this added two more), and every row that was stale was among the other 35
 
 **Area:** FORMAL (the x86-64 emitter/model agreement check). Found 2026-10-05 on
 `work/formal69-docs`, while fixing the two stale successor rows that made
@@ -22,10 +22,10 @@ drift. The `cqo` row (B29) is why the file exists.
 
 ```console
 $ python3 -c "import formal.x86_64_endtoend_test as E, formal.x86_64_model_coverage_test as M; print(len(M.SUCCESSOR_FORMS), len(E._FORMS))"
-6 43
+8 45          # 45 after the same pass wired `group3:not` and `group3:neg`; it was 6 of 43
 ```
 
-so 37 forms have a `_SUCCS` row and no row in `SUCCESSOR_FORMS`. The two that had
+so 37 forms had a `_SUCCS` row and no row in `SUCCESSOR_FORMS`. The two that had
 drifted (`setcc`, `imul_r64_r64`) were both in those 37, and both were found by
 `formal-x86-endtoend`'s `Type mismatch` instead — which is the direction the
 project has been arguing against for three docs now: **the end-to-end prover is
@@ -37,6 +37,17 @@ corpus does reach them — but one `Type mismatch` per example, printed as
 `lean exited 1: error: Type mismatch | x86_step_setcc_r8 s24` with the
 `:60` truncation `_run_lean` applies, which names a LEMMA rather than a row. Both
 rows could have stayed wrong for months on that route.
+
+## Update (same day): 8 rows, and the two new ones are there because they had NO
+## check at all
+
+`group3:not` and `group3:neg` gained a step lemma and a successor row in the same
+pass (six corpus examples were refused by name for them), and with them the table
+this doc is about grew to 8 of 45 — which is the argument of this doc in one
+number: **a row added with no `SUCCESSOR_FORMS` row beside it is a row that can be
+wrong for as long as nobody runs a generated proof.** Both are measured to have
+teeth: with the operation dropped from `not`'s row and from `neg`'s, the check
+reports two failures and exits 1.
 
 ## The next step
 
@@ -64,6 +75,8 @@ show:
   mechanism rather than a new row, and it is the rows that have not been written
   yet.
 
+**Update: `SUCCESSOR_FORMS` has 8 rows since this was filed — the two stale ones plus `group3:not`/`group3:neg`, whose rows landed with no check of this kind behind them and now have one.**
+
 `SUCCESSOR_FORMS` is a tuple of tuples and `successor_lean_source` already
 accepts the optional fourth element, so a row costs three lines and no change to
 the emitter. The coverage count is printed by the registered job
@@ -73,7 +86,7 @@ the emitter. The coverage count is printed by the registered job
 
 ```console
 $ python3 formal/x86_64_model_coverage_test.py | grep 'successor vs the model'
-emitted successor vs the model: 6 form(s) — each successor is the model's
+emitted successor vs the model: 8 form(s) — each successor is the model's
 ```
 
 The same command with `_SUCCS["setcc"]` put back to
