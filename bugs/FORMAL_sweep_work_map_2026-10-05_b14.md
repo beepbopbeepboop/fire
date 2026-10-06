@@ -527,12 +527,18 @@ a wrong number on two architectures at once. `_lower_builtin_extremum` now skips
 `M.module_body_functions(functions)` — the one reader of *"this wrapper is a
 module's top level"*, used rather than matching `MODULE_BODY_NAME` because a
 library is compiled from SEVERAL sources and `compile_formal_dylib` renames the
-second and later bodies. **The underlying store defect is filed**
-(`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`, §6),
-with the three sibling positions measured: a default argument value and a struct
-field default are both **refused by name**, and `[max(3, 9)]` is right — so two of
-the four are refusals and one is a wrong answer, which is the shape of a gap
-rather than of a design.
+second and later bodies. **The underlying store defect this paragraph named is
+FIXED and its doc deleted with the fix** (`formal/model.py`'s
+`fold_module_select_expr`, which decides the value so the store is recognised as
+already-in-the-image), and the fence's stated *reason* turned out to be wrong:
+the store was never dropping a `TernaryExpr` to zero — reading it back from a
+function answers CPython on both architectures — so what `TOP = 9 if 1 else 3`
+measuring 0 against CPython's 9 was the **entry point** (an initializer the
+module-level folder declined kept its store in the module body, and a non-empty
+module body outranks `main`), not a store that could not hold the value. The
+three sibling positions measured there still stand: a default argument value and
+a struct field default are both **refused by name**, and `[max(3, 9)]` is right —
+so two of the four are refusals and one is the entry-point defect above.
 
 ### 5.2 The silent wrong answer that guard would otherwise have walked into, REFUSED at the source
 
@@ -707,13 +713,15 @@ the exact next step.
   boundary `fire_compiler.py` already computes one layer up — with the one
   question to answer first stated in the doc (does `rawness` change the
   segmentation? it must not, and the reason is in the doc).
-* **`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`**
-  (NEW, found by §5.1) — a module-level store of a `F.TernaryExpr` answers **0 on
-  both architectures** where CPython stores the arm it took, and needs no `max` to
-  do it: `TOP = 9 if 1 else 3` is 0 while `TOP = 3 + 9` at the same position is
-  12. **Fenced off, not fixed** — `_lower_builtin_extremum` skips the module body,
-  and the doc's next step is the store path rather than the ternary, with the
-  three sibling positions measured.
+* **A module-level store of a `F.TernaryExpr` answering 0** (NEW, found by
+  §5.1) — `TOP = 9 if 1 else 3` was 0 while `TOP = 3 + 9` at the same position
+  was 12, and needs no `max` to do it. **Since fixed, and the doc deleted with
+  the fix** — but its DIAGNOSIS was wrong, which is the transferable part: the
+  store was never zero (reading it back from a function answers CPython on both
+  architectures), and the 0 was `main` being displaced by a module body whose
+  store the module-level folder could not fold away. The fix is the folder
+  (`formal/model.py::fold_module_select_expr`), not the store and not the
+  ternary. §5.1's fence above is still wanted, and its paragraph now says why.
 * **The 136-file family-table gap (§4.3) needed no doc from this branch**: it had
   one (`FORMAL_the_sweep_family_table_has_no_row_for_the_export_rule_refusal.md`,
   filed by `formal32-instrument` off the `-12` log with **the same 136**), this

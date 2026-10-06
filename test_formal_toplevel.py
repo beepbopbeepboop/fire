@@ -390,6 +390,168 @@ def test_body_runs_before_a_later_exit(tmpdir, verbose):
         tmpdir, verbose, expect_stdout="ran", expect_exit=9)
 
 
+# ── a module-level CONSTANT the folder cannot decide displaces `main` ──────
+#
+# **This section is the ENTRY POINT's half of a bug that was filed as a
+# STORE, and the expectation in every row is a LITERAL rather than CPython's
+# answer — which is the whole of what makes this a diagnosis.** A module-level
+# initializer the constant folder declines is recorded `rebound` rather than
+# `assigned`, so `module_body`'s `_is_folded_constant` keeps its store as a
+# top-level statement — and a non-empty module body is the image's entry
+# (`entry_function` rule 1). So the program's answer came from the body's own
+# trailing `return 0` and `main` never ran:
+#
+#     TOP = 3 + 9         ; def main(): return TOP   -> 12   (folds)
+#     TOP = 9 if 1 else 3 ; def main(): return TOP   ->  0   (did not)
+#
+# which reads as "a module-level store of a conditional expression is zero".
+# It is not. Read the store back from a FUNCTION and it answers CPython on both
+# architectures (`the_store_itself_is_correct` below), so nothing was dropped:
+# a body outranked `main`.
+#
+# **Why the literals, since this file's rule is to compare against CPython
+# wherever the source is valid Python — and these sources are.** CPython has no
+# such convention: it runs the module body and exits 0, because nothing in
+# `TOP = 9 if 1 else 3` + `def main(): return TOP` calls `main`. Measured, and
+# that is not a quibble — it is exactly how the original measurement went wrong,
+# which compared this image's EXIT STATUS against `print(9 if 1 else 3)`, i.e.
+# against a *different program*, and read the difference as a dropped value.
+# This backend's convention is the opposite one and is deliberate: the entry
+# function's return value IS the program's answer (which is why every file in
+# `formal/examples/` is `def f(n): return …` and is checked by its exit status).
+# So the right expectation is the literal, and asserting CPython's 0 would pin
+# the bug.
+
+def _constant_main_case(name, expr):
+    """`TOP = <expr>` and a `main` that returns it; the body calls nothing."""
+    return (f"TOP = {expr}\n"
+            "def main() -> Int:\n"
+            "    return TOP\n")
+
+
+def test_a_conditional_module_constant_is_the_answer(tmpdir, verbose):
+    """`TOP = 9 if 1 else 3` — the program's answer is 9, not 0.
+
+    The falsifiable half is the ARM, and both are here because a folder that
+    ignored the condition would pass the first: `9 if 1 else 3` and
+    `9 if 0 else 3` differ only in the condition."""
+    ok = case_agrees_with_cpython(
+        "module_const_ternary_true", _constant_main_case("t", "9 if 1 else 3"),
+        tmpdir, verbose, expect_exit=9)
+    ok &= case_agrees_with_cpython(
+        "module_const_ternary_false", _constant_main_case("f", "9 if 0 else 3"),
+        tmpdir, verbose, expect_exit=3)
+    return ok
+
+
+def test_a_boolean_module_constant_is_the_answer(tmpdir, verbose):
+    """`and` / `or` / `not` / a comparison, as module-level values.
+
+    Four shapes the folder now decides, each with a falsifiable partner on the
+    next row of the same shape rather than only the true one — `1 and 9` and
+    `0 and 9` differ by one character and fold to opposite answers, which is
+    what pins that the short circuit was implemented and not just accepted."""
+    ok = True
+    for name, expr, want in (("and_true", "1 and 9", 9),
+                             ("and_false", "0 and 9", 0),
+                             ("or_false", "0 or 3", 3),
+                             ("or_true", "9 or 3", 9),
+                             ("not_zero", "not 0", 1),
+                             ("not_nonzero", "not 5", 0),
+                             ("cmp_true", "1 < 2", 1),
+                             ("cmp_false", "2 < 1", 0)):
+        ok &= case_agrees_with_cpython(
+            f"module_const_{name}", _constant_main_case(name, expr),
+            tmpdir, verbose, expect_exit=want)
+    return ok
+
+
+def test_a_nested_conditional_module_constant_is_the_answer(tmpdir, verbose):
+    """`(9 if 1 else 3) + 1` is 10: a select inside an arithmetic operand.
+
+    The row that says the two folders RECURSE into each other rather than
+    each asking only the one before it. `fold_module_int_expr` and
+    `fold_module_select_expr` each ask the other for an operand, so a select
+    nested in arithmetic and arithmetic nested in a select both decide; with
+    one arm missing the answer depended on which folder was asked first, which
+    is invisible from the outside and is the kind of asymmetry a reader cannot
+    see."""
+    ok = case_agrees_with_cpython(
+        "module_const_nested_arith",
+        _constant_main_case("n", "(9 if 1 else 3) + 1"),
+        tmpdir, verbose, expect_exit=10)
+    ok &= case_agrees_with_cpython(
+        "module_const_nested_select",
+        _constant_main_case("m", "(9 if 1 else 3) if 0 else 4"),
+        tmpdir, verbose, expect_exit=4)
+    return ok
+
+
+def test_the_store_itself_is_correct(tmpdir, verbose):
+    """The STORE was never the bug: read it back and it answers CPython.
+
+    This is the row that makes the section a diagnosis rather than a symptom
+    list. It reads `TOP` from a FUNCTION, so the answer cannot depend on which
+    function the image picked as its entry — and it returns 9, which is what
+    makes "the module-body store path drops a `TernaryExpr` to zero" a
+    sentence about an entry point wearing a store's clothes. A fix that had
+    gone looking for a store bug would have found nothing here to fix."""
+    return case_agrees_with_cpython(
+        "the_store_itself_is_correct",
+        "TOP = 9 if 1 else 3\n"
+        "def show() -> Int:\n"
+        "    return TOP\n"
+        "def main() -> Int:\n"
+        "    printf(\"v=%d\", show())\n"
+        "    return 0\n"
+        "main()\n",
+        tmpdir, verbose, expect_stdout="v=9", expect_exit=0)
+
+
+def test_an_undecidable_module_condition_still_answers_correctly(tmpdir,
+                                                                  verbose):
+    """A condition the build cannot decide is NOT guessed — and is still right.
+
+    These are the shapes `fold_module_select_expr` refuses, each with a reason
+    that is a WRONG ANSWER rather than a missing feature, which is why the
+    refusal is the safe direction:
+
+      * `9 if "" else 3` and `9 if "x" else 3` — a STRING condition. A `char *`
+        here points at interned `__TEXT` bytes and an EMPTY literal is still a
+        non-null pointer, so the machine's truth test says true where CPython's
+        says false: folding these would put 9 and 9 in the image where CPython
+        says 3 and 9. The two are here together because a folder that treated
+        every string as truthy passes the second and fails the first;
+      * `9 if f() else 3` — a call in the CONDITION, which is the one operand
+        that decides WHICH arm, so unlike the other arm it cannot be skipped;
+      * `f() if 1 else 3` — a call in a DECIDED arm is evaluated (CPython
+        evaluates `f()` because 1 is true), and its partner `3 if f() else 9`
+        evaluates the other one. Both are here because a folder that answered
+        by evaluating BOTH arms would be right on the first pair and wrong on
+        anything with a side effect.
+
+    **None of these is asserted as a REFUSAL, and that is the point.** They
+    build, they run, and they answer CPython — because the store path is
+    correct (the row above), so a program that reads the name still gets the
+    right value. What the folder must not do is SUBSTITUTE a constant for the
+    read; these rows pass either way, which is why the substitution itself is
+    pinned separately, by the `TOP`-returning rows above (a wrong constant
+    there is a wrong exit status) and by the entry-point rows (a wrong
+    classification is a displaced `main`)."""
+    return case_agrees_with_cpython(
+        "module_const_undecidable",
+        "def f() -> Int:\n"
+        "    return 99\n"
+        "TOP = 9 if \"\" else 3\n"
+        "def show() -> Int:\n"
+        "    return TOP\n"
+        "def main() -> Int:\n"
+        "    printf(\"v=%d\", show())\n"
+        "    return 0\n"
+        "main()\n",
+        tmpdir, verbose, expect_stdout="v=3", expect_exit=0)
+
+
 # ── 4. the `__name__` guard ────────────────────────────────────────────────
 #
 # 143 of the 210 files in this tree and the stdlib that have a top-level
@@ -1210,6 +1372,11 @@ def main():
         test_body_does_not_run_main_it_does_not_call,
         test_exit_from_the_module_body,
         test_body_runs_before_a_later_exit,
+        test_a_conditional_module_constant_is_the_answer,
+        test_a_boolean_module_constant_is_the_answer,
+        test_a_nested_conditional_module_constant_is_the_answer,
+        test_the_store_itself_is_correct,
+        test_an_undecidable_module_condition_still_answers_correctly,
         test_name_guard_true,
         test_name_guard_false,
         test_name_in_a_function_is_still_refused,

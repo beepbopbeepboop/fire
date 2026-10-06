@@ -39240,18 +39240,34 @@ def fold_literal_expr(node, names=None, bound=()):
 def fold_module_value(node, names=None):
     """The value of a module-level INITIALIZER this build knows, or None.
 
-    Three folders, deliberately separate and deliberately in this order.
+    Four folders, deliberately separate and deliberately in this order.
     `fold_literal_expr` stays literal-only — its own comment is right that every
     operator added there is one more way for a fold to be wrong, and it is
     shared with the struct-field, class-constant and default-parameter readers,
     which have no target to consult and are not asking the same question. This
-    one answers the two initializer shapes that are not a value the source
-    wrote plainly:
+    one answers the initializer shapes that are not a value the source wrote
+    plainly:
 
     * a `#kgen.param.expr<…>` template about the target this build is emitting
       (`std/sys/info.mojo`'s `_TargetType` machinery, and the `_PLUGIN_COUNT`
       arithmetic beside it);
-    * a `FloatLiteral`, truncated toward zero.
+    * a `FloatLiteral`, truncated toward zero;
+    * the VALUE-SELECTING and BOOLEAN shapes — `a if c else b`, `and`, `or`,
+      `not`, and a comparison — whose operands are themselves constants, in
+      `fold_module_select_expr`. That one is the third bullet for a reason worth
+      stating here rather than only there: **deciding these is what keeps a
+      module-level store out of the module BODY, and a store in the body is what
+      makes the body the entry**, so a folder that declines a decidable value
+      does not merely miss a substitution — it changes which function the image
+      runs. Measured, both architectures, no `max` anywhere in the program:
+
+          TOP = 3 + 9         ; def main(): return TOP   -> 12
+          TOP = 9 if 1 else 3 ; def main(): return TOP   ->  0
+          TOP = 9 if 0 else 3 ; def main(): return TOP   ->  0
+
+      and the 0 is not a dropped value (the store lands, and reading it back
+      answers CPython) but a body that outranked `main`. Its docstring is the
+      argument; this is the caller.
 
     **The float arm is the module-level one, and where it sits is the whole
     argument for it.**  `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
@@ -39300,6 +39316,11 @@ def fold_module_value(node, names=None):
     if folded is not None:
         return folded
     folded = fold_module_int_expr(node, names)
+    if folded is None:
+        # The VALUE-SELECTING and BOOLEAN forms, in the same folder and for the
+        # same reason — see `fold_module_select_expr`'s own docstring, which is
+        # the argument for why this is not "just add TernaryExpr to the folder".
+        folded = fold_module_select_expr(node, names)
     if folded is not None:
         # ONE range check, here, on the value that would be substituted: a
         # module-level slot is a word in `__DATA` and a read of this name is
@@ -39411,6 +39432,14 @@ def fold_module_int_expr(node, names=None):
         value = fold_literal_expr(child, names)
         if value is None:
             value = fold_module_int_expr(child, names)
+        if value is None:
+            # The third folder, so a CONDITIONAL nested inside arithmetic is
+            # decided rather than refused: `(9 if 1 else 3) + 1` is 10 and CPython
+            # says 10. Asked here as well as from `fold_module_value` because
+            # these two folders recurse into each other — without this arm the
+            # nesting depended on which folder happened to be asked first, which
+            # is the one kind of asymmetry a reader cannot see.
+            value = fold_module_select_expr(child, names)
         return value
 
     def as_int(value):
@@ -39449,6 +39478,159 @@ def fold_module_int_expr(node, names=None):
         try:
             return _FOLD_BINOPS[node.op](a, b)
         except (TypeError, ValueError, ZeroDivisionError):
+            return None
+    return None
+
+
+# The COMPARISONS a module-level initializer may be folded with, and what each
+# one decides. A separate table from `mojo/middle/comptime.py::compare_op` on
+# purpose rather than by accident: that one answers for a function's own
+# `comptime` binding and is a member of the self-hosted tier (a dict of
+# lambdas cannot link there, which is why it is an if/elif chain), while this
+# one is asked at build time by CPython. Same rule, two tiers — the arrangement
+# `fold_unary_sign` documents for `_FOLD_UNARY`, and for the same reason.
+_FOLD_COMPARE = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+}
+
+# `and` / `or`, as the two short-circuit selects they are. NOT lambdas over
+# both operands: Python evaluates `a and b` as `b if a else a`, so the LEFT
+# alone decides the result whenever it is falsy, and `a or b` as `a if a else
+# b` — the mirror. A table entry would have to evaluate `b` to answer, which is
+# both wrong for a `b` the build cannot fold and a way to turn a short circuit
+# into an eager one; `fold_module_select_expr` reads the left operand itself.
+_FOLD_SELECT_OPS = ("and", "or")
+
+
+def fold_module_select_expr(node, names=None):
+    """The value of a module-level CONDITIONAL initializer, or None.
+
+    `a if c else b`, `a and b`, `a or b`, `not a`, and a comparison — the five
+    shapes whose value CPython decides from operands that are themselves
+    constants. They are here, in the MODULE-level folder, rather than in
+    `fold_literal_expr`, for the reason that function's own comment gives for
+    keeping its arms out: it is also the struct-field, class-constant and
+    default-parameter reader, and none of those asks this question.
+
+    **AND THE REASON THIS IS A FIX RATHER THAN A NEW OPERATOR is the entry
+    point, which is where the wrong answer actually came from.** A module-level
+    initializer that this folder cannot decide is recorded `rebound` rather
+    than `assigned`, and `module_body`'s `_is_folded_constant` therefore KEEPS
+    the store as a top-level statement. A non-empty module body is the image's
+    entry (`entry_function` rule 1), so `main` is displaced: a program whose
+    whole point is `def main(): return TOP` stops running `main` and answers the
+    body's own trailing `return 0`. Measured on both architectures, with the
+    condition a LITERAL and no `max` anywhere:
+
+        TOP = 3 + 9        ; def main(): return TOP   -> 12   (folds)
+        TOP = 9 if 1 else 3; def main(): return TOP   ->  0   (did not fold)
+        TOP = 9 if 0 else 3; def main(): return TOP   ->  0   (did not fold)
+
+    So the value was never dropped — the STORE is correct, and reading it back
+    from a function answers CPython on both architectures — and the sentence
+    "a module-level store of a conditional expression is zero" was a wrong
+    description of an ENTRY-POINTER selection. The fix is the one this folder
+    was missing: decide the value, so the store is recognised as already-in-the-
+    image and `main` is the entry as the source plainly intends.
+
+    **Python's short circuit is preserved, and that is what keeps this from
+    evaluating something the machine would not.** Only the operand that decides
+    the result has to fold: `f() if 1 else 3` is 3 (CPython never calls `f`),
+    while `3 if f() else 9` is not foldable at all because the CONDITION has to
+    be known to choose the arm. The same rule gives `a and b` → `a` when `a` is
+    falsy without looking at `b` at all.
+
+    **Truthiness is CPython's, and only over an int.** `0` is false and any
+    other int is true, which is also what both machines' `cset`/`jnz` compute
+    over a word, so a `TernaryExpr` condition folded to an int decides the same
+    arm the emitter would. A STRING is deliberately not a condition: a `char *`
+    here points at interned `__TEXT` bytes and an EMPTY literal is still a
+    non-null pointer, so `"a" if "" else "b"` would be `1` on the machine and
+    `"b"` in CPython — a fold that would put a wrong value in the image rather
+    than leave one out. That is the same reason `refuse_none_comparisons`
+    exists, and the refusal direction here is the safe one.
+
+    A `None` anywhere in the shape does not fold, for the reason
+    `collect_module_symbols`'s `remember` gives: `NONE_WORD` is `0` wearing
+    `None`'s spelling, so folding `3 if 1 else None` to a value a later
+    initializer could add to `7 + <that>` is exactly the conflation that
+    function refuses."""
+    def operand(child):
+        value = fold_literal_expr(child, names)
+        if value is None:
+            value = fold_module_int_expr(child, names)
+        if value is None:
+            value = fold_module_select_expr(child, names)
+        return value
+
+    def as_int(value):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
+    def part(child):
+        """The folded value of an OPERAND, refusing one this cannot decide.
+
+        `None` — the NAME — is refused here rather than folded to `NONE_WORD`,
+        for the reason the docstring gives; a `str` is kept, because a string
+        constant is a real folded value (`folded_literal_node` builds a
+        `StringLiteral` for it) and only its TRUTHINESS is undecidable."""
+        if child is not None and is_none_expr(child):
+            return None, False
+        return operand(child), True
+
+    if isinstance(node, F.TernaryExpr):
+        cond, ok = part(node.condition)
+        if not ok:
+            return None
+        truth = as_int(cond)
+        if truth is None:
+            return None
+        taken = node.then_val if truth != 0 else node.else_val
+        value, ok = part(taken)
+        return value if ok else None
+    if isinstance(node, F.BinaryOp) and node.op in _FOLD_SELECT_OPS:
+        left, ok = part(node.left)
+        if not ok:
+            return None
+        truth = as_int(left)
+        if truth is None:
+            return None
+        # `a and b` is `b` when `a` is truthy and `a` otherwise; `a or b` is the
+        # mirror. Decided by the LEFT alone where the left decides, so an
+        # undecidable right operand costs nothing — which is CPython's own
+        # short circuit and not a relaxation of it.
+        if (truth != 0) == (node.op == "and"):
+            right, ok = part(node.right)
+            return right if ok else None
+        return left
+    if isinstance(node, F.UnaryOp) and node.op == "not":
+        value, ok = part(node.operand)
+        if not ok:
+            return None
+        truth = as_int(value)
+        if truth is None:
+            return None
+        return 0 if truth != 0 else 1
+    if isinstance(node, F.BinaryOp) and node.op in _FOLD_COMPARE:
+        a, ok = part(node.left)
+        if not ok:
+            return None
+        b, ok = part(node.right)
+        if not ok:
+            return None
+        a = as_int(a)
+        b = as_int(b)
+        if a is None or b is None:
+            return None
+        try:
+            return 1 if _FOLD_COMPARE[node.op](a, b) else 0
+        except TypeError:
             return None
     return None
 
