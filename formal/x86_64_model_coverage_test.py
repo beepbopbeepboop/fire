@@ -701,20 +701,33 @@ def _memory_samples():
 #:
 #: The two answer different questions and both have been needed.  A `cqo` whose
 #: `_SUCCS` row said `x86_sign_extend32` while the model's arm computes
-#: `x86_cqo` left every hypothesis satisfiable — so the row above was green —
+#: `x86_cqo` left every hypothesis satisfiable -- so the row above was green --
 #: and the end-to-end proof of that step was a proof of a different instruction.
 #: That is the whole argument for having this: the applicability check cannot
 #: see a successor at all, and a successor is a second copy of the model that
 #: has to be kept in step with it.
 #:
-#: Read out of the ENCODER, so the bytes are the ones the backend emits, and the
-#: successor out of `_resolve`, so the check is against what the generator
-#: actually writes rather than against a hand-written copy of it.
-#: `(form, encoding, probe)` — the probe is `X86State -> (Nat x UInt64)`, the
-#: `rip` and the ONE field the instruction writes.  It is a fact about the
-#: instruction, not a copy of the successor, so the check below stays
-#: non-circular: it compares the model's step against the emitter's successor on
-#: the fields the instruction is ABOUT.
+#: **The `setcc` row is the second instance of that, and it is why the third
+#: field exists.**  `e54d2f4e` (2026-10-04) changed the model's narrow register
+#: write so a 1- or 2-byte write leaves the high bytes alone, corrected all three
+#: `setcc` lemmas in `lib/X86.lean` to conclude `x86_set_reg_narrow`, and did not
+#: touch `x86_64_endtoend_test.py`'s `_SUCCS`, which kept `x86_set_reg`.  All 26
+#: `terminates` cases carrying a `setcc` then failed to ELABORATE --
+#: `Type mismatch | x86_step_setcc_r8 sN ...`, with both 30-field records
+#: printed and neither naming the width.  Nothing caught it, because a check at
+#: `X86State.init 10 _` cannot see this difference at all: `init` leaves every
+#: general register 0 except RDI, and `x86_set_reg_narrow s 7 1 1` and
+#: `x86_set_reg s 7 1` both answer `1` when the destination is 0 or 10.  **A
+#: check run at a state where the wrong successor gives the same answer is not a
+#: check**, and it was one for every row here before the `init` became
+#: per-row.
+#:
+#: `(form, encoding, probe, state)` -- `probe` is `X86State -> (Nat x UInt64)`,
+#: the `rip` and the ONE field the instruction writes, and `state` is the
+#: `X86State.init` term the row runs at, i.e. which register values make the
+#: difference VISIBLE.  `probe` is a fact about the instruction, not a copy of
+#: the successor, so the check stays non-circular: it compares the model's step
+#: against the emitter's successor on the fields the instruction is ABOUT.
 #:
 #: `RDI` and not `R12` for the `movq` source, and that is the whole reason the
 #: row has teeth.  `X86State.init 10 _` sets `rdi := 10` and every other general
@@ -724,9 +737,22 @@ def _memory_samples():
 #: successors differ.  At `x12`/`r12`, which is the pair the applicability rows
 #: use, both halves are 0 and the swap is invisible.
 SUCCESSOR_FORMS = (
-    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)"),
+    # `RAX` carries bit 63, so `x86_cqo` answers `0xffffffffffffffff` where the
+    # `x86_sign_extend32` this row used to name answers `0xffffffff80000000`.
+    # `X86State.init` cannot supply that -- RAX is one of the fifteen registers
+    # it zeroes -- so this row names its own state, and that is the difference
+    # between a check and a green.
+    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)",
+     "{ X86State.init 10 %d with rax := 0x8000000000000000 }"),
     ("movq_xmm_rm64", X.encode_movq_xmm_rm64(3, X.Reg.RDI),
-     "fun t => (t.rip, t.xmm3)"),
+     "fun t => (t.rip, t.xmm3)", "X86State.init 10 %d"),
+    # `setcc al` (`0F 9C C0`), the condition `n > n`, and the destination RAX at
+    # a value with its high bytes set: the model narrows to
+    # `0xdeadbeefcafebabf` and a whole-register write answers `1`.  `rm = 0` is
+    # RAX and NOT RDI, so this row has to supply the destination's value itself
+    # for the same reason the `cqo` row does.
+    ("setcc", X.encode_setle(R.RAX), "fun t => (t.rip, t.rax)",
+     "{ X86State.init 10 %d with rax := 0xdeadbeefcafebabe }"),
     # The stack-floor guard's two, and the reason they are HERE rather than
     # only in `_FORMS`.  Both are forms every image emits and neither had a
     # successor row, so `_plan` refused the whole corpus by name before any of
@@ -739,11 +765,13 @@ SUCCESSOR_FORMS = (
     # at 0 in `X86State.init 10 _`, which is what makes them discriminating: a
     # successor that added the immediate instead of subtracting it, or that
     # addressed the mode from a base register, differs from the model here and
-    # agrees nowhere else.
-    ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(X.Reg.R10, 0x780000),
-     "fun t => (t.rip, t.r10)"),
-    ("lea_r64_rip", X.encode_lea_r64_rip(X.Reg.R11, 0x3ffc24),
-     "fun t => (t.rip, t.r11)"),
+    # agrees nowhere else.  (The subtraction is still visible with R10 = 0 -- the
+    # result is `-immediate` rather than `0` -- so `init` is the right state for
+    # these two and the per-row one is only for the rows that need it.)
+    ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(R.R10, 0x780000),
+     "fun t => (t.rip, t.r10)", "X86State.init 10 %d"),
+    ("lea_r64_rip", X.encode_lea_r64_rip(R.R11, 0x3ffc24),
+     "fun t => (t.rip, t.r11)", "X86State.init 10 %d"),
 )
 
 
@@ -997,17 +1025,27 @@ def successor_lean_source(forms):
     -- which is an error, so it is caught, but it says nothing about the
     successor.  Mapping both sides through a probe puts them in
     `Option (Nat x UInt64)`, which is decidable and computable.
+
+    **The state's `%d` is the ENTRY ADDRESS and the row's `state` is the register
+    file it runs at**, so a row can put a value in a register `X86State.init`
+    zeroes -- which is what makes a `setcc`'s width visible at all, and what
+    makes `cqo`'s sign extension visible at all.  The two cases this check
+    existed to catch had been invisible for that reason rather than for want of
+    a row, so the state is per row and every row has to say what it is.  The
+    `%d` is required rather than defaulted: a row that forgot the entry address
+    would put its instruction at 0 and the `rip` half of the claim would fail for
+    a reason that says nothing about the successor.
     """
     out = ["import X86", ""]
     checks = []
-    for i, (form, enc, probe) in enumerate(forms):
+    for i, (form, enc, probe, state) in enumerate(forms):
         m = BASE + 16 * i
         items = ", ".join("0x%02x" % b for b in enc)
         out.append("def scode_%d (code : Nat) : UInt8 :=" % i)
         out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
                    % (m, items, m))
-        out.append("def sst_%d : X86State := X86State.init 10 %d" % (i, m))
-    for i, (form, enc, probe) in enumerate(forms):
+        out.append("def sst_%d : X86State := (%s)" % (i, state % m))
+    for i, (form, enc, probe, _state) in enumerate(forms):
         succ = ET._resolve(form, enc, BASE + 16 * i, "s", 0, length=len(enc),
                            code_name="code")[1]
         claim = ("(let s := sst_%d; let code := scode_%d; "

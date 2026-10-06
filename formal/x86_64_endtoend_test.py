@@ -745,15 +745,61 @@ _SUCCS = {
         "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat, rsp := $s.rsp - 8, "
         "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat "
         "(UInt64.ofNat ($m + 5)) 8 }",
+    # `x86_set_reg_narrow s rmv 1 …` and NOT `x86_set_reg s rmv …`: this row was
+    # the second place the model's narrow-write fix was applied, and this one was
+    # missed.  `e54d2f4e` (2026-10-04, "nine x86-64 model defects found by
+    # fuzzing it against the CPU") changed the model's `rm_write` so a 1- or
+    # 2-byte write touches only the low bytes and LEAVES THE REST ALONE, and
+    # updated `x86_step_setne_al` / `x86_step_setle_al` /
+    # `x86_step_setcc_r8` in `lib/X86.lean` to conclude `x86_set_reg_narrow`.
+    # This successor table is a copy of the model and kept the old one, so every
+    # `setcc` step in a generated proof was a proof about the pre-fix
+    # instruction — and the symptom was not a wrong theorem but a file that would
+    # not elaborate at all:
+    #
+    #     Type mismatch
+    #       x86_step_setcc_r8 s24 rc 4294968397 158 192 14 0 (by …)
+    #
+    # with the whole `X86State` printed on both sides and neither naming the
+    # width.  This is `cqo`'s row above arriving again (see its comment), and it
+    # is what `e54d2f4e` made possible by editing the model in three places and
+    # this being the fourth: the coverage test's `SUCCESSOR_FORMS` is the only
+    # instrument that compares a successor against the model, and it held no
+    # `setcc` row — so 26 of 26 `terminates` cases failed on elaboration with
+    # nothing reporting that the successor table had drifted.  See
+    # `bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md`.
     "setcc":
-        "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
+        "{ x86_set_reg_narrow $s $rmv 1 (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
-        # `imul` reads its first multiplicand from the reg field -- the same field
-    # it writes -- so `$dst` appears on both sides of the product, and it sets
-    # no flags, so there is nothing else in the successor.
+        # `$dst` appears on both sides of the product -- `imul` reads its first
+    # multiplicand out of the reg field, the same field it writes -- and it sets
+    # FOUR FLAGS, which this row omitted for as long as the lemma existed.
+    # `e54d2f4e` (2026-10-04) corrected the model's `imul` arm, which had been
+    # setting no flags at all, and updated `x86_step_imul_r64` to conclude
+    # `x86_set_flag4 … (res) (res != x86_sign_extend64 res) (same)`; this row kept
+    # the pre-fix shape, so all 12 examples that emit a three-operand `imul`
+    # failed to elaborate with
+    #
+    #     Type mismatch | x86_step_imul_r64 s23 rc 4294968390 73 175 195 …
+    #
+    # — the same class, the same commit and the same "the model was changed in
+    # three places and this was the fourth" as the `setcc` row below, and it was
+    # INVISIBLE until that one was fixed: a file that dies at its first
+    # elaboration error does not reach its second, so one stale successor hid
+    # the next.  That is worth stating as a property of the instrument: the Lean
+    # check is one verdict per file, so it cannot count stale successors, and
+    # `test_formal_sweep_truth.py::TestX86EndToEndTables` is what counts them.
     "imul_r64_r64":
+        "(x86_set_flag4 "
         "{ x86_set_reg $s $dst (x86_get_reg $s $dst * "
-        "x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
+        "x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next } "
+        "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex)) "
+        "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex) "
+        "!= x86_sign_extend64 (x86_get_reg $s $dst * "
+        "x86_get_reg $s ($rm + x86_rex_b $rex))) "
+        "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex) "
+        "!= x86_sign_extend64 (x86_get_reg $s $dst * "
+        "x86_get_reg $s ($rm + x86_rex_b $rex))))",
 "alu_rr:cmp":
         "{ $s with rip := $next, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
@@ -877,7 +923,7 @@ _UNKNOWN_FORM_HINT = {
 
 
 def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
-             length=1, rip=None, code_name="rc"):
+             length=1, rip=None, code_name="rc", fs_path=()):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
     the successor expression its conclusion has.
 
@@ -889,6 +935,11 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     model says it reads it out of memory — a `ret` that returns into a caller.
     The caller then proves the value separately and rewrites the step with it, so
     the step is still the model's; see `emit_terminates`.
+
+    `fs_path` is the FORM of every step walked before this one on this path, and
+    it sizes the `rip` side condition's `simp`: the state this step starts in is
+    written by all of them, so folding it needs every definition they used and
+    not only the last one's.  See `_path_simp`.
 
     `code_name` is the NAME of the code function in the generated file, because a
     successor may quote the model's own reader (`UInt64.ofInt (read_i32_le rc
@@ -986,8 +1037,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                 # fork is in the shared prefix and so has a lower number than
                 # this step.  Indexing by `k` names an equation that does not
                 # exist yet -- "Unknown identifier hs20".
-                sc.append(sc_("simp [" + ", ".join(
-                    [hs_in or ("hs%d" % k)] + list(cases)) + "]"))
+                sc.append(sc_("simp [" + _path_simp(
+                    fs_path, (hs_in or ("hs%d" % k),), extra=cases) + "]"))
         elif c in ("b0", "b1", "b2", "b3", "b4", "imm", "disp", "disp32",
                    "off"):
             sc.append(sc_(_BYTES))
@@ -1486,6 +1537,18 @@ def _msb(v):
     return v >= 0x8000000000000000
 
 
+def _sign_extend64(v):
+    """`x86_sign_extend64`: bit 63 replicated down the word.
+
+    The signed reading of a 64-bit unsigned value, which is what an `imul`'s
+    `cf`/`of` compare the product against -- they mean "the product does not fit
+    in 64 signed bits".  `lib/X86.lean` states it as
+    `if x86_msb v then 0xffffffffffffffff else 0`, and `v` is already masked to
+    64 bits by `_u64` at every call site here.
+    """
+    return _U64 - 1 if _msb(v) else 0
+
+
 class _Abs:
     """What this emitter knows about the machine at ONE point on ONE path.
 
@@ -1932,16 +1995,42 @@ def _abs_step(prev, form, raw, addr, length):
         st.flags = dict(st.flags, zf=res == 0, sf=_msb(res))
         return st
     if form == "imul_r64_r64":
+        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
+        # which had been setting no flags at all, and this walk had followed it
+        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
+        # `imul`, and the flags are cheap arithmetic on a product it already
+        # computes -- `x86_set_flag4`'s own definitions, transcribed:
+        # `zf = res = 0`, `sf = msb res`, and `cf = of_ = (res !=
+        # x86_sign_extend64 res)`, i.e. the product does not fit in 64 signed
+        # bits.  An unknown operand leaves all four unknown rather than
+        # guessing, which is what `None` means here.
         a, b = st.get(dst), st.get(src)
-        st.put(dst, None if a is None or b is None else _u64(a * b))
-        return st                      # and no flags, which is the model's row
+        if a is None or b is None:
+            st.put(dst, None)
+            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
+            return st
+        res = _u64(a * b)
+        st.put(dst, res)
+        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
+                        cf=res != _sign_extend64(res),
+                        of_=res != _sign_extend64(res))
+        return st
     if form == "setcc":
-        # `x86_set_reg` writes 1 or 0, zero-extended — the two values the model
-        # narrows to (`x86_trunc32_zero`, `x86_trunc32_one`). The destination is
-        # the bare `modrm & 7` and carries NO REX.B, which is `_resolve`'s own
-        # reading of this row and the one this follows.
+        # The NARROW write, matching `x86_set_reg_narrow` rather than the whole
+        # register: `(old & ~0xFF) | (1 if v else 0)`, so a `setcc` into a
+        # register whose upper bytes are set keeps them.  `st.put(rm, 1 or 0)`
+        # was the pre-`e54d2f4e` model and it is wrong in the direction that
+        # costs a decision: this walk's whole job is to say what a register
+        # holds so that a `hval` fact can state it, and a `setcc` into `rdi` --
+        # the one register whose value this walk does NOT know, because it is
+        # the theorem's quantified input `n` -- turned "unknown" into a literal
+        # `1`, which would have been a false statement about `n`.
         v = _abs_cond(raw[1] - 0x90, st)
-        st.put(rm, None if v is None else (1 if v else 0))
+        old = st.get(rm)
+        if old is None or v is None:
+            st.put(rm, None)
+        else:
+            st.put(rm, (old & ~0xFF) | (1 if v else 0))
         return st
     st.wipe()
     return st
@@ -2052,9 +2141,15 @@ _SIMP_FORMS = {
     "shift_imm8:shr": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "UInt64.ofNat"),
     "shift_imm8:sar": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
                        "x86_trunc32", "x86_sign_extend32"),
-    "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
+    "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
+                     "x86_set_flag4", "x86_sign_extend64"),
     "cqo": ("x86_cqo",),
-    "setcc": ("x86_get_reg", "x86_set_reg", "x86_trunc32"),
+    # `x86_set_reg_narrow` and `x86_mask`, because that is what the `setcc`
+    # successor mentions now; `x86_trunc32` was here for the model's PRE-fix
+    # narrow write and is not in any successor any more.  A set that does not
+    # name a definition its form's successor uses cannot fold the step's own
+    # record, which shows up as the decision proof leaving the goal open.
+    "setcc": ("x86_get_reg", "x86_set_reg", "x86_set_reg_narrow", "x86_mask"),
     "call_rel32": ("UInt64.ofNat", "mem_write_bytes"),
     "ret": ("mem_read_bytes",),
     "leave": ("mem_read_bytes",),
@@ -2090,6 +2185,31 @@ _REG_FIELDS = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
                "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
 
 
+def _path_simp(forms, path, extra=()):
+    """`simp` argument list for FOLDING the states a path's equations describe.
+
+    `forms` are the instructions whose successors are stacked up in the state
+    `path` names, and the set is `_SIMP_FORMS` read off them, which is the same
+    set `_decision_simp` uses and for the same reason: a successor is a nest of
+    records written with definitions the simplifier will not unfold unless asked,
+    and one that cannot project through them leaves the goal open.  Measured on
+    `powexpr` after the `imul` row was corrected to the model's `x86_set_flag4`:
+    `x86_set_reg` reduces on its own because it is a `match` on a literal index,
+    `x86_set_flag4` does not, and the `x86_exec_go_exit_step` side condition
+    `¬ (x86_set_flag4 {…} …).rip = exit` was left with a 30-field record in it.
+
+    `mem_read_bytes` and `mem_write_bytes` are excluded for the reason
+    `_decision_simp` gives: the value of a cell comes from the `hval` facts, and a
+    `simp` able to unfold the read itself will unfold it before it matches the
+    hypothesis that states it.
+    """
+    names = set(extra)
+    for form in forms:
+        names.update(n for n in _SIMP_FORMS.get(form, ())
+                     if n not in ("mem_read_bytes", "mem_write_bytes"))
+    return ", ".join(list(path) + sorted(names))
+
+
 def _decision_simp(forms, path):
     """The `simp` argument list for a decision taken on `path` at `forms`.
 
@@ -2109,11 +2229,7 @@ def _decision_simp(forms, path):
     `[i0, X86State.init, mem_read_bytes]`, which is the one place the read is
     unfolded on purpose.
     """
-    names = set(_DECISION_SIMP)
-    for form in forms:
-        names.update(n for n in _SIMP_FORMS.get(form, ())
-                     if n not in ("mem_read_bytes", "mem_write_bytes"))
-    return ", ".join(list(path) + sorted(names))
+    return _path_simp(forms, path, extra=_DECISION_SIMP)
 
 
 def _shapes(code, insns):
@@ -2804,14 +2920,20 @@ def _byte_list(insns, code, base):
     return out
 
 
-#: The five `lib/X86.lean` lemmas that say a state-valued wrapper leaves memory
+#: The `lib/X86.lean` lemmas that say a state-valued wrapper leaves memory
 #: alone, named here because this is the one consumer that needs them.  See the
 #: section "A register write does not change memory" in that file for why they
 #: exist at all and why they are not `@[simp]`.
+#:
+#: `x86_set_reg_narrow_mem` and `x86_set_flag4_mem` are the two the `setcc` and
+#: `imul` successor rows needed, and they were added with them: the closing read
+#: projects `.mem` down the whole chain, and it used to stop at the first
+#: successor written as a wrapper call rather than a literal record update.
 _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
-               "x86_flags_add_mem", "x86_flags_sub_mem")
+               "x86_flags_add_mem", "x86_flags_sub_mem",
+               "x86_set_reg_narrow_mem", "x86_set_flag4_mem")
 
-#: The five state-valued wrappers' DEFINITIONS, which the same file needs
+#: The state-valued wrappers' DEFINITIONS, which the same file needs
 #: unfolded for a different projection.  `_MEM_LEMMAS` gets `.mem` through a
 #: wrapper without unfolding it, which is cheaper; but a REGISTER read out of a
 #: wrapper's result is a projection the simplifier can only reduce if the
@@ -2821,6 +2943,12 @@ _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
 #: all three steps: `x86_rex_b` decoded, `x86_get_reg`'s `match` reduced to one
 #: arm, and the wrapper unfolded so the selected field projects.
 #:
+#: **This is why the two names are here and not only their `_mem` lemmas**: the
+#: `setcc` successor is `x86_set_reg_narrow s i 1 v`, whose `.mem` the `_mem`
+#: lemma gets through, but whose `rax`-and-everything-else projection needs the
+#: definition unfolded first, and the step's own `rip` side condition is exactly
+#: such a projection.
+#:
 #: **These are names in a `simp only` set and nothing else.** The whole point of
 #: the route is that the simplifier UNFOLDS structure and `native_decide`
 #: EVALUATES arithmetic; the old closing block handed the same definitions to a
@@ -2828,7 +2956,8 @@ _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
 #: and that is the 1190 s the bug doc measured. Nothing here decides an
 #: inequality or folds a literal.
 _WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
-                 "x86_flags_logic", "x86_flags_add", "x86_flags_sub")
+                 "x86_flags_logic", "x86_flags_add", "x86_flags_sub",
+                 "x86_set_reg_narrow", "x86_mask", "x86_set_flag4")
 
 
 def _rex_byte_lemmas(shapes):
@@ -3410,7 +3539,7 @@ def emit_terminates(path):
 
         call, succ = _resolve(node.form, node.raw, node.addr, state, k,
                               cases, hs_in, node.insn.length,
-                              rip=ret_to)
+                              rip=ret_to, fs_path=fs_path)
 
         if ret_to is not None:
             # The chain has crossed a FRAME boundary, which is what the closing
@@ -3487,8 +3616,19 @@ def emit_terminates(path):
             step_rule = ("x86_exec_go_exit_step (by decide) (by simp only "
                          "[i0, X86State.init] <;> decide) h0")
         else:
-            step_rule = ("x86_exec_go_exit_step (by decide) (by simp [%s%s]) h%d"
-                         % (hs_in or ("hs%d" % k), case_simp, k))
+            # **The set is read off `fs_path`, which is what `hs_in` describes.**
+            # `fs_path` holds the form of every step walked before this one, so
+            # it is exactly the set of definitions standing between `hs_in` and a
+            # record `simp` can project through — and this side condition is a
+            # projection (`¬ (the state).rip = exit`), so it needs all of them
+            # and not just the last step's.  `simp [hsK]` alone worked for every
+            # step whose successor was a literal record update and failed the
+            # moment a successor wrapped itself in a definition that is not a
+            # `match` on a literal: `x86_set_flag4` after the `imul` row was
+            # corrected, and `x86_set_reg_narrow` after the `setcc` row was.
+            step_rule = ("x86_exec_go_exit_step (by decide) (by simp [%s]) h%d"
+                         % (_path_simp(fs_path, (hs_in or ("hs%d" % k),),
+                                       extra=cases), k))
 
         if node.kind == "jcc":
             # The condition is over the state the branch READS -- the one this

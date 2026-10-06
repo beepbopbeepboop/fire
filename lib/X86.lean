@@ -147,7 +147,14 @@ three `x86_flags_*` are `rfl` because they are `{s with …}` outright.  All fiv
 are here because the emitter's successor table quotes every one of them (read
 off `_SUCCS` for the `x86_` names it applies to a state), and a wrapper without
 one of these puts the whole register file — `rdi`, and so the program's input —
-back into a term `native_decide` refuses. -/
+back into a term `native_decide` refuses.
+
+**The section is finished further down, beside `x86_set_reg_narrow` and
+`x86_set_flag4`** — the two the emitter's `setcc` and `imul` successors began to
+quote when those rows were corrected to the model, and the same generalisation
+the five above are: a wrapper applied to a state in a successor needs its own
+`_mem` fact, and a `.mem` projection stops at it instead of walking down to
+`X86State.init`'s zero function. -/
 theorem x86_set_reg_mem (s : X86State) (i : Nat) (v : UInt64) :
     (x86_set_reg s i v).mem = s.mem := by
   unfold x86_set_reg
@@ -410,6 +417,32 @@ theorem x86_flags_sub_mem (s : X86State) (a b res : UInt64) :
     a proof failure. -/
 def x86_set_flag4 (s : X86State) (res : UInt64) (cf ofBit : Bool) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := cf, of_ := ofBit }
+
+/-! ### …and the two wrappers the end-to-end emitter's `setcc` and `imul`
+    ## rows began to quote
+
+    `x86_set_reg_narrow` (the NARROW register write) and `x86_set_flag4` (the
+    four flags `imul` sets) are applied to a state by
+    `formal/x86_64_endtoend_test.py`'s `_SUCCS`, and the successor table is a
+    copy of the model: when `e54d2f4e` corrected the model and all three `setcc`
+    lemmas and `x86_step_imul_r64` to these two, the table was corrected with
+    them and started quoting names the closing read could not see through.  That
+    is the section above's own argument arriving from the other direction — a
+    wrapper with no `_mem` fact puts `rdi`, and so the program's input, back into
+    a term `native_decide` refuses, which the read's guard then admits.  So the
+    pair is here rather than up there, because each has to follow its definition.
+
+    `x86_set_reg_narrow` is `rfl` after unfolding, since it is a `x86_set_reg`
+    call and the fact above does the work; `x86_set_flag4` is `{s with …}`
+    outright. -/
+
+theorem x86_set_reg_narrow_mem (s : X86State) (i sz : Nat) (v : UInt64) :
+    (x86_set_reg_narrow s i sz v).mem = s.mem := by
+  unfold x86_set_reg_narrow
+  exact x86_set_reg_mem _ _ _
+
+theorem x86_set_flag4_mem (s : X86State) (res : UInt64) (cf ofBit : Bool) :
+    (x86_set_flag4 s res cf ofBit).mem = s.mem := rfl
 
 /-- Evaluate a condition code against the flags.
 

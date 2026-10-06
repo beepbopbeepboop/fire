@@ -3129,18 +3129,37 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         without one would not fail: the evaluation would simply be refused, the
         guard would admit, and the report would say "proved with a sorry" about a
         read that is computable. So this reads `_SUCCS` and asks for each name.
+
+        **Applied to a state means "its FIRST argument is a state", and that is
+        not the same as "it is the head of a record update".** The narrower
+        reading is what this used to do, and it missed two wrappers the moment the
+        `setcc` and `imul` rows were corrected to the model: `x86_set_reg_narrow
+        s i 1 v` is inside a record update but not the head of one, and
+        `x86_set_flag4 {…} res cf of` is the whole successor with no `with` in it
+        at all. Both were reported here as missing while nothing named them, which
+        is the direction this test exists to fail in.
         """
         import formal.x86_64_endtoend_test as E
         import re as _re
-        # A name is applied to a STATE when it is the head of the record the
-        # successor updates (`{ x86_set_reg s i v with … }`), which is read off
-        # the table rather than off a list -- `x86_cond` and `x86_sign_extend8`
-        # are named there too and neither returns a state.
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "lib", "X86.lean")) as f:
+            src = f.read()
+
+        # A name is applied to a STATE when what follows it IS one: the
+        # successor's own `$s`, or a record update of a state. Read off the
+        # table rather than off a list -- `x86_cond` and `x86_sign_extend8` are
+        # named there too and neither returns a state.
+        #
+        # `$s` and nothing else, so `$s.rax` (which is how `cqo` reads its
+        # multiplicand) does not read as one: `x86_cqo` returns a `UInt64`.
         applied = set()
         for succ in E._SUCCS.values():
-            for m in _re.finditer(
-                    r"\{\s*(x86_[A-Za-z_0-9]+)[^}]*\bwith\b", succ):
-                applied.add(m.group(1))
+            for m in _re.finditer(r"(?<![A-Za-z0-9_'])(x86_[A-Za-z_0-9]+)",
+                                  succ):
+                rest = succ[m.end():].lstrip()
+                if rest == "$s" or rest.startswith("$s ") \
+                        or rest.startswith("{"):
+                    applied.add(m.group(1))
         named = set(E._MEM_LEMMAS) | set(E._WRAPPER_DEFS)
         missing = sorted(n for n in applied
                          if n + "_mem" not in named and n not in named)
@@ -3148,6 +3167,21 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                          "these are applied to a STATE by the successor table "
                          "and neither they nor their `_mem` lemma is in the "
                          f"closing read's simp set: {missing}")
+        # The two this change added, by name, so "the set grew" is not evidence
+        # and "the set is big enough" is not a check. Each is asked for in the
+        # library too: a name in a `simp only` set that is not a theorem is an
+        # elaboration error in every generated file rather than a narrowing of
+        # one read.
+        for name in E._MEM_LEMMAS:
+            self.assertIn("theorem %s " % name, src,
+                          "%s is in the closing read's simp set and is not a "
+                          "theorem in lib/X86.lean" % name)
+        for name in E._WRAPPER_DEFS:
+            self.assertIn("def %s " % name, src,
+                          "%s is in the closing read's simp set and is not a "
+                          "definition in lib/X86.lean" % name)
+        self.assertIn("x86_set_reg_narrow", applied)
+        self.assertIn("x86_set_flag4", applied)
 
     def test_every_rex_byte_a_path_uses_has_a_named_decoding(self):
         """`simp only` does not use the default simp set, so the sixteen `[simp]`
@@ -3488,7 +3522,15 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     #: The guard this class makes unsatisfiable. Pinned to a line the emitter
     #: really writes, with the message the case below carries, because a fixture
     #: that silently stops matching is a fixture that stops testing.
-    _GUARD = "try (simp [hs7, hdec6])"
+    #:
+    #: It names the whole `simp` set because that set is what the rip side
+    #: condition's proof is, and it CHANGED: the state a step starts in is
+    #: written by every step before it, so the definitions to unfold are read
+    #: off the path's own forms (`_path_simp`) rather than off the last step
+    #: alone. This is the second acceptance test to be re-pinned by an emitter
+    #: change for that reason, and the first was pinned before it.
+    _GUARD = ("try (simp [hs7, UInt64.ofNat, hdec6, x86_flags_logic, "
+              "x86_flags_sub, x86_get_reg, x86_rex_b, x86_rex_r, x86_set_reg])")
 
     def _patched_const2(self):
         """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.

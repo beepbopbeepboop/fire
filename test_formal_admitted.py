@@ -1348,7 +1348,15 @@ AXIOM_CLOSURE = {
     # somebody typed.
     "ProofLib": (311, 60, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    "X86": (144, 2, 141, 0, 1, 0),
+    # +2 asked and +2 clean, and neither reaches an axiom: the two `_mem` facts
+    # `formal/x86_64_endtoend_test.py`'s `setcc` and `imul` successor rows began
+    # to need (`x86_set_reg_narrow_mem`, `x86_set_flag4_mem`). Both are proved by
+    # `rfl` over a record update or one `x86_set_reg` call, which is the same
+    # proof the five `_mem` facts beside them already carry, and a fall in
+    # `clean` is the direction this column is watched in: a wrapper that did not
+    # leave memory alone would put `rdi` into a term the closing read has to
+    # evaluate. The partition still closes (146 = 2 + 143 + 0 + 1).
+    "X86": (146, 2, 143, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
