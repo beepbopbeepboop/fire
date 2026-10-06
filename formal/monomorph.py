@@ -859,12 +859,33 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
     return made, failed
 
 
-def rewrite_instantiation_calls(stmts, demap: dict) -> int:
-    """Rewrite `Base[Args](…)` call sites to the mangled `Base_Args`, in place.
+def instantiations_by_base(demap: dict) -> dict:
+    """`{base name: {mangled name, …}}` — the instantiations `demap` holds for
+    each template, which is what "how many instantiations does this unit apply
+    of THAT template" is.
+
+    One reader for both arms of the class-attribute rule
+    (`rewrite_instantiation_uses`): a read named `Template.<attr>` carries no
+    bracket and so names no instantiation of its own, which makes the COUNT the
+    whole of the answer — one instantiation and the read has exactly one
+    instantiation it could mean, two or more and it names none of them in
+    particular. Keyed by the demap rather than recomputed from the source,
+    because the demap is the table the declarations came out of and a count taken
+    anywhere else is a second answer to "what was instantiated" that can disagree
+    with the ones on the link line."""
+    out: dict = {}
+    for (base, _args), mangled in demap.items():
+        out.setdefault(base, set()).add(mangled)
+    return out
+
+
+def rewrite_instantiation_uses(stmts, demap: dict) -> int:
+    """Rewrite every USE of a generic template to the mangled instantiation, in
+    place: `Base[Args](…)` and `Base.<attr>` alike.
 
     `demap` is `{(base, (arg, …)): mangled name}` — the same key
     `all_instantiation_calls` produces, and the same table the exporting side
-    compiled from, so a call site rewritten here names a definition the library
+    compiled from, so a use rewritten here names a definition the library
     on the link line actually has.  Returns the number of call sites rewritten,
     which is what the caller asserts on: a demand that produced a declaration and
     no rewrite (or the reverse) is a bug in the table, and the count is how that
@@ -888,68 +909,68 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
 
     The position copied onto the replacement is the SUBSCRIPT'S BASE's, not the
     subscript's: `fire_compiler.Parser` leaves `SubscriptExpr.line`/`col` at 0
-    (measured — the whole expression is positioned by its `obj`), so copying
-    the subscript's own position would report every rewritten call at line 0.
+    (measured — the whole expression is positioned by its `obj`), so copying the
+    subscript's own position would report every rewritten call at line 0.
 
     The bracket is read through the same scope-aware `_bracket_type_args` the
     demand walk uses, for the same reason and with the same consequence: a call
     site whose bracket names a VALUE (`Pair[t]()` with `var t = Float64`) has no
     entry in `demap`, so it is left alone and keeps its brackets to be refused
     with the sentence that is true of it.  Reading the bracket differently here
-    than in `all_instantiation_calls` would be the one way a rewrite could name
-    a definition the library was never asked for.
+    than in `all_instantiation_calls` would be the one way a rewrite could name a
+    definition the library was never asked for.
 
-    **A `Base.<member>` READ is rewritten too, and it is the same rewrite
-    because it is the same fact.**  `TypeDict.length` names a class attribute of
-    a struct TEMPLATE, and the value that answers it lives in the class BODY —
-    which is only published per instantiation, so the template's own copy still
-    reads the unsubstituted `len(Self.values)`.  That was a refusal: the
-    consumer's read found the bare `TypeDict` while the consumer's struct table
-    held the mangled instantiation, and the sentence it got described the class
-    BODY of the template rather than the read the source wrote.  Rewriting the
-    OBJECT rather than answering the read is what makes the declaration and the
-    rewrite one table: the substituted attribute is in the same `demap` the
-    constructor came out of.
+    **THE CLASS-ATTRIBUTE READ (`Template.<attr>`) IS THE SAME REWRITE, because
+    the two are one question about one table.**  A struct's `comptime`
+    attribute is a value of the CLASS BODY, and the class body is compiled once
+    per instantiation — `comptime length = len(Self.values)` publishes `length`
+    as 4 in `TypeDict_1_T_3_Int_…_values_…` and as 1 in the instantiation of
+    `[9]`. So a consumer that writes `TypeDict.length` is naming a value that
+    belongs to no class at all until the program says WHICH instantiation it
+    means, and the read is answered exactly when the consumer applies that
+    template at exactly one instantiation — which is the count
+    `instantiations_by_base` hands over. It is answered by rewriting the read's
+    BASE to that mangled name, and then the existing class-constant machinery
+    (`formal/build.py::_constant_read_sites`) reads the instantiated body's own
+    `comptime length = len([1, 2, 3, 4])`, which is a foldable literal.
 
-    **Only when the base has exactly ONE instantiation.**  `demap` carries the
-    arguments the consumer WROTE, and a consumer that asks for `TypeDict` at two
-    lengths and then reads `TypeDict.length` has asked an ambiguous question
-    that has no answer in this table — the read keeps its brackets-free spelling
-    and is refused, which is the same refusal the value-model answer would have
-    been replaced by and is now a refusal for a reason that is TRUE of the
-    source.  Two rows pin both directions.
+    Three arms, and the two that are not rewritten are both refusals rather than
+    guesses:
 
-    The base name is checked against what the SCOPE binds by value, and the
-    check is deliberately not the one the call-site arm uses: `TypeDict` is
-    routinely a module-level IMPORT, and `collect_module_symbols` reports an
-    import, so using that set whole would exempt the one spelling the rewrite
-    exists for.  `imported` is excluded from it (`_shadowed_here`) and a name a
-    function binds by assignment is excluded as well, so a local
-    `TypeDict = 5` cannot have its `TypeDict.length` rewritten into a class
-    attribute read — which would replace today's refusal with a plausible
-    number.
-    """
+      * **exactly one instantiation** — rewritten, and counted;
+      * **two or more** — refused by name, because the read names no one of them
+        (`formal/model.py::template_attribute_read_ambiguous`). Leaving it
+        alone would let it reach the TEMPLATE's own unsubstituted alias, which is
+        a plausible number with no instantiation behind it;
+      * **none** — left alone, because there is no table to answer it and the
+        class-attribute refusal already in `formal/build.py` is the sentence that
+        is true of it: nothing in this unit supplied the parameter's value.
+
+    And the base must not be a VALUE binding in the scope the read is written
+    in, by the same scope tables `all_instantiation_calls` uses: `var TypeDict =
+    3` two lines above `TypeDict.length` is a read of an integer, and rewriting
+    it would invent a struct out of it."""
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
-    uniq = _unique_instantiation(demap)
+    module_level = set(M.collect_module_symbols(stmts) or {})
+    CodegenError = M.CodegenError
+    by_base = instantiations_by_base(demap)
     n = 0
     for st in stmts:
-        if isinstance(st, F.FunctionDef):
-            values = _names_bound_in(st)
-            shadowed = values
-        else:
-            syms = M.collect_module_symbols(stmts) or {}
-            values = set(syms)
-            shadowed = _shadowed_here(syms)
+        values = _names_bound_in(st) \
+            if isinstance(st, F.FunctionDef) else module_level
         for node in M.iter_nodes(st):
-            if isinstance(node, F.MemberExpr) \
-                    and isinstance(node.obj, F.IdentExpr):
-                mangled = uniq.get(node.obj.name)
-                if mangled is None or node.obj.name in shadowed:
+            if isinstance(node, F.MemberExpr):
+                base = _attribute_read_base(node, values)
+                if base is None:
                     continue
-                node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
-                                       col=node.obj.col)
-                n += 1
+                made = by_base.get(base) or ()
+                if len(made) == 1:
+                    node.obj.name = next(iter(made))
+                    n += 1
+                elif len(made) > 1:
+                    raise CodegenError(M.template_attribute_read_ambiguous(
+                        base, node.member, sorted(made)))
                 continue
             if not isinstance(node, F.CallExpr):
                 continue
@@ -967,38 +988,25 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     return n
 
 
-def _unique_instantiation(demap: dict) -> dict:
-    """`{base: mangled}` for the bases `demap` holds EXACTLY ONE
-    instantiation of — the bases a bare `Base.<member>` read can be answered
-    from.
+def _attribute_read_base(node, values) -> str:
+    """The template name a class-attribute read `Base.<attr>` names, or None.
 
-    The filter is the whole of the rule and it is a filter rather than a choice:
-    `demap` is keyed `(base, args)` and holds every argument spelling the
-    consumer wrote, so a base with two entries is a question with two answers and
-    a base with none is a question this build never instantiated.  Both are left
-    out, and the read that needed them keeps the refusal it has today.
+    None for anything that is not that shape, and the reasons are two and both
+    matter.  A base that is not a bare `IdentExpr` is a DOTTED read —
+    `mod.TypeDict.length`, `self.x.length` — and a dotted application is out of
+    this mechanism's reach by the same rule that keeps `L.Pair[Int]()` out of the
+    demand set (`_callee_base`: `comptime.specialization_name` answers None for a
+    dotted callee by design, because the demand belongs to the module that
+    DECLARES the body, not the one whose name the consumer spelled).  A base
+    that IS a bare name but a VALUE binding in this scope is a read of that
+    value, for the reason `rewrite_instantiation_uses` gives.
     """
-    counts: dict = {}
-    for base, _args in demap:
-        counts[base] = counts.get(base, 0) + 1
-    return {base: mangled for (base, _args), mangled in demap.items()
-            if counts.get(base) == 1}
+    if not isinstance(node.obj, F.IdentExpr) or not node.member:
+        return None
+    name = node.obj.name
+    return None if name in values else name
 
 
-def _shadowed_here(syms: dict) -> set:
-    """The module-level names bound to a VALUE here, `imported` ones excluded.
-
-    `collect_module_symbols` is about what a module PROVIDES, and one of its
-    four sites is an import — `from sizelib import TypeDict` reports `TypeDict`.
-    A local-shadow check has to see through that, because `TypeDict.length` read
-    straight after that import is the spelling the rewrite exists for, and using
-    the whole set would leave it unrewritten at module level while rewriting it
-    inside a function: one construct with two answers depending on where it is
-    written.  The three remaining sites (`assigned`, `rebound`, `declared`) are
-    all bindings, which is what a shadow is.
-    """
-    return {n for n, sym in (syms or {}).items()
-            if getattr(sym, "site", None) != "imported"}
 def _consumer_statements(consumer_src: str) -> list:
     """`consumer_src`'s top-level statements, from ONE parse.
 

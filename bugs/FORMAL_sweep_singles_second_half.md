@@ -16,11 +16,7 @@ a paragraph with a measurement rather than "ANOTHER LANE'S"; the citation §2 ca
 pointed at a doc deleted with its fix, and that dangling reference is gone; and
 §6's `stdlib_core.mojo` row is **closed** — the file builds and passes on both
 architectures in `bugs/sweeps/sweep-arm-8.txt` — so the section and its citation are
-retired. **Four rows remained, and one more is now closed too:** §2's
-"one parameter, two kinds of value" row is **FIXED** — `fd396597` landed the
-static `__DATA` frame this file said was "not started", so the section is retired
-below (`work/formal115-docs`, 2026-10-07). **Three rows remain, none of them a
-patch.**
+retired. **Four rows remain, none of them a patch.**
 
 The measurement is one build per row with the row's own file, arm64, and the
 x86-64 build where the row could plausibly differ:
@@ -45,44 +41,68 @@ read-before-store stance this backend takes everywhere else. Already measured,
 with the same reasoning, in the `repo-c` round of `bugs/FORMAL_sweep_work_map.md`
 §4.4. **Not the sweep's next step, and not cheap either way.**
 
-## 2. "one parameter, two kinds of value" — `module_loader.py` — FIXED 2026-10-03, so this section is retired
+## 2. "one parameter, two kinds of value" — `module_loader.py` — 20 FILES, UNOWNED, and its next wall is measured
 
-**The row is FIXED**, by `fd396597` ("formal: a module-level struct value is a
-frame in the IMAGE, not a body block"), which is exactly the change this section
-described as `What would make it work … **Not started here.**` — the new
-`GlobalSlot` `init` kind `("frame", struct, words)`, laid out in `__DATA`, with
-`module_frame_slot_initializer` deciding when it is expressible. The commit moved
-the STORAGE rather than lifting the refusal, which is what this section's own
-paragraph ("Teaching the holder fixpoint … would convert this refusal into a
-SIGSEGV") correctly warned against.
+    build: ModuleLoader_load_module() takes a ModuleLoader receiver at argument 0
+    — 'self' — at ModuleLoader_load_module(self, module_name) here, and
+    something that is not a frame address at
+    ModuleLoader_load_module(_module_loader, module_name). One parameter, two
+    kinds of value: … Measured on both architectures with nothing lifted: the
+    two-call-site shape builds, runs, and dies with SIGSEGV (exit 139).
 
-Measured 2026-10-07, both architectures, a module-level `Loader()` with a method
-reached through BOTH `self` and the global:
+**Re-measured 2026-10-03 (`work/formal14-sweep-b8`, claim `sweep14:sweep-b8`). Three
+things in the paragraph above are now stale and the row is bigger than one file.**
 
-```python
-struct Loader:
-    var a: Int = 0
-    var b: Int = 0
-    var c: Int = 0
-    fn load(self, name: Int) -> Int:
-        return self.a + name
-    fn again(self, name: Int) -> Int:
-        return self.load(name) + self.b + self.c
-_ml = Loader()
-def main(n: Int) -> Int:
-    return _ml.load(1) + _ml.again(2)
-```
+**The cited doc is GONE.** This section used to point at
+`FORMAL_frame_by_value_ceiling_zero.md` in `bugs/`, and that file does not exist on
+this tree — its bug was fixed and the doc deleted with it, which is this project's
+rule for a fixed bug. (Named without the `bugs/` prefix on purpose:
+`tools/dangling_doc_refs.py` counts any citation of a doc that is not there, and
+re-introducing one to say it is missing would put this file back on its own census.)
+So the mechanism's record is this section and
+the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.2, and **the dangling citation was
+the defect `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` exists to
+catch.** `formal10-3` has also exited, so "ANOTHER LANE'S" in this section's heading
+was true when written and is false now.
 
-`Built: … [arm64/macho]` and `… [x86_64/macho]`, both run and answer `3`, the
-same as `fire.py run` — the SIGSEGV this section recorded is gone. The
-`two-kinds-of-value` message no longer appears for this shape.
+**The row is 20 files, not one.** `module_loader.py` blocks **19** dependents plus
+itself, on both architectures, byte-identically, and **0 of the 19 name anything it
+declares** — they are refused for having imported it. It is the fourth-largest cause
+row in `bugs/sweeps/sweep-arm-8.txt` and **no live worker holds it**
+(`python3 tools/control.py claims`: no `FORMAL_*` doc for it is claimed).
 
-**The row's next wall is not this row and is not stated here any more.**
-`module_loader.py` now stops earlier than the two-kinds refusal, at the f-string
-on its line 108 (`FORMAL_string_composition_has_no_buffer`); behind that is the
-`os.path` read out of the imported `os` (`FORMAL_module_state_no_storage`). The
-per-file ranking this section carried is the `b8`/`b9` rounds of
-`bugs/FORMAL_sweep_work_map.md`, which supersede it.
+**Its next wall is measured, and it is not this row.** With
+`_check_one_callee`'s disagreement refusal lifted and nothing else changed
+(`.tmp/probe_after_two_kinds.py`, which prints each refusal it lifted so the number
+is not a guess), `module_loader.py` refuses at
+
+    build: _find_stdlib_path: os.environ reads 'environ' out of the imported module
+    `os`, and a module is not a value this path can place …
+
+which is the **12-file** "a module's ATTRIBUTE read as a value" row, whose doc
+(`bugs/FORMAL_module_state_no_storage.md` §(4)) makes it an exported slot or a
+command line. **So fixing this row moves 0 of the 20.** That is the same lesson
+`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` records for the 165-file row,
+and the reason this is a measurement rather than a patch.
+
+**The root cause, stated so the obvious fix is visibly wrong.** `_module_loader =
+ModuleLoader()` at module level puts the address of a **three-field frame** in a
+`__DATA` slot. Since the load-time initializer landed, the module body runs at load,
+builds the three `dict` fields in **its own** frame and stores that frame's address —
+so `self` (line 1011) is a live frame and `_module_loader` (line 1063) is an address
+into a frame that has already been returned from. **Teaching the holder fixpoint
+that a `__DATA` slot of framed-struct type is a frame address would convert this
+refusal into a SIGSEGV**, which is why it has not been done and why the
+disagreement check is right to fire.
+
+What would make it work: a **static frame in `__DATA`** for a module-level global
+whose value is a construction of a multi-field struct — a new `GlobalSlot` `init`
+kind plus the field layout in `build_data_image` (shared by both backends, and its
+`nested_element` machinery is the precedent). Nothing in either emitter moves,
+because the read is already a load from the slot. `ModuleLoader`'s three fields are
+all empty dicts, so it is expressible; a general struct needs the "every field is
+itself a static initializer" rule, which is `static_initializer_refusal_reason`'s
+existing `computed_element` boundary moved one level out. **Not started here.**
 
 ## 3. a slot holding a frame address rebound — `regex_compile.py` — CORRECT refusal
 
@@ -99,17 +119,15 @@ the `repo-c` round of `bugs/FORMAL_sweep_work_map.md` §4.5. **A source change t
 `regex_compile.py` would be a workaround for a value-model gap; the gap is the
 work.**
 
-## 4. `len()` of a value classified as an int — `unescape_c.py` — FIXED, and the
-## map's guess about it was refuted by a measurement
+## 4. `len()` of a value classified as an int — `unescape_c.py` — a value-model question, and the file is behind another refusal
 
 `unescape_c.py` does not reach this row on this tree: it stops earlier at
 
     build: __module_body__: sys.stdin reads 'stdin' out of the imported module
     `sys`, and a module is not a value this path can place …
 
-which is `FORMAL_module_state_no_storage`'s row (`formal8-7-r2`). **The `len(s)`
-refusal this section used to carry behind it is GONE**, and the reproducer the
-section itself quotes is the row that says so:
+which is `FORMAL_module_state_no_storage`'s row (`formal8-7-r2`). The `len(s)`
+refusal is still there behind it, and a four-line reproducer reaches it:
 
 ```python
 def unescape(s):
@@ -119,62 +137,19 @@ def unescape(s):
     return n
 ```
 
-    build: len(s) is len() of a value classified as 'int', and an integer has
-    no length: …                     # what this section recorded
+    build: len(s) is len() of a value classified as 'int', and an integer has no
+    length: there is no count to read at offset 0, and the word there is the
+    integer itself. …
 
-    Built: … [arm64/macho]           # what it says now, on BOTH architectures
-    Built: … [x86_64/macho]
-
-The cause is `model.string_parameters_by_call_site`, the same reader
-`ValueKinds`' `param_kind` hook uses: an unannotated parameter takes the kind of
-its call site's argument, agreed over every site of the name in the image, so
-`unescape("abc")` classifies `s` as a string and `len(s)` is a `strlen`. It is
-the mechanism `bugs/FORMAL_string_value_model.md` records as landing on
-2026-10-03 for the truthiness case, and this section is where the `len()` reader
-was never re-measured after it.
-
-**Pinned by `test_formal_run.py::BOTH_ARCH_CASES::len_of_an_unannotated_parameter_from_a_string_literal`**,
-which builds and runs `count("a")`, `count("abcd")` and `count("")` on **both**
-architectures and requires `1 4 0`. It is in that group rather than beside the
-truthiness rows because the kind table is one `formal/model.py` reader both
-emitters consult — the two machines cannot disagree about it — so the row is
-about the reader and not about an instruction.
-
-**And the map's guess about this row stays refuted, which is the half of this
-section still worth carrying.** `…_repo-c.md` §4.1 says "this one is a case
-where `s` *has* an annotation the analysis is not reading, or where the value
-flows from a call the analysis cannot follow" — `def unescape(s)` has NO
-annotation, so the first half is false, and there is no annotation to read.
-What was left was a real inference: the only evidence that `s` holds text was
-its USES (`s[i] == '\\'`, `result.append(s[i])`). **That inference is now made,
-and from the CALL SITE rather than from the uses** — the better of the two
-answers, and the one this path can reach without type inference.
-
-**One shape beside it is still refused, and it is the same reader one level
-deeper** — named so that a reader does not take this section as "the parameter
-kind is settled":
-
-```python
-def helper(t):
-    return len(t)
-
-def outer(s):
-    return helper(s)
-
-def main(n):
-    return outer("qq")     # len(t) is refused, identically on both machines
-```
-
-`string_parameters_by_call_site` reads the argument's own SHAPE, and a bare name
-says nothing, so `helper`'s `t` claims no kind. Annotating `outer`'s `s` does
-not help; annotating `helper`'s `t` does. **That is the reader's documented
-limitation and not a gap in it** — `formal/model.py` lists it ("the CALLER's
-`ValueKinds`, so `f(some_local)` where `some_local` holds a string is still
-unclassified … reading it would mean building a ValueKinds per caller from
-inside the callee's, which is the recursion `func_kind` already guards with a
-depth limit"), for the reason it gives: a kind that depends on which function
-the emitter reached first decides whether `printf("%s", s)` formats a pointer
-or bytes. Transitive propagation would be a real fix; it is not taken here.
+identical on x86-64. **The map's guess about this row is refuted by
+measurement**: `…_repo-c.md` §4.1 says "this one is a case where `s` *has* an
+annotation the analysis is not reading, or where the value flows from a call the
+analysis cannot follow" — `def unescape_c(s)` has NO annotation, so the first
+half is false and there is no annotation to read. What is left is a real
+inference: the only evidence that `s` holds text is its USES (`s[i] == '\\'`,
+`result.append(s[i])`), and deriving a parameter's kind from its uses is type
+inference, not a missing hook. **A note in `repo-c.md` §4.1 would save the next
+reader the probe.**
 
 ## 5. a method call on a value receiver — `std/format/repr.mojo`, `std/utils/_serialize.mojo` — needs a repr model, as the map says
 
