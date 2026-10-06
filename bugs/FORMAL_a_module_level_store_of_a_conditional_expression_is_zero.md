@@ -69,7 +69,8 @@ this document is filing, and one instance is not the whole of it.
 
 `formal/model.py::NOT_LOWERED_BUILTINS`'s `max` row says the two-argument form is
 "a compare and a select", and
-`bugs/FORMAL_sweep_work_map_2026-10-05_b14.md` §5 is the change that cashes it.
+the `b14` round of `bugs/FORMAL_sweep_work_map.md` §5 is the change that
+cashes it.
 The rewrite is a source-to-source rewrite into `F.TernaryExpr`, in the shared
 pipeline, so it reaches every position a `def`'s body does — and the module body
 is a synthetic function (`formal/model.py::MODULE_BODY_TAG`). Before the fence:

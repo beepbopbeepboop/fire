@@ -2039,7 +2039,15 @@ STALE_PER_CHILD_BUDGETS = {
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
-    'test_formal_call_proof_gen.py': 1,
+    # +1 on 2026-10-05: `work/formal40-4-r2`'s
+    # `TestTheDivisionExamplesHaveNoProofToCheck::test_the_image_itself_is_fine_`
+    # `without_the_prove` — a `subprocess.run` of the `floordiv`/`udivmod`
+    # image on both architectures, so the 30 s there is a RUN of a two-instruction
+    # program and the row below's 60 s is the same kind of thing for the div0
+    # image. Both are per-child walls on an image the case built itself, which is
+    # what a residue row is for; neither is the SUBJECT of its test, so neither
+    # moves to `BUDGET_IS_THE_SUBJECT`.
+    'test_formal_call_proof_gen.py': 2,
     'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,

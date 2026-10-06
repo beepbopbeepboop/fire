@@ -101,9 +101,11 @@ not describe it.
    are kernel-checked"): print `census["axioms"]["IEEE754"]` and
    `census["sites"]["IEEE754"]` and look at one theorem end to end. If
    `axiom_site_tactic` now returns `None` for the axiom names `lib/IEEE754.lean`
-   actually produces, the classifier is the bug and
-   `bugs/FORMAL_native_decide_axiom.md`'s "the wrong AXIOM" thread is where the
-   spelling belongs.
+   actually produces, the classifier is the bug, and `test_formal_axioms.py`'s
+   own header is where the spelling belongs —
+   `formal/lean.py::GENERATED_AXIOM_RE` is the one pattern that got it right, and
+   it uses a greedy `.+` because a lazy one would hand `DylibExport` to `decl`
+   and fail to match at all.
 2. Re-pin the three boring rows from the measured run, with the date and the
    `lib/` growth in the comment the way `IEEE754`'s own comment already does
    ("Read out of a real `#print axioms` run over all 24 declarations").
@@ -203,10 +205,10 @@ with a second one:
    2026-10-05) in the row's comment the way `IEEE754`'s already is.
 2. **`LIBRARY_TRUST["ProofLib"]`'s ceiling and `FORMAL.md` §7's total are a
    PAY-DOWN decision, not a transcription.** +833 sites is not drift, it is a
-   debt that arrived with the model work, and `bugs/FORMAL_native_decide_axiom.md`
-   §3 "Keep the ceiling honest" is where that decision is written down: a
-   ceiling that goes up is a statement that the debt is accepted, and the
-   `native_decide` → `decide` replacements in that doc's ledger are how it is
+   debt that arrived with the model work, and FORMAL.md §7 row 10's LEDGER is
+   where that decision is written down: a ceiling that goes up is a statement
+   that the debt is accepted, and the `native_decide` → `decide` replacements in
+   `test_formal_admitted.py::NATIVE_DECIDE_REPLACED` are how it is
    paid. That doc's 2026-10-04 status says `test_formal_admitted.py` was green;
    it is not, and the two rows above are the reason.
 3. Do not widen either assertion. Both tables are measurements, and both tests

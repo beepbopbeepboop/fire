@@ -196,7 +196,24 @@ Twenty-two rows. Against them:
   name in `mojo/backend_gimple/device_select.py::_decorator_names`'s docstring as
   the worked example that function's `CallExpr` branch exists for, so removing
   the import would trade one file of this wall for a hole in a compiled-path
-  test. **Left, deliberately.**
+  test. **Left, deliberately** — **and the trade has since been UNDONE, so this
+  is no longer a reason to leave the row alone (2026-10-05, `formal37-2`)**:
+  `version.py`'s decorator was its whole `functools` dependency (see
+  `bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`), it was the
+  **only** call-shaped decorator in `fire.py`'s import closure — measured 0 after
+  the removal, over the 75-file closure — and the `CallExpr` branch had **no
+  direct unit test at all**. So the coverage was a real file's incidental shape
+  rather than a test, which is the weaker of the two by construction.
+
+  `test_metal_codegen.py::TestDeviceSelect::test_a_parameterized_decorator_is_its_callees_name`
+  pins the branch on source the test supplies, and covers all four shapes the
+  arm has to accept (bare string, `IdentExpr`, `MemberExpr` — which returns the
+  **full dotted** `torch.jit`, not the member — and the `CallExpr`). Deleting the
+  `CallExpr` arm from `device_select.py` fails it. That is strictly better
+  coverage than the closure compile: it fails with a message naming the four
+  shapes instead of a `TypeError: cannot use 'CallExpr' as a set element` three
+  modules deep, and it keeps working when the file that happened to carry the
+  shape stops doing so.
 * **3 are UNCLASSIFIED** — `tokenize`, `pwd`, `plistlib`, `sqlite3` are in
   neither tier, so their refusal says "nothing here can say whether it is
   reachable". `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is

@@ -1,18 +1,27 @@
-# FORMAL_sweep_work_map: the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty rounds it replaces
+# FORMAL_sweep_work_map: the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces
 
-**This is the ONE home for the formal sweep series.** It replaces twenty
-per-round work maps, which between them were 8 676 lines and grew by ~500 lines
+**This is the ONE home for the formal sweep series.** It replaces twenty-one
+per-round work maps, which between them were 9 527 lines and grew by ~500 lines
 per round while every open item in them was filed as its own document — so the
 queue this index is supposed to summarise grew faster than the work it described.
 Every doc name it replaces is listed in **§3, THE ROUND INDEX**, with the base
 commit, the scope, and the one measurement that round contributed; a citation to
 a round written anywhere in this tree is a citation to a row of that table.
 
+**`b14` is folded in too, and its arrival is the argument for this document.**
+`work/formal41-sweep-b14` was cut after the consolidation and filed its round as
+a twenty-first `FORMAL_sweep_work_map_2026-10-05_b14.md` — which is precisely
+what `test_suite.py::test_the_formal_sweep_series_is_one_document_with_an_index_
+of_its_rounds` refuses, and precisely what this file exists to prevent. So §1 is
+now `b14`'s census, §1.13 keeps `b13`'s in full because §1.4–§1.8 are deltas
+against it, and §3 has a `b14` row. **A round's author adds to §1/§2 here**;
+that is the whole convention.
+
 The split, and why it is this split:
 
-* **§1 is a measurement of ONE commit** (`86af1b44`, 738 files, both
+* **§1 is a measurement of ONE commit** (`b83f2ed2`, 768 files, both
   architectures) and every number in it is over that commit and nothing else.
-  `master` has moved many times since; a re-sweep differs and §5 says how to
+  `master` has moved many times since; a re-sweep differs and §6 says how to
   price it.
 * **§2 is what the earlier rounds established and still holds** — the facts that
   are not about a round: what the coverage rate measures, why a row can empty
@@ -24,15 +33,479 @@ The split, and why it is this split:
   round tag and an index row in step.
 
 **Claim** `project38:docs-consolidation` on
-`work/formal38-docs-consolidation`. **Nothing in this document is a new
-measurement** — it is the consolidation of twenty documents into one, and every
-number is attributed to the round that took it. What is asserted here that the
-rounds did not assert is §2's list, which is the part that was true of all of
-them and had been written down twenty times.
+`work/formal38-docs-consolidation`; the `b14` fold is `merge-formal44`.
+**Nothing in this document is a new measurement** — it is the consolidation of
+twenty-one documents into one, and every number is attributed to the round that
+took it. What is asserted here that the rounds did not assert is §2's list, which
+is the part that was true of all of them and had been written down twenty-one
+times.
 
 ---
 
 ## 1. The current census
+
+`master` at **`b83f2ed2`** — the `b14` round, and the newest sweep in this
+series. Both arms ran to completion over the whole **768-file** scope with **no
+file left unclassified** and **no `tool` row**, so every number below is over the
+whole scope and every file has a verdict. §1.1 is the run and its cost, §1.4 is
+the class counts, §1.8 is the per-CAUSE delta, and §1.9 is the ranked table with
+the next step per row. **§1.13 is `b13`'s census, kept in full and in `b13`'s own
+numbering, because §1.4–§1.8 are all deltas against it** — so the two are never
+confused and neither is thrown away.
+
+`b14`'s own §5 (what that branch changed) is a changelog and `git log` is the
+changelog; the two documents it filed are its own documents and §4 names them.
+
+
+### 1.1 The commands, and how long they took
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+nohup python3 tools/memslot.py --gb 8 --label sweep-arm-14 -- \
+  python3 tools/formal_sweep.py -j 4 -t 120 > bugs/sweeps/sweep-arm-14.txt 2>&1 &
+nohup python3 tools/memslot.py --gb 8 --label sweep-x86-14 -- \
+  python3 tools/formal_sweep.py -j 4 -t 120 --arch x86_64 > bugs/sweeps/sweep-x86-14.txt 2>&1 &
+```
+
+Launched 15:24:14; both summary blocks were on disk by 16:04, so **≤ 40 minutes
+for both arms together** at `-j 4` each, against `-13`'s ≤ 27 minutes — **the
+machine was 50 % busier**, which is the expected cost of a round that lands
+alongside the `formal40-*` merges and shows up as wall time and not as a
+different answer (every §1.4–§1.12 number is a property of the source, not of the
+load). No wait on either per-architecture `flock`, so both arms started together:
+no sibling worker held either lock and `--allow-concurrent` was not needed.
+
+Both arms **exit 4**, which is right: the run has real findings. **`memcap`
+never breached — peak 1.0 GB on both arms** across up to 9 processes, against the
+8 GB reservation. (`-13` was 0.8 GB; the ceiling is not close and the difference
+is the wider `-14` scope, §1.2.)
+
+The interpreter is not optional
+(`bugs/INFRA_bare_python3_is_3_9_and_the_formal_backend_needs_3_10.md`):
+`export PATH=/opt/homebrew/bin:$PATH` first, or the tool refuses to start with a
+diagnosis rather than a wait.
+
+### 1.2 Scope: 768 files, **+30** on `-13`
+
+```
+Sweep roots:
+  /Users/mrs/net/chatgpt/claude/work-501  (516 files)
+  /Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/std  (252 files)
+Total: 768 files
+```
+
+516 = 486 at `-13` **+ 30**, and the stdlib's 252 did not move — the whole delta
+is this repository, which is where six rounds of host-module and proof work
+landed. `tools/formal_sweep_rounds.py` names 22 of the 30 as *printed in NEW,
+not in OLD*; the other 8 are new files that PASS (a pass prints no row), so
+22 + 8 = 30 and the arithmetic is the check. The 22:
+
+```
+exec_budget.py                      formal/contracts.py
+formal/peephole.py                  formal/specs.py
+test_formal_closures.py             test_formal_contracts.py
+test_formal_exceptions.py           test_formal_host_import_shapes.py
+test_formal_host_import_wall.py     test_formal_int_semantics.py
+test_formal_interop.py              test_formal_isa_census.py
+test_formal_peephole.py             test_formal_proof_shape.py
+test_formal_random.py               test_formal_specs.py
+test_x86_64_model_fuzz.py           tools/formal_bench.py
+tools/formal_host_import_shapes.py  tools/formal_host_import_wall.py
+tools/formal_isa_census.py          tools/formal_proof_shape.py
+```
+
+### 1.3 No `tool` row at all, for the fifth round running
+
+`-10` was the first round in this series with an empty `tool` class, and every
+round since has kept it. **All 768 files have a verdict on both architectures**,
+and the summary block's own arithmetic checks it (`classes sum to 768 = 768 files
+swept`).
+
+---
+
+
+### 1.4 Class counts, against the round before
+
+Left column: `-13`'s numbers (§1.13). Right column: this run.
+
+| class | **`-13`** | **`-14`** | Δ |
+|---|---|---|---|
+| **pass** | 149 | **157** | **+8** |
+| built-with-admitted-contracts | 4 | **4** | 0 |
+| **codegen** (a refusal IN this file) | 83 | **91** | +8 |
+| **codegen/dependency** (refused in a module it imports) | 267 | **274** | +7 |
+| not-answerable/host-import | 220 | **214** | −6 |
+| not-answerable/unresolved-import | 10 | **23** | +13 |
+| not-answerable/target-limit | 5 | **5** | 0 |
+| **backend-crash** | 0 | **0** | **0** |
+| **tool — no verdict at all** | 0 | **0** | **0** |
+| **files swept** | 738 | **768** | +30 |
+| codegen findings (`codegen` + `codegen/dependency`) | 350 | **365** | +15 |
+| **codegen coverage** | 149/503 = **29.6 %** | 157/526 = **29.8 %** | **+0.2 pp** |
+
+**Read the coverage rate and the finding count together or neither means
+anything.** `not-answerable/unresolved-import` rose 10 → 23 and every one of the
+13 is a file that imports a **tool** of this repository — `formal_sweep` x15,
+`formal_fuzz`, `formal_proof_fuzz`, `formal_sweep_rounds`, `lang_spec`,
+`memslot`, `mojo_compiler`, `pytest`, `tools` — i.e. a fact about the TARGET
+(a `.py` importing a sibling `.py` through a package name the module set does
+not carry), not a gap in the backend. Those 13 files **left the denominator**,
+which is why coverage rose 0.2 pp while the codegen findings rose 15: a scope
+that grows with test files moves both numbers for a reason no backend change
+had anything to do with.
+
+### 1.5 arm64 vs x86-64: **zero** architecture-dependent verdicts, zero changed reasons, and the ranked tables are identical
+
+`python3 tools/formal_sweep_parity.py bugs/sweeps/sweep-arm-14.txt bugs/sweeps/sweep-x86-14.txt`
+
+| | this run | `-13` | `-12` |
+|---|---|---|---|
+| paths classified on both | **611** | 589 | 604 |
+| **of those, class CHANGED** | **0** | 0 | 0 |
+| x86-64-only rows (a pass on arm64) | **0** | 0 | 0 |
+| arm64-only rows (a pass on x86-64) | **0** | 0 | 0 |
+| class counts that differ | **none** | none | none |
+| **of those, REASON CHANGED** | **0** | 0 | 0 |
+
+Eighth round running with nothing to explain, and the fourth with **zero REASON
+CHANGED**. In 768 files the two architectures produce the same verdict *and the
+same sentence* for every single one.
+
+**The two arms' RANKED TABLES are now byte-identical**, and that is new:
+
+```
+$ diff <(python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-14.txt) \
+       <(python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-x86-14.txt)
+$ echo $?
+0
+```
+
+`-13`'s §2.2 recorded the two tables differing in exactly one line — which file
+the reader happened to keep as a row's `example:`, a property of arrival order
+because the two arms sweep concurrently. At `-14` even that is gone: the reader
+kept the same example for every row on both arms, so the difference was always
+in the reader and the corpus has now stopped depending on it. The summary blocks
+still differ in three lines, all of them the architecture: the `[arm64]` /
+`[x86_64]` label, the `cas:` hit count, and the x86-64-only note that **200 binds
+across 22 files** were resolved by reading a dylib's export trie instead of
+`dlopen` (dlopen loads only this host's own architecture).
+
+### 1.6 The baseline alarm, and why its 103 "regressions" are 103 improvements
+
+The new instrument is live and it is the first thing to read in the log, because
+it is the only block that names FILES rather than counts:
+
+```
+committed baseline: bugs/sweeps/sweep-arm.baseline.json — banked 2026-10-05T02:16:21,
+  [arm64], 738 file(s), from bugs/sweeps/sweep-arm-12.txt
+  REGRESSION: 103 file(s) moved to a WORSE class than the committed baseline records,
+    4 kept their class and lost their NAME, and 134 more are in a class this baseline
+    does not name at all (68 moved the other way, 2 sideways, 30 not in the baseline,
+    0 baseline file(s) not swept)
+    92 file(s)  codegen/dependency -> not-answerable/host-import
+    10 file(s)  codegen/dependency -> not-answerable/unresolved-import
+     1 file(s)  codegen -> codegen/dependency
+    4 file(s)  (class unchanged) -> a refusal this table does not name
+```
+
+Both arms print the same block with the same counts, which is §1.5 again.
+
+**Every one of the 103 is a file that got FURTHER.** `not-answerable/host-import`
+and `not-answerable/unresolved-import` are the two classes the tool's own
+docstring calls *"a statement about the target, not a module-resolution
+failure"* and *"neither host nor present in this backend's module set"* — a file
+in one of them did not stop at a construct at all. So the class ordering the
+comparator uses ("worse") puts a **capability** below a **finding**, and the
+number is a measurement of that ordering, not of the tree. The 92 and the 10 are
+the `-12` encoding wall's other side arriving late: at `-13` those files were
+already past it in most cases, and the baseline is a `-12` record. The single
+`codegen -> codegen/dependency` is `test_formal_libc_symbol.py`, whose parse
+error `-13` removed and which now reaches a refusal in `exec_budget.py` — the
+honest shape of that fix, and `-13`'s own §5.3 predicted it.
+
+**The 4 "kept their class and lost their NAME" rows are the alarm working**:
+`tools/memcap.py` and `tools/procrun.py` (a handler arm with a body),
+`tools/detach.py` (`sys.argv` as a value), `tools/wave2_extract_shared.py` (an
+f-string) each kept a `codegen` class while the refusal that answers them is no
+longer matched by any row in `tools/formal_sweep_causes.py::CAUSES`. Two of the
+four have a doc and a cause row at `-13` (`a handler arm with a body`,
+`a module's ATTRIBUTE read as a value`) and one does not (§1.11).
+
+**The 134 "in a class this baseline does not name" are the baseline's own
+limitation, stated in the log**: `pass-unnamed` is *"this baseline's way of
+saying a log records the COUNT of the files that printed no row and not their
+names"*, so 130 of the 134 are files that are now PASSES and cannot be
+attributed. **Re-banking the baseline from this run would make the next round's
+alarm exact** — `tools/formal_sweep.py --write-baseline`, or
+`tools/formal_sweep_rounds.py --write-baseline` for a log already in hand. This
+branch does **not** re-bank it: a baseline is a claim about a tree, and banking
+one mid-task from a tree that also carries `b14` §5's change would make the next
+round's alarm compare against a mixture.
+
+### 1.7 `not-answerable/host-import` fell by 6, and the reach split moved with it
+
+By first host module named, each log's own `by module:` line (`-13` §2.3 for the
+left column):
+
+| module | `-13` | **`-14`** | Δ |
+|---|---|---|---|
+| `importlib` | 94 | **98** | +4 |
+| `collections` | 39 | **43** | +4 |
+| `itertools` | 14 | 14 | 0 |
+| `copy` | 13 | **12** | −1 |
+| `unittest` | 18 | **24** | +6 |
+| `atexit`, `resource`, `socket`, `tokenize`, … | | | see the log |
+| `signal` | 0 | **0** | stays gone |
+
+The reach split moves the other way from the file count:
+**90 in reach / 130 not** at `-13` → **72 in reach / 142 not** at `-14`, and the
+log names the eight still in reach: `collections`, `copy`, `fractions`,
+`functools`, `inspect`, `resource`, `types`, `uuid`. `formal/imports.py` owns
+that split and it is read, never copied, so this is a fact about the target
+computed at run time — and the log prints which of the two each file is, so the
+work is separable from the impossible without a second tool.
+
+---
+
+
+### 1.8 The per-CAUSE delta — 8 files changed cause, 0 went to a pass, and all 8 are new files
+
+`python3 tools/formal_sweep_rounds.py bugs/sweeps/sweep-arm-13.txt bugs/sweeps/sweep-arm-14.txt`
+
+```
+FILE MOVES:
+  to a pass    0
+  from a pass  22
+  cause        8
+  class        22
+  unchanged    559
+```
+
+**`to a pass 0` is the number to sit with.** Twenty-two files that used to print
+a row print none — and every one of the 22 is in §1.2's list of files that
+**entered the scope**, so "from a pass 22" is the scope growing and not a
+regression. Not one file that existed at `-13` changed the construct that blocks
+it, for the third round running (`-13` §1.8 measured the same against `-11`).
+
+### 1.8 (continued) The 8 cause changes are ONE re-worded message, and the table shows it
+
+The `-13` column is §1.13's ranked table, read out of the same committed log.
+
+```
+                files    old   new  delta  cause
+                    148   148     +0  a call to a name the defining module does not export
+                    109   123    +14  string composition: nothing to compose into
+                     59    59     +0  module exports no public functions
+                      7     5     -2  other refusal
+                      0     6     +6  a builtin this path does not lower
+                      6     6     +0  variadic call has no ABI
+                      4     4     +0  MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)
+                      4     3     -1  a module's ATTRIBUTE read as a value, across a dylib boundary
+                      2     2     +0  method call on a value receiver is not one of the lowered methods
+                      2     2     +0  Optional unwrap: the payload type has no niche, or the receiver states none
+                      2     2     +0  a handler arm with a body (no unwinder to emit it into)
+                      2     2     +0  a `...` body: no instructions to emit
+                      1     1     +0  a linked module exports no such name
+                      1     1     +0  a method on a multi-field struct where a descriptor is meant
+                      1     1     +0  a repetition whose count this path cannot read
+                      1     0     -1  comptime does not fold to a constant
+                      1     0     -1  a String method that returns a SHORTER string writes the receiver's bytes
+                      1     0     -1  multi-index subscript
+
+WHERE THE FILES WENT, per cause that lost any (a file that moved to another cause is not a fix):
+  other refusal  (3 file(s)):  2 -> a builtin this path does not lower
+                                 1 -> string composition: nothing to compose into
+  string composition  (2 file(s)):  1 -> string composition
+                                      1 -> other refusal
+  comptime does not fold to a constant  (1):  1 -> a builtin this path does not lower
+  a String method that returns a SHORTER string  (1):  1 -> a builtin this path does not lower
+  a module's ATTRIBUTE read as a value  (1):  1 -> a builtin this path does not lower
+```
+
+**`a builtin this path does not lower` did not exist at `-13`.** Its five
+inbound edges are the whole of it: `other refusal` x2, and one each from
+`comptime does not fold to a constant`, `a String method that returns a SHORTER
+string`, and `a module's ATTRIBUTE read as a value`. **Every one of those five
+files got FURTHER** — each reached its own `max`/`any`/`list` call where it used
+to be stopped by a different, less specific construct — and the row that names
+them is new because the refusal that answers them is now asked **before** the
+ones that used to answer it. §1.10 is the per-file version of this table, and it
+is the reading to trust: a cause table says a row grew by six, and this says
+five of the six arrived from somewhere.
+
+The two one-file losses are the same fact seen from the other end: `multi-index
+subscript` and `comptime does not fold` are rows whose *messages* a caller now
+reaches past. **`FILES BLOCKED IS AN UPPER BOUND`** — `formal_sweep_causes.py`'s
+own footer — and §1.8 is the measurement of that bound for this round.
+
+### 1.8 (continued) The row that grew is the string row, by the scope and not by a wall
+
+`string composition: nothing to compose into` went 109 → 123. The refusal is
+unchanged (`formal/model.py::string_concat_refusal`, and
+`max`/`min`'s new neighbour row quotes it), and the +14 is accounted for by the
+scope: of the 22 new-in-scope files, `cas.py`-reachable ones and `exec_budget.py`
+join the row's `refused in:` column. **No wall came down this round**, which is
+the property that distinguishes a stable round from a lucky one: at `-13` 108
+files changed cause because a 230-file wall disappeared; here the cause table's
+only changes are five files walking *past* a construct into the one behind it.
+
+---
+
+### 1.9 Ranked causes, and the next step per row
+
+`python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-14.txt` — and
+the x86-64 arm prints **the same table, byte for byte** (§2.2). **16 causes** fire
+on this corpus, against 17 at `-13`.
+
+**FILES BLOCKED IS AN UPPER BOUND**: a file's terminal cause is the first refusal
+its build walk reaches, so fixing one moves the file to the next with the count
+unchanged. §1.8 is the measurement of that bound for this round.
+
+**Ownership is read from `tools/control.py claims`, live, at 2026-10-05 17:0x** —
+and it has moved since `-13`'s §4 in a way that changes this map's whole shape,
+because the three rows `-13` called claimed are now claimed by DIFFERENT tasks and
+a fourth one is claimed that `-13` recorded as unclaimed.
+
+| files | `-13` | in-file | cause | refused in | owner / next step |
+|---|---|---|---|---|---|
+| **148** | 148 | 15 | a call to a name the defining module does not export | `std.format._utils` x105, `std.memory.alloc` x28, `std.bit.mask` x8, `std.utils.numerics` x2, 5 more x1 | **CLAIMED** — `formal40-1` holds `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`, and `formal41-exports-and-strings` holds `sweep41:exports-and-strings`. Unmoved for a fifth round and unmoved in cause since `-11`. The row's `uses:` line: **52 of the 148 name something the refusing module declares, 95 name nothing it declares**, 1 not measurable |
+| **123** | 109 | 50 | string composition: nothing to compose into | (this file) x50, `cas.py` x41, `module_loader.py` x23, `exec_budget.py` x4, `type_system.py` x2, `determinism_trace.py` x2, `memslot.py` x1 | **CLAIMED** — `formal40-6` holds `FORMAL_string_composition_has_no_buffer`; `formal41-exports-and-strings` holds the same area. The +14 is §1.8 |
+| **59** | 59 | 0 | module exports no public functions | `constants.mojo` x33, `_io.mojo` x23, `_select.mojo`, `_unicode_lookups.mojo`, `stat.mojo` | **CLAIMED** — `formal40-1` **and** `formal40-2` both hold `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`. Unmoved for a fifth round |
+| **6** | 0 | **6** | **`a builtin this path does not lower`** | (this file) x6 | **UNOWNED, and this branch's** — §1.10 and §5 of `b14` |
+| 6 | 6 | 1 | variadic call has no ABI | `tile.mojo` x5, (this file) x1 | **CLAIMED** — `formal40-3` holds `FORMAL_a_variadic_parameter_read_has_no_abi`. Its own Status says *NOT FIXED, and correctly so at the width it is written at* |
+| 5 | 7 | 5 | `other refusal` — the *"nobody has looked"* bucket | (this file) x5 | §4.2 — down from 7, and the two that left left by walking FURTHER |
+| 4 | 4 | 3 | MLIR dialect construct (`__mlir_attr`/`__mlir_type`/`__mlir_op`) | (this file) x3, `function.mojo` x1 | `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` — **no live claim**; its own "next step" records items 1–3 DONE |
+| 3 | 4 | 3 | a module's ATTRIBUTE read as a value, across a dylib boundary | (this file) x3 — `t_argv.mojo`, `tools/detach.py`, `unescape_c.py` | `FORMAL_module_state_no_storage.md` — **no live claim**, storage half landed 2026-09-30. All three names are `sys.argv`/`sys.stdin`, which `formal/hostmods/sys.mojo`'s docstring says it **deliberately** does not declare, so the refusal is correct |
+| 2 each | | | method call on a value receiver; `Optional unwrap`; a handler arm with a body; a `...` body | | §4.2 |
+| 1 each | | | a method on a multi-field struct where a descriptor is meant; a linked module exports no such name; a repetition whose count this path cannot read | | §4.2 |
+
+### 1.10 The top UNOWNED row, per file: what each of the six actually wants
+
+All six are **in-file**, which for this row means the refusal is in the file
+itself and the fix is in this backend rather than in a module boundary.
+
+| file | the call | what it actually needs |
+|---|---|---|
+| `std/math/polynomial.mojo` | `reversed(range(n))` | a **reversed copy of a run-time sequence** — the same two gaps as `list`, and `FORMAL_listdir_no_run_time_sequence` |
+| `std/utils/_serialize.mojo` | `max(rank - 2, 0)` | **a compare and a select** — `b14` §5, and the fix that section names. This is the ONLY two-argument `max` in the 768-file scope, and it is `for i in range(max(rank - 2, 0))` |
+| `bootstrap-validate.mojo` | `sorted(glob.glob(p))` | a **sort with a comparison per element**, and a call through a value is not a thing this path can express |
+| `mojo/middle/metal_ops.py` | `any(g for g in FAMILIES)` | a **fold over a sequence with a short circuit** |
+| `test_formal_int_semantics.py` | `list(ROWS)` | **a run-time blob copy** — the doc says so itself, and `formal40-3` holds `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time` |
+| `tools/gatewatch.py` | `max(r[1] for r in rows)` | a **fold over a generator**, and `sorted(rows, key=lambda …)` behind it |
+
+**So: one of the six wanted the compare-and-select and five want a run-time
+sequence, a sort, a fold or a blob copy** — four of which are named projects
+elsewhere and one (`tools/gatewatch.py`) is stdlib-shaped code this repository
+writes and cannot lower for the same reason `polynomial.mojo` cannot. That is
+the honest size of this row, and `b14` §5 takes the one file of it that is a SELECT
+rather than a sequence.
+
+### 1.11 `other refusal` at 5, and the 2-file rows
+
+The five, all in-file, all measured off the committed log
+(`tools/formal_sweep_causes.py`'s `unclassified` list, which is the same
+implementation its `--min 1` table is):
+
+| file | the refusal, in one sentence | what it is |
+|---|---|---|
+| `std/builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` cannot be lowered: the receiver's type is written down and the CALLEE is what is missing | **stdlib** — not editable from a worktree |
+| `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is `Self.keys`, a PARAMETER of `TypeDict` | **stdlib**; a parameter's value belongs to an instantiation, and there is no monomorphizer here |
+| `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
+| `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is this image's ENTRY, whose caller is the C runtime | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
+| **`tools/wave2_extract_shared.py`** | **`cannot read an interpolated literal from 'rf"…"': the character after the prefix is not a quote`** | **a real defect in `formal/model.py::interpolated_literal_segments`** — see below |
+
+**`other refusal` is 7 → 5 and the arithmetic is worth stating**: of the seven at
+`-13`, `-13`'s own branch fixed one (a lexer rule, `test_formal_libc_symbol.py`)
+and the other six are accounted for by §3.2 — two became "a builtin", one became
+string composition, one became the module-ATTRIBUTE row, and the two that remain
+are this table's two stdlib files plus the two correct refusals.
+
+**`tools/wave2_extract_shared.py` is the seventh thing in this row and it is a
+bug, in this repository, in the diagnostic rather than in the lowering.** Its
+source is
+
+```python
+rf"^(\\s*)from\\s+{re.escape(old)}\\s+import\\s+"
+```
+
+— a **raw** f-string, i.e. a two-character prefix. `interpolated_literal_segments`
+assumes the prefix is **one** character (`quote = spelled[1]`, with a comment
+saying so), so every `rf`/`fr` f-string is refused with a sentence that is FALSE
+about the source: the character after `rf` *is* a quote. `fire_compiler.py` grew
+the PEP 701 prefix spellings on 2026-10-05 (`_prefix_is_interpolated`), and this
+reader one layer down did not follow. **It is filed, not fixed** — see §4.
+
+* **method call on a value receiver** (2) — `std/collections/binary_heap.mojo`'s
+  own `self.clear()` and `std/format/repr.mojo`'s: one stdlib file's own source
+  each, and the stdlib is not editable from a repository worktree.
+* **`Optional unwrap`** (2) — `std/collections/set.mojo` and
+  `std/memory/owned_pointer.mojo`, **both refused in `builtin_slice.mojo`**.
+  `FORMAL_optional_needs_a_niche.md` has **no live claim**; the message names the
+  missing thing (`Optional[Int]` has no word to spell `None` as).
+* **a handler arm with a body** (2) — `tools/procrun.py` and `tools/memcap.py`.
+  The refusal is **CORRECT** and is the sweep's own documented class: `formal`
+  has no exception unwinder, so no edge runs from a raise site into an arm.
+* **a `...` body** (1) — `std/builtin/len.mojo`: the language's own
+  no-implementation marker, and a formal image is a compiled program.
+* **The three remaining singles** are each a distinct construct and each is
+  either stdlib or a correct refusal: a method where a descriptor is meant
+  (`std/builtin/none.mojo`), `sys.exit()` on a name libSystem provides
+  (`t1.mojo` — deliberately not taken, `formal/hostmods/sys.mojo`'s docstring
+  and `test_formal_sys.py` both pin it), and a repetition whose count this path
+  cannot read (`test_llm/dumb_gemm.mojo`).
+
+### 1.12 The instrument gap is now a LOUD FINDING in the log itself, and it is UNOWNED
+
+`-13`'s `-13` §4.3 measured this from outside: 148 files read as "nobody has looked"
+because `tools/formal_sweep.py::_REFUSAL_FAMILIES` has no row for the export
+refusal. **`-13` could not fix it — `sweep32:instrument` was a live claim then.
+It is not live now, and the same work that released it also gave the sweep a
+`LOUD FINDING:` line, which is where this round's number comes from:**
+
+```
+LOUD FINDING: 136 file(s) of the 768 swept (17.7%) — shape: `…` is called, and it is
+  imported from `…`, so the call has to bind a …
+  105 file(s) in one wording, 28 file(s) in one wording, 1 file(s) in one wording;
+  5 exact wording(s) in all
+  said by: `FormatStruct` is called, and it is imported from `std.format._utils`, so
+  the call has to bind a symbol `std.format._utils` exports
+```
+
+**136 files, 17.7 % of the corpus, 45 % of the 305 findings `formal_sweep.py`'s
+own family table calls `other refusal`** — and every one of them is the single
+best-understood row in the corpus. The fix is one row in one table, keyed on a
+sentence both instruments already quote; `-13` argued the two-part case for it
+and this round has the instrument to say so in the log without being asked. **It
+was fixed while this branch was being written** — `77cfebbe`, *"tools/
+formal_sweep.py: the export rule gets a FAMILY row, and the loud finding goes
+quiet"*, merged as `09b81933` (`formal41-exports-and-strings`), and its doc was
+deleted with the fix as CLAUDE.md requires. **So the honest statement about the
+gap is that it existed for the whole of §1 and was closed 40 lines below this
+one**, and the thing a reader should take from it is the instrument, not the row:
+`LOUD FINDING:` is what turns "nobody has looked" into a number that cannot go
+quiet, and `-13` §4.3 had to derive the same 136 by hand off a log because that
+line did not exist yet.
+
+**Three numbers in it are worth keeping, because they are about the row rather
+than the gap.** It is **unchanged at 136 while the corpus grew by 30 and every
+other ranking row moved** — the strongest form of "this is a property of the
+current tree". Its denominator moved the other way, from 136/158 at `-12` to
+**136/305 at `-14`**, so the row stopped being the largest thing in the
+`other refusal` bucket by file count and became **45 % of it and 100 % of rank
+1**. And `formal_sweep_causes.py` has always ranked the same files as
+`a call to a name the defining module does not export` at 148, which is the
+corpus's largest codegen cause for a fifth round and is held by `formal40-1`
+
+
+### 1.13 The round before: `b13`'s census, in full, in `b13`'s own numbering
+
+**Everything below is a measurement of `86af1b44` over 738 files**, kept because
+§1.4–§1.8 are `b14`-against-`b13` deltas and a delta without its left-hand side
+is a number with nothing to subtract from. Its subsections keep `b13`'s own
+numbers (`§1.1`–`§1.7` below are `b13`'s `§1.1`–`§1.7`), so §3.1's "now §1.5 of
+this document" still resolves and a citation of the `b13` round and a citation of
+this document cannot be confused for each other.
+
 
 `master` at **`86af1b44`**, both arms run to completion over the whole
 **738-file** scope (this worktree's own 486 `*.py`/`*.mojo` plus the 252 under
@@ -41,7 +514,7 @@ row**. Launched 01:53; both summary blocks on disk by 02:20 — **≤ 27 minutes
 for both arms together** at `-j 4` each. `memcap` never breached: peak **0.8 GB**
 on both arms across up to 9 processes, against an 8 GB reservation.
 
-### 1.1 Class counts, against the round before
+#### 1.1 Class counts, against the round before
 
 | class | `-12` | `-13` | Δ |
 |---|---|---|---|
@@ -59,7 +532,7 @@ on both arms across up to 9 processes, against an 8 GB reservation.
 | codegen findings | 472 | **350** | −122 |
 | **codegen coverage** | 131/605 = **21.7 %** | **149/503 = 29.6 %** | **+8.0 pp** |
 
-### 1.2 arm64 vs x86-64: the same sweep, exactly, for the seventh round running
+#### 1.2 arm64 vs x86-64: the same sweep, exactly, for the seventh round running
 
 `python3 tools/formal_sweep_parity.py bugs/sweeps/sweep-arm-13.txt bugs/sweeps/sweep-x86-13.txt`
 
@@ -84,7 +557,7 @@ dylib's export trie instead of `dlopen`).
 zero architecture-dependent verdicts, and three of those rounds also zero
 changed REASONS. Every claim below is a claim about both backends.
 
-### 1.3 What moved, per CAUSE — 108 files changed cause, 18 went to a pass, and the wall is the whole of it
+#### 1.3 What moved, per CAUSE — 108 files changed cause, 18 went to a pass, and the wall is the whole of it
 
 `python3 tools/formal_sweep_rounds.py bugs/sweeps/sweep-arm-12.txt bugs/sweeps/sweep-arm-13.txt`
 
@@ -119,7 +592,7 @@ work.** Passes 145 → 149, coverage 28.8 % → 29.6 %, and `cause 0`. That is n
 an absence of work; it is a measurement that rounds 12 and 13 landed on rows
 that were already named and already owned.
 
-### 1.4 Ranked causes, and the next step per row
+#### 1.4 Ranked causes, and the next step per row
 
 `python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-13.txt` —
 17 causes fire on this corpus. **FILES BLOCKED IS AN UPPER BOUND**: a file's
@@ -143,7 +616,7 @@ having been looked at.
 | 2 each | | | | method call on a value receiver; `Optional unwrap`; a handler arm with a body | | §1.6 |
 | 1 each | | | | **7** further single-file causes | | §1.6 |
 
-### 1.5 `other refusal` at 7: the top unowned row, and what each of the seven is
+#### 1.5 `other refusal` at 7: the top unowned row, and what each of the seven is
 
 All seven are in-file; the bucket's definition is in
 `tools/formal_sweep_causes.py`'s module docstring.
@@ -174,7 +647,7 @@ file out of 503, and the file did not become a pass** — it landed on the
 module-exports-nothing row of rank 3, which is the better outcome and the
 smaller one.
 
-### 1.6 The 2-file and 1-file rows
+#### 1.6 The 2-file and 1-file rows
 
 * **method call on a value receiver** — `std/collections/binary_heap.mojo`'s own
   `self.clear()` and `std/format/repr.mojo`'s: one stdlib file's own source
@@ -203,7 +676,7 @@ smaller one.
   `test_formal_sys.py` both pin `doc/ABI.md`'s rule that a C library name like
   `exit` comes from libSystem.
 
-### 1.7 The instrument gap: **148 files read as "nobody has looked"**
+#### 1.7 The instrument gap: **148 files read as "nobody has looked"**
 
 `tools/formal_sweep_causes.py::CAUSES` has a row for the export refusal. The
 sweep's **own by-family breakdown** does not: `tools/formal_sweep.py::
@@ -234,9 +707,6 @@ re-derive.
 
 **While the row stands, the loud finding is correct and the corpus is red for
 it.** An unclassified shape over the honesty bar exits 4 on purpose.
-
----
-
 ## 2. What the earlier rounds established, and still holds
 
 Everything here is a fact about the corpus or the instrument rather than about a
@@ -292,7 +762,7 @@ instrument changes:
 
 **`other refusal` is the fifth defect and it is the one that is still open**: the
 bucket means *nobody has looked*, and it has twice held the largest row in the
-corpus (170 files at `-10`, 163 findings now). §1.7.
+corpus (170 files at `-10`, 163 findings now). §1.12.
 
 ### 2.4 The sweep's own three refusals, and why each one is right to fail loudly
 
@@ -385,7 +855,7 @@ file count.
 
 ## 3. THE ROUND INDEX
 
-Twenty rounds, 2026-09-30 → 2026-10-05, all of them superseded. **The first
+Twenty-one rounds, 2026-09-30 → 2026-10-05, all of them superseded. **The first
 column is the round's TAG, and the tag is how a citation spells it** — "the `b9`
 round of `bugs/FORMAL_sweep_work_map.md` §4.1" is the whole citation, and it
 resolves into §3.1 below. The second column is the document the round was, which
@@ -416,7 +886,8 @@ number below is re-derivable from them.
 | `b10` | `…_2026-10-04_b10.md` | 10-04 | `3c3516db` | **710, both arms complete** | the per-edge export gate emptied the 166-file row **into** `other refusal`, and 170 of the 184 were one construct — which is why `CAUSES` got a row |
 | `b11` | `…_2026-10-04_b11.md` | 10-04 | `65b88dab` | **722, both arms complete** | two rows emptied **behind** a five-day-old refusal with no row in either instrument, and **54 files went dark** |
 | `b12` | `…_2026-10-04_b12.md` | 10-04 | `77b24183` | **735, both arms complete** | a **229-file regression named**: six lines of em-dash prose in a docstring refused every `s[i]` in a module 229 files import |
-| `b13` | `…_2026-10-05_b13.md` | 10-05 | `86af1b44` | **738, both arms complete** | the wall is at ZERO and none of its 230 files landed on another encoding refusal; **§1 of this document** |
+| `b13` | `…_2026-10-05_b13.md` | 10-05 | `86af1b44` | **738, both arms complete** | the wall is at ZERO and none of its 230 files landed on another encoding refusal; **§1.13 of this document** |
+| `b14` | `…_2026-10-05_b14.md` | 10-05 | `b83f2ed2` | **768, both arms complete** | the corpus stable for the third round running at its best coverage yet (**157/526 = 29.8 %**), the two arms' ranked tables **byte-identical**, the baseline alarm live and its **103 "regressions" all improvements**, and the top UNOWNED row a builtin this backend now lowers; **§1 of this document** |
 
 ### 3.1 Section numbers other files cite, and what each carried
 
@@ -459,32 +930,52 @@ reason §3 exists rather than a list of twenty dead filenames.
 | `b12` | §3.4 | where the 236 `other refusal` files came from, and 229 of them are one wall |
 | `b12` | §4.2 | the seven single-file causes, each a distinct construct |
 | `b12` | §5.2 | the fix in BOTH ranking instruments — the two-part argument |
-| `b13` | §5 | the lexer's multi-line f-string rule and what the fix was worth (0.0 pp of coverage, 1 file, and the file did not become a pass) — **now §1.5 of this document** |
+| `b13` | §5 | the lexer's multi-line f-string rule and what the fix was worth (0.0 pp of coverage, 1 file, and the file did not become a pass) — **now §1.13's `#### 1.5`**, which is where that content sits in this document's own numbering |
+| `b13` | §2.1–§2.7 | the `b13` census itself — class counts, parity, the per-CAUSE delta, the ranked table, `other refusal` at 7, the 2-file rows, the instrument gap — **now §1.13 of this document**, in `b13`'s own numbering |
+| `b14` | §1 | the run: the commands, the ≤ 40 minutes for both arms, the peak 1.0 GB, and the 768-file scope with its 30 new files named — **now §1.1–§1.3** |
+| `b14` | §2 | class counts against `-13`; arm64 vs x86-64; the baseline alarm and its 103 improvements; the host-import reach split — **now §1.4–§1.7** |
+| `b14` | §3 | the per-CAUSE delta: `to a pass 0`, `from a pass 22`, `cause 8`, all 8 new files — **now §1.8** |
+| `b14` | §4 | the ranked causes and the next step per row over 768 files, 16 causes — **now §1.9** |
+| `b14` | §4.1 | the top UNOWNED row per file: one compare-and-select and five run-time sequence/fold/blob-copy asks — **now §1.10** |
+| `b14` | §4.2 | `other refusal` at 5 and the 2-file rows, including the `rf"…"` reader defect — **now §1.11** |
+| `b14` | §4.3 | the 136-file instrument gap read out of the sweep's own `LOUD FINDING:` line, and the row's own numbers — **now §1.12** |
+| `b14` | §5 | what that branch changed (`max`/`min`) and what the fix was worth in the sweep's units — **not carried here**: it is a changelog, `git log` is the changelog, and its two filed items are named in §4 |
+| `b14` | §6 | the two documents it filed, and the two `test_formal_proof_breadth.py` failures master had already fixed — **the two documents are named in §4**; the failures were fixed by `ce5d2b8d` |
+| `b14` | §7 | the commands, arm64 and x86-64 — **now §6** |
 
 ---
 
 ## 4. What is NOT here, and where it went
 
-**Every open item the twenty rounds filed has its own document**, which is the
-reason those documents could be deleted rather than merged: a reader who starts
-at a refusal follows it to the refusal's own doc, not to a census that measured
-it three rounds ago. The two exceptions are named:
+**Every open item the twenty-one rounds filed has its own document**, which is
+the reason those documents could be deleted rather than merged: a reader who
+starts at a refusal follows it to the refusal's own doc, not to a census that
+measured it three rounds ago. The exceptions are named:
 
 * `FORMAL_the_sweep_family_table_has_no_row_for_the_export_rule_refusal.md` —
-  §1.7's next step in full. **Not** folded in here on purpose: it is a
+  §1.12's next step in full. **Not** folded in here on purpose: it is a
   five-line change to one table with a marker to quote, and a map that carries
-  another document's next step is how the twenty became twenty.
+  another document's next step is how the twenty became twenty-one. **`b14`
+  recorded that this one is now FIXED** — `77cfebbe` gave the export rule a
+  `CAUSES`/`_REFUSAL_FAMILIES` row and `09b81933` merged it, so the document is
+  deleted with the fix as `CLAUDE.md` requires and §1.12 is where its last
+  measurement lives.
 * `FORMAL_known_limits.md` — the audit of which refusals in the residue are
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
+* `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
+  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
+  own document for the reason above: the measurement is here (§1.11) and the fix
+  has a question to answer first that belongs with the fix.
 
-**The per-slice rounds also fixed things and recorded the pins.** Those pins are
-in the test files and the fixes are in the tree; the rounds' `## What landed`
-sections are a changelog, and `git log` is the changelog.
+**The per-slice rounds also fixed things and recorded the pins**, and so did
+`b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the
+fixes are in the tree; the rounds' `## What landed` sections are a changelog, and
+`git log` is the changelog.
 
 ---
 
-## 5. Reproducing this
+## 6. Reproducing this
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
@@ -493,19 +984,25 @@ python3 tools/memslot.py --gb 8 --label sweep-x86 -- \
 python3 tools/memslot.py --gb 8 --label sweep-arm -- \
   python3 tools/formal_sweep.py -j 4 -t 120            > bugs/sweeps/sweep-arm-N.txt  2>&1
 
-python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-N.txt   # §1.4
-python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-x86-N.txt  # §1.4, same table
+python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-N.txt   # §1.9
+diff <(python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-N.txt) \
+     <(python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-x86-N.txt)  # §1.5
 python3 tools/formal_sweep_parity.py  bugs/sweeps/sweep-arm-N.txt \
-                             bugs/sweeps/sweep-x86-N.txt                  # §1.2
+                             bugs/sweeps/sweep-x86-N.txt                  # §1.5
 python3 tools/formal_sweep_rounds.py  bugs/sweeps/sweep-arm-N-1.txt \
-                             bugs/sweeps/sweep-arm-N.txt                   # §1.3
-python3 tools/formal_host_import_wall.py                                 # §1.4's host rows
+                             bugs/sweeps/sweep-arm-N.txt                   # §1.8
+python3 tools/formal_sweep.py --write-baseline                            # §1.6's alarm
+python3 tools/formal_host_import_wall.py                                 # §1.7's host rows
 python3 tools/formal_chain_probe.py <file>                               # §2.6's chain
-python3 tools/formal_template_call_census.py                            # §1.4's `uses:`
+python3 tools/formal_template_call_census.py                            # §1.9's `uses:`
 python3 test_formal_sweep_truth.py                                      # the instrument's own checks
 ```
 
-**Both arms exit 1, and that is right**: the run has real findings, and each
-log's `memcap:` line says `child exit 1`. **A re-sweep is the only way to price
-anything that was behind a wall** — §1.3 is the honest statement of what that
-costs: this document says where the 230 went, not what is behind each of them.
+**Both arms exit 4, and that is right**: the run has real findings, and each
+log's `memcap:` line says the child exited non-zero. **`--baseline` needs a
+committed baseline to be worth anything** (`bugs/sweeps/sweep-arm.baseline.json`),
+and §1.6 says why the one banked from `-12` reports 103 improvements as
+regressions, and what re-banking it changes. **A re-sweep is the only way to
+price anything that was behind a wall** — §1.8 is the honest statement of what
+that costs: this document says where the 230 went, not what is behind each of
+them.

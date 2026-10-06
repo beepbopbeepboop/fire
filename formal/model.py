@@ -9024,13 +9024,22 @@ def string_operand_is_string(kind) -> bool:
 
 # ── `%s`, the one conversion that DEREFERENCES its argument ─────────────────
 #
-# Every other conversion reads the word it is handed and renders it: `%d`,
-# `%lld`, `%llu`, `%u`, `%c`, `%f`, and `%p` on Darwin, which prints the address
-# rather than the bytes at it.  `%s` is the exception, and it is the whole of
-# why a format string is a thing this model has to READ rather than pass
-# through: it walks bytes at the address until it finds a NUL, so handing it a
-# number is not a wrong rendering — it is a walk off the end of whatever the
-# number points into.
+# Every other conversion reads the word it is handed and renders it: `%c`,
+# `%f`, and `%p` on Darwin, which prints the address rather than the bytes at
+# it.  `%s` is the exception, and it is the whole of why a format string is a
+# thing this model has to READ rather than pass through: it walks bytes at the
+# address until it finds a NUL, so handing it a number is not a wrong
+# rendering — it is a walk off the end of whatever the number points into.
+#
+# The INTEGER conversions are the third thing this section has to be true
+# about, and it was false here for a while: `%d` reads a C `int` out of a
+# 64-bit word, so `printf("%d", 2**62)` printed `0` where CPython prints
+# `4611686018427387904`. `printf_widened_format` gives every one of them an
+# `ll` before the format is interned — see that function for the measurement,
+# for the `%c`/`%s`/`%ld` exclusions and for the one shape it changes
+# deliberately. The `%lld` and `%llu` names here are what a `print` builds for
+# itself (`_print_call`) and what that rewrite produces for a `printf`, which
+# is the whole of why the two now agree.
 #
 # The corpus spells the output call `printf` and nothing else, so the set is a
 # set and not a pattern; a second member would be added with the callee that
@@ -9154,16 +9163,17 @@ _PRINTF_QUANTIFIER_RE = re.compile(
 def _printf_specs(fmt_text) -> list | None:
     """One record per CONVERSION SPECIFICATION in `fmt_text`, or None if unparsed.
 
-    **`{quant, conv, stars}` per specification — one row each for a quantifier,
-    a conversion character and a `*` count, and NOT one row per argument.** The
-    two public readers below answer different questions and index different
-    things, which is why there are two of them: `printf_conversion_specifiers`
-    is an ARGUMENT-indexed classification (a `*` consumes one and is INTEGER),
-    and `printf_text_widths` is a SPECIFICATION-indexed quantifier. A third
-    reader that needs both the quantifier and the character — the width refusal,
-    which must ask "is this a `%s`" before it asks "is there a width" — was
-    reading the quantifier out of one and about to read the character out of the
-    other, and the two do not have the same LENGTH:
+    **`{quant, conv, stars, text, start, end}` per specification — one row each
+    for a quantifier, a conversion character, a `*` count, the specification's
+    own TEXT and its span in `fmt_text`.** The two public readers below answer
+    different questions and index different things, which is why there are two
+    of them: `printf_conversion_specifiers` is an ARGUMENT-indexed
+    classification (a `*` consumes one and is INTEGER), and `printf_text_widths`
+    is a SPECIFICATION-indexed quantifier. A third reader that needs both the
+    quantifier and the character — the width refusal, which must ask "is this a
+    `%s`" before it asks "is there a width" — was reading the quantifier out of
+    one and about to read the character out of the other, and the two do not
+    have the same LENGTH:
 
         %*s        letters ['*', 's']   widths ['*']
 
@@ -9171,8 +9181,17 @@ def _printf_specs(fmt_text) -> list | None:
     `*`'s argument. One scan is the alternative to that and it is why this
     function exists.
 
+    **`text`/`start`/`end` are here for the one reader that REWRITES a format
+    rather than reading it** — `printf_widened_format`, which gives a `%d` an
+    `ll` and has to put the new specification back where the old one was. It is
+    the same scan rather than a second regex because a second regex is a second
+    answer to "where does this specification end", which is the disagreement
+    this function was introduced to end.
+
     `%%` matches and contributes nothing, which is the only skipping rule and is
-    the one `printf_conversion_specifiers` documents.
+    the one `printf_conversion_specifiers` documents. A `%%` is still ADVANCED
+    over rather than re-scanned, so `a%%b%d` widens the `%d` and leaves the
+    `%%` alone.
 
     None for text this does not parse, and that is the permissive direction both
     public readers already take — see their own docstrings.
@@ -9200,7 +9219,8 @@ def _printf_specs(fmt_text) -> list | None:
             else:
                 quant = None
             out.append({"quant": quant, "conv": conv,
-                        "stars": spec.count("*")})
+                        "stars": spec.count("*"),
+                        "text": spec, "start": at, "end": m.end()})
         pos = m.end()
 
 
@@ -9274,6 +9294,226 @@ def printf_text_widths(fmt_text) -> list | None:
         out.append(s["quant"])
         out.extend([None] * (s["stars"] - (1 if s["quant"] == "*" else 0)))
     return out
+
+
+#: The conversions whose C reading is an `int`/`unsigned int` — 32 bits on
+#: every target this backend emits — paired with the 64-bit SPELLING of each.
+#: `i` is `d` and `X` is `x`; both spellings exist in C and a program may use
+#: either, so the table carries both rather than normalizing the source.
+#:
+#: `c` is deliberately ABSENT and that is a fact about the conversion rather
+#: than an omission: `%c` converts an `int` to `unsigned char`, so the low
+#: EIGHT bits are what it renders and widening it would change the character
+#: rather than widen the number. `%s`, `%f`, `%p` and `%n` are absent for the
+#: same kind of reason — none of them reads the word as a number at all.
+PRINTF_32_BIT_INTEGER_CONVERSIONS = {
+    "d": "lld", "i": "lli", "u": "llu", "o": "llo", "x": "llx", "X": "llX",
+}
+
+
+def _printf_length_modifier(spec: str) -> str:
+    """The LENGTH MODIFIER of one matched conversion specification, or "".
+
+    `_PRINTF_CONVERSION_RE` matches the whole specification but names none of
+    its parts, so the modifier is read off the tail: a conversion character is
+    `[a-zA-Z]` and the modifier is the run of length letters immediately
+    before it, out of the set the pattern accepts (`hh h ll l L z j t q`).
+    Reading it off the TAIL rather than by re-matching is what keeps this and
+    `_printf_specs` from disagreeing about where a specification ends — the
+    `printf_conversion_specifiers` / `printf_text_widths` disagreement this
+    scan already exists to prevent.
+    """
+    i = len(spec) - 2                      # the char before the conversion
+    while i >= 0 and spec[i] in "hlLqjzt":
+        i -= 1
+    return spec[i + 1:-1]
+
+
+def printf_widened_format(fmt_text) -> str | None:
+    """`fmt_text` with every 32-bit INTEGER conversion given an `ll`, or None.
+
+    **The rewrite that made `printf("%d", 2**62)` print the number the source
+    wrote, and it is a REWRITE rather than a refusal because the answer is not
+    in doubt.** A
+    formal value is one 64-bit word (`doc/ABI.md`, "Scalar types"), the emitter
+    passes the whole word, and libc's `%d` reads a C `int` out of it — so the
+    conversion renders the low 32 bits and the program prints a number the
+    source never wrote. Measured on both architectures from one source:
+
+        a = 4611686018427387904            # 2**62
+        printf("A=%d|", a)                 -> A=0
+        printf("B=%lld|", a)               -> B=4611686018427387904
+
+    and CPython's `print(a)` is `4611686018427387904`. The two spellings differ
+    by exactly the low 32 bits read as `int`, which is why the defect is
+    invisible to every program whose integers fit in 32 bits and to every
+    differential test that compares EXIT STATUS.
+
+    **Why the rewrite is the whole word and not a zero-extension.** The
+    argument is already in a 64-bit register in full; libc's `%lld` reads all
+    eight bytes of it. Nothing is widened, nothing is truncated, and the
+    emitted instructions are the same two the operand already cost.
+
+    **Why `%d` was RIGHT for a genuine 32-bit C `int` and stays right.**
+    `strcmp`, `memcmp`, `atoi` and every other int-returning libc name the
+    corpus reaches are listed in `BARE_C_RETURN_KINDS`, and the emitters
+    sign-extend what it lists (`_emit_extern_return`, whose own comment says a
+    W-register write zero-extends and `Int32` is signed), so the word libc reads
+    with `%lld` is the sign-extended value and prints the same digits.
+    Measured, both architectures, after this landed: `atoi("-2147483648")`
+    prints `-2147483648` through `%d` and through `%lld`.
+
+    ## What it deliberately does NOT touch, and each omission is a decision
+
+    **ONLY a conversion with NO length modifier**, because a modifier is the
+    source stating a width and this rewrite is about C's DEFAULT width being
+    narrower than a formal value:
+
+    * `%ld` / `%lld` / `%llu` / `%lu` / `%llx` — `long` and `long long`, 64-bit
+      under LP64 on both targets this backend emits, which is exactly what
+      this rewrite would have produced. `z`/`j`/`t` are `size_t`/`intmax_t`/
+      `ptrdiff_t`, 64-bit for the same reason; `L` is `long double` and
+      belongs to the floating conversions.
+    * `%hd` / `%hhd` — 16- and 8-BIT, which is the source asking for a
+      narrower type on purpose. There is no 16-bit value on this path to be
+      narrower than, so widening them would answer a question nobody asked.
+      Zero sites in this corpus either way.
+    * **`%c`** — it converts an `int` to `unsigned char`, so the eight bits it
+      renders are the eight bits it means.
+    * `%s`, `%f`, `%p`, `%n`, `%%` — none reads its operand as a number.
+
+    ## The one shape where `%d` was right by ACCIDENT, and what this does
+    ## about it
+
+    A C function returning `int` puts 32 bits in the return register and leaves
+    the rest unspecified (AAPCS64 §6.9, SysV AMD64 §3.2.3), so its `-1` may
+    arrive as `0xFFFF_FFFF_FFFF_FFFF` or as `0x0000_0000_FFFF_FFFF`. This path
+    normalizes the ones it has a prototype for (`BARE_C_RETURN_KINDS`, total
+    over `formal/hostmods/` and pinned by `test_formal_libc_symbol.py`'s
+    `retkind` group); a name it does NOT list is handed on as it arrived, so for
+    that word `%d` renders the low 32 bits and happens to be C's answer while
+    the model's own value is `4294967295`.
+
+    **The rewrite is unconditional anyway, because the alternative is to leave
+    `%d` disagreeing with the model.** `print(a)` on that same word already
+    prints `4294967295` — `_print_call` builds `%lld` — and `a < 0` already
+    answers `no` and `a + 1` already answers `0`: measured, both architectures,
+    on `strcasecmp("a", "b")`. **So the word this path holds for that value IS
+    4294967295, and `%d` was the one rendering that did not say so.** Widening
+    makes `printf` agree with `print` and with every operator on the same word,
+    which is the property that lets a program swap one for the other; narrowing
+    instead would preserve an accident and keep the two disagreeing.
+
+    The residual defect is upstream of `printf` and is filed as
+    `bugs/FORMAL_a_bare_c_int_return_with_no_prototype_row_is_not_sign_extended.md`:
+    `BARE_C_RETURN_KINDS` should not be missing a libc `int` return. **Its
+    exposure here is ZERO**, measured: every real libc bare callee reachable
+    from this repository's 423 `.mojo` files and the stdlib has a row, and none
+    of the 18 `printf` varargs over them is a bare call without one. So this
+    rewrite changes no answer on this corpus, and the one program that could
+    observe a change is one this corpus does not contain.
+
+    **A format held in a NAME is not reachable here** (`fmt = "%d";
+    printf(fmt, x)`), because a non-literal cannot be scanned. That is the
+    permissive direction every format reader on this path already takes —
+    `printf_format_refusal` is a no-op for a non-literal format for the same
+    reason — and it is the one limit the bug doc's next step does not ask about.
+
+    **One rewrite, asked of the format, and both backends apply it**
+    (`formal/build.py::_widen_printf_integer_conversions`, in the pipeline both
+    front ends share) — not a per-emitter substitution, because two emitters
+    that each widened a format string would be two answers to one question on
+    the day one of them was edited. The emitters' own `printf_format_refusal`
+    then read the WIDENED text, so the `%s`/float/missing-operand refusals and
+    this agree about what the format says.
+
+    `None` for a format that does not parse — the permissive direction every
+    other reader of a format string on this path takes — and `None` when there
+    is nothing to widen, which is what lets a caller ask unconditionally and
+    only rewrite when the answer is a different string.
+    """
+    if not isinstance(fmt_text, str) or "%" not in fmt_text:
+        return None
+    specs = _printf_specs(fmt_text)
+    if specs is None:
+        return None
+    out, pos, widened = [], 0, 0
+    for s in specs:
+        if s["conv"] not in PRINTF_32_BIT_INTEGER_CONVERSIONS:
+            continue
+        if _printf_length_modifier(s["text"]):
+            continue
+        out.append(fmt_text[pos:s["start"]])
+        out.append(s["text"][:-1] + PRINTF_32_BIT_INTEGER_CONVERSIONS[s["conv"]])
+        pos = s["end"]
+        widened += 1
+    if not widened:
+        return None
+    out.append(fmt_text[pos:])
+    return "".join(out)
+
+
+def printf_callee_name(call) -> str | None:
+    """The C NAME a `printf`-family call binds, or None.
+
+    **One reader of "which call is a `printf`", because two answers is how the
+    two architectures come to disagree about a format string.** `fire.py`'s
+    `dylib --formal --backend=x86_64` measurement is the shape of the failure
+    this prevents: the architecture flag was parsed and dropped, so a reader
+    asking "is this call a `printf`" from the emitter's own resolved name got
+    an answer for one machine and the other reader got the other one.
+
+    Three spellings reach a format function on this path, and all three are
+    here:
+
+      * `printf(fmt, …)` — the corpus's own spelling, and the only one a
+        program writes.
+      * `external_call["printf", Int32](fmt, n)` — the same C function reached
+        through the bracket, which `external_call_spec` resolves. Its own
+        docstring records that this reaches the same line in the emitters with
+        `name == "printf"`, so a gate that only read the bare spelling would
+        miss every dylib-format call.
+      * `printf[T](fmt, …)` — a comptime specialization, which
+        `call_callee_name` looks through.
+
+    `None` for anything else, including a `MemberExpr` callee: `mod.f(x)` is a
+    different question and `call_callee_name`'s own table says why.
+    """
+    func = getattr(call, "func", None)
+    if func is None:
+        return None
+    if is_external_call_template(func):
+        symbol, _ret, why = external_call_spec(func)
+        return None if why is not None else symbol
+    return call_callee_name(func)
+
+
+def printf_call_format_literal(call):
+    """The format `F.StringLiteral` of a `printf`-family call, or None.
+
+    **The ONE place a format argument is located**, asked by the rewrite that
+    widens a `%d` (`printf_widened_format`) and available to any reader that
+    needs the node rather than the text. The INDEX is
+    `printf_format_arg_index`'s, which derives it from `VARIADIC_LIBC` rather
+    than from a second table, so `sprintf`'s buffer argument cannot be mistaken
+    for a format — which is the whole reason that function exists.
+
+    `None` when the callee is not a format function, when there is no argument
+    at the format index, or when the format is not a LITERAL. The last is the
+    permissive direction every format reader on this path takes: a format in a
+    variable cannot be scanned, and `printf_format_refusal` has said so in its
+    own docstring since before this existed. **The widening therefore does not
+    reach a format held in a name**, and that is a real limit rather than an
+    oversight — it is recorded on `printf_widened_format` and in the bug doc.
+    """
+    if not isinstance(call, F.CallExpr):
+        return None
+    idx = printf_format_arg_index(printf_callee_name(call) or "")
+    if idx is None:
+        return None
+    args = list(getattr(call, "args", None) or [])
+    node = args[idx] if idx < len(args) else None
+    return node if isinstance(node, F.StringLiteral) else None
 
 
 def printf_text_width_refusal(callee: str, fmt_text, args: list,
@@ -17920,31 +18160,47 @@ NOT_LOWERED_BUILTINS = {
 FOREIGN_ABI_BUILTINS = frozenset({"abs", "pow", "round"})
 
 
-# The one name `NOT_LOWERED_BUILTINS` lists that the emitters DO lower when it is
-# CALLED, so `not_lowered_builtin_refusal` must not ask about it.
+# The names in `NOT_LOWERED_BUILTINS` whose CALL SHAPE the emitters DO lower,
+# and which this pre-pass must therefore not refuse. Asked through TWO readers
+# rather than one table, because there are two ways a name can be lowered and a
+# single hand-listed set is how they came to disagree:
 #
-# **`float(x)` is an integer-to-double CONVERSION and both emitters build it**,
-# measured on this tree at HEAD in all three argument positions —
-# `printf("%.17g\n", float(9007199254740995))`, `printf("%s\n", float(7))`, and
-# a `float(7)` bound to a `var` first — and `test_formal_run.py`'s three float
-# rows depend on it, answering `9007199254740996` where the source says
-# `9007199254740995` and CPython says the same. So a pre-pass that refused the
-# name would take three passing rows red, which is the whole cost of a
-# name-based check that has not asked whether the name is lowered.
+# * `emitter_lowers(name)` is the emitters' own question. `ord`, `chr` and `hash`
+#   are in `EMITTER_BUILTINS` because `_emit_text_builtin` answers one of them
+#   (a literal's single character folds to its code point) and words a refusal
+#   for the other two that is specific to each, so they are answered through
+#   that table rather than by being listed here a second time.
+# * `float` is the other kind: it is NOT in `EMITTER_BUILTINS` — the emitters
+#   reach it through the type-conversion path rather than a named builtin
+#   intercept — so it is the one name this set holds. **Its exclusion is what
+#   this set is FOR**: `float(x)` is an integer-to-double CONVERSION and both
+#   emitters build it, measured on this tree in all three argument positions —
+#   `printf("%.17g\n", float(9007199254740995))`, `printf("%s\n", float(7))`, and
+#   a `float(7)` bound to a `var` first — and `test_formal_run.py`'s three float
+#   rows depend on it, answering `9007199254740996` where the source says
+#   `9007199254740995` and CPython says the same.
 #
-# The table row is not wrong, and this is why both can be true: `float` is in
-# `NOT_LOWERED_BUILTINS` because a `Double` is not a VALUE on this path — every
-# value is one 64-bit integer word — and the row is about the value model. The
-# call shape is a separate fact, and it is answered, so the name belongs in
-# neither this pre-pass nor `FOREIGN_ABI_BUILTINS` (which is for names whose
-# call shape is refused with a better message, not for names whose call shape
-# works).
+# **Neither reader was here when the pre-pass landed on 2026-10-05, which is why
+# both are consulted rather than the second replacing the first.** Without
+# `emitter_lowers`, every `ord("A")` and every `chr(233)` is refused by NAME
+# before an emitter runs, with the generic "write the operation out in the
+# source" sentence, where the emitter answers the first with the right NUMBER
+# and refuses the second with the reason that is about it ("a NEW one-character
+# object … this representation has nowhere to put one"). Measured on `master`
+# before that change: `test_formal_unicode.py` 141/9, the nine being exactly the
+# four `ord`-folds and the five `ord`/`chr`-refusals, and that file's own comment
+# on the `ord`/`chr`/`hash` block recording the folded answer as landed.
+#
+# **The table row is not wrong, and this is why all of the above can be true**:
+# `float` is in `NOT_LOWERED_BUILTINS` because a `Double` is not a VALUE on this
+# path — every value is one 64-bit integer word — and the row is about the value
+# model. The call shape is a separate fact, and it is answered.
 #
 # `abs`, `pow` and `round` are excluded by `FOREIGN_ABI_BUILTINS` instead, for
 # the same reason and with a different message: those ARE refused at the
 # emitter, by `builtin_binding_refusal`, and its sentence names the C function
 # whose namesake would be bound — which says more than this table's one-liner.
-# Between them these two exclusions and this table account for every name in
+# Between them these two exclusions and this pre-pass account for every name in
 # `NOT_LOWERED_BUILTINS`, so the set of names this pre-pass may refuse is stated
 # here rather than left as "the ones nobody has tried yet": the other twenty
 # were each probed at HEAD and every one refuses.
@@ -18074,7 +18330,16 @@ def not_lowered_builtin_refusal(functions, module_names=()) -> str | None:
             if name not in NOT_LOWERED_BUILTINS or name in compiled \
                     or name in at_module or callee_is_a_bound_value(fn, name):
                 continue
-            if name in LOWERED_CALL_SHAPED_BUILTINS:
+            if name in LOWERED_CALL_SHAPED_BUILTINS or emitter_lowers(name):
+                # A name one of the emitters LOWERS is answered downstream —
+                # `ord("A")` folds to 65 and `chr(233)` is refused by the
+                # sentence that is about a NEW one-character object — and this
+                # pass would pre-empt both with a weaker, generic one. Asked
+                # through `emitter_lowers` rather than by listing the names, so
+                # the question is the emitters' own and the two cannot drift.
+                # `float` is in the list because it is lowered through the
+                # conversion path rather than a named builtin intercept, so
+                # `emitter_lowers` does not see it.
                 continue
             if name in EMITTER_BUILTINS:
                 # THE EMITTER'S OWN TABLE, and the one exclusion that is not
@@ -31949,6 +32214,79 @@ def one_word_field_struct(struct_def, name, decls: dict):
     return (st, "assigned") if st is not None else (None, None)
 
 
+def field_stores_a_caller_frame(struct_def, name, decls: dict, only_init=False):
+    """The `StructDef` of this module every `self.<name>` store hands the CALLER
+    a frame of, or None.
+
+    **THE LIFETIME ARGUMENT, and it is one rule asked about two method sets.**
+    A field whose declared type names a framed struct of this module holds a
+    FRAME ADDRESS, and the question every reader of such a field has to answer
+    is *whose* frame — because the one thing that makes the address safe is that
+    the frame outlives nothing that can read the slot. When every store of the
+    field is a bare NAME that is a parameter of the writing method, annotated
+    with a struct of this module, the frame in the slot is one the CALLER
+    reserved in the caller's own scratch and passed down; and the object it is
+    stored into is the RECEIVER, which is storage the caller owns (the frame
+    checks are what refuse to let a receiver be anything else). Both die
+    together, so no read of the slot can name reclaimed stack. `__init__` is not
+    a premise of any of that — it is one writer among several, and the reason it
+    was the only one considered is history, not lifetime.
+
+    `only_init=True` narrows the question to `__init__`, which is what
+    `struct_nested_frame_fields` asks: PLACEMENT is the constructor's job, so
+    whether the constructor builds a block there is a question about the
+    constructor and not about the writers. `only_init=False` — every method — is
+    what a READ asks, because a read cannot know which writer ran.
+
+    Unanimous-or-nothing, as everywhere else on this axis, and the negative
+    direction is the one that keeps the refusal: any stored value that is not a
+    bare parameter NAME — a construction `R()`, a call `mk(4)`, a ternary, a
+    nested field `other.inner`, a name the parameter table does not resolve, an
+    `AugAssignStmt` — answers None, and so does a field no method writes. This is
+    deliberately the same CONSERVATIVE rule `init_stores_a_parameter_struct`
+    applied to the shape it already covered, so lifting this to every method
+    cannot also widen what counts as a delegating store.
+
+    **`only_init=False` is what `formal/build.py`'s `_typed_nested_frame` asks**,
+    and it is the same argument that predicate's own comment made while it
+    exempted the `__init__` case: "the only assignment is `__init__`'s, and its
+    argument is the CALLER's, so the two die together" reads as a statement
+    about `__init__` and is a statement about every writer. What it is NOT is
+    licensed for a store into anything but the receiver — `b.inner = o` where
+    `b` is a LOCAL, and `b` is returned, hands a frame that dies with this call
+    to an object that outlives it, so that shape has no writer this predicate
+    counts and keeps its refusal.
+    """
+    stores = _init_field_assignments(struct_def).get(name) or [] \
+        if only_init else method_field_assignments(struct_def, name)
+    if not stores:
+        return None
+    params_by_method = {}
+    named = set()
+    for entry in stores:
+        m, v = (None, entry) if only_init else entry
+        if not (isinstance(v, F.IdentExpr) and v.name != "None"):
+            return None
+        if only_init:
+            table = params_by_method.get(None)
+            if table is None:
+                table = params_by_method[None] = _init_declared_parameters(
+                    struct_def, decls)
+        else:
+            key = id(m)
+            table = params_by_method.get(key)
+            if table is None:
+                table = params_by_method[key] = parameter_declared_structs(
+                    m, decls or {}, owner=struct_def)
+        st = table.get(v.name)
+        if st is None:
+            return None
+        named.add(st.name)
+    if len(named) != 1:
+        return None
+    return structs_declared(named.pop(), decls)
+
+
 def init_stores_a_parameter_struct(struct_def, name, decls: dict):
     """The `StructDef` of this module a `__init__` field store is a NAME of, or
     None.
@@ -31982,37 +32320,16 @@ def init_stores_a_parameter_struct(struct_def, name, decls: dict):
     `_frame_field_store_is_sound` already makes and which the placement was
     cancelling out.
 
-    Unanimous-or-nothing, as everywhere else on this axis, and the negative
-    direction is the one that keeps the old behaviour: any assigned value that
-    is not a bare NAME of an `__init__` parameter annotated with a struct of this
-    module — a construction `R()`, a call, a ternary, a name the parameter table
-    does not resolve — leaves the field PLACED, because that is the shape the
-    placement was built for and this predicate is not a rewrite of it. It is
-    asked only of a field `struct_nested_frame_fields` has already agreed is a
-    nested frame of this module, so it can only ever REMOVE a placement, never
-    invent one.
+    The rule itself is `field_stores_a_caller_frame(..., only_init=True)`, and
+    this is the narrower question asked by the narrower caller: whether the
+    CONSTRUCTOR builds a block there is a question about the constructor, even
+    though the lifetime argument is about the caller and holds for every writer.
 
     `one_word_field_struct` is the other reader of the same evidence and calls
     this, rather than the two walking `__init__`'s body separately and one of
     them learning about a spelling the other does not.
     """
-    values = _init_field_assignments(struct_def).get(name) or []
-    if not values:
-        return None
-    params = None
-    named = set()
-    for v in values:
-        if not (isinstance(v, F.IdentExpr) and v.name != "None"):
-            return None
-        if params is None:
-            params = _init_declared_parameters(struct_def, decls)
-        st = params.get(v.name)
-        if st is None:
-            return None
-        named.add(st.name)
-    if len(named) != 1:
-        return None
-    return structs_declared(named.pop(), decls)
+    return field_stores_a_caller_frame(struct_def, name, decls, only_init=True)
 
 
 def _init_declared_parameters(struct_def, decls: dict) -> dict:
@@ -32396,13 +32713,13 @@ MAX_NESTED_FRAME_DEPTH = 4
 # dangerous direction — by accident.  A call to something else, a name, a
 # literal, an augmented assignment: all of them yield no evidence, which is the
 # absent answer, and the field stays refused with the disagreement spelled.
-def _init_field_assignments(struct_def) -> dict:
-    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
+def _method_field_stores(m, receivers) -> list:
+    """`[(field_name, value_node), …]` — one method's `self.<name> = …` stores.
 
-    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
-    UNION of a field's assignments rather than the last one seen: unanimity is
-    decided by `struct_init_field_types`, and it can only be decided over all
-    of them.
+    The scan, over ONE method body, and the only place it is written: the two
+    questions asked of it differ in *which methods they ask about* and agree
+    about everything else, so a second scanner would be a second thing that
+    could learn a spelling the first one does not read.
 
     Both assignment spellings matter and only one of them is a `MemberExpr`
     target of a plain `AssignStmt`: `self.a, self.b = limit, [], 0` parses as an
@@ -32412,41 +32729,66 @@ def _init_field_assignments(struct_def) -> dict:
     table `init_body_stores` inlines from — so a type can never be read out of a
     store the emitter is going to refuse.
 
-    `MultiAssignStmt` (`a = b = v`) is the other shape, and the parser gives
-    the chain ONE node with a `targets` list rather than a chain of nodes, so
+    `MultiAssignStmt` (`a = b = v`) is the other shape, and the parser gives the
+    chain ONE node with a `targets` list rather than a chain of nodes, so
     `iter_nodes` alone would miss every target on it.
 
     An `AugAssignStmt` contributes the FIELD and no value: `self.n += 1` in
     `__init__` says the slot is a counter and says nothing about its type.
     """
+    out = []
+    for node in iter_nodes(getattr(m, "body", None)):
+        if isinstance(node, F.AssignStmt):
+            for target, value in _init_statement_field_stores(node,
+                                                              receivers) or ():
+                out.append((target.member, value))
+            continue
+        if isinstance(node, F.MultiAssignStmt):
+            # `a = b = v` is a chain of `AssignStmt` in this AST, and the
+            # parser gives the chain ONE node with a `targets` list, so this
+            # is the shape `iter_nodes` alone would miss.  Every target here
+            # is a plain name or a member — the grammar does not admit a
+            # chain of tuple targets — so one value serves them all.
+            for t in (getattr(node, "targets", None) or []):
+                if isinstance(t, F.MemberExpr) and isinstance(t.obj, F.IdentExpr) \
+                        and t.obj.name in receivers:
+                    out.append((t.member, node.value))
+    return out
+
+
+def _init_field_assignments(struct_def) -> dict:
+    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
+
+    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
+    UNION of a field's assignments rather than the last one seen: unanimity is
+    decided by `struct_init_field_types`, and it can only be decided over all
+    of them.  The scan itself is `_method_field_stores`; what is narrow here is
+    the method set, and `field_stores_a_caller_frame` asks the same scan about
+    every method for the same reason this one asks it about one.
+    """
     out: dict = {}
     for m in struct_methods(struct_def):
         if m.name != "__init__":
             continue
-        receivers = struct_receivers(struct_def)
-
-        def record(name, value):
+        for name, value in _method_field_stores(m, struct_receivers(struct_def)):
             out.setdefault(name, []).append(value)
-
-        for node in iter_nodes(getattr(m, "body", None)):
-            if isinstance(node, F.AssignStmt):
-                for target, value in _init_statement_field_stores(node,
-                                                                   receivers) \
-                        or ():
-                    record(target.member, value)
-                continue
-            if isinstance(node, F.MultiAssignStmt):
-                # `a = b = v` is a chain of `AssignStmt` in this AST, and the
-                # parser gives the chain ONE node with a `targets` list, so this
-                # is the shape `iter_nodes` alone would miss.  Every target here
-                # is a plain name or a member — the grammar does not admit a
-                # chain of tuple targets — so one value serves them all.
-                for t in (getattr(node, "targets", None) or []):
-                    if isinstance(t, F.MemberExpr) and isinstance(t.obj,
-                                                                 F.IdentExpr) \
-                            and t.obj.name in receivers:
-                        record(t.member, node.value)
     return out
+
+
+def method_field_assignments(struct_def, name) -> list:
+    """`[(method, value_node), …]` — every method's `self.<name> = …`.
+
+    The all-methods projection of the same scan `_init_field_assignments` reads,
+    and it carries the METHOD because the reader needs it: `field_stores_a_caller_frame`
+    asks whether the stored value is one of *that method's own* annotated
+    parameters, and a value read without knowing which method wrote it cannot be
+    looked up in the right parameter table.
+    """
+    receivers = struct_receivers(struct_def)
+    return [(m, value)
+            for m in struct_methods(struct_def)
+            for fname, value in _method_field_stores(m, receivers)
+            if fname == name]
 
 
 # The type NAME an assigned value provably has, for the rows the classifier can

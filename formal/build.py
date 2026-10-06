@@ -3869,6 +3869,94 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
     )
 
 
+def _widen_printf_integer_conversions(functions: list) -> int:
+    """Give every 32-bit INTEGER conversion of a printf format an `ll`.
+
+    **The rewrite that made `printf("%d", 2**62)` print the number the source
+    wrote, and it is HERE, in the one pipeline both front ends go through, for
+    the reason the neighbouring passes give.** A `%d` on this path reads a C `int` out of a
+    64-bit word, so `printf("%d", 2**62)` printed `0` where CPython prints
+    `4611686018427387904` — measured on BOTH architectures, exit 0, wrong
+    number, and invisible to every differential test that compares exit status
+    or whose integers happen to fit in 32 bits.
+
+    **A REWRITE of the format literal, not a refusal and not an emitter-side
+    substitution**, and each of those three is the wrong layer for a stated
+    reason:
+
+    * **Not a refusal.** This path refuses what it cannot answer
+      (`int_parse_base_refusal`, `float_binary_refusal`, `printf_kind_conversion_refusal`),
+      and this one CAN be answered: the operand is one 64-bit word
+      (`doc/ABI.md`, "Scalar types") and libc's `%lld` renders all eight bytes
+      of it. Refusing `%d` would also refuse what a large amount of ordinary
+      Mojo spells, including three of this repository's own `formal/hostmods/`.
+    * **Not per-emitter.** Two backends that each substituted a widened format
+      would be two answers to one question, and this file already carries the
+      scar: `fire.py dylib --formal --backend=x86_64` built an **arm64** image
+      because the architecture flag was parsed and dropped
+      (`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §3). One rewrite,
+      in the shared pipeline, is what makes the two architectures unable to
+      disagree.
+    * **Not in the emitters.** Doing it here means the emitters'
+      `printf_format_refusal` reads the WIDENED text, so the `%s`-of-an-integer
+      refusal, the missing-operand refusal and this agree about what the format
+      says — rather than one of them having to know the other ran first.
+
+    **It rewrites the literal's TEXT, which is what `_intern_string` interns,
+    and the escape discipline is `print_literal`'s.** A source literal reaches
+    here as raw text (`"%d"` is two characters), the decode is
+    `fire_compiler.decoded_literal`, and the emitter decodes AGAIN when it
+    interns — so a widened format written back raw would be decoded twice. The
+    value is therefore replaced with the DOUBLED-BACKSLASH form of the widened
+    decoded text, which is what `print_literal` already does for the same
+    reason and states in its own docstring.
+
+    **The decision is per CONVERSION and does NOT consult the operand**, which
+    is a scope statement rather than an omission. The one shape where `%d`
+    renders C's answer and `%lld` would not is a bare libc `int`-returning name
+    with no `BARE_C_RETURN_KINDS` row, which arrives zero-extended; but that
+    word is what `print` already renders as `4294967295` and what `a < 0`
+    already answers `no` for, so widening `%d` makes the two agree instead of
+    leaving one rendering that contradicts the rest of the model. The residual
+    defect is upstream and is filed as
+    `bugs/FORMAL_a_bare_c_int_return_with_no_prototype_row_is_not_sign_extended.md`;
+    its exposure on this corpus is zero, measured over every real libc bare
+    callee in 423 `.mojo` files.
+
+    **What it does not reach, and it is a real limit rather than an oversight:**
+    a format held in a NAME (`fmt = "%d"; printf(fmt, x)`) is not a literal,
+    so nothing here can scan it. That is the permissive direction every format
+    reader on this path already takes — `printf_format_refusal` is a no-op for
+    a non-literal format for the same reason — and the shape is rare enough
+    that the bug doc's own next step does not ask for it. Recorded on
+    `model.printf_widened_format` and in the bug doc's Status.
+
+    Returns the number of literals rewritten, which is what the test asserts
+    against: a pass that reports progress it did not make would be a bug in
+    its own right.
+    """
+    count = 0
+    for fn in functions:
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            lit = M.printf_call_format_literal(node)
+            if lit is None:
+                continue
+            widened = M.printf_widened_format(F.decoded_literal(lit))
+            if widened is None:
+                continue
+            # The same doubling `print_literal` does, and for the same reason:
+            # the emitter's `_intern_string` decodes, so the value written here
+            # has to be the inverse of that decode or an escape is decoded
+            # twice. `is_raw` is left as the parser set it, because a raw
+            # literal is not decoded at all and doubling its backslashes would
+            # ADD a backslash rather than remove one.
+            if not getattr(lit, "is_raw", False):
+                widened = widened.replace("\\", "\\\\")
+            lit.value = widened
+            count += 1
+    return count
+
+
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = (),
@@ -7457,25 +7545,40 @@ _UNPLACED = object()
 # Opt; def __init__(out self, o: Opt): self.inner = o; def get(out self) ->
 # Int: return self.inner.v * 10 + self.inner.has }` with `Box(mk(4))` builds
 # and prints CPython's `41` on arm64 AND on x86-64. It is the DELEGATING field —
-# `model.init_stores_a_parameter_struct`, the predicate `_typed_nested_frame`
-# already exempts a few lines above the refusal — and the reason it is sound is
-# the one that predicate's own comment makes: the only assignment is
-# `__init__`'s and its argument is the CALLER's, so the frame in the slot and the
-# frame the caller is reached through die together. A method that is not
-# `__init__` assigning the field is exactly the case with two independent
-# lifetimes, which is the refusal.
+# `model.field_stores_a_caller_frame`, the predicate `_typed_nested_frame`
+# exempts a few lines below the refusal — and the reason it is sound is the one
+# that predicate's own comment makes: every store of the field is a parameter
+# the CALLER supplied, and the object it went into is the RECEIVER, which the
+# caller owns, so the frame in the slot and the object die together. `__init__`
+# is one writer among several and the argument never mentioned it.
 #
-# What it does NOT claim: that a non-constructor assigner becomes answerable, or
-# that the read-through-a-local spelling works. Both are separate gaps, named
-# here so the next reader of either of them knows they were measured rather than
+# `model.field_stores_a_caller_frame` asks about EVERY method rather than about
+# `__init__` alone, which is what makes a setter delegating too, so this advice
+# has to name the setter form or it is naming a spelling narrower than the one
+# that works. It did, for one commit: the tail of this string said "a method
+# that assigns the field puts in a frame belonging to whichever function ran the
+# assignment and nothing here says the two lifetimes agree", which is false of
+# `Box.set(mut self, o: Opt)` — measured building and answering `41` on both
+# backends — and a refusal that names a narrower spelling than the one that
+# works is the same promise-nobody-checked defect the rest of this comment is
+# about.
+#
+# What it does NOT claim: that a store into anything but the receiver is
+# delegating. `b.inner = o` where `b` is a LOCAL that is then returned hands a
+# frame that dies with this call to an object that outlives it, so that shape is
+# refused at the STORE (`_frame_field_store_is_sound`) and neither this advice
+# nor the predicate behind it reaches it. Nor that a local copy of the field can
+# be read through — `var t = self.inner; t.v` is a separate gap, named here so
+# the next reader of either of them knows they were measured rather than
 # assumed.
 DELEGATING_FIELD_ADVICE = (
-    "Assign the field in __init__ from a parameter of __init__ and read it "
-    "through the field, which is the same program with a lifetime this "
-    "analysis can see: a constructor's argument is the frame the CALLER "
-    "reached, so the two die together, while a method that assigns the field "
-    "puts in a frame belonging to whichever function ran the assignment and "
-    "nothing here says the two lifetimes agree"
+    "Store the field from a PARAMETER of the method that stores it, annotated "
+    "with that struct's type: a constructor's argument is the frame the CALLER "
+    "reached, so the two die together, and a setter's argument is the caller's "
+    "for the same reason. EVERY method that writes the field has to do it -- "
+    "one writer that stores a constructed value, a call, or another field's word "
+    "puts in a frame this analysis cannot place, and it refuses the whole field "
+    "rather than part of it"
 )
 
 
@@ -7598,8 +7701,9 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     #
     # **A DELEGATING field is the one thing that is a nested frame WITHOUT being
     # placed, and it has to be asked here rather than inferred from the
-    # placement's absence.** `model.init_stores_a_parameter_struct` is the
-    # predicate: `self.src = r` where `r: R` is `__init__`'s own annotated
+    # placement's absence.** `model.field_stores_a_caller_frame` is the
+    # predicate, asked about EVERY method rather than about `__init__` alone:
+    # `self.src = r` where `r: R` is the writing method's own annotated
     # parameter, and nothing else writes `src`. The slot holds a frame address —
     # the CALLER's — so a read is `[slot + 8k]` exactly as it is for a placed
     # one and `walked`/`nested_fields` want the struct back. What it is NOT is a
@@ -7611,19 +7715,29 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # (`_frame_field_store_is_sound`), and the store's soundness is what says the
     # slot is a pointer.
     #
-    # Returning `_REASSIGNED` here instead would be the wrong ANSWER rather than
-    # a cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
+    # **Asking it about every method is what a READ has to do, and `__init__` is
+    # not where the lifetime argument comes from.** That argument is "the frame
+    # in the slot is one the CALLER reserved and passed down, and the object it
+    # went into is the RECEIVER, which the caller owns, so the two die together"
+    # — and it holds for a setter exactly as it holds for a constructor:
+    # `Box.set(mut self, o: Opt)` puts the caller's `o` into the caller's `Box`,
+    # so nothing that reads the slot afterwards can name reclaimed stack. What
+    # the argument does NOT license is a store into anything but the receiver,
+    # and `field_stores_a_caller_frame` counts only `self.<field>` stores, so
+    # `b.inner = o` with `b` a LOCAL that is then RETURNED keeps its refusal
+    # (`formal/model.py`'s docstring is the statement of which shape that is).
+    #
+    # Returning `_REASSIGNED` here instead is the wrong ANSWER rather than a
+    # cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
     # whichever function ran the assignment", and for a delegating field the
-    # only assignment is `__init__`'s, whose argument the caller supplies. So
-    # the frame in the slot is the caller's, the caller is the frame the object
-    # itself is reached through, and the two die together — which is the whole
-    # argument `_frame_field_store_is_sound` already makes.
+    # frame is the caller's whichever function ran it — so the caller is the
+    # frame the object itself is reached through, and the two die together,
+    # which is the whole argument `_frame_field_store_is_sound` already makes.
     for st in cands:
         if any(name == field for name, _slot, _child
                in M.struct_nested_frame_fields(st, structs_by_name)):
             continue
-        if M.init_stores_a_parameter_struct(st, field,
-                                            structs_by_name) is not None:
+        if M.field_stores_a_caller_frame(st, field, structs_by_name) is not None:
             continue
         return _REASSIGNED
     return nested
@@ -17975,6 +18089,22 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # name, so
     # every other module missed and silently got an empty census — the quieter
     # half of the same bug, and why `_check_method_receiver_types` was dead.
+    # A `printf` format's 32-bit INTEGER conversions are given an `ll` HERE,
+    # and HERE for the same reason as the four passes above it: this is the one
+    # pipeline both front ends go through, so one rewrite is what makes the two
+    # architectures unable to disagree about what a `%d` means. It is asked
+    # LAST, immediately before the frame pass, so it sees the final function
+    # list — after closures are flattened and lambdas lifted — for the reason
+    # `_frame_receivers`'s own docstring states about itself.
+    #
+    # `printf("%d", 2**62)` printed `0` where CPython prints
+    # `4611686018427387904`, on BOTH architectures, with exit 0: a formal value
+    # is one 64-bit word and libc's `%d` reads a C `int` out of it. The
+    # measurement, the three rejected alternatives (a refusal, a per-emitter
+    # substitution, an emitter-side rewrite) and the one shape it cannot reach
+    # (a format held in a NAME) are in `_widen_printf_integer_conversions`'s
+    # docstring and on `model.printf_widened_format`.
+    _widen_printf_integer_conversions(functions)
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
                      star_imported_modules(stmts), enum_structs, one_field)
@@ -19561,7 +19691,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (668 entry points, 262 of them word-shaped,
+    §3.1 for the word-shaped surface (683 entry points, 272 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps

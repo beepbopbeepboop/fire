@@ -1265,6 +1265,46 @@ def model_checks():
            'def f():\n'
            '    """prose."""\n'
            '    printf("%s", "héllo")\n')), ["héllo"])
+
+    # ── this repository's OWN host modules must scan as ASCII ──
+    #
+    # `bugs/FORMAL_string_value_model.md`'s last section recorded that
+    # `formal/hostmods/os/_syscalls.mojo` and `formal/hostmods/struct.mojo` are
+    # written with em-dashes and that FOUR registered suites were red on master
+    # for that one reason. **Both halves of that are now false, and this row is
+    # the measurement of the false half**, because the repair the section
+    # recommends — ASCII-folding the prose — is what would make the doc true and
+    # is not needed: the exclusion tested two rows above means those 93 non-ASCII
+    # lines are docstrings and `#` comments, neither of which is a string a
+    # program can name, so no image that imports them is non-ASCII.
+    #
+    # So the durable obligation is not "keep the prose ASCII" — it is "keep every
+    # host module's string VALUES ASCII", and this asks the reader the build
+    # asks rather than counting bytes: a hostmod written with a non-ASCII
+    # docstring is fine and one written with a non-ASCII VALUE is not, and only
+    # the reader tells them apart. One such value would make `d[i]`,
+    # `len(s)` and `printf("%<w>s", s)` refuse in every image whose closure
+    # reaches the module, which is every image that imports `os` — the 174 checks
+    # over four suites the doc counted, re-derivable here in about a second.
+    import os as _os
+    _hostmods = _os.path.join(HERE, "formal", "hostmods")
+    _dirty = []
+    for _root, _dirs, _files in _os.walk(_hostmods):
+        for _f in sorted(_files):
+            if not _f.endswith(".mojo"):
+                continue
+            _p = _os.path.join(_root, _f)
+            try:
+                _stmts = F.Parser(F.py_tokenize(
+                    open(_p, encoding="utf-8").read())).parse_module()
+            except Exception as _e:                      # noqa: BLE001
+                _dirty.append(f"{_os.path.relpath(_p, HERE)}: {_e}")
+                continue
+            _found = M.non_ascii_strings_in(_stmts)
+            if _found:
+                _dirty.append(f"{_os.path.relpath(_p, HERE)}: {_found[:2]}")
+    ok("every formal/hostmods module has no non-ASCII string VALUE",
+       _dirty, [])
     # The predicate itself, asked directly rather than through the walk, because
     # it is the answer to a question TWO places now ask
     # (`module_body` and the scan) and two answers would be the failure this
@@ -1387,6 +1427,65 @@ def model_checks():
        M.printf_text_widths("%s%%%d"), [None, None])
     ok("widths: an unparsed format is None",
        M.printf_text_widths("%2$6s"), None)
+
+    # ── the INTEGER-conversion widening, which is a REWRITE of the format ──
+    #
+    # A formal value is one 64-bit word and libc's `%d` reads a C `int` out of
+    # it, so `printf("%d", 2**62)` printed `0` where CPython prints
+    # 4611686018427387904 (measured on both architectures; the fix is
+    # `model.printf_widened_format`, landed 2026-10-05). It widens the
+    # CONVERSION, so these rows are
+    # about the text and `test_formal_int_semantics.py`'s are about the answer;
+    # between them they are what stops a rewrite from being "widen everything
+    # that looks like a number".
+    #
+    # Every row is a COMPARISON against the spelling the rewrite must produce,
+    # including the ones that must NOT move — a `%c`, a `%s`, an already-64-bit
+    # conversion, and the `%%` a `print_literal` doubles. A rule that widened
+    # `%c` would change the CHARACTER; one that doubled `ll` in front of an `l`
+    # would produce `%lllld`, which libc reads as something else entirely.
+    ok("widen: a bare %d", M.printf_widened_format("A=%d|"), "A=%lld|")
+    ok("widen: %u", M.printf_widened_format("%u"), "%llu")
+    ok("widen: %i and %o", M.printf_widened_format("%i/%o"), "%lli/%llo")
+    ok("widen: %x and %X", M.printf_widened_format("%x %X"), "%llx %llX")
+    ok("widen: flags, width and precision all survive",
+       M.printf_widened_format("%+08.3d %-5d %#x"), "%+08.3lld %-5lld %#llx")
+    ok("widen: a star width keeps its own argument",
+       M.printf_widened_format("%*d"), "%*lld")
+    ok("widen: several in one format",
+       M.printf_widened_format("%d %u %x"), "%lld %llu %llx")
+    ok("widen: a %% is left alone", M.printf_widened_format("a%%b%d"),
+       "a%%b%lld")
+    ok("widen: %c is not an integer rendering", M.printf_widened_format("%c"),
+       None)
+    ok("widen: %s is not an integer rendering",
+       M.printf_widened_format("%s"), None)
+    ok("widen: a floating conversion is untouched",
+       M.printf_widened_format("%f %.17g %e %a"), None)
+    ok("widen: %p renders an address", M.printf_widened_format("%p"), None)
+    # An EXPLICIT length modifier is the source stating a width. `%lld` is
+    # already what this rewrite produces; `%hd`/`%hhd` ask for a narrower type
+    # on purpose and there is no 16-bit value on this path to be narrower than.
+    ok("widen: %lld is already 64-bit", M.printf_widened_format("%lld"), None)
+    ok("widen: %ld is 64-bit under LP64", M.printf_widened_format("%ld"), None)
+    ok("widen: %zu/%jd/%td are 64-bit", M.printf_widened_format("%zu %jd %td"),
+       None)
+    ok("widen: %hd asks for 16 bits and is left alone",
+       M.printf_widened_format("%hd"), None)
+    ok("widen: %hhd asks for 8 bits and is left alone",
+       M.printf_widened_format("%hhd"), None)
+    ok("widen: %Lf is a long double", M.printf_widened_format("%Lf"), None)
+    ok("widen: nothing to widen is None", M.printf_widened_format("plain"),
+       None)
+    ok("widen: an unparsed format is None",
+       M.printf_widened_format("%2$6s"), None)
+    # The scan this rides on is the SAME one `printf_conversion_specifiers` and
+    # `printf_text_widths` read, so a rewrite that found a different end for a
+    # specification would show up here as a disagreement about what the format
+    # contains at all.
+    ok("widen: the widened format parses the same way",
+       M.printf_conversion_specifiers(M.printf_widened_format("%+08.3d %x")),
+       M.printf_conversion_specifiers("%+08.3d %x"))
 
     # ── the width refusal asks whether the conversion is a `%s` ────────────
     #

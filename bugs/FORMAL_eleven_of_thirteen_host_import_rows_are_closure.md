@@ -465,3 +465,99 @@ files), because the two closures this document names have both moved:
 question rather than a missing file. `collections` at 10 is the larger reachable
 row and is `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue, not
 this document's.
+
+## Status, 2026-10-05 (`formal37-2`): `functools` is GONE, and the row closed the
+## way `itertools` and `copy` did
+
+**Every "NOT WORK: the answer is a module" row in this document has now closed by
+the corpus instead, and the third was the one this document called a capability
+question.** It was: `lru_cache` is a decorator over a function value
+(`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`), and
+`bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue would have put
+`functools` in the "decorator" column forever.
+
+It decorates a **ZERO-ARGUMENT** function, though. That is the whole of what
+`lru_cache(maxsize=1)` did here: compute once, return the same value after. Two
+module globals are that, and `version.py` says why in its own docstring — which
+is where the next reader will look, because `version.py` is imported by
+`fire.py`, `cas.py` and `jit/arm64.py` and a reader deciding whether the memo is
+safe wants the argument next to the code rather than in this file.
+
+```python
+_VERSION_CACHE = None
+
+def version() -> str:
+    global _VERSION_CACHE
+    if _VERSION_CACHE is not None:
+        return _VERSION_CACHE
+    ...
+```
+
+`functools` is now **absent from the wall entirely** — not `alone 0`, absent
+from the `751`-file measurement's output, because `alone 1 / reach 1` was the
+whole of its column. `version.py`'s closure is **5 files, `{}` unresolvable**
+(walked with `formal/imports.py`'s own `resolve_module_path`, the resolver the
+build uses).
+
+### Two constructs came off with the module, and the second was not predicted
+
+The doc's value statement for a module is that "the verdict does not change, the
+SUBJECT of the refusal does". Measured on both architectures, `version.py` walks
+two subjects further before it stops:
+
+| construct | subject it was stopped on |
+|---|---|
+| `@functools.lru_cache(maxsize=1)` | `version.py imports 'functools', which is a host module (CPython standard library), which has no Mojo source for this backend to compile` |
+| `def _git(*args)` | `version__git: the body reads 'args', its *-parameter, and this path has no variadic ABI. A formal value is one 64-bit word, so the arguments a caller passes past the fixed ones have nowhere to be packed` |
+| `r.returncode` | `'r.returncode' is a field access through 'r', and this path has no way to say what 'r' holds` |
+
+The variadic one is the reason the substitution was not a one-liner, and it is
+the same shape as `test_formal_run.py`'s `itertools` removal: **the call site
+knew its shapes**. `_git` had exactly two, so two `subprocess.run` calls spelled
+out is the whole of the fix — and it deletes the nested `def` with them, which
+was a closure capture the path has to flatten before it can lower the function
+at all.
+
+**And the third subject is where it stops, and it is a REAL capability
+question** — this document's word, not mine. `formal/hostmods/subprocess.mojo`
+models `run` as returning the **status word** (`formal/hostmods/subprocess.mojo`
+line 472, and `completed_process_returncode` at 333 is the same fact), so
+`r` holds a word and `r.returncode` is a field access on an integer. That is not
+a spelling this repository can fix without changing what its own code means, and
+it is **filed, not fixed**: `FORMAL_subprocess_run_is_modelled_as_returning_the
+_status_word.md`. It is the same class of divergence as the doc's own
+`FORMAL_os_path_realpath_keeps_a_double_slash_root`, filed from §4.
+
+So `version.py` is no longer "one `functools` call away" and it is also not
+"swept": it is three subjects in, stopped on a capability question that has a doc
+and an owner. That is the position `test_formal_run.py` and
+`tools/apply_extraction.py` are in, which is what "the corpus closed its own
+row" is supposed to mean.
+
+### The pin, and the hole the pin found
+
+`test_formal_imports.py::a memo replaces the decorator the corpus cannot climb`,
+beside the `copy` test it follows. It asks three questions, none of them "is the
+string `functools` still in the file": the closure is empty (re-adding the
+import puts `functools` straight back on the wall), the answer still equals what
+a real `lru_cache(maxsize=1)` over the pre-change body answers on this tree, and
+the `RELEASE` override branch — the one input that does not depend on this being
+a git checkout — is still live and memoised.
+
+**The third of those was WRONG when first written, and measuring rather than
+assuming is what caught it.** The initial pin compared `version()` to itself,
+which a `version()` that recomputes on every call and stores the result passes:
+same string, two `git` subprocesses per caller, on the path of `fire.py`,
+`cas.py` and `jit/arm64.py`. Deleting the `if _VERSION_CACHE is not None: return`
+line left the test **green**, which is the finding. The check that distinguishes
+them is that a memo is AUTHORITATIVE, so poisoning `_VERSION_CACHE` with a
+string no recomputation could produce must come straight back out; with that,
+all three reverts fail and the whole file is 84/0.
+
+**The remaining `alone` rows on the wall are unchanged by this and none of them
+is this document's**: `collections` 10 (the largest reachable row, and
+`FORMAL_stdlib_module_names_are_not_classified.md`'s queue), `unittest` 7,
+`builtins` 2, `datetime` 2, `fractions` 1 (a real oracle use, correctly a wall),
+and the tail. `formal/hostmods/functools.mojo` still does not exist and still
+should not: nothing in this tree reads `functools` any more, which is the whole
+of `formal31-3`'s `copy` argument applied to a module nobody was going to write.

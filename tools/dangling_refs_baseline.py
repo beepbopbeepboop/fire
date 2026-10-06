@@ -31,6 +31,5 @@ their fixtures are a fixed, small, intentional number that a ceiling can
 honestly bound.
 """
 BASELINE = {
-    'bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md': 1,
     'test_suite.py': 6,
 }

@@ -857,7 +857,10 @@ def _decorator_names(fdef) -> set:
     A decorator is not always a bare name: `@gpu` is, but
     `@functools.lru_cache(maxsize=1)` is a CallExpr node, which is unhashable
     and dies if put in a set directly. (device_select._decorator_names
-    documents the real instance -- `version.py` in the self-host closure.)
+    documents the real instance -- it was `version.py` in the self-host
+    closure, which no longer carries the decorator since `formal37-2`; both
+    arms are pinned by test_metal_codegen.py's
+    `test_a_parameterized_decorator_is_its_callees_name`.)
     So: a string entry is itself, a name/member node is its name, and a call
     contributes its callee's name.
     """

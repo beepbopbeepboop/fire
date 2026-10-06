@@ -789,9 +789,10 @@ def contract_texts_are_unique(contracts: list) -> str:
 # simulation finishes at all) rather than a hole.  It is counted because a trust
 # boundary nobody can see is worth nothing, and because the alternative — a
 # library that quietly depends on an axiom while §7 says it depends on none — is
-# the failure this module exists to prevent.  `bugs/FORMAL_native_decide_axiom.md`
-# carries the replacement plan and the exact `#print axioms` measurement that
-# belongs to the integrator.
+# the failure this module exists to prevent.  The replacement plan and the exact
+# `#print axioms` measurement are `test_formal_axioms.py` (per-declaration) and
+# `test_formal_admitted.py::AXIOM_CLOSURE` (per-closure); both are pinned, so
+# the plan is a list of zero replaceable theorems rather than a backlog.
 #
 # TEXT SCAN, AND WHAT IT IS NOT
 # -----------------------------
@@ -1270,9 +1271,10 @@ def library_trust_by_declaration(lean_dir: str) -> dict:
     actionable.** `library_trust` reports SITES because a count with no location
     is a number nobody can act on; this reports how many of them each THEOREM
     owns, because the ceiling `test_formal_admitted.py` pins is per MODULE and
-    the work is per proof.  `bugs/FORMAL_native_decide_axiom.md` item 2 is this
-    function: "the ceiling can be lowered per theorem rather than per file",
-    which needs the theorem to be named before anything can be lowered.
+    the work is per proof.  This function is what makes "the ceiling can be
+    lowered per theorem rather than per file" decidable at all: it needs the
+    theorem named before anything can be lowered, and
+    `test_formal_admitted.py::REPLACEABLE_THEOREMS` is the list that reads.
 
     A PROJECTION of `_attribution`, and kept in this shape for the two consumers
     that read a two-tuple: `test_formal_axioms.py`'s per-declaration arithmetic
@@ -1292,9 +1294,8 @@ def declaration_tally(lean_dir: str) -> dict:
     """`{module: [(name, line, kinds)]}` — the attribution as a WORK LIST.
 
     `library_trust_by_declaration` in the shape a CEILING wants: a count and
-    where its sites are.  This is the shape `bugs/FORMAL_native_decide_axiom.md`
-    items 2 and 3 want — where the theorem starts, and how its sites split by
-    tactic — because "these four theorems are now kernel-checked" is a claim
+    where its sites are.  This is the shape a pay-down wants — where the theorem
+    starts, and how its sites split by tactic — because "these four theorems are now kernel-checked" is a claim
     somebody has to be able to act on, and the difference between a `native_decide`
     on a closed `UInt64` goal and a `bv_decide` on a `∀ w, …` bit-pattern lemma
     is the difference between a replacement with a spelling and one without.
