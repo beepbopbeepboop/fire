@@ -10,7 +10,10 @@ doc listed; NOT FIXED. The cost is `native_decide`/`bv_decide` in the
 per-block BRANCH-CONDITION facts, and what is missing is a lemma for a
 short-circuit condition's value flow, not a smaller record and not a larger
 ceiling.** §2 is the bisection; §3 is the fix direction; §4 is what was
-already tried and measured against.
+already tried and measured against. **§6 is new (2026-10-05) and it is the
+narrowest statement of the fix that has been measured: the per-block fact the
+fix needs is one block WIDE, and the reason it cannot be made that narrow is a
+specific register class that `hprior_*` does not cover.**
 **§5 — the census half of this doc, the half that made the regression above
 invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
 ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
@@ -206,6 +209,92 @@ chains already folded.**
   with it, and `omega` does not unfold a reducible constant either, so the
   fuel obligations fail.
 * `blocks := []` in the record: the error is unchanged, at the same line.
+
+## 6. §3's lemma, built and measured: the per-block fact is one block WIDE, and
+## `hprior_*` cannot be widened to cover what is missing (2026-10-05)
+
+§3 says the missing thing is "a lemma for a short-circuit condition's value
+flow … for each of the two edges into the merge block, *which* operand's truth
+value the merge register holds". **The closest existing machinery is
+`hprior_*`** — a fact per (path, prior block, variable) that
+`(s_{pb}).x<reg> = <variable>`, proved by unfolding that ONE block's chain and
+referencing the previous block's fact. So the experiment was: **give `hcond` the
+same treatment** — for a merge block whose cset is in a PRIOR block, unfold only
+that block's chain plus the `hprior_*` names, instead of the whole path prefix.
+That is `_cs_defs` in `formal/arm64_proof_gen.py`'s `hcond` emitter, and it was
+changed and measured and then **withdrawn**, for the reason below.
+
+| the emitted `either` proof, arm64 | wall | peak RSS | verdict |
+|---|---|---|---|
+| as emitted (`_cs_defs` = the whole `flow_hsid` prefix) | 304 s | **6.10 GB** | `rc=0` through `run_lean`; `(kernel) excessive memory consumption detected` run twice by invoking `lean` directly on the same bytes — **the file is over `-M 6144` and the verdict is a coin flip** |
+| `_cs_defs` = `hsid_{cset_bi}` + that block's `qS`/`qT` + `hprior_*` | 239 s | **3.52 GB** | **`rc=1`: 12 `bv_decide` counterexamples, one per `_cset_bi != bi` goal** |
+
+**The narrowing is worth 2.6 GB and does not close, and the reason is a
+specific register class.** All twelve failures are the same shape and the
+message names the expressions `bv_decide` could not see:
+
+```
+- It abstracted the following unsupported expressions as opaque variables:
+  [arm64_reg 0 {…}, arm64_reg 16 {…},
+   mem_read_u64 (mem_write_u64 (mem_write_u64 mem✝² (sp✝² - 16).toNat n) …),
+   arm64_matches_condition 2 nzcv✝²]
+```
+
+`arm64_reg 16` is the register the **literal `10`** was materialised into
+(`mov x16, #10`, in the block before the one holding the cset), and
+`nzcv✝²` is the flags the cset's own `subs`/`cmp` read. **Neither is a named
+VARIABLE, so `hprior_*` reaches neither** — that table's loop is
+`for _v in _vars if re.search(rf"\b{_v}\b", _src)`, i.e. it is keyed on the
+variable names that appear in the SOURCE CONDITION, and a comparison operand
+that has been lowered to a register, and a flag field, are not among them. With
+the prefix unfolded, both reduce (`arm64_reg 16 s_0` becomes `10` by
+`Arm64State.init`); with only `_cset_bi` unfolded, `s_0` is an opaque local and
+they do not.
+
+### The exact next step, and it is one predicate
+
+**Extend the per-block fact from "a variable's register" to "every register and
+flag the block's OWN chain reads".** The emitter has both halves:
+
+* the chain's read set — `_cset_registers` is already the write-set reader for
+  one instruction, and the operand registers of a `cmp`/`subs` are decodable
+  from the same word;
+* the value — for a register whose last writer on this path is an immediate
+  store, the value is a literal, and `(s_{pb}).x<r> = K` is provable by
+  unfolding that one block. That is the base case the induction needs, and
+  `nzcv` is the same fact for the flag field.
+
+Then `hcond`'s prefix disappears and §2's memory measurement has nothing left to
+carry. **What this does NOT do:** it is a backward slice, so its size is a
+function of how far the operand's chain reaches back — on a program whose
+condition reads a value a CALL produced, the slice is the call, and the flag
+this doc's §2 measured (`native_decide` over a symbolic `n`) is still there.
+That is the same wall `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
+owns, and this section does not claim to clear it.
+
+**Not landed, and the reason is verification rather than the change.** The
+narrowing above was written and measured and withdrawn because it does not close;
+the predicate that would make it close is a dataflow addition to a 12 000-line
+emitter, and each iteration of it costs a 4–5 minute `run_lean` per program
+(`formal/lean.py`'s own bounds) plus the same on the x86-64 side, which has no
+`_sc_by_merge` at all and therefore has no shared code to fix. That is not a
+light worker's change.
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 -c "import sys; sys.path.insert(0,'.'); from formal import monomorph" #noop
+$ python3 tools/memslot.py --gb 8 --label t -- python3 .tmp/pg/emit.py \
+      formal/examples/either.mojo .tmp/pg/either.aout arm64   # proof text, no Lean
+$ python3 tools/memslot.py --gb 8 --label pg -- python3 -c "
+import sys,os; sys.path.insert(0,'.')
+from formal import lean as L
+env=dict(os.environ); env['LEAN_PATH']=os.path.join(os.getcwd(),'lib')
+r=L.run_lean(L.find_lean(), ['.tmp/pg/either_proof.lean'], env=env)
+print('rc',r.returncode,'wall',round(r.wall_s,1),'peak',round(r.peak_rss/2**30,2))"
+rc 0 wall 304.0 peak 6.1
+$ grep -n "_cs_defs = " formal/arm64_proof_gen.py          # the line to narrow
+$ grep -n "for _v in _vars" formal/arm64_proof_gen.py       # the table to widen
+```
 
 ## 5. A thing the census got wrong: FIXED 2026-10-04, and it is in this doc
 ## because it is how the regression above stayed invisible
