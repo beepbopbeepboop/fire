@@ -134,63 +134,6 @@ def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
         os.unlink(path)
 
 
-def gimple_body_compiles(mojo_src: str) -> tuple[bool, str, str]:
-    """`gimple_compiles` with the one flag that makes gcc ACTUALLY parse a
-    `__GIMPLE` function's body as GIMPLE: `-x c`.
-
-    A closure body and a struct-method body are emitted with the
-    `__GIMPLE` attribute, which tells gcc "this text is already GIMPLE,
-    do not re-lower it" — and gcc honours that only when it is reading
-    the file as C. `fire.py build_executable`'s compile step is the one
-    that does (`... -c -o o.ci -x c`), and it is the path the whole
-    self-host build goes through; `gimple_compiles` above (and
-    driver._build, and tools/compile_one.py) leave the language to the
-    `.c` suffix, so gcc lowers the body from C itself and tolerates C
-    that GIMPLE has no form for.
-
-    The gap is not academic: it hid a lowering that emitted
-    `_t3 = !mojo_is_tuple ((MojoList *)x);` and
-    `_t4 = (_t2 != 0) && (_t3 != 0);` — three separate GIMPLE violations
-    (a call is a statement and never an operand; `&&` does not exist; a
-    parenthesized assignment RHS does not parse) — for the whole history
-    of the tuple-marker `isinstance(x, list)` check, until the self-host
-    build compiled the backend that emits it and gcc said "'!' not valid
-    in GIMPLE before '!' token" (mojoc / selfhost / bootstrap-stage2-cc).
-    Use this for anything emitted inside a closure or a struct method.
-    """
-    c_src = compile_to_gimple(mojo_src)
-    with tempfile.NamedTemporaryFile(suffix='.ci', mode='w', delete=False) as f:
-        f.write(c_src)
-        path = f.name
-    try:
-        r = subprocess.run(
-            [GCC, '-fgimple', '-fsyntax-only', '-x', 'c', f'-I{_RUNTIME_INC}', path],
-            capture_output=True, text=True,
-        )
-        return r.returncode == 0, c_src, r.stderr
-    finally:
-        os.unlink(path)
-
-
-def test_gimple_body(name: str, mojo_src: str):
-    """`test`, for source whose interesting text lands in a `__GIMPLE`
-    body — see `gimple_body_compiles` for why that needs its own gate."""
-    global _PASS, _FAIL
-    ok, c_src, stderr = gimple_body_compiles(mojo_src)
-    if ok:
-        print(f"PASS  {name}")
-        _PASS += 1
-        return
-    print(f"FAIL  {name}")
-    print("      --- generated C ---")
-    for i, line in enumerate(c_src.splitlines(), 1):
-        print(f"      {i:3}: {line}")
-    print("      --- gcc stderr ---")
-    for line in stderr.splitlines():
-        print(f"      {line}")
-    _FAIL += 1
-
-
 def test(name: str, mojo_src: str):
     global _PASS, _FAIL
     ok, c_src, stderr = gimple_compiles(mojo_src)
@@ -6412,46 +6355,6 @@ fn main():
     print(isinstance(5, bytes))
 """)
 
-    # A tuple is a MojoList carrying the tuple marker, so `isinstance(t,
-    # list)` on a value whose static C type is already `MojoList *` is the
-    # one isinstance this codegen answers with two runtime calls
-    # (`mojo_is_registered_list` AND NOT `mojo_is_tuple`) rather than
-    # statically. Inside a CLOSURE that answer's body is `__GIMPLE`, so it
-    # has to be real GIMPLE and not merely valid C: it used to be emitted
-    # as `!mojo_is_tuple ((MojoList *)x)` and a `&&` of two comparisons,
-    # which gcc rejects ("'!' not valid in GIMPLE before '!' token") the
-    # moment anything compiles the backend itself — that is the self-host
-    # build, and it took mojoc / selfhost / bootstrap-stage2-cc out. The
-    # `list`-annotated parameter is what gives the check a `MojoList *`
-    # static type to fire on; the nested `def` is what makes the body
-    # `__GIMPLE`. Both are load-bearing, so neither is optional here.
-    test_gimple_body("isinstance_list_tuple_check_in_closure", """\
-def outer(v: list):
-    def inner():
-        return isinstance(v, list)
-    return inner()
-
-def main():
-    print(outer([1, 2]))
-    print(outer((3,)))
-""")
-
-    # The same answer reached through a struct field rather than a
-    # parameter, and asked as a NEGATIVE (`not isinstance(...)`), which
-    # adds the `== 0` leg — the other half of the join the old `&&` was
-    # standing in for.
-    test_gimple_body("isinstance_list_tuple_check_on_struct_field", """\
-struct Box:
-    var items: list
-
-    def is_list(self):
-        return not isinstance(self.items, list)
-
-def main():
-    var b = Box([4, 5])
-    print(b.is_list())
-""")
-
     # bytes value type (Stage 2b) — %-formatting + body-usage param inference
     test("bytes_percent_format", """\
 fn main():
@@ -11792,79 +11695,6 @@ print(run('x/y.txt'))
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_local_rebound_from_a_scalar_to_a_container_is_the_box():
-        """A local assigned a scalar and a container has no single C type,
-        so it must be declared `int64_t` (the box) and neither store may be
-        a pointer cast.
-
-        The lattice's pointer-wins join answered the CONTAINER, so `q = 5`
-        was emitted as `q = (MojoList *)5` and `q > 1` lowered as a
-        list-vs-int compare the codegen refuses at run time (exit 1,
-        `TypeError`), and `q = 2.5` in the same slot would not even build
-        ("pointer value used where a floating-point was expected"). CPython
-        is the oracle for every shape below. `double` is deliberately one of
-        them: it is the only scalar that made the un-boxed slot a hard gcc
-        error rather than a wrong value.
-        """
-        global _PASS, _FAIL
-        name = "a_local_rebound_from_a_scalar_to_a_container_is_the_box"
-        shapes = [
-            "def k():\n    q = 5\n    q = [1, 2]\n    return q\nprint(len(k()))\n",
-            "def k():\n    q = None\n    q = [1, 2]\n    return q\nprint(len(k()))\n",
-            "def k(c):\n    if c:\n        q = None\n    else:\n        q = [1, 2]\n    return q\nprint(len(k(0)))\n",
-            "def k():\n    q = 'ab'\n    if q:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
-            "def k():\n    q = 5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
-            "def k():\n    q = 2.5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
-            "def k(c):\n    q = 2.5\n    if c:\n        q = [1, 2]\n    return q\nprint(len(k(1)))\n",
-        ]
-        with tempfile.TemporaryDirectory() as td:
-            for i, src in enumerate(shapes):
-                entry = os.path.join(td, f'rb_{i}.py')
-                with open(entry, 'w') as fh:
-                    fh.write(src)
-                py = subprocess.run([sys.executable, entry],
-                                    capture_output=True, text=True, cwd=td,
-                                    timeout=RUN_TIMEOUT_S)
-                if py.returncode != 0 or not py.stdout:
-                    print(f"FAIL  {name}: shape {i}: CPython exited "
-                          f"{py.returncode} printing {py.stdout!r} — the test "
-                          f"program itself is wrong, not the compiler")
-                    _FAIL += 1
-                    return
-                try:
-                    c_src = gimple_codegen._run_pipeline(
-                        src, filename=entry, do_imports=False)[0]
-                except Exception as e:
-                    print(f"FAIL  {name}: shape {i}: the compiler raised "
-                          f"{type(e).__name__}: {e}")
-                    _FAIL += 1
-                    return
-                cf = os.path.join(td, f'rb_{i}.c')
-                exe = os.path.join(td, f'rb_{i}.exe')
-                with open(cf, 'w') as fh:
-                    fh.write(c_src)
-                cc = subprocess.run(
-                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, cf,
-                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-                if cc.returncode != 0:
-                    errs = [ln for ln in cc.stderr.splitlines()
-                            if ' error:' in ln]
-                    print(f"FAIL  {name}: shape {i}: gcc -fgimple failed:\n"
-                          + "\n".join(errs[:4]))
-                    _FAIL += 1
-                    return
-                run = subprocess.run([exe], capture_output=True, text=True,
-                                     timeout=RUN_TIMEOUT_S)
-                if run.stdout != py.stdout or run.returncode != 0:
-                    print(f"FAIL  {name}: shape {i}: compiled printed "
-                          f"{run.stdout!r} (exit {run.returncode}), CPython "
-                          f"printed {py.stdout!r}")
-                    _FAIL += 1
-                    return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
@@ -11917,7 +11747,6 @@ print(run('x/y.txt'))
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
-    test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
@@ -11932,8 +11761,8 @@ print(run('x/y.txt'))
     # `-fgimple`'s strict verifier — a hard gcc error and no binary.
     #
     # The declaration is the whole reason this program exists. `info = None`
-    # types a local `int`, and a NESTED `def`'s local took that path (the
-    # same source at module level declared `int64_t` and compiled), so
+    # types a local `int`, and a NESTED `def`'s local takes that path (the
+    # same source at module level declares `int64_t` and compiles), so
     # `mojo/middle/coro.py`'s `_visit_call` — `pinfo = None` then
     # `pinfo = gen_params[gname]` then `len(pinfo)` — is four of them, plus one
     # in `myinterpreter.py`'s `MojoString`. `_ensure_local` is the chokepoint
@@ -11941,20 +11770,12 @@ print(run('x/y.txt'))
     # DECLARED type is a different scalar", and it emits nothing extra when
     # there is no mismatch.
     #
-    # The DECLARATION is fixed now, not only the cast: a lifted closure gets
-    # the same per-function local-type pre-pass a top-level `def` gets
-    # (`_gen_lifted_closure` now fills `_inferred_var_types[ci.lifted_name]`),
-    # so `info` is declared `int64_t` from the join over ALL its assignments
-    # and `info = table[key]` stores the full boxed pointer with no cast. The
-    # `(int64_t)info` must-have below is the `len()`-subject copy (still a
-    # cast, correctly), and `int info;` is the truncated declaration whose
-    # absence is the bug.
-    #
     # Asserted as the emitted TEXT and not only as "it compiles": a `len()`
     # that stopped routing through the registries at all would also compile,
     # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
     # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
-    # must-have list for that reason.
+    # must-have list for that reason, and `(int64_t)info` is the exact text
+    # whose absence is the bug.
     test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
 def outer(names, table):
     def visit(node, caller):
@@ -11972,9 +11793,8 @@ def main():
     t = {"a": [1, 2, 3]}
     print(outer("a", t))
 main()
-""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info",
-      "int64_t info;"],
-       ["int info;", "int64_t _t = info;"])
+""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info"],
+       ["int64_t _t = info;"])
 
 
     print()

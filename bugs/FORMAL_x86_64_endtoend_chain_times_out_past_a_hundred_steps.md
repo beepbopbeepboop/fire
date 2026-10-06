@@ -1,44 +1,5 @@
 # the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable
 
-## Status (2026-10-05 — `work/formal42-5`: the two successor rows that had drifted are corrected, and `wide_recv` is still the one file that aborts)
-
-**The doc's own subject — the per-step separation and the `hpop` proof — is
-UNCHANGED, and `formal/examples/wide_recv.mojo` still dies in Lean's allocator.
-Measured after this pass's three commits:** `terminates: FAIL lean exited -6:
-libc++abi: terminating due to uncaught exception of type
-lean::memory_exception: excessive memory consumption detected at 'interpreter'`,
-**313.2 s, 6.1 GB**, with **five admitted facts** — `hpop56`, `hpop91`,
-`hpop115`, `hpop141` and `hrip` — and **1 278 guarded side conditions**. Before
-this pass the same file did not get that far: it failed to ELABORATE, on a
-`Type mismatch | x86_step_setcc_r8`, so its 115 equations were never reached at
-all. **That is the only thing that changed for it, and it is worth knowing that
-`e54d2f4e` (2026-10-04) put this file back to where it was on 2026-10-03** —
-two successor rows stopped matching the model and took the whole corpus's
-`terminates` theorems with them.
-
-**What changed in the emitter that bears on this doc**, and it is one thing:
-the `x86_exec_go_exit_step` side condition and the next step's own `rip` side
-condition now take their `simp` set from `_path_simp(fs_path, …)` — the
-definitions of every step on the path — instead of from the last step's form
-alone. Both are projections through the whole chain, so both need the whole
-chain's definitions, and both are the kind of proof the `hpop` work needs to be
-affordable anyway.
-
-**The other measurement this pass produced, and it is the one the doc's option 1
-predicted:** `powexpr`, `localmul` and `pair` each went from *one live hole at
-`hrip`* to **no live hole**, because `_WRAPPER_DEFS`'s new
-`x86_set_reg_narrow_mem` / `x86_set_flag4_mem` let `_concrete_read` project
-through the two new wrappers. Those are the short chains this doc's boundary is
-about — 24 to 77 equations — and none of them crosses `_MAX_UNFOLD = 64` with a
-`call` in it, so **they say nothing about the 115-equation file** and the table
-in the Status above stands.
-
-**Still open, unchanged and still the whole of this doc:** the `hpop` proof,
-which needs the separation carried across the callee's N steps at a literal read
-address, which needs the emitter-side stack/frame tracker. `wide_recv`'s
-measurement above is the number that work starts from.
-
-
 **Area:** FORMAL (the x86-64 end-to-end prover). **Status: the premise is wrong
 and the premise was the bug; the read at a `ret` is now EVALUATED rather than
 simplified and closed where the chain is short, two guards that could not work
@@ -49,43 +10,6 @@ the SysV stack-argument convention's proof half
 deleted with its fix — the lemmas it asked for are in `lib/X86.lean` and wired in
 `formal/x86_64_endtoend_test.py`). Re-opened and rewritten 2026-10-02 on
 `work/formal8-14`.
-
-## Status (2026-10-05 — this is now the ONLY red in `formal-x86-endtoend`, and it is a registered `expect=`)
-
-`formal43-x86-endtoend-red` re-measured the whole job
-(`python3 formal/x86_64_endtoend_test.py`, 93 programs, ~55 min, 6.1 GB peak):
-
-| | 2026-10-05 (this doc's subject fixed) | 2026-10-05 after |
-|---|---|---|
-| `terminates` FAIL | **26 of 26** | **1** |
-| proved with no sorry | 13 | **58** |
-| proved with a counted hole | 0 (nothing elaborated) | **6** |
-| no finite tree | 28 | 28 (19 loop, 9 uncovered form) |
-
-The 26 were three stale rows in `_SUCCS` against a corrected model, and the
-rest of that work is in `037f4113` and `7cb21aea`. **The one remaining failure is
-this doc's subject and nothing else**: `formal/examples/wide_recv.mojo` aborts
-with
-
-    libc++abi: terminating due to uncaught exception of type
-      lean::memory_exception: excessive memory consumption detected at 'interpreter'
-
-at `rc=-6`, on the 113-equation chain this doc's `_MAX_UNFOLD = 64` table
-measures. Its own numbers are unchanged by that work — `const2` still closes its
-read at 19 equations, 77 still leaves a hole, 113 still aborts — and it is
-registered as `formal-x86-endtoend`'s `expect='1 of 65'`, so it is now a
-CHECKED red that runs on every `proofs`/`x86` sweep instead of an unobserved
-one.
-
-**What is still missing, unchanged from the 2026-10-04 entry below:** the
-per-step separation invariant, so the closing read needs no unfold at all. The
-interim answer (`_concrete_read` unfolding up to 64 equations and
-`native_decide`-ing the result) is what makes `wide_recv` abort, and the durable
-one is a `mem` lemma per step that keeps the intermediate state abstract — which
-is what `bugs/FORMAL_x86_64_end_to_end_proof.md`'s remaining section also asks
-for. **The concrete next step is unchanged and is in the generator, not in
-`X86.lean`:** thread a "this step wrote only registers" fact through the chain,
-so `.mem` never has to be reconstructed from 113 record updates.
 
 ## Status (2026-10-04 — the read at a `ret` is EVALUATED rather than simplified; the chain's LENGTH is still the wall)
 
