@@ -6001,6 +6001,87 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     return out
 
 
+def _walk_range(words: dict, func_entry: int, func_end=None) -> int:
+    """The address one past the code the walk decomposes.
+
+    "Past the last `RET` at or after the entry", which is the only definition
+    of a function's extent either the walk or a refusal may use: `RET` is the
+    one instruction whose meaning is the same in every function of an image, so
+    it is a fact about the machine rather than about a label the codegen
+    recorded.  `func_end` overrides it, and the one caller that has an end of
+    its own to give (a by-reference receiver's `frame["func_end"]`) is giving
+    the same answer for a layout where the entry is not the first function.
+    """
+    if func_end is not None:
+        return func_end
+    rets = [pc for pc, w in words.items() if w == 0xd65f03c0 and pc >= func_entry]
+    return max(rets) + 4 if rets else 0
+
+
+def _same_image_call_plan(code: bytes, base: int, func_entry: int,
+                          func_end=None) -> tuple:
+    """`({call_pc: return_pc}, "")` for a call the CFG walk CAN follow into the
+    same image, and `(None, why)` for one it cannot.
+
+    The return-address map this file lacked is exact for ONE shape, and this is
+    that shape: a single `BL` whose target is a block start inside the walked
+    range, whose own body contains no call of its own, and which the caller
+    returns from itself.  For that shape `x30` at the callee's `RET` is the
+    constant `call_pc + 4`, so the callee's blocks are ordinary blocks with an
+    ordinary edge — no dispatch, no disjunction, no second induction chain.
+    The doc named this the whole limit (`bugs/FORMAL_arm64_the_universal_theorem_
+    cannot_follow_a_call_into_the_same_image.md` step 1) and it is.
+
+    Every other shape is REFUSED, and it is refused HERE rather than in each of
+    the two places that need to know: `generate_arm64_proof` writes the reason
+    into the message a reader sees, and `_gen_universal_e2e_cfg` reads the same
+    answer to decide whether its `bl` arm may descend.  One rule read twice; a
+    second copy of these conditions is a second answer to the same question.
+    """
+    words = {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)}
+    end = _walk_range(words, func_entry, func_end)
+    intra = [c for c in _unfollowable_calls(code, base, func_entry, func_end)
+             if c["kind"] == "intralocal"]
+    if not intra:
+        return {}, ""
+    where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x}" for c in intra)
+    if len(intra) > 1:
+        return None, (
+            f"there are {len(intra)} calls into the same image ({where}) and ONE "
+            f"return address does not serve them: a path can reach the second "
+            f"without passing the first, so `x30` at the callee's `RET` would be "
+            f"a property of the CALL PATH rather than a constant")
+    c = intra[0]
+    if not (func_entry <= c["target"] < end):
+        return None, (
+            f"the callee at {c['target']:#x} lies outside the range the walk "
+            f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be a "
+            f"second walk over code this theorem does not cover")
+    blocks = _cfg_blocks(words, func_entry, end)
+    if c["target"] not in {b["start"] for b in blocks}:
+        return None, (
+            f"the callee's entry {c['target']:#x} is not a block start of the "
+            f"walk, so no certificate would exist for its first run")
+    inner = [pc for pc, w in words.items()
+             if c["target"] <= pc < end and _step_branch_index(w) == 15]
+    if inner:
+        return None, (
+            f"the callee calls out of itself at {', '.join(hex(p) for p in inner)}, "
+            f"so following it is RECURSION and not a return-address map: the "
+            f"frame bound and the fuel descent of the recursion contract would "
+            f"have to be re-proved for a second function")
+    if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
+        return None, (
+            f"the caller has no return of its own before {c['target']:#x}, so "
+            f"nothing states what the program returns once the callee has")
+    if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
+        return None, (
+            f"the callee has no `RET` inside the walked range, so its blocks "
+            f"have no terminal and the walk would leave the function without one")
+    return {c["pc"]: c["pc"] + 4}, ""
+
+
 def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
                                  func_end: int, pc: int,
                                  cond_branches=None) -> bool:
@@ -6284,14 +6365,32 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     if frame and frame.get("func_end"):
         func_end = frame["func_end"]
     else:
-        rets = [pc for pc, w in words.items()
-                if w == 0xd65f03c0 and pc >= func_entry]
-        if not rets:
+        func_end = _walk_range(words, func_entry)
+        if not func_end:
             return None
-        func_end = max(rets) + 4
     blocks = _cfg_blocks(words, func_entry, func_end)
     if not blocks:
         return None
+    # The calls into the SAME IMAGE this walk can follow, as `{call_pc:
+    # return_pc}`.  Decided by the one rule that also writes the refusal a
+    # reader sees (`_same_image_call_plan`), so the walk and the message cannot
+    # disagree about which programs are followable.  `None` is the shape no
+    # walk can use and `""` is the shape every program without such a call
+    # already proved; the `bl` arm below asks this and not its own question,
+    # and `generate_arm64_proof` has already refused by the time it matters.
+    _intra_returns, _intra_why = _same_image_call_plan(code, base, func_entry,
+                                                      func_end)
+
+    def _is_intralocal(entry: int) -> bool:
+        """Whether a `BL` target is a second function of THIS image rather than
+        a self-call (which the recursion contract owns) or a callee outside it.
+
+        The same range the plan read, asked per call site so the `bl` arm does
+        not have to trust that the plan covered the call in front of it.
+        """
+        return (func_entry <= entry < _walk_range(words, func_entry, func_end)
+                and entry != func_entry)
+
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
     if fuel is not None:
         # A back edge is any branch whose target is at or before the branch
@@ -6743,6 +6842,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         block = blocks[bi]
         kind = block["kind"]
         cert_name, mid_name, exit_expr, m_run, def_names, is_ret, run_last_pc, run_pcs = run_info[bi]
+        # The address this block's `RET` returns to, when the walk reached
+        # it by descending into a callee of the same image.  `None` for
+        # every block the entry itself reaches, and `None` is exactly the
+        # value that means "this is the program's own return", because that
+        # one jumps to `exit_pc`.
+        _ret_to = ctx.get("ret_to")
         IND = "  " * (depth + 1)
         path = path | {bi}
         fuel_next = (_fuel_minus(fuel_n, m_run) if isinstance(fuel_n, str)
@@ -6768,8 +6873,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 else:
                     flow_hsid = list(reversed(ctx["flow_hsid"]))
                     flow_defs = ctx["flow_defs"] + def_names
+                    # `x30` at a `RET` is the address the machine jumps to, and
+                    # for the ENTRY's own return that is the halt address.  For
+                    # a callee's return it is the address after the call site,
+                    # which `ctx["ret_to"]` carries down from the `bl` arm that
+                    # entered it — the one fact that makes following a call into
+                    # the same image a walk rather than a disjunction.
+                    _x30t = _ret_to if _ret_to is not None else exit_pc
                     A(f"{IND}have hx30_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30 "
-                      f"= UInt64.ofNat {exit_pc} := by")
+                      f"= UInt64.ofNat {_x30t} := by")
                     _hl = ctx["lets"]
                     unfold_terms = ctx["lets"] + flow_hsid + flow_defs + \
                         ['arm64_reg', 'arm64_set_reg', 'Arm64State.init']
@@ -6797,7 +6909,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  injection hrun_{bi}.symm.trans hcert_{bi}")
             # Make this block's identity/unfolding available to the
             # continuation's value-flow proofs (path-scoped).
-            if not is_ret:
+            #
+            # A RETURNING ret is a `not is_ret` block for this purpose: the
+            # walk continues through it, into the caller's own code, and that
+            # continuation's value flow has to be able to unfold this block the
+            # way it unfolds every other block it came through.
+            if not is_ret or _ret_to is not None:
                 ctx["flow_hsid"].append(f"hsid_{bi}")
                 ctx["flow_defs"].extend(def_names)
                 ctx.setdefault("flow_blocks", []).append(bi)
@@ -6805,6 +6922,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}have hpc_s_{bi} : (s_{bi}).pc = {run_last_pc + 4} := by")
                 A(f"{IND}  exact (congrArg (fun st => st.pc) hsid_{bi}).trans (by rfl)")
                 s_pc_facts[bi] = f"hpc_s_{bi}"
+            elif _ret_to is not None:
+                # A callee's `RET` leaves the machine AT the caller's return
+                # address, so the entry-pc fact the continuation needs is `x30`
+                # rather than `pc + 4`.  Read off the same `hx30` the `RET`'s
+                # side condition used, so there is one fact about the return
+                # address in the proof and not two that could disagree.
+                A(f"{IND}have hpc_r_{bi} : (s_{bi}).pc = {_ret_to} := by")
+                A(f"{IND}  rw [hsid_{bi}]")
+                A(f"{IND}  change ({name}_b{bi}_qS{m_run - 1} ({state})).x30.toNat = {_ret_to}")
+                A(f"{IND}  rw [hx30_{bi}]")
+                A(f"{IND}  rfl")
+                s_pc_facts[bi] = f"hpc_r_{bi}"
             hexit_ty = f"∀ p ∈ [{', '.join(str(pc) for pc in run_pcs)}], p ≠ {EXIT}"
             A(f"{IND}have hexit_{bi} : {hexit_ty} := by simp "
               f"-- value flow: return address not among block addresses")
@@ -6830,7 +6959,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # pattern)` -- which is why every program with a call had no proof.
         _halts = (kind != "ret" and cert_name is not None
                   and run_last_pc + 4 == EXIT)
-        if kind == "ret" or _halts:
+        if kind == "ret" and _ret_to is not None:
+            # A CALLEE's return.  The run ends with the machine at the caller's
+            # own next instruction (`hpc_r_{bi}` above), so the walk continues
+            # into the caller's block there — no `arm64_go_exit_hit`, because
+            # this `RET` did not reach the halt address and must not be allowed
+            # to claim it did.  The path-scoped `ctx` carries the callee's
+            # `hsid`/defs, which is what lets the caller's own terminal value
+            # flow unfold what the callee computed.
+            tgt_bi = start_to_bi.get(_ret_to)
+            if tgt_bi is None or tgt_bi in path:
+                raise ValueError(
+                    f"unsupported same-image return continuation to {_ret_to:#x}")
+            # The caller's own continuation is the CALLER's, so `ret_to` is
+            # dropped here: what follows this block returns to the halt address
+            # like every other return of the function the walk started from.
+            # Leaving it set would make the caller's own `RET` come back to the
+            # call site and the walk would close a cycle.
+            _cr = dict(ctx)
+            _cr["ret_to"] = None
+            emit_block(tgt_bi, s_cur, fuel_next, depth, path, _cr)
+        elif kind == "ret" or _halts:
             if is_contract:
                 raise NotImplementedError(
                     f"contract-mode {'ret' if kind == 'ret' else 'halt'} block "
@@ -7173,137 +7322,175 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # the contract's result unify without record-expansion mismatches.
             arg_term = f"arm64_reg 0 {s_cur}"
             call_state = f"({{ {s_cur} with x30 := UInt64.ofNat {ret}, pc := {entry} }})"
-            # The UNFOLD SET for the two goals below (`hargeq_{bi}` and
-            # `hspd`) is the PATH-SCOPED one — every `hsid_i` and every block
-            # state function the walk has emitted so far, in reverse order —
-            # and not "block 0's defs plus this block's defs".  That shortcut
-            # was correct while the call sat one block deep, because `s_0`'s
-            # definition closed the whole state; it is not correct at depth,
-            # because `s_6`'s definition is written in terms of `s_4`, and a
-            # simp set carrying neither `hsid_4` nor `s_4`'s own block defs
-            # leaves `s_4` a free variable in the goal.  Two consequences,
-            # both measured on `formal/examples/count.mojo` (8 blocks, the
-            # recursive call at depth 3): `hargeq` was left with an unsolved
-            # goal, and `hspd` failed with "Expected type must not contain
-            # free variables" — `native_decide` cannot decide a statement that
-            # mentions a local.  The same idiom is what the sibling goals in
-            # this function already use (`hfrread_{bi}`, `_hsid`), so this is
-            # one definition of "what has to be unfolded here", not a third.
-            _sdefs = ", ".join(list(reversed(ctx["flow_hsid"]))
-                               + list(ctx["flow_defs"])
-                               + ["arm64_reg", "arm64_set_reg",
-                                  "Arm64State.init"])
-            # The fact that the RECURSION ARGUMENT is below `n` needs the
-            # source condition of the branch this call is under — `¬(n = 0)`
-            # for a dec1 program — and that is the hypothesis the nearest
-            # enclosing conditional block emitted (`hsrc_{bi}` there, or
-            # `hscL_{bi}` for a short-circuit chain's own branch), carried
-            # down the walk in `ctx["branch_src"]`.
-            #
-            # This used to be the literal `hsrc_0`, which names nothing in any
-            # generated proof: no `hsrc_0` is ever emitted, so every dec1
-            # program with a recursive call produced a proof referring to an
-            # unknown identifier, hundreds of lines after the call that
-            # wanted it. It was not visible while the surrounding goals also
-            # failed for other reasons.
-            _bsrc = ctx.get("branch_src")
-            if not _bsrc:
-                raise NotImplementedError(
-                    f"recursion contract: the call in block {bi} has to be "
-                    f"below the source condition's negation "
-                    f"(`u64_sub_one_toNat_le` needs it), and this walk "
-                    f"reached the call with no enclosing branch condition to "
-                    f"take it from. Refusing rather than naming a hypothesis "
-                    f"this path never emitted: a `have` that cites `hsrc_0` "
-                    f"reads as proved and is an `Unknown identifier` in Lean.")
-            # The callee's argument is `n - 1`; state that directly (rather than
-            # the weaker `≤ n`) so the callee's frame bound has the one-stride
-            # headroom the descent needs.
-            if is_dec1:
-                A(f"{IND}have hargeq_{bi} : ({arg_term}) = n - 1 := by")
-                A(f"{IND}  simp only [{_sdefs}]")
-                A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
-                  f"mem_read_two_writes_same]")
-                A(f"{IND}have harg_{bi} : ({arg_term}).toNat + 1 ≤ n.toNat := "
-                  f"u64_sub_one_toNat_le n ({arg_term}) {_bsrc} hargeq_{bi}")
-            else:
-                raise ValueError("unsupported: recursion argument bound (not a dec1 pattern)")
-            # The callee's frame bound is the caller's bound carried down one
-            # level, i.e. exactly `frameBound_succ` at the frame size the
-            # emitter used.  The generator supplies the call site's `sp`
-            # relation and the argument relation; the stride and the descent
-            # arithmetic live in the library lemma.
-            # The callee's frame bound is the caller's bound carried down one
-            # level.  `hspd` is the ground fact that the call site's `sp` is
-            # still at least `2^64-16-stride`; combined with the caller's
-            # `hbnd` (which reserved `stride` per level) and `harg` (the callee
-            # argument is no larger than the caller's), the descent closes.
-            # The stride and descent arithmetic live in `FrameBound` itself, so
-            # the generator only supplies the concrete numbers.
-            A(f"{IND}have hbndbl_{bi} : FrameBound {stride} ({call_state}) ({arg_term}) := by")
-            if is_dec1:
-                A(f"{IND}  have hspd : 18446744073709551600 - {stride} ≤ ({call_state}).sp.toNat := by")
-                A(f"{IND}    simp only [{_sdefs}]")
-                A(f"{IND}    native_decide")
-                A(f"{IND}  exact frameBound_descend {stride} {init} ({call_state}) n "
-                  f"({arg_term}) harg_{bi} (by rfl) hspd hbnd")
-            else:
-                raise ValueError("unsupported: FrameBound for recursion (not a dec1 pattern)")
-            # Step-counted recursion contract: `hc` gives a call step bound
-            # `k_{bi}` and the returned state `s_ret_{bi}` (abstract, with its
-            # frame relation to `call_state`).  The exit-switch lemma then turns
-            # the run to the *function exit* into the run from `s_ret_{bi}` with
-            # `k_{bi}` fewer steps, so the walk continues from `s_ret_{bi}`.
-            fuel_sub = f"({fuel_1} - {_TOTAL})"
-            # Linear recursion: the step measure fits the linear fuel, so the
-            # bound obligation is arithmetic.  Tree recursion (>= 2 self-calls)
-            # has a super-linear measure that the framework's linear fuel does
-            # not model; leave that measure obligation as an honest leaf.
-            _is_tree = fn is not None and _count_self_calls(fn) >= 2
-            if _is_tree:
-                raise NotImplementedError("tree recursion fuel measure unsupported")
-            _hfuel_proof = "(by omega)"
-            _hx30 = ("(by intro pc hmem; "
-                     f"simp only [List.mem_cons, List.not_mem_nil, or_false] at hmem; "
-                     f"rcases hmem with h | h <;> (rw [h]; native_decide))")
-            A(f"{IND}have hx30ret_{bi} : ∀ pc, pc ∈ [{_RETS}] → pc ≠ {ret} := "
-              f"{_hx30}")
-            A(f"{IND}have hc_{bi} := {name}_contract ({fuel_sub}) ({arg_term}) {call_state} "
-              f"{_hfuel_proof} (by rfl) (by rfl) hbndbl_{bi} hx30ret_{bi}")
-            A(f"{IND}obtain ⟨k_{bi}, s_ret_{bi}, hk_{bi}, hrun_{bi}, hx0_{bi}, hpc_{bi}, "
-               f"hfr_{bi}, hmid_{bi}⟩ := hc_{bi}")
-            A(f"{IND}have hsw_{bi} : arm64_go_exit {call_state} "
-              f"{C} {EXIT} {fuel_1}")
-            A(f"{IND}    = arm64_go_exit s_ret_{bi} {C} {EXIT} ({fuel_1} - k_{bi}) := by")
-            A(f"{IND}  have h := arm64_go_exit_switch {call_state} s_ret_{bi} {C} "
-              f"{ret} {EXIT} k_{bi} ({fuel_1} - k_{bi}) hrun_{bi} hpc_{bi} (by omega)")
-            A(f"{IND}    hmid_{bi}")
-            A(f"{IND}  rw [show k_{bi} + ({fuel_1} - k_{bi}) = {fuel_1} from by omega] at h")
-            A(f"{IND}  exact h")
-            A(f"{IND}rw [hsw_{bi}]")
-            tgt_bi = start_to_bi.get(ret)
-            if tgt_bi is None or tgt_bi in path:
-                raise ValueError(f"unsupported bl continuation to {hex(ret)}")
-            else:
-                # `s_ret_{bi}` is abstract; its frame relation to the caller is
-                # spelled out by `FrameOk`, so the continuation walk rewrites
-                # through those equalities instead of unfolding a concrete state.
-                A(f"{IND}obtain ⟨hfr19_{bi}, hfr20_{bi}, hfr21_{bi}, hfr22_{bi}, hfr23_{bi}, "
-                  f"hfr24_{bi}, hfr25_{bi}, hfr26_{bi}, hfr27_{bi}, hfr28_{bi}, hfr29_{bi}, "
-                  f"hfr30_{bi}, hfrsp_{bi}, hfrwin_{bi}⟩ := hfr_{bi}")
-                A(f"{IND}have hfrread_{bi} := FrameOk_read_at {call_state} s_ret_{bi} hfrwin_{bi}")
-                A(f"{IND}simp only [{', '.join(list(reversed(ctx['flow_hsid'])) + ctx['flow_defs'] + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}] at hfrread_{bi}")
-                s_pc_facts[f"s_ret_{bi}"] = f"hpc_{bi}"
+            # A call to a SECOND FUNCTION IN THE SAME IMAGE is not recursion,
+            # and it is not a call out of the image either: every byte of the
+            # callee is in `code` and `arm64_step` steps it.  The callee's
+            # blocks are already among this walk's blocks (`_cfg_blocks` spans
+            # every function from the entry to the image's last `RET`), so
+            # following the call is one edge into an existing block plus one
+            # constant in the return register — the return-address map, in the
+            # one shape where it is a constant rather than a property of the
+            # path.  `ret_to` is what carries it: every `RET` the walk reaches
+            # below this point jumps there, and the walk carries on into the
+            # caller's own code.
+            if _is_intralocal(entry):
+                if not (_intra_returns and bl_pc in _intra_returns):
+                    # A same-image call the plan declined.  Refused by name here
+                    # rather than left to fall into the recursion arm below,
+                    # which reports a program with no recursion as a recursion
+                    # problem — the crash this doc's predecessor was written for.
+                    raise NotImplementedError(
+                        f"same-image call: the call at {bl_pc:#x} -> {entry:#x} "
+                        f"cannot be followed by this walk, and {_intra_why}.")
+                entry_bi = start_to_bi.get(entry)
+                if entry_bi is None or entry_bi in path:
+                    raise ValueError(
+                        f"unsupported same-image call continuation to {entry:#x}")
                 _ct = dict(ctx)
-                for _k in ("lets", "flow_hsid", "flow_defs", "flow_blocks", "conds"):
+                for _k in ("lets", "flow_hsid", "flow_defs", "flow_blocks",
+                           "conds", "branch_srcs"):
                     _ct[_k] = list(ctx.get(_k, []))
-                _ct["lets"] = _ct["lets"] + [
-                    f"hfrread_{bi}", f"hfrsp_{bi}",
-                    f"hfr19_{bi}", f"hfr20_{bi}", f"hfr21_{bi}", f"hfr22_{bi}",
-                    f"hfr23_{bi}", f"hfr24_{bi}", f"hfr25_{bi}", f"hfr26_{bi}",
-                    f"hfr27_{bi}", f"hfr28_{bi}", f"hfr29_{bi}", f"hfr30_{bi}",
-                    f"hx0_{bi}"]
-                emit_block(tgt_bi, f"s_ret_{bi}", f"({fuel_1} - k_{bi})", depth, path, _ct)
+                _ct["ret_to"] = _intra_returns[bl_pc]
+                # At THIS block's indentation, not one deeper: Lean's layout
+                # closes a tactic sequence when a tactic arrives at a column the
+                # sequence has not used yet, so a `rw` at column 6 followed by a
+                # `have` at column 8 parses as a new command and takes the rest
+                # of the theorem with it (measured on the generated file).  A
+                # `by_cases` at the sequence's own column is fine -- block 2's
+                # is -- so the callee's own branches need no extra level.
+                emit_block(entry_bi, call_state, fuel_1, depth, path, _ct)
+            else:
+                # The UNFOLD SET for the two goals below (`hargeq_{bi}` and
+                # `hspd`) is the PATH-SCOPED one — every `hsid_i` and every block
+                # state function the walk has emitted so far, in reverse order —
+                # and not "block 0's defs plus this block's defs".  That shortcut
+                # was correct while the call sat one block deep, because `s_0`'s
+                # definition closed the whole state; it is not correct at depth,
+                # because `s_6`'s definition is written in terms of `s_4`, and a
+                # simp set carrying neither `hsid_4` nor `s_4`'s own block defs
+                # leaves `s_4` a free variable in the goal.  Two consequences,
+                # both measured on `formal/examples/count.mojo` (8 blocks, the
+                # recursive call at depth 3): `hargeq` was left with an unsolved
+                # goal, and `hspd` failed with "Expected type must not contain
+                # free variables" — `native_decide` cannot decide a statement that
+                # mentions a local.  The same idiom is what the sibling goals in
+                # this function already use (`hfrread_{bi}`, `_hsid`), so this is
+                # one definition of "what has to be unfolded here", not a third.
+                _sdefs = ", ".join(list(reversed(ctx["flow_hsid"]))
+                                   + list(ctx["flow_defs"])
+                                   + ["arm64_reg", "arm64_set_reg",
+                                      "Arm64State.init"])
+                # The fact that the RECURSION ARGUMENT is below `n` needs the
+                # source condition of the branch this call is under — `¬(n = 0)`
+                # for a dec1 program — and that is the hypothesis the nearest
+                # enclosing conditional block emitted (`hsrc_{bi}` there, or
+                # `hscL_{bi}` for a short-circuit chain's own branch), carried
+                # down the walk in `ctx["branch_src"]`.
+                #
+                # This used to be the literal `hsrc_0`, which names nothing in any
+                # generated proof: no `hsrc_0` is ever emitted, so every dec1
+                # program with a recursive call produced a proof referring to an
+                # unknown identifier, hundreds of lines after the call that
+                # wanted it. It was not visible while the surrounding goals also
+                # failed for other reasons.
+                _bsrc = ctx.get("branch_src")
+                if not _bsrc:
+                    raise NotImplementedError(
+                        f"recursion contract: the call in block {bi} has to be "
+                        f"below the source condition's negation "
+                        f"(`u64_sub_one_toNat_le` needs it), and this walk "
+                        f"reached the call with no enclosing branch condition to "
+                        f"take it from. Refusing rather than naming a hypothesis "
+                        f"this path never emitted: a `have` that cites `hsrc_0` "
+                        f"reads as proved and is an `Unknown identifier` in Lean.")
+                # The callee's argument is `n - 1`; state that directly (rather than
+                # the weaker `≤ n`) so the callee's frame bound has the one-stride
+                # headroom the descent needs.
+                if is_dec1:
+                    A(f"{IND}have hargeq_{bi} : ({arg_term}) = n - 1 := by")
+                    A(f"{IND}  simp only [{_sdefs}]")
+                    A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                      f"mem_read_two_writes_same]")
+                    A(f"{IND}have harg_{bi} : ({arg_term}).toNat + 1 ≤ n.toNat := "
+                      f"u64_sub_one_toNat_le n ({arg_term}) {_bsrc} hargeq_{bi}")
+                else:
+                    raise ValueError("unsupported: recursion argument bound (not a dec1 pattern)")
+                # The callee's frame bound is the caller's bound carried down one
+                # level, i.e. exactly `frameBound_succ` at the frame size the
+                # emitter used.  The generator supplies the call site's `sp`
+                # relation and the argument relation; the stride and the descent
+                # arithmetic live in the library lemma.
+                # The callee's frame bound is the caller's bound carried down one
+                # level.  `hspd` is the ground fact that the call site's `sp` is
+                # still at least `2^64-16-stride`; combined with the caller's
+                # `hbnd` (which reserved `stride` per level) and `harg` (the callee
+                # argument is no larger than the caller's), the descent closes.
+                # The stride and descent arithmetic live in `FrameBound` itself, so
+                # the generator only supplies the concrete numbers.
+                A(f"{IND}have hbndbl_{bi} : FrameBound {stride} ({call_state}) ({arg_term}) := by")
+                if is_dec1:
+                    A(f"{IND}  have hspd : 18446744073709551600 - {stride} ≤ ({call_state}).sp.toNat := by")
+                    A(f"{IND}    simp only [{_sdefs}]")
+                    A(f"{IND}    native_decide")
+                    A(f"{IND}  exact frameBound_descend {stride} {init} ({call_state}) n "
+                      f"({arg_term}) harg_{bi} (by rfl) hspd hbnd")
+                else:
+                    raise ValueError("unsupported: FrameBound for recursion (not a dec1 pattern)")
+                # Step-counted recursion contract: `hc` gives a call step bound
+                # `k_{bi}` and the returned state `s_ret_{bi}` (abstract, with its
+                # frame relation to `call_state`).  The exit-switch lemma then turns
+                # the run to the *function exit* into the run from `s_ret_{bi}` with
+                # `k_{bi}` fewer steps, so the walk continues from `s_ret_{bi}`.
+                fuel_sub = f"({fuel_1} - {_TOTAL})"
+                # Linear recursion: the step measure fits the linear fuel, so the
+                # bound obligation is arithmetic.  Tree recursion (>= 2 self-calls)
+                # has a super-linear measure that the framework's linear fuel does
+                # not model; leave that measure obligation as an honest leaf.
+                _is_tree = fn is not None and _count_self_calls(fn) >= 2
+                if _is_tree:
+                    raise NotImplementedError("tree recursion fuel measure unsupported")
+                _hfuel_proof = "(by omega)"
+                _hx30 = ("(by intro pc hmem; "
+                         f"simp only [List.mem_cons, List.not_mem_nil, or_false] at hmem; "
+                         f"rcases hmem with h | h <;> (rw [h]; native_decide))")
+                A(f"{IND}have hx30ret_{bi} : ∀ pc, pc ∈ [{_RETS}] → pc ≠ {ret} := "
+                  f"{_hx30}")
+                A(f"{IND}have hc_{bi} := {name}_contract ({fuel_sub}) ({arg_term}) {call_state} "
+                  f"{_hfuel_proof} (by rfl) (by rfl) hbndbl_{bi} hx30ret_{bi}")
+                A(f"{IND}obtain ⟨k_{bi}, s_ret_{bi}, hk_{bi}, hrun_{bi}, hx0_{bi}, hpc_{bi}, "
+                   f"hfr_{bi}, hmid_{bi}⟩ := hc_{bi}")
+                A(f"{IND}have hsw_{bi} : arm64_go_exit {call_state} "
+                  f"{C} {EXIT} {fuel_1}")
+                A(f"{IND}    = arm64_go_exit s_ret_{bi} {C} {EXIT} ({fuel_1} - k_{bi}) := by")
+                A(f"{IND}  have h := arm64_go_exit_switch {call_state} s_ret_{bi} {C} "
+                  f"{ret} {EXIT} k_{bi} ({fuel_1} - k_{bi}) hrun_{bi} hpc_{bi} (by omega)")
+                A(f"{IND}    hmid_{bi}")
+                A(f"{IND}  rw [show k_{bi} + ({fuel_1} - k_{bi}) = {fuel_1} from by omega] at h")
+                A(f"{IND}  exact h")
+                A(f"{IND}rw [hsw_{bi}]")
+                tgt_bi = start_to_bi.get(ret)
+                if tgt_bi is None or tgt_bi in path:
+                    raise ValueError(f"unsupported bl continuation to {hex(ret)}")
+                else:
+                    # `s_ret_{bi}` is abstract; its frame relation to the caller is
+                    # spelled out by `FrameOk`, so the continuation walk rewrites
+                    # through those equalities instead of unfolding a concrete state.
+                    A(f"{IND}obtain ⟨hfr19_{bi}, hfr20_{bi}, hfr21_{bi}, hfr22_{bi}, hfr23_{bi}, "
+                      f"hfr24_{bi}, hfr25_{bi}, hfr26_{bi}, hfr27_{bi}, hfr28_{bi}, hfr29_{bi}, "
+                      f"hfr30_{bi}, hfrsp_{bi}, hfrwin_{bi}⟩ := hfr_{bi}")
+                    A(f"{IND}have hfrread_{bi} := FrameOk_read_at {call_state} s_ret_{bi} hfrwin_{bi}")
+                    A(f"{IND}simp only [{', '.join(list(reversed(ctx['flow_hsid'])) + ctx['flow_defs'] + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}] at hfrread_{bi}")
+                    s_pc_facts[f"s_ret_{bi}"] = f"hpc_{bi}"
+                    _ct = dict(ctx)
+                    for _k in ("lets", "flow_hsid", "flow_defs", "flow_blocks", "conds"):
+                        _ct[_k] = list(ctx.get(_k, []))
+                    _ct["lets"] = _ct["lets"] + [
+                        f"hfrread_{bi}", f"hfrsp_{bi}",
+                        f"hfr19_{bi}", f"hfr20_{bi}", f"hfr21_{bi}", f"hfr22_{bi}",
+                        f"hfr23_{bi}", f"hfr24_{bi}", f"hfr25_{bi}", f"hfr26_{bi}",
+                        f"hfr27_{bi}", f"hfr28_{bi}", f"hfr29_{bi}", f"hfr30_{bi}",
+                        f"hx0_{bi}"]
+                    emit_block(tgt_bi, f"s_ret_{bi}", f"({fuel_1} - k_{bi})", depth, path, _ct)
         elif kind == "cbz":
             # pre-state is run exit (pc = the cbz pc); targets = [fall, taken]
             fall, taken = block["targets"]
@@ -10169,21 +10356,25 @@ def generate_arm64_proof(prog, code, info) -> str:
     # boundary` finds the first such call; when there is one, the halt address
     # is that call and the terminal proposition is the reachability of it.
     _calls = _unfollowable_calls(code, base_addr, func_entry_addr, None)
-    _opaque = _calls[0] if _calls else None
-    if _opaque is not None and _opaque["kind"] == "intralocal":
+    # A call OUT OF THE IMAGE is what changes what the theorem can say; a call
+    # into another function of the SAME image is not, because the model has
+    # every byte of the callee and steps it.  The two were one list, and the
+    # haltable one is selected here rather than downstream, so everything below
+    # (`exit_at`, the reachability theorem, the suppressed run test) keeps
+    # meaning "a call the model cannot execute".
+    _opaque = next((c for c in _calls if c["kind"] == "opaque"), None)
+    _intra, _intra_why = _same_image_call_plan(code, base_addr, func_entry_addr)
+    if _intra is None:
         raise NotImplementedError(
-            f"universal theorem: the call at {_opaque['pc']:#x} targets "
-            f"{_opaque['target']:#x}, a second function in the same image.  The "
-            f"machine model follows it -- every byte is present, and the "
-            f"callee's `ret` returns through `x30` -- but the CFG walk is "
-            f"per-function, and following the call means entering the callee's "
-            f"blocks and then dispatching on `x30`, whose value is a property "
-            f"of the call path rather than of the block.  That is "
-            f"interprocedural walking: a return-address map in the framework, "
-            f"not a missing case here.  The semantic model for the call is "
-            f"correct and emitted (see the `_go` definitions above); what is "
-            f"missing is the machine half.")
-    if len(_calls) > 1:
+            f"universal theorem: a call into the same image cannot be followed "
+            f"by this walk, and {_intra_why}.  The machine model follows it -- "
+            f"every byte is present, and the callee's `ret` returns through "
+            f"`x30` -- and so does the CFG walk, but only where the return "
+            f"address is a constant of the call rather than of the path.  The "
+            f"semantic model for the call is correct and emitted (see the `_go` "
+            f"definitions above); what is missing is the return-address map for "
+            f"the shape named above.")
+    if len(_calls) - (1 if _intra else 0) > 1:
         # The halt address is ONE address and the walk reaches it only on the
         # paths that pass it, so a second unfollowable call has a path of its own
         # and the walk executes it as if it were a self-call — landing in the
@@ -10195,10 +10386,13 @@ def generate_arm64_proof(prog, code, info) -> str:
         # `tools/formal_proof_breadth.py` classifies as `proof-refused` rather
         # than as a defect in the generator.
         where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x} ({c['kind']})"
-                          for c in _calls)
+                          for c in _calls if c["kind"] == "opaque")
+        n_opaque = sum(1 for c in _calls if c["kind"] == "opaque")
         raise NotImplementedError(
-            f"universal theorem: {len(_calls)} calls this walk cannot follow "
-            f"({where}), and ONE halt address cannot discharge them.  The run "
+            f"universal theorem: {n_opaque} calls this walk cannot follow "
+            f"({where}), every one of them OUT OF THE IMAGE, and ONE halt "
+            f"address cannot discharge "
+            f"them.  The run "
             f"reaches {_opaque['pc']:#x} only on the paths that pass it, so a "
             f"second call has paths of its own -- the honest statement would be "
             f"a disjunction over the call addresses, which is one exit address "
