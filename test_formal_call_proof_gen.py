@@ -595,6 +595,84 @@ class TestGeneratorSource(unittest.TestCase):
         for note in notes:
             self.assertIn("shadows entry", note)
 
+    def test_smulh_is_modelled_and_disjoint_from_mul(self):
+        """The four things `SMULH` costs, and the one that is easy to get wrong.
+
+        `formal/arm64_codegen.py` emits `smulh` for
+        `formal/model.py::int_overflow_traps` — "did `a * b` fit in 64 signed
+        bits", which a wrapping `MUL` cannot answer — and until 2026-10-05
+        `arm64_step` had no arm for it, so every one of the 71 fuzz draws of it
+        in 400 flagged cases was a `NOSTEP`: a proof that cannot step an
+        instruction is a proof about nothing.
+
+        What is asserted here is the wiring, and the SECOND row is the one that
+        matters: `SMULH` and `MUL` differ only in bit 22, so a mask that cleared
+        it would make the two claim the same words and whichever arm came first
+        in `arm64_step`'s chain would answer for both — a proof about a
+        different instruction, which is the failure `check_step_conds` exists to
+        make loud. So this asserts both words resolve to DIFFERENT rows and that
+        the new row's mask is bit-22-preserving.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            w = fn(*args)
+            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
+                else w
+
+        smulh = word(A.encode_smulh_xd_xn_xm, 2, 0, 1)
+        mul = word(A.encode_mul_xd_xn_xm, 2, 0, 1)
+        self.assertEqual(smulh, 0x9b417c02,
+                         "`smulh x2, x0, x1` is not the word the encoder "
+                         "produces, so every assertion below would be about a "
+                         "word no image contains")
+        self.assertEqual(smulh & ~mul, 0x00400000,
+                         "SMULH and MUL must differ in bit 22 and nowhere else, "
+                         "or the disjointness below is not what makes them "
+                         "disjoint")
+        s_idx, m_idx = G._step_branch_index(smulh), G._step_branch_index(mul)
+        self.assertIsNotNone(s_idx, "SMULH resolves to no step-table row")
+        self.assertIsNotNone(m_idx, "MUL resolves to no step-table row")
+        self.assertNotEqual(s_idx, m_idx,
+                            "SMULH and MUL land on the SAME row, so the "
+                            "generator would describe one of them while the "
+                            "model steps the other")
+        mask, base = G._STEP_CONDS[s_idx]
+        self.assertEqual((mask, base), (0xffe07c00, 0x9b407c00))
+        self.assertEqual(base & 0x00400000, 0x00400000,
+                         "the row's own base must set bit 22 — that is what "
+                         "separates it from MUL's `0x9b007c00`")
+        self.assertTrue(mask & 0x00400000,
+                        "the row's mask must KEEP bit 22; `0xffa07c00` would "
+                        "clear it and claim MUL's words too")
+        # `_WORK_STEP` is what makes the model's branch a fact a generated
+        # block can USE (the step-result lemma `exact`s the library lemma at
+        # this word), and `_regs_written` is what a block's certificate asserts
+        # about the registers a step clobbered.
+        self.assertIn(s_idx, G._WORK_STEP_BY_IDX,
+                      "no `work_step_*` lemma is wired for the new row, so a "
+                      "program containing it cannot get a step-result lemma")
+        lemma, tests = G._WORK_STEP_BY_IDX[s_idx]
+        self.assertEqual(lemma, "work_step_smulh")
+        self.assertIn((0xffe07c00, 0x9b407c00), tests,
+                      "the library lemma must be stated at THIS row's word "
+                      "test, or the step-result lemma `exact`s a hypothesis it "
+                      "cannot prove")
+        self.assertEqual(G._regs_written(smulh, s_idx), {2},
+                         "SMULH writes Xd and nothing else, exactly as MUL "
+                         "does; a certificate that claims more or less is a "
+                         "false claim about the block")
+        self.assertIn("smulh64", G._step_rhs(smulh, s_idx),
+                      "the right-hand side must name the library definition, "
+                      "not restate the identity inline: the step-result lemma "
+                      "is closed by `exact`ing the library lemma at this word, "
+                      "so a second statement is a chance to drift")
+        self.assertIn("smulh64", G._step_rhs_generic(s_idx),
+                      "the word-relative form (`lib/work.lean`) must name it "
+                      "too, or the two right-hand sides disagree about the same "
+                      "instruction")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`

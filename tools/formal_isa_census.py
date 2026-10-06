@@ -539,11 +539,14 @@ HARNESS_LIMITS = {
 #: than leave a stale "known problem" behind.
 BACKLOG = {
     # ── arm64: emitted, and `arm64_step` has no arm for it ────────────────
-    "encode_smulh_xd_xn_xm": (
-        "bugs/FORMAL_arm64_smulh_has_no_model_arm.md",
-        "the high half of a signed multiply; emitted for the overflow check "
-        "(`formal/model.py::int_overflow_traps`) and modelled nowhere. The "
-        "fuzz pool DOES draw it, so a case that does is a NOSTEP"),
+    #
+    # `encode_smulh_xd_xn_xm` WAS here until 2026-10-05 and is not any more:
+    # it was the high half of a signed multiply, emitted for the overflow check
+    # (`formal/model.py::int_overflow_traps`) and modelled nowhere, so the
+    # 71-in-400 fuzz draws of it were all NOSTEP.  `arm64_step`'s last arm is
+    # now `(0xffe07c00, 0x9b407c00)` with `work_step_smulh`, and the row's LEAN
+    # column reads `yes` — measured, `formal_model_fuzz.py --mix flagged
+    # --cases 400 --length 1 --seed 11` reports 400/400 AGREE with no NOSTEP.
     "encode_csel_xd_xm_cond": (
         "bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md",
         "six call sites emit it and `arm64_step` has no branch; the blocked "
