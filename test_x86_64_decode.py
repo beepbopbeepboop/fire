@@ -229,6 +229,16 @@ for enc, name in ((X.encode_add_r64_r64, "add"), (X.encode_or_r64_r64, "or"),
           mod=3, reg=R.RBX.value, rm=R.RAX.value)
 check("imul rax,rbx", X.encode_imul_r64_r64(R.RAX, R.RBX), "imul_r64_r64",
       mod=3, reg=R.RAX.value, rm=R.RBX.value)
+# The THREE-operand form with an immediate, and its own name: the destination is
+# the reg field in both, but this one reads a byte out of the stream and that
+# changes its LENGTH, which is the field every caller of the decoder uses to
+# find the next instruction. `6B /r ib` and not `69 /r id`, and the row that
+# says so is a negative immediate -- the pointer-subscript shape, where a
+# negative index moves the address backwards.
+check("imul rax,rbx,4", X.encode_imul_r64_r64_imm(R.RAX, R.RBX, 4),
+      "imul_r64_r64_imm", mod=3, reg=R.RAX.value, rm=R.RBX.value, imm=4)
+check("imul r10,r11,-8", X.encode_imul_r64_r64_imm(R.R10, R.R11, -8),
+      "imul_r64_r64_imm", mod=3, reg=R.R10.value, rm=R.R11.value, imm=-8)
 
 # ALU reg/imm
 for enc, name in ((X.encode_add_r64_imm32, "add"), (X.encode_or_r64_imm32, "or"),
@@ -289,6 +299,23 @@ check("jmp rel32", X.encode_jmp_rel32(0x1234), "jmp_rel32", imm=0x1234)
 check("call rel32", X.encode_call_rel32(-0x2000), "call_rel32", imm=-0x2000)
 check("call [rip+x]", X.encode_call_rm64(0x40), "call_rm64", rip_rel=0x40)
 check("jmp [rip+x]", X.encode_jmp_rm64(-0x30), "jmp_rm64", rip_rel=-0x30)
+# `FF /2` with mod=11, the call through a function VALUE, and a DIFFERENT
+# instruction from the `FF 15` above: two bytes rather than six, and the target
+# is a register's contents rather than a displacement's address. Its own name,
+# because a successor written for one is not the successor for the other.
+check("call rax", X.encode_call_r64(R.RAX), "call_r64", mod=3, rm=R.RAX.value)
+check("call r11", X.encode_call_r64(R.R11), "call_r64", mod=3, rm=R.R11.value)
+
+# The BYTE-WISE `and`/`or`, which exist for one reason: `UCOMISD` reports an
+# ORDERED equality as `ZF=1 and PF=0`, no single SETcc reads the conjunction,
+# and a 64-bit AND would read the seven bytes a `SETcc` left in the register
+# beside the value. Its own name and not `alu_rr:and` -- that one is the
+# decoder's REX.W arm and is a 64-bit write.
+for enc, name in ((X.encode_and_r8_r8, "and"), (X.encode_or_r8_r8, "or")):
+    check(f"{name} al,cl", enc(R.RAX, R.RCX), f"alu_rr8:{name}",
+          mod=3, reg=R.RCX.value, rm=R.RAX.value)
+    check(f"{name} r11b,r10b", enc(R.R11, R.R10), f"alu_rr8:{name}",
+          mod=3, reg=R.R10.value, rm=R.R11.value)
 
 # A back-to-back stream decodes as a sequence, not just instruction by
 # instruction: boundaries are the whole point of the decoder.

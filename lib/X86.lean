@@ -774,6 +774,29 @@ def x86_idiv128 (hi lo d : Int) : Option (Int × Int) :=
 
 /-! ## The step function -/
 
+/-- `20 /r` and `08 /r` — the BYTE-WISE `and`/`or`, shared by `x86_step_rex`
+    and `x86_step_plain` because `encode_and_r8_r8` emits a REX byte whenever
+    EITHER register is r8-r15, so the same instruction arrives with and without
+    one and an arm in only one of the two decoders leaves half of them
+    unsteppable.
+
+    `mod=3` only, and the reason is the READ: `x86_rm_read` ignores `sz` for a
+    register operand (it is used by 8-byte reads too), so a one-byte `and` that
+    read through it would AND the seven bytes a `SETcc` left in the register
+    beside the value.  Both operands are masked to their low byte here and the
+    write is `x86_set_reg_narrow`, which leaves the rest alone.
+
+    They exist for one reason and it is worth stating: `UCOMISD` reports an
+    ORDERED equality as `ZF=1 and PF=0`, no single SETcc reads the conjunction,
+    and the 8-bit width is not a choice. -/
+def x86_step_alu_r8 (s : X86State) (code : Nat → UInt8) (op : UInt8)
+    (endAddr : Nat) (rm reg : Nat) : Option X86State :=
+  let av := x86_get_reg s rm &&& 0xff
+  let bv := x86_get_reg s reg &&& 0xff
+  let res := if op = 0x20 then (av &&& bv) else (av ||| bv)
+  let f := x86_flags_logic s res
+  some { x86_set_reg_narrow s rm 1 res with rip := endAddr, zf := f.zf, sf := f.sf, cf := f.cf, of_ := f.of_ }
+
 /-- REX-prefixed instruction forms. `op` is the byte after the prefix.
 
     The prefix shifts EVERY field one byte along: with a REX byte at `rip`, the
@@ -826,6 +849,15 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     match x86_rm_write s code rex modrm modrmPos endAddr sz src with
     | some s' => some { s' with rip := endAddr }
     | none => none
+  else if op = 0x20 || op = 0x08 then
+    -- the byte-wise `and`/`or` again, with the REX byte present because one of
+    -- the two registers is r8-r15.  `encode_and_r8_r8` emits that byte, so this
+    -- arm is not a generalisation: without it every `and`/`or` on a high
+    -- register pair is UNSTEPPABLE, and an unsteppable form reads as result 0.
+    let modrm := code modrmPos
+    if (modrm.toNat >>> 6) != 3 then none
+    else x86_step_alu_r8 s code op (rip + 3) ((modrm.toNat &&& 7) + x86_rex_b rex)
+      ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex)
   else if op = 0x8b then
     -- mov r, r/m
     let modrm := code modrmPos
@@ -874,6 +906,38 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     | some (addr, _) =>
       some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (UInt64.ofNat (addr % 18446744073709551616)) with rip := endAddr }
     | none => none
+  else if op = 0x6b && w then
+    -- imul r64, r/m64, imm8 — the THREE-operand form with a one-byte scale.
+    --
+    -- It is emitted by `encode_imul_r64_r64_imm`, which is a pointer
+    -- subscript's element scale (`p[i]` on a `Pointer[Int32]` is `p + i*4`).
+    -- `6B` and not `69`: `69` is the imm32 spelling, using it with a one-byte
+    -- scale reads the following THREE instructions as the immediate, and that
+    -- is not a theoretical mistake — it is what the encoder emitted first, and
+    -- `p[0]` then multiplied the index by `0xd8014c04` and dereferenced the
+    -- result.
+    --
+    -- **The immediate is SIGNED**, which is what a C subscript wants: a
+    -- negative index moves the address backwards.  It is carried as
+    -- `UInt64.ofInt (read_i8 …)` and multiplied UNSIGNED, which is the same low
+    -- 64 bits -- the two differ only above bit 63, and the destination is 64
+    -- bits wide.  CF and OF are `x86_imul_ovf`, the same definition the `0F AF`
+    -- arm reads, because it is the same question about the same 128-bit
+    -- product, and it does read the immediate as signed.
+    -- **The destination is the reg field and is a TARGET, not a third
+    -- multiplicand.**  `imul r64, r/m64, imm8` writes `r/m64 * imm8` into
+    -- `r64`; it does NOT read `r64`.  The two-operand `0F AF` form below IS the
+    -- one that reads its destination, and mixing the two is a product of three
+    -- factors instead of two.  Measured here: `imul RDX, R12, -1` with
+    -- RDX = 0x0123456789abcdef and R12 = 0xfedcba0987654321 leaves RDX =
+    -- 0x012345f6789abcdf, which is `R12 * -1` and not `RDX * R12 * -1`.
+    let modrm := code modrmPos
+    let i := (modrm.toNat >>> 3 &&& 7) + x86_rex_r rex
+    let b := x86_get_reg s ((modrm.toNat &&& 7) + x86_rex_b rex)
+    let scale := UInt64.ofInt (read_i8 (code (rip + 3)))
+    let u := b * scale
+    let ovf := x86_imul_ovf b scale
+    some (x86_set_flag4 { x86_set_reg s i u with rip := rip + 4 } u ovf ovf)
   else if op = 0x63 && w then
     -- movsxd r64, r/m32
     --
@@ -1221,6 +1285,22 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
     let rsp' := s.rsp - 8
     let mem' := mem_write_bytes s.mem rsp'.toNat (UInt64.ofNat (rip + 5)) 8
     some { s with rip := target, rsp := rsp', mem := mem' }
+  else if b0 = 0xff && (code (rip + 1)).toNat >>> 6 == 3 && (code (rip + 1)).toNat >>> 3 &&& 7 == 2 then
+    -- `FF /2` with mod=11 — `call r64`, the call through a function VALUE.
+    -- `encode_call_r64` emits it and nothing else in this tree emits that
+    -- byte pair, so it used to be undecodable and every image containing one
+    -- STOPPED in the model: `x86_step` returned `none` at the instruction, and
+    -- a stopped run reads as result 0.
+    --
+    -- The `0xff` arm below reads the SAME two ModRM bytes and refuses them
+    -- (`x86_mem_addr` on a mod=11 ModRM is not an address), so this arm has to
+    -- come first — and it does, which is the whole reason the two are written
+    -- as one `if` chain rather than as one fallback.  Two bytes, not six: the
+    -- target is the register's own contents.
+    let target := (x86_get_reg s ((code (rip + 1)).toNat &&& 7)).toNat
+    let rsp' := s.rsp - 8
+    let mem' := mem_write_bytes s.mem rsp'.toNat (UInt64.ofNat (rip + 2)) 8
+    some { s with rip := target, rsp := rsp', mem := mem' }
   else if b0 = 0xff then
     -- call/jmp through memory (the extern paths)
     let modrm := code (rip + 1)
@@ -1236,6 +1316,11 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
           some { s with rip := target, rsp := rsp', mem := mem' }
         else some { s with rip := target }
       | none => none
+  else if b0 = 0x20 || b0 = 0x08 then
+    -- the byte-wise `and`/`or`; see `x86_step_alu_r8`
+    let modrm := code (rip + 1)
+    if (modrm.toNat >>> 6) != 3 then none
+    else x86_step_alu_r8 s code b0 (rip + 2) (modrm.toNat &&& 7) ((modrm.toNat >>> 3) &&& 7)
   else if b0 = 0x89 then
     -- mov r/m32, r32 (no REX.W): zero-extending
     let modrm := code (rip + 1)
@@ -1414,6 +1499,104 @@ theorem x86_step_call_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off
     (h_rip : s.rip = m) (h_b0 : code m = 0xe8) (h_imm : read_i32_le code (m + 1) = off) :
     x86_step s code = some { s with rip := (Int.ofNat m + 5 + off).toNat, rsp := s.rsp - 8, mem := mem_write_bytes s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8 } := by
   simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_imm]
+
+/-- `call r64` (FF /2, mod=11): push the address after the call, then jump to
+    the REGISTER's own contents.  Two bytes, where `x86_step_call_rel32`'s
+    instruction is five and `call_rm64`'s is six — and the pushed word is
+    `m + 2`, not `m + 5` or `m + 6`, which is the one field every caller of a
+    call needs and the reason this is a separate theorem rather than a case of
+    `x86_step_call_rel32`. -/
+theorem x86_step_call_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (modrm : UInt8)
+    (h_rip : s.rip = m) (h_b0 : code m = 0xff) (h_b1 : code (m + 1) = modrm)
+    (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 2) :
+    x86_step s code = some { s with
+        rip := (x86_get_reg s (modrm.toNat &&& 7)).toNat,
+        rsp := s.rsp - 8,
+        mem := mem_write_bytes s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 2)) 8 } := by
+  -- **No register parameter, and that is the rule this file states twice**: the
+  -- conclusion quotes the MODEL's own index expression, so both sides of the `=`
+  -- are syntactically identical and `simp` never has to reduce `x86_get_reg`'s
+  -- `match` on a non-literal.  A caller supplies `modrm` as a byte, so the
+  -- `&&&` reduces to a numeral on its own.
+  simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb,
+        h_rip, h_b0, h_b1, h_mod, h_digit]
+
+/-- `and r/m8, r8` (20 /r, mod=3): the BYTE-WISE `and`, and the reason the
+    width is the instruction rather than a choice — a 64-bit `and` would read
+    the seven bytes a `SETcc` left in the destination beside the value.  Both
+    operands are masked to their low byte and the write is
+    `x86_set_reg_narrow`, which leaves the rest of the register alone. -/
+theorem x86_step_and_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (modrm : UInt8)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x20) (h_b1 : code (m + 1) = modrm)
+    (h_mod : modrm.toNat >>> 6 = 3) :
+    x86_step s code = some
+      { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
+        rip := m + 2,
+        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+  -- No register parameters, for the reason `x86_step_call_r64` states: the
+  -- conclusion quotes the model's own index expressions, so the two sides are
+  -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
+  simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
+        x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
+        x86_rm_write, x86_flags_logic, x86_msb,
+        h_rip, h_b0, h_b1, h_mod]
+
+/-- `or r/m8, r8` (08 /r, mod=3): the `!=` half of `x86_step_and_r8_r8`'s
+    conjunction, and the same instruction with the other opcode.  Two theorems
+    rather than one over an opcode `if` because that is what the `alu_rr:and` /
+    `alu_rr:or` pair above does, for the same reason. -/
+theorem x86_step_or_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (modrm : UInt8)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x08) (h_b1 : code (m + 1) = modrm)
+    (h_mod : modrm.toNat >>> 6 = 3) :
+    x86_step s code = some
+      { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
+        rip := m + 2,
+        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+  -- No register parameters, for the reason `x86_step_call_r64` states: the
+  -- conclusion quotes the model's own index expressions, so the two sides are
+  -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
+  simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
+        x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
+        x86_rm_write, x86_flags_logic, x86_msb,
+        h_rip, h_b0, h_b1, h_mod]
+
+/-- `imul r64, r/m64, imm8` (REX.W 6B /r ib): the three-operand form with a
+    one-byte scale, which is a pointer subscript's element size.  `dst` is the
+    CONCRETE destination for the reason `x86_step_imul_r64` names — `x86_set_reg`
+    is a `match` and `simp` will not reduce it on a non-literal — and the scale
+    is read SIGNED, so `p[-1]` moves the address backwards rather than forwards
+    by 127 elements. -/
+theorem x86_step_imul_r64_imm (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm dst : Nat) (imm : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x6b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_imm : read_i8 (code (m + 3)) = imm)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      (x86_set_flag4
+        { x86_set_reg s dst (x86_get_reg s (rm + x86_rex_b rex) * UInt64.ofInt imm)
+          with rip := m + 4 }
+        (x86_get_reg s (rm + x86_rex_b rex) * UInt64.ofInt imm)
+        (x86_imul_ovf (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt imm))
+        (x86_imul_ovf (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt imm))) := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm, h_imm,
+        h_dst, h_dst_lt]
 
 /-- `mov rax, rbx` (REX.W 89 /r, mod=3): the ModRM `reg` field is the SOURCE
     and `rm` the destination, so 0xd8 (reg=3, rm=0) moves RBX into RAX. -/

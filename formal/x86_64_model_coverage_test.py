@@ -228,6 +228,22 @@ def samples():
     add("alu_rr32:xor", "xor edx, edx", X.encode_xor_edx_edx())
     add("imul_r64_r64", "imul rax, rbx", X.encode_imul_r64_r64(R.RAX, R.RBX))
     add("imul_r64_r64", "imul r12, r15", X.encode_imul_r64_r64(R.R12, R.R15))
+    # The three-operand form with an immediate, and BOTH immediates' signs: a
+    # pointer subscript's scale is positive and a C subscript's negative index
+    # moves the address backwards, so the one-byte immediate has to be read as
+    # signed or `p[-1]` reads `p + 127*4`.
+    for dst, src, imm in ((R.RAX, R.RBX, 4), (R.R10, R.R11, -8)):
+        add("imul_r64_r64_imm", "imul %s, %s, %d" % (dst.name, src.name, imm),
+            X.encode_imul_r64_r64_imm(dst, src, imm))
+    # The byte-wise `and`/`or`, which exist so a floating `==` can read the
+    # conjunction of ZF and PF without reading the seven bytes a `SETcc` left
+    # in the register.  Two register pairs, because REX.B and REX.R both have to
+    # be decoded and a low pair cannot show that.
+    for dst, src in ((R.RAX, R.RCX), (R.R11, R.R10)):
+        add("alu_rr8:and", "and %s, %s" % (dst.name, src.name),
+            X.encode_and_r8_r8(dst, src))
+        add("alu_rr8:or", "or %s, %s" % (dst.name, src.name),
+            X.encode_or_r8_r8(dst, src))
 
     # ALU register/immediate
     for enc, name, w in ((X.encode_add_r64_imm32, "add", 32),
@@ -286,6 +302,13 @@ def samples():
     add("call_rel32", "call rel32", X.encode_call_rel32(-0x2000))
     add("call_rm64", "call [rip+x]", X.encode_call_rm64(0x40))
     add("call_rm64", "call [rip-x]", X.encode_call_rm64(-0x40))
+    # `FF /2` with mod=11 — the call through a function VALUE.  It is a
+    # different instruction from the `FF 15` above (two bytes, and the target
+    # is a register's contents), so it needs its own row: a sample under
+    # `call_rm64`'s name would ask `x86_step` about bytes the model answers
+    # differently.
+    for reg in (R.RAX, R.R11):
+        add("call_r64", "call %s" % reg.name, X.encode_call_r64(reg))
     add("jmp_rm64", "jmp [rip-x]", X.encode_jmp_rm64(-0x30))
     return out
 
