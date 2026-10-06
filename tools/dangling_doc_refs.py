@@ -21,6 +21,14 @@ in this repo", and they eventually disagree.
     python3 tools/dangling_doc_refs.py --json     # machine-readable
     python3 tools/dangling_doc_refs.py --ratchet  # only REGRESSIONS vs the baseline
     python3 tools/dangling_doc_refs.py --write-baseline   # regenerate it
+    python3 tools/dangling_doc_refs.py --stale      # only the disagreeing verdicts
+
+THE OTHER HALF, which this tool now also answers: a citation that RESOLVES and is
+still FALSE about the tree. `stale_verdicts` below reports a `bugs/` document
+whose verdict TABLE disagrees with the committed ledger of those verdicts
+(`tools/formal_proof_census_baseline.json`). Reported, never failed on, for
+`BARE_REF`'s reason: a verdict table is prose-adjacent, and a branch that fixes
+one must be able to move it without a ledger.
 
 Exit code is 1 when anything dangles, 0 when nothing does, so this can become
 a hook without being edited first. It is NOT wired into any bucket, and the
@@ -350,6 +358,176 @@ def write_baseline(by_file, skip=(), baseline=None):
     return 0
 
 
+# ── stale claims: a citation that RESOLVES and is still false ───────────────
+# Everything above counts a reference to a document that is GONE. It cannot
+# count a reference that resolves and is no longer TRUE, and that half is the
+# larger one: CLAUDE.md's rule manufactures the first kind every time a fix
+# lands, but nothing manufactures the second — a document that says `sgt8` is
+# red after `sgt8` started passing is a file a reader trusts and is wrong, and
+# the only thing that reported it was a reader who went looking. Three such
+# rows sat in this tree simultaneously (measured; see `stale_verdicts`'s
+# section in `main`), all three in one verdict table, all three in the same
+# direction: a committed ledger row written from a REPLAYED verdict that no
+# longer described the tree.
+#
+# The ledger is `tools/formal_proof_census_baseline.json` because that is the
+# one committed, machine-readable record of what a `formal/examples` proof
+# actually did — `test_formal.py` prints today's pass/fail against a
+# hand-maintained `EXPECTED_FAILURES` dict and throws the rest away, so it is
+# not a source of truth for anything, and re-running Lean is not something a
+# documentation check can do.
+#
+# REPORTING and not failing, and the reason is the same one BARE_REF gives: a
+# verdict table is prose-adjacent, a branch that fixes one must be able to move
+# it without a ledger, and either side of a disagreement can be the stale one
+# (the doc can be ahead of a ledger row that has not been re-banked, or the
+# ledger can be ahead of a doc nobody updated) — so a verdict is not a decision
+# this tool may take on somebody else's file. Making it visible is the part
+# that pays.
+VERDICT_LEDGER = os.path.join(HERE, 'formal_proof_census_baseline.json')
+
+# A document's spelling of a verdict, mapped onto the ledger's vocabulary, so
+# the comparison is against the record and not against whichever word the
+# document happened to use. `PASS` is `proved` and nothing else: `test_formal.py`
+# prints PASS for a proof that typechecked with no holes and FAIL for every
+# other outcome, so PASS names one ledger status and FAIL names three of them —
+# which is why there is no FAIL arm, and why guessing one would invent
+# disagreements out of the three reds it cannot tell apart.
+SAID_TO_STATUS = {
+    'pass': 'proved',
+    'proved': 'proved',
+    'lean-rejected': 'lean-rejected',
+    'refused': 'refused',
+    'too-large': 'too-large',
+}
+
+
+def load_verdict_ledger(path=VERDICT_LEDGER):
+    """{stem: (status, timed_on, cached)} from the committed proof census.
+
+    Empty when the ledger is absent, and the reason is printed rather than
+    swallowed: a census that silently finds no verdicts to disagree with is a
+    census reporting green because it read nothing, which is the one thing this
+    whole tool exists not to be able to do.
+    """
+    if not os.path.exists(path):
+        print(f'warning: {os.path.relpath(path, ROOT)} is not here, so the '
+              f'stale-verdict section below has nothing to compare against and '
+              f'will report nothing', file=sys.stderr)
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            records = json.load(f).get('records') or {}
+    except (OSError, ValueError) as e:
+        print(f'warning: {os.path.relpath(path, ROOT)} is unreadable '
+              f'({type(e).__name__}: {e}); the stale-verdict section below will '
+              f'report nothing', file=sys.stderr)
+        return {}
+    return {stem: (r.get('status'), r.get('timed_on'), bool(r.get('cached')))
+            for stem, r in records.items()}
+
+
+def _cell(cell):
+    """A table cell reduced to the token that decides it.
+
+    Strips the markdown a verdict cell is written with — backticks, emphasis,
+    and a trailing `(2026-10-05)` date qualifier — because `**PASS (2026-10-05)**`
+    and `` `lean-rejected` `` and `` `refused` (generate) `` are three spellings
+    of one claim and a comparison that missed any of them would be a check with
+    a hole in it rather than a check. The strip is a fixpoint rather than a
+    fixed order for a measured reason: emphasis and a qualifier alternate in
+    one cell (`**PASS (2026-10-05)**` ends in `**`, so a single pass that looks
+    for a trailing parenthesis finds none), and a strip that only runs once
+    silently finds no verdict in the ONE spelling that dates its claim.
+    """
+    cell = cell.strip()
+    for _ in range(4):
+        before = cell
+        cell = cell.strip('`*').strip()
+        cell = re.sub(r'\s*\([^)]*\)\s*$', '', cell).strip()
+        if cell == before:
+            break
+    return cell
+
+
+def verdict_claims(text, ledger):
+    """[(lineno, stem, said)] — every verdict a table row states for a stem.
+
+    A row qualifies when one cell IS a stem the ledger knows and ANOTHER cell
+    IS a verdict. Both halves are equality rather than containment, and each
+    for a measured reason. A substring test would match every prose sentence
+    that mentions a stem and mentions the word "PASS" somewhere, which on this
+    corpus is most of `bugs/`. And equality on the verdict cell is what reads a
+    row written chronologically: `| 4 | `sgt8` | **PASS (2026-10-05)** | was
+    `lean-rejected` on … |` states its CURRENT verdict in the short cell and
+    its former one inside a sentence, so first-match wins and the sentence is
+    never mistaken for the claim.
+    """
+    out = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        row = line.strip()
+        if not (row.startswith('|') and row.endswith('|')):
+            continue
+        cells = [_cell(c) for c in row.strip('|').split('|')]
+        for i, cell in enumerate(cells):
+            if cell not in ledger:
+                continue
+            for other in cells[:i] + cells[i + 1:]:
+                said = SAID_TO_STATUS.get(other.lower())
+                if said:
+                    out.append((lineno, cell, said))
+                    break
+    return out
+
+
+def stale_verdicts(ledger=None, docs=None, skip=()):
+    """[(rel, lineno, stem, said, recorded, timed_on, cached)] — the rows whose
+    verdict disagrees with the committed ledger.
+
+    `docs` is the file list to read and defaults to the tracked corpus, so a
+    test can hand this a fixture document instead of the tree — the negative
+    control `test_suite.py` asks for, because a checker that cannot fail is not
+    a checker.
+    """
+    if ledger is None:
+        ledger = load_verdict_ledger()
+    if docs is None:
+        docs = candidates()
+    out = []
+    for rel in docs:
+        if rel in skip:
+            continue
+        try:
+            text = open(os.path.join(ROOT, rel), encoding='utf-8',
+                        errors='replace').read()
+        except OSError:
+            continue
+        for lineno, stem, said in verdict_claims(text, ledger):
+            recorded, timed_on, cached = ledger[stem]
+            if said != recorded:
+                out.append((rel, lineno, stem, said, recorded, timed_on,
+                            cached))
+    return sorted(out)
+
+
+def stale_verdict_heading():
+    """The section title, shared by `main` and `--stale` so the two spellings
+    cannot drift into two different descriptions of one check."""
+    return ('VERDICTS THAT DISAGREE with the committed ledger '
+            '(tools/formal_proof_census_baseline.json)')
+
+
+def print_stale(row):
+    """One disagreeing row, with WHICH side is replayed — the field that says
+    which of the two records was never measured."""
+    rel, lineno, stem, said, recorded, timed_on, cached = row
+    when = f'measured {timed_on}' if timed_on else 'never measured'
+    if cached:
+        when += ', REPLAYED from a verdict cache'
+    print(f'  {rel}:{lineno}  {stem}: the doc says {said}, the ledger says '
+          f'{recorded} ({when})')
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--by-file', action='store_true',
@@ -366,6 +544,9 @@ def main() -> int:
     ap.add_argument('--skip', action='append', default=(),
                     help='a repo-relative path to leave out of the walk '
                          '(repeatable)')
+    ap.add_argument('--stale', action='store_true',
+                    help='report only the verdict rows that disagree with '
+                         'tools/formal_proof_census_baseline.json')
     args = ap.parse_args()
 
     _have, by_doc, by_file = find(skip=set(args.skip))
@@ -373,6 +554,11 @@ def main() -> int:
 
     if args.write_baseline:
         return write_baseline(by_file, skip=set(args.skip))
+
+    if args.stale:
+        for row in stale_verdicts(skip=set(args.skip)):
+            print_stale(row)
+        return 0
 
     if args.ratchet:
         regressions = ratchet_regressions(by_file)
@@ -408,6 +594,11 @@ def main() -> int:
                        for k, v in sorted(by_doc.items())},
             'by_file': {k: [f'{d}@{n}' for d, n in v]
                         for k, v in sorted(by_file.items())},
+            'stale_verdicts': [
+                {'doc': r, 'line': n, 'stem': s, 'doc_says': said,
+                 'ledger_says': rec, 'measured_on': on, 'replayed': cached}
+                for r, n, s, said, rec, on, cached
+                in stale_verdicts(skip=set(args.skip))],
         }, indent=2, sort_keys=True))
         return 1 if by_doc else 0
 
@@ -437,6 +628,15 @@ def main() -> int:
           'the\nsymptom, or the commit that fixed it — which is what '
           'test_arm64_encoders.py\nsays at its shift sweep. See '
           'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md.')
+    stale = stale_verdicts(skip=set(args.skip))
+    if stale:
+        print(f'\n{stale_verdict_heading()} — {len(stale)} row(s), in '
+              f'{len({r for r, *_ in stale})} document(s). REPORTED, and the '
+              f'exit code above is not\nwhat they decide: either side can be '
+              f'the stale one, and this tool does not get\nto decide which. '
+              f'Re-measure, then move whichever record is behind.')
+        for row in stale:
+            print_stale(row)
     return 1 if by_doc else 0
 
 
