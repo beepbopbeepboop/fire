@@ -28,6 +28,45 @@ not ask, and it is the first thing a planner should measure: it is the wall
 `FORMAL_stdlib_module_names_are_not_classified` and the `-77` files behind it
 both sit behind.
 
+### ANSWERED 2026-10-05 later (`formal40-6`): it is NOT one missing export, and the
+### wall belongs to a DIFFERENT DOC -- 47 bare call sites, and spelling one removes it
+
+**Measured, both architectures, `fire.py build --formal`:**
+
+| the call | arm64 | x86-64 |
+|---|---|---|
+| `FormatStruct(7)` -- bare, as the stdlib spells it | `std.format._utils` does not export it | the same sentence |
+| `FormatStruct[Pointer[Int64]](7)` -- one type argument spelled | **past the export gate**, onto `constants.mojo: formal dylib has no public functions` | the same, same wall |
+
+**So `std/format/_utils.mojo` cannot be given the missing export, and the reason
+is the export rule's own text rather than a decision about this module.**
+`FormatStruct` is declared `struct FormatStruct[T: Writer, o: MutOrigin]`
+(`_utils.mojo:287`), so it is **a generic template, and the refusal says in its
+own words that a generic template is not one symbol but one per instantiation.**
+There is no name to export; there are 47 instantiations' worth, and the linker
+needs to know which. The demand pipeline gets that from an explicit bracket
+(`formal/monomorph.py` compiles an instantiation into the module's library when
+an importer asks for it), which is exactly why the spelled call carries one and
+the bare call arrives with nothing to bind.
+
+**And every one of the 47 call sites in the stdlib is bare** -- counted over
+`std/**/*.mojo`: 47 `FormatStruct(` in 31 files, and the single `FormatStruct[`
+hit in the whole tree is the declaration at `_utils.mojo:287` itself. The
+stdlib's own spelling (`FormatStruct(writer, "Allocation")`, `alloc.mojo:450`)
+is correct Mojo, which the refusal message says outright.
+
+**Consequence for this document's plan: item (0) is answered and it is another
+claim's row.** The wall standing in front of items 1, 2 and 3 at once is
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` --
+template type-argument inference, the 123 files that doc counts, claimed by
+`formal40-1`, so it was not touched here. **What those rows advanced onto, one
+module further along, is `constants.mojo`**, whose refusal is
+`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s row and which that
+refusal message itself calls "not more work on the module but a decision about
+the BACKEND".
+
+`../new-modular/Mojo/stdlib` is a separate checkout and was not edited.
+
 **Everything below is the 2026-10-04 measurement and is kept as it was**,
 because it is the record of what the row was and the three rows above are what
 it is now; §6's ordering is stale in the same way §3's table is, and §6 says so.
@@ -230,11 +269,16 @@ either way; the wall and the in-file row are the same refusal.
 **STALE IN ITS FIRST THREE ITEMS as of 2026-10-05 — see the header table.**
 Item 1 is DONE by somebody else and the row moved; item 2's refusal is gone and
 its row moved onto the export rule; item 3's refusal is gone and its rows moved
-onto the variadic ABI. **The order to measure in now is: (0) the
+onto the variadic ABI. **The order to measure in now is: (0) ~~the
 `std.format._utils` export of `FormatStruct`, which stands in front of items 1,
-2 and 3 at once, then (1) `binary_heap.mojo`'s new `self.unsafe_ptr()` row,
-then (2) `builtin_slice.mojo` past the export gate.** Items 4-6 below are
-unchanged and still not this claim's.
+2 and 3 at once~~ MEASURED 2026-10-05 later, and it is not an export question at
+all: it is template type-argument inference
+(`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`, 47
+bare call sites in 31 files, claimed by `formal40-1`) -- see the header's
+ANSWERED block. So the order is (1) `binary_heap.mojo`'s new
+`self.unsafe_ptr()` row, then (2) `builtin_slice.mojo` past the
+`constants.mojo` no-exports wall, which is where item (0) advanced those rows.
+** Items 4-6 below are unchanged and still not this claim's.
 
 1. ~~**`binary_heap.mojo`'s `pop()`**~~ — **FIXED between 2026-10-04 and
    2026-10-05** (`formal/model.py`'s one-field-mutator receiver handover, which
