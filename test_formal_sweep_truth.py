@@ -3488,7 +3488,17 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     #: The guard this class makes unsatisfiable. Pinned to a line the emitter
     #: really writes, with the message the case below carries, because a fixture
     #: that silently stops matching is a fixture that stops testing.
-    _GUARD = "try (simp [hs7, hdec6])"
+    #:
+    #: **`hdec4`, not `hdec6`, and the move is this tree's emission and not a
+    #: rename.** `work/formal33-recursion-stack` stopped counting the startup
+    #: stub's `getrlimit` as a PROGRAM call (`x86_64_proof_gen.py::
+    #: _program_externs` drops an extern whose address is below
+    #: `info["func_offset"]`), so no generated proof carries an
+    #: `extern_getrlimit_step` any more: `const2.mojo` emits 722 lines on master
+    #: and 533 here, and the condition-decision facts are numbered over the
+    #: steps that survive, which moves `hdec6` to `hdec4`. Same guard, same
+    #: role — step 7's side condition — at the same line.
+    _GUARD = "try (simp [hs7, hdec4])"
 
     def _patched_const2(self):
         """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.
@@ -3824,11 +3834,14 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         digits — so a hole in an imported `.olean` arrived as a bare line number
         in a file it had never seen, and `hole_at` resolved it against the
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:503:8` position came back as `"hstep11's side condition, line
-        503"`, which is confident, specific and completely wrong, because 503 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 503 of the
+        `«lib».X86:451:8` position came back as `"hstep11's side condition, line
+        451"`, which is confident, specific and completely wrong, because 451 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 451 of the
         generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
+        (The line is 451 and not the 503 an earlier version of this case used,
+        because the emission moved: `_GUARD`'s comment says what removed the
+        steps between them.)
 
         Both are `None` now, and for the stated reason: a hole this emitter did
         not write has no emitter fact to name. The rows are non-vacuous in both
@@ -3850,11 +3863,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:503:8`\n", module),
-            "hstep11's side condition, line 503",
-            "the control: OUR hole at 503 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 503")
-        for label, pos in (("«lib».X86", 503), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:451:8`\n", module),
+            "hstep11's side condition, line 451",
+            "the control: OUR hole at 451 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 451")
+        for label, pos in (("«lib».X86", 451), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -3867,8 +3880,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:503:8`\n"),
-            "hstep11's side condition, line 503",
+                "`«lib».X86:451:8`\n"),
+            "hstep11's side condition, line 451",
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
@@ -4084,10 +4097,19 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         decisions = re.findall(r"have (hdec\d+) : (x86_cond \d+ s\d+) = (true|false)"
                                r" := by\n[ ]*simp \[([^\]]*)\][^\n]*\n[ ]*<;> decide",
                                text)
-        self.assertEqual(len(decisions), 4,
-                         "two per guarded prologue — the branch that parks the "
-                         "floor word and the one that checks it — and this chain "
-                         "crosses a frame, so two prologues: four. "
+        # ONE per guarded prologue now, not two. The second one used to be the
+        # `test floor / jne done` that skipped the once-per-process
+        # `getrlimit`; that read moved out of the prologue into the startup stub
+        # (`x86_64_codegen.py::_emit_stack_floor_init`), because a `call` inside
+        # a prologue ends that function's path tree at the call and cost the
+        # corpus two thirds of its leaves. The floor word is still read once and
+        # still cached, so the prologue is a load and a compare and the only
+        # branch left in it is the one that checks the floor — which is the one
+        # this test is actually about.
+        self.assertEqual(len(decisions), 2,
+                         "one per guarded prologue — the branch that checks the "
+                         "floor — and this chain crosses a frame, so two "
+                         "prologues: two. "
                          f"Got {decisions}")
         for name, cond, value, simp in decisions:
             # The decision's OWN proof, which is the two lines after its `have`:
@@ -4368,9 +4390,19 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: — which is the whole change, and the reason `ret42` (one function) and
     #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest` is
     #: the one with a conditional of its own, so it is 4.
-    TREES = (("formal/examples/ret42.mojo", 1, 16),
-             ("formal/examples/bittest.mojo", 4, 220),
-             ("formal/examples/wide_recv.mojo", 1, 150))
+    #:
+    #: **Re-pinned again 2026-10-05, by the merge of
+    #: `work/formal33-recursion-stack`, and this time the cause is the EMITTER
+    #: rather than the corpus**: that branch stopped counting the startup stub's
+    #: `getrlimit` as a program call, so every generated proof lost its
+    #: `extern_getrlimit_step` and the whole corpus walks fewer steps — 4 232 ->
+    #: 3 693 here, with the trees unchanged at 105. The three rows below moved
+    #: with it for the same reason (16 -> 11, 220 -> 200, 150 -> 137), and the
+    #: 52-example subset moved from 2 718 to 2 366, which is the same reduction
+    #: over the programs that were already there.
+    TREES = (("formal/examples/ret42.mojo", 1, 11),
+             ("formal/examples/bittest.mojo", 4, 200),
+             ("formal/examples/wide_recv.mojo", 1, 137))
     #: …and the corpus TOTAL, which is the doc's after-table's own row. A
     #: per-example table cannot see a program that gained a branch, so the total
     #: is the row that does, and it is the number the doc quotes.
@@ -4390,8 +4422,8 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
     #: examples that were already here still produce what they produced.
-    TOTAL = (105, 4232)
-    TOTAL_PRE_MERGE52 = (69, 2718)
+    TOTAL = (105, 3693)
+    TOTAL_PRE_MERGE52 = (69, 2366)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

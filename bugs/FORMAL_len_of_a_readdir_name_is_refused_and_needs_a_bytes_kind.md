@@ -251,3 +251,8 @@ says the seed landed at the element and nowhere else. **68/68, and 58/58 before.
 which is the check that matters for a change that rewrote nine `== STR_KIND`
 comparisons: every one of them now reads `string_operand_is_string`, which
 returns the same answer for every kind that existed before this one.
+* The fix that made it green for a day is `4d081b4f` (`formal: a
+  namespace-qualified `decide` axiom was invisible to the closure census`),
+  and the doc it deleted with that fix is named by the commit rather than by
+  a path that no longer exists — which is why the measurement above is over
+  a table that has been stale before.

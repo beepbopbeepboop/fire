@@ -42354,6 +42354,62 @@ class GlobalDataImage:
         """
         return self.init_flag_offset + GLOBAL_SLOT_BYTES
 
+    @property
+    def stack_limit_offset(self) -> int:
+        """The word after the floor: where this image CACHES `RLIMIT_STACK`.
+
+        A third reserved word, and the reason it is needed is a measurement: the
+        floor could not stay a compile-time constant, because a budget larger
+        than the process's real stack is a guard that never fires — the same
+        binary at the same depth gives `exit 2` under the default `ulimit -s
+        8176` and `exit 139` (a SIGSEGV with no output) under `ulimit -s 2048`.
+        So the guard reads the limit at run time, and reading it is a CALL, so
+        it is made once per process rather than once per call — which needs a
+        word to remember the answer in, and `__DATA` is the only place in the
+        image that outlives the frame that read it.
+
+        Zero means "not read yet", which is safe rather than a hole for the same
+        reason the floor's zero is: the `CBNZ` tests it BEFORE the `getrlimit`,
+        so the first guarded prologue does the read and no later one repeats it,
+        and a program that somehow reaches the guard with the word still zero
+        reads it rather than proceeding.
+        """
+        return self.init_flag_offset + 2 * GLOBAL_SLOT_BYTES
+
+    @property
+    def stack_scratch_offset(self) -> int:
+        """The word after the cached limit: 16 bytes of `__DATA` the guard lends
+        to `getrlimit`.
+
+        **A `__DATA` word and not 16 bytes of stack, and the measurement is why.**
+        The guard's `getrlimit(RLIMIT_STACK, &rlim)` needs a 16-byte destination,
+        and the two obvious homes for it both corrupt the program:
+
+          * **the frame.** Emitted before `sub sp, #_SCRATCH`, a `sub sp, #16` /
+            `add sp, #16` pair around the call leaves SP 16 bytes lower across an
+            extern call, and the C library reads SP-relative state across that
+            boundary — measured as a hang or a SIGSEGV on *every* program,
+            including `def helper(x): return x + 1` with a `main` that calls it,
+            with no recursion and no output. Reusing the caller's red zone at
+            `[sp, #16)` is worse: those are the caller's own frame, and
+            overwriting them hangs immediately.
+          * **the frame's blob region.** The original placement, after
+            `sub sp, #_SCRATCH`, where `[sp, #0..#16)` is where a RECEIVER FRAME
+            lives (`struct_constructor_sites`) — a store there corrupts the
+            struct the call was handed.
+
+        `__DATA` is writable, already addressed by the ADRP/ADD pair two
+        instructions earlier, and cannot be aliased by anything: it outlives every
+        frame and the only writer is this guard, on a path the `CBNZ`/`JNE` above
+        runs once per process.
+
+        Two words rather than one, because `struct rlimit` is two `rlim_t` and
+        only `rlim_cur` (the first) is read — but the C library writes both, and a
+        16-byte store into the last word of the image would be a write past it.
+        """
+        return self.init_flag_offset + 3 * GLOBAL_SLOT_BYTES
+
+
     def __bool__(self):
         return bool(self.blob)
 
@@ -42386,6 +42442,239 @@ class GlobalDataImage:
 # program dies as it does today — no worse than the defect being fixed — while a
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
+
+
+# THE PART OF THE PROCESS'S STACK THIS COMPILER LEAVES ALONE, and the reason
+# the guard above has to read the limit at RUN time rather than trust this
+# constant.
+#
+# `STACK_FLOOR_BUDGET_BYTES` says how much stack this compiler is willing to
+# spend. It cannot say how much there IS, because that is `RLIMIT_STACK` — a
+# fact about the process the kernel established, which a caller may have
+# lowered before exec and which nothing in the source mentions. Measured on this
+# tree with a 128 KiB-frame C probe, so the frame is the only variable
+# (`tools/formal_recursion_depth.py` measures the same thing on the images):
+#
+#     ulimit -s   rlim_cur    deepest frame set    unusable
+#       1024 KiB   1048576         786432         262144
+#       2048 KiB   2097152        1835008         262144
+#       4096 KiB   4194304        3932160         262144
+#       8176 KiB   8372224        8126464         245760
+#      16384 KiB  16777216       16515072         262144
+#      32768 KiB  33554432       33292288         262144
+#
+# **256 KiB, and it does not scale.** That is the guard page, the kernel's own
+# bookkeeping and the startup stub's frame — a fixed cost, which is why the
+# RATIO of usable stack to limit runs from 0.75 at 1 MiB to 0.99 at 32 MiB while
+# the DIFFERENCE stays flat. A margin written as a fraction of the limit would
+# be wrong at one end or the other, and this constant is what says so.
+STACK_FLOOR_MARGIN_BYTES = 256 * 1024
+
+
+# `RLIMIT_STACK`, the `getrlimit(2)` SELECTOR whose soft limit is how much stack
+# the process may use. It is 3 on Darwin (`sys/resource.h`) and on Linux
+# (`RLIMIT_STACK` in `bits/resource.h`), and those are the two targets this path
+# emits for; a third would need its own value here rather than a silent reuse of
+# this one.
+#
+# **In the model, not in either backend**, because both backends' guards now read
+# the limit and a literal in each file is two copies of one answer — which is how
+# they came to disagree about the arm64 threshold once already (see
+# `stack_floor_guarded_names` for the rule that is genuinely per-backend, which is
+# a different thing: WHICH prologues carry the guard, not what they compare).
+RLIMIT_STACK = 3
+
+
+# THE SMALLEST BUDGET THE GUARD WILL USE, and why the arithmetic above needs one.
+#
+# A process whose limit is BELOW the margin has by definition less usable stack
+# than the margin reserves, so `limit - margin` is negative; an unsigned subtract
+# wraps it to a huge positive, the floor word is stored far ABOVE the stack
+# pointer, and the guard's "SP >= floor" is then trivially true forever — a guard
+# that is silent, which is the crash this mechanism exists to replace. Measured
+# reachable rather than theoretical: macOS's own default stack for a non-main
+# thread is 512 KiB, which is the margin itself, so a thread's recursion lands
+# inside this case on a stock host.
+#
+# **TWO arm64 frames, and the second one is load-bearing.** The guard runs before
+# the frame reservation (`stack_floor_charge` below), so a budget of a single
+# frame would put the floor exactly at the current SP, where `SP >= floor` is true
+# by construction and the guard never fires — the silent-crash failure mode this
+# whole mechanism exists to prevent, reached by the clamp meant to prevent it.
+# Two frames always leaves at least one frame of depth to recurse into.
+STACK_FLOOR_MIN_BUDGET_BYTES = 2 * ARM64_CONTAINER_BUDGET
+
+
+def stack_floor_budget_for_limit(limit_bytes: int,
+                                 frame_bytes: int = None) -> int:
+    """The budget the guard uses on a process whose stack limit is `limit_bytes`.
+
+    The run-time half of the policy above, and the reason the guard could not be
+    a constant: **a budget larger than the process's real stack is a guard that
+    never fires**, and what it leaves behind is the silent SIGSEGV the guard was
+    written to replace. Measured, same binary, same program, same depth, with
+    `STACK_FLOOR_BUDGET_BYTES` used verbatim as it was before this existed:
+
+        ulimit -s 8176 (the default here)   exit 2    the guard fires
+        ulimit -s 2048                      exit 139  SIGSEGV, no output
+        ulimit -s 1024                      exit 139  SIGSEGV, no output
+        ulimit -s 512                       exit 139  SIGSEGV, no output
+
+    So the answer is `min(BUDGET, limit - MARGIN - frame)` and every term is the
+    conservative direction: the budget never exceeds what the policy is willing
+    to spend, it never claims more of the stack than the kernel leaves usable,
+    and it never claims a whole frame the first call has not taken yet. That last
+    term is the one that was missing, and it is what
+    `stack_floor_charge`'s table measures.
+
+    `frame_bytes` defaults to the largest frame either backend emits
+    (`ARM64_CONTAINER_BUDGET`), which is the conservative choice for a caller
+    with no particular function in mind — a smaller frame would buy one more
+    level of depth on a host with stack to spare, and the guard's own docstring
+    is where that trade is argued.
+
+    **An integer in, an integer out, with no syscall in here**, because the
+    emitter cannot call `getrlimit` — its whole job is to emit instructions, and
+    reading the limit IS a call, emitted where the guard is emitted. What the
+    emitter does with the answer is `arm64_codegen._emit_stack_floor_guard`'s
+    business; keeping the arithmetic here is what lets a test pin the relation
+    between a limit, a margin and a budget without a process, and
+    `getrlimit(RLIMIT_STACK)` on the BUILD host is not the limit of the process
+    that will RUN the image.
+    """
+    frame = (ARM64_CONTAINER_BUDGET if frame_bytes is None
+             else int(frame_bytes))
+    usable = int(limit_bytes) - STACK_FLOOR_MARGIN_BYTES - frame
+    if usable < STACK_FLOOR_MIN_BUDGET_BYTES:
+        usable = STACK_FLOOR_MIN_BUDGET_BYTES
+    return min(STACK_FLOOR_BUDGET_BYTES, usable)
+
+
+def stack_floor_charge(budget_bytes: int, frame_bytes: int) -> int:
+    """What the guard SUBTRACTS from the SP it reads to get the floor.
+
+    **The budget LESS one frame, and getting this wrong was a two-step
+    measurement in both directions — so both are here, because the second is only
+    visible once the first is fixed.**
+
+    * **The guard has to run BEFORE the frame it guards is reserved.** It used to
+      be emitted immediately after `sub sp, #_SCRATCH` (arm64) / `sub rsp,
+      #_frame_bytes` (x86-64), and then two things were wrong. The threshold was a
+      frame too generous; and — fatally — **by the time the guard ran, the frame
+      had already been reserved and the saved registers already pushed**, so the
+      frame that crossed the real limit had already TOUCHED the memory below it.
+      No arithmetic in the guard could have prevented that. Measured, arm64,
+      `deep(n)`, `ulimit -s 2048`: `n=13` exits 0, `n=14` dies with SIGSEGV and no
+      output, while the same binary under `ulimit -s 8176` refuses at depth 59
+      with a status and never crashes — because 8 372 224 is not a multiple of
+      131 072 and the extra frame lands inside `STACK_FLOOR_MARGIN_BYTES`. That
+      is the whole reason this survived: the default stack hides it and only an
+      exact multiple exposes it.
+
+    * **With the guard in front, the charge is `budget - frame`.** Not the
+      budget, and not the budget plus a frame. The guard is emitted after the
+      `stp x29, x30` / `push rbp` that saves the frame pointer — so the SP it
+      reads is already one frame below the SP the ENTRY prologue inherited, which
+      is the point the budget is defined against. `deep(k)` therefore sits at
+      `SP_entry - (k+1)*frame`, and it passes when `(k+1)*frame <= charge`.
+
+      Measured, arm64, `deep(n)`, over four stack limits, the deepest `n` that
+      still ANSWERS, against each candidate charge:
+
+          ulimit -s   budget     deepest n that answers   budget-frame   budget+frame
+            8176 KiB   60 frames            59               59  ok          60  too deep
+            4096 KiB   30 frames            29               29  ok          30  too deep
+            2048 KiB   14 frames            13               13  ok          14  too deep
+            1024 KiB    6 frames             5                5  ok           6  too deep
+
+      `budget - frame` is right in every row, and every row where the other two
+      are wrong is a depth CPython answers and this used to answer too.
+
+    `frame_bytes` is what makes the relation checkable: `charge / frame_bytes` is
+    the deepest depth the guard admits, so a test states that number and MEASURES
+    it rather than trusting it. It is per-function and per-backend — `_SCRATCH` on
+    arm64, `_frame_bytes` on x86-64, which counts that function's own spills —
+    which is the sense in which the guard's threshold really is derived from each
+    function's frame size: a function with many locals has a larger frame, so
+    `charge / frame` is a smaller depth for it.
+
+    Clamped at one frame, for `STACK_FLOOR_MIN_BUDGET_BYTES`'s reason: a charge
+    of zero would put the floor at the current SP, where `SP >= floor` is true by
+    construction and the guard never fires — the silent-crash failure mode this
+    whole mechanism exists to prevent, reached by the clamp meant to prevent it.
+    """
+    charge = int(budget_bytes) - int(frame_bytes)
+    return charge if charge > frame_bytes else frame_bytes
+
+
+def stack_trap_message() -> str:
+    """The ONE text a stack overflow writes to fd 2 before it stops the program.
+
+    For BOTH backends, for the reason every other `*_message` in this file is
+    shared: two architectures naming one limit differently is how a reader ends
+    up looking for a construct one of them invented. The siblings are
+    `list_append_overflow_message`, `dict_store_overflow_message` and
+    `int_parse_trap_message`, and this is the fourth member of that family —
+    **the one that was missing**, because the stack-floor trap was the only
+    bounded stop on this path that said nothing at all:
+
+        $ python3 fire.py build --formal --no-prove -n 5000 -o deep deep.mojo
+        $ ./deep; echo "exit $?"
+        exit 2
+
+    A status, no output on either stream, and nothing to say which of the
+    program's bounds it hit. Every other bound on this path names itself.
+
+    **It takes no arguments, and that is a decision rather than an omission.**
+    The text is an interned literal in `__TEXT` — this path has no `printf`, so
+    every number in it is spelled in at BUILD time, which is exactly what
+    `list_append_overflow_message`'s capacity and `int_parse_trap_message`'s
+    base are. So it cannot quote the process's `RLIMIT_STACK`, which is a run-time
+    fact and is the number a reader who lowered `ulimit -s` most wants to see.
+
+    What it does instead is name the RULE those two numbers come out of, which
+    is strictly more useful than either number alone: the budget is
+    `min(STACK_FLOOR_BUDGET_BYTES, your limit - STACK_FLOOR_MARGIN_BYTES)`, so a
+    reader holding their own `ulimit -s` computes their own depth in one step.
+    A message that quoted a number the reader cannot check would be worse than
+    one that names the arithmetic.
+
+    Three things are named, and they are the three a reader needs in order to
+    act:
+
+      * **the depth is not the limit.** What fires is `budget / frame_bytes`,
+        and the frame is a property of the FUNCTION, so the same recursion is
+        refused at depth 59 on arm64 and 471 on x86-64 purely because of the two
+        frame sizes (measured: `tools/formal_recursion_depth.py`). A message
+        saying only "too much recursion" sends the reader to their recursion
+        when the answer is their frame layout;
+      * **the budget, the margin, and that the budget is the SMALLER of the two**
+        — which is what tells a reader that a smaller stack refuses sooner
+        rather than failing to refuse at all;
+      * **what to do** — CPython's remedy for a deep recursion is
+        `sys.setrecursionlimit`, and `formal/hostmods/sys.mojo`'s
+        `setrecursionlimit` says in its own docstring that it changes nothing,
+        so a program that follows CPython's advice verbatim gets no warning
+        until it stops. Saying so is the difference between a diagnostic and a
+        dead end.
+    """
+    return (f"RecursionError: this program's call stack went past the stack "
+            f"budget of {STACK_FLOOR_BUDGET_BYTES} bytes, which is the smaller "
+            f"of that number and this process's own stack limit less "
+            f"{STACK_FLOOR_MARGIN_BYTES} bytes of reserve — so a process with "
+            f"a smaller stack refuses SOONER, and never later than this. "
+            f"CPython raises RecursionError for a recursion this deep, and "
+            f"sys.setrecursionlimit cannot help here: this target has no "
+            f"interpreter stack to raise a limit on, and it compiles the limit "
+            f"you ask for without changing anything. The depth that fits is "
+            f"the budget divided by one call frame; a frame is "
+            f"{ARM64_CONTAINER_BUDGET} bytes on arm64 and "
+            f"{X86_64_CONTAINER_BUDGET} on x86-64 plus whatever the function "
+            f"spills, so the same recursion is refused at a different depth on "
+            f"each and a function with many locals is refused sooner. Rewrite "
+            f"the recursion as a loop, or split it so that no chain of calls is "
+            f"this deep.\n")
+
 
 # THE STATUS A STACK OVERFLOW LEAVES, beside the one a shift leaves. The
 # argument for a second number and against reusing `SHIFT_TRAP_STATUS` is the
@@ -42420,6 +42709,41 @@ def stack_floor_address(base: int, table: dict = None) -> int:
     """
     return base + build_data_image(
         module_slots() if table is None else table, base).stack_floor_offset
+
+
+def stack_limit_address(base: int, table: dict = None) -> int:
+    """Where this unit's CACHED STACK LIMIT word is, as an absolute address.
+
+    The word AFTER the floor, and a separate question from it, which is why it is
+    a second function and not `stack_floor_address(...) + 8`: the floor is
+    derived (SP minus a budget) and the limit is read (`getrlimit`), they are
+    written at different moments by different instructions, and a backend that
+    spelled the second as an offset from the first would be relying on the two
+    staying adjacent in `__DATA` — which is `GlobalDataImage`'s layout to decide
+    and this file's to name.
+
+    The offset is read out of the IMAGE rather than recomputed, for the same
+    reason `stack_floor_address` does it: a word the bytes do not contain is
+    addressable and that is the worst way for a guard to be wrong.
+    """
+    return base + build_data_image(
+        module_slots() if table is None else table, base).stack_limit_offset
+
+
+def stack_scratch_address(base: int, table: dict = None) -> int:
+    """Where this unit's 16-byte `getrlimit` scratch is, as an absolute address.
+
+    The word after the cached limit, and `GlobalDataImage.stack_scratch_offset`
+    is where the reason it is `__DATA` and not the stack is written down — the
+    short version is that all three stack answers corrupt the program, and the
+    measurements are on that property's docstring. It is a separate function for
+    the same reason `stack_limit_address` is: three words with three different
+    writers, and an offset spelled as `previous + 8` three times is three
+    chances to be wrong about a layout this file decides.
+    """
+    return base + build_data_image(
+        module_slots() if table is None else table, base).stack_scratch_offset
+
 
 
 def call_graph_edges(functions, structs: dict = None) -> dict:
@@ -44008,7 +44332,17 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # than a `None` that every reader would have to test for.
     count = max(s.index for s in table.values()) + 1 if table else 0
     flag_offset = count * GLOBAL_SLOT_BYTES
-    blob = bytearray(flag_offset + 2 * GLOBAL_SLOT_BYTES)
+    # FIVE reserved words, not two: the initializer flag, the stack floor, the
+    # cached `RLIMIT_STACK`, and the 16-byte scratch `getrlimit` writes into.
+    # The third is there because the floor's budget is read from the process at
+    # run time (measured: a constant budget larger than the real stack is a guard
+    # that never fires — same binary, same depth, `exit 2` at the default
+    # `ulimit -s` and `exit 139` at `ulimit -s 2048`), reading it is a call, and
+    # a call is made once per process only because there is a word to remember
+    # the answer in. The fourth and fifth are that call's 16-byte destination,
+    # which cannot be stack: `GlobalDataImage.stack_scratch_offset` has the
+    # measurement for all three alternatives.
+    blob = bytearray(flag_offset + 5 * GLOBAL_SLOT_BYTES)
     fixups = []
     string_cells = []
     # The trailing area starts after the reserved words, so a slot's address
