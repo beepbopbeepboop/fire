@@ -6741,6 +6741,107 @@ BOTH_ARCH_CASES = [
      "    var b = Box()\n"
      "    return b.get()\n",
      0, None),
+    # ── a nested frame's OWN CONSTRUCTOR runs at the bring-up ───────────────
+    #
+    # The row above answers **0** on purpose, because `Opt` declares no
+    # `__init__` and a fresh frame's defaults are zeros. This one declares one,
+    # and the whole point of the group is that a nested field is
+    # DEFAULT-CONSTRUCTED — in Mojo `T(...)` CALLS `T.__init__` — so the
+    # constructor's stores are part of the program and a bring-up that writes
+    # field DEFAULTS and stops is a silent wrong answer: it builds, it exits 0,
+    # and it leaves zeros where the source wrote stores.
+    #
+    # It used to answer 0 where CPython answers 41, in the same file and with
+    # the same `Opt` that `var o = Opt()` answered 41 for. Two paths in one
+    # emitter disagreed about what `T()` means and neither said so.
+    # `formal/model.py::nested_frame_init_stores` is the one reader both now ask,
+    # so the two cannot.
+    #
+    # **Three shapes, and they are three different code paths.** The one-field
+    # holder goes through `_emit_fresh_one_word`'s `("nested_frame", …)` arm,
+    # which used to spell the walk out again instead of calling
+    # `_emit_nested_frame_defaults`; the two-field holder goes through
+    # `_emit_frame_constructor`; and the three-level chain is the DEPTH case, where
+    # x86-64's defaults walk added `self._blob_base` a second time and put every
+    # frame from the third level down at `blob_base + blob_base + …`. That last
+    # one was invisible while the defaults were zeros — a store to the wrong
+    # address of zeros looks exactly like a store to the right address of zeros —
+    # and it printed a DIFFERENT wrong number on each machine: arm64 `q=0`,
+    # x86-64 `q=5`, CPython 70, measured on master before this change.
+    ("nested_frame_runs_the_nested_constructor_of_a_one_field_holder",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.v = 41\n"
+     "        self.has = 1\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    printf(\"b=%d\", b.get())\n"
+     "    return 0\n",
+     0, "b=41"),
+    ("nested_frame_runs_the_nested_constructor_of_a_two_field_holder",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.v = 41\n"
+     "        self.has = 1\n"
+     "\n"
+     "struct Wide:\n"
+     "    var inner: Opt\n"
+     "    var pad: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var w = Wide()\n"
+     "    printf(\"w=%d\", w.get())\n"
+     "    return 0\n",
+     0, "w=41"),
+    ("nested_frame_runs_the_nested_constructor_at_depth_three",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.x = 7\n"
+     "        self.y = 9\n"
+     "\n"
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var d: Deep\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "        self.d = Deep()\n"
+     "\n"
+     "    def read_d(self) -> Int:\n"
+     "        return self.d.x\n"
+     "\n"
+     "struct Outer:\n"
+     "    var n: Inner\n"
+     "\n"
+     "    def read_d(self) -> Int:\n"
+     "        return self.n.read_d()\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var t = Outer()\n"
+     "    printf(\"t=%d\", t.read_d())\n"
+     "    return 0\n",
+     0, "t=7"),
     # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
     # cannot reach: the frame is reserved in the PROLOGUE, one block per call
     # site, laid out in walk order by `model.struct_constructor_sites`, and the

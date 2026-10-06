@@ -8803,13 +8803,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 value = F.StringLiteral(value=payload)
             else:
                 value = int(payload or 0)
-            self._emit_block_store(site, slot, value)
+            self._emit_block_store(site[1], slot, value)
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
         for _field, slot, value in (plan[1] if shape ==
                                     M.CONSTRUCTION_INIT else ()):
-            self._emit_block_store(site, slot, value)
+            self._emit_block_store(site[1], slot, value)
         self._emit_frame_nested_addresses(site)
         # …and once more at the end, because the address is the RESULT and
         # every store above left something else in X0. An address materialized
@@ -8860,7 +8860,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_nested_frame_defaults(self, st, offset: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first.
+        """`st`'s nested subtree: defaults first, deepest first, then `__init__`.
 
         The same walk `model.struct_block_direct_children` describes, and it is
         the recursion that used to crash: it unpacked FOUR values out of
@@ -8880,11 +8880,47 @@ ctor_field_value=self._ctor_field_value_for(name),
         `Inner2`'s defaults at 16, on top of `Inner`'s own frame, and the read of
         `o.inner.inner2.x` then returned a DIFFERENT garbage number on each
         architecture.
+
+        **And then the frame's own CONSTRUCTOR runs, deepest first, because a
+        nested field is default-constructed and in Mojo that calls `__init__`.**
+        Writing the defaults and stopping there was a SILENT wrong answer: it
+        built, exited 0, and left zeros where the constructor's stores go, while
+        `var o = Opt()` one line away — the same declarations through
+        `init_body_stores` — answered correctly. `model.nested_frame_init_stores`
+        is the one reader of what those stores are, so the two paths cannot
+        disagree about what `T()` means.
+
+        The ORDER is defaults-then-constructor rather than the reverse for the
+        same reason the recursion is deepest-first: a constructor store may be
+        `self.d = Deep()`, and `Deep()` brings its OWN subtree up at ITS offset.
+        The defaults come first so that a field the constructor does not assign
+        keeps its class-level default, which is what the language
+        default-initializes, and the nested addresses are stored afterwards by
+        `_emit_nested_frame_addresses` — which is after this walk, so a
+        constructor store that lands on a PLACED slot would be caught by
+        `construction_nested_slot_refusal` rather than silently overwriting the
+        address.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, offset):
             self._emit_nested_frame_defaults(child, child_off)
         self._emit_frame_defaults(st, offset)
+        self._emit_nested_ctor_stores(st, offset)
+
+    def _emit_nested_ctor_stores(self, st, offset: int) -> None:
+        """`st`'s own `__init__` stores at `offset`, or nothing.
+
+        The one place a nested frame's constructor runs, and it is a refusal
+        rather than a skip when it cannot: a nested struct whose `__init__` this
+        path cannot lower would otherwise leave its frame at defaults, which is
+        the failure this method exists to remove — a second copy of it in a
+        shape a reader would read as working.
+        """
+        stores, refusal = M.nested_frame_init_stores(st, self._structs)
+        if refusal is not None:
+            raise CodegenError(refusal)
+        for _field, slot, value in stores:
+            self._emit_block_store(offset, slot, value)
 
     def _emit_frame_nested_addresses(self, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -8920,8 +8956,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
-    def _emit_block_store(self, site, slot: int, value) -> None:
-        """One store into a CONSTRUCTION's fresh block: `value` to `8·slot`.
+    def _emit_block_store(self, base: int, slot: int, value) -> None:
+        """One store into a construction's fresh block: `value` to `base + 8·slot`.
 
         The register discipline every construction shape shares, and unchanged
         by any of them: the value is evaluated into X0 and the base is
@@ -8933,12 +8969,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is what lets the class-level defaults and an inlined
         constructor's stores share one loop: a literal default has nothing to
         evaluate, and a literal inside a constructor body is the same node.
+
+        **`base`, not a `site`, and the two backends' signatures now match.** A
+        site is a tuple whose `[1]` is the offset, and only the site's OWN slots
+        want it: a nested frame's stores land at the CHILD's offset, which is a
+        number the placement walk carries and no site tuple holds.
         """
         if isinstance(value, int):
             self._emit_mov_imm("X0", value)
         else:
             self._emit_expr(value)
-        self._emit_frame_base(site[1])
+        self._emit_frame_base(base)
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_frame_positional(self, e: F.CallExpr, name: str, st, site,
@@ -8959,7 +9000,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         """
         self._emit_frame_nested(site)
         for arg, (_field, slot) in zip(e.args, fields):
-            self._emit_block_store(site, slot, arg)
+            self._emit_block_store(site[1], slot, arg)
         self._emit_frame_nested_addresses(site)
         # The address is the RESULT, and every store above left something else
         # in X0.  Same last line as the default constructor's, and for the same
@@ -9191,14 +9232,15 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"list blob is. This is a disagreement between the "
                     f"construction's layout table and the body rather than a "
                     f"limit of the path — a compiler bug.")
-            # The nested struct's own subtree first, then its own slots: the
-            # same order `struct_block_direct_children` lays them out in, and
-            # through `_emit_frame_nested` ITSELF rather than a second walk of
-            # the same rows — that helper reads only the struct and the offset
-            # out of the tuple it is handed, so passing the nested pair brings a
-            # subtree up at the offset the layout chose.
-            self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_defaults(nested, site[1])
+            # The nested struct's own subtree first, then its own slots, then
+            # its OWN constructor: one call, because `_emit_nested_frame_defaults`
+            # is that walk — children deepest first, this frame's defaults, this
+            # frame's `__init__` — and the two lines this replaced were its first
+            # two steps written out again. Measured, both architectures, what the
+            # third step was worth: `struct Box: var inner: Opt` where `Opt`
+            # declares `def __init__` printing `b=0` where CPython prints 41,
+            # with nothing refused. The addresses go in after, below.
+            self._emit_nested_frame_defaults(nested, site[1])
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the

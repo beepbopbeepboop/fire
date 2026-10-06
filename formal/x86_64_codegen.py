@@ -10796,7 +10796,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                                               Reg.RAX))
 
     def _emit_nested_frame_defaults(self, st, base: int) -> None:
-        """`st`'s nested subtree, defaults first, deepest first.
+        """`st`'s nested subtree: defaults first, deepest first, then `__init__`.
 
         The x86-64 twin of arm64's, over the same `struct_block_direct_children`
         rows.  It replaces a loop that unpacked FOUR values out of
@@ -10804,11 +10804,47 @@ ctor_field_value=self._ctor_field_value_for(name),
         only while no nested frame had a nested frame of its OWN; measured, both
         architectures, the 3-value unpack raised `ValueError` from the
         constructor of exactly such a struct.
+
+        **And then the frame's own CONSTRUCTOR runs**, for arm64's reason and by
+        arm64's reader (`model.nested_frame_init_stores`): a nested field is
+        default-constructed, in Mojo that calls `__init__`, and writing the
+        defaults and stopping was a silent wrong answer on both machines.
+
+        **`base` is ABSOLUTE and STAYS absolute through the recursion, which is
+        `_emit_nested_frame_addresses`'s rule and it is the one this walk was
+        violating.** `struct_block_direct_children` is asked with the base and
+        each row's offset is already absolute, so the `+ self._blob_base` this
+        recursion used to apply added it a SECOND time and placed every frame
+        from the third level down at `blob_base + blob_base + …`. It was
+        invisible while the defaults were all zeros, because a store to the
+        wrong address of zeros is indistinguishable from a store to the right
+        address of zeros — and it became visible the moment a constructor wrote
+        something else there. Measured on master, before this fix, the same three
+        structs with `Deep2.__init__` writing `x = 70`: arm64 printed `q=0` and
+        x86-64 printed `q=5`, and CPython prints 70. Two machines, two different
+        wrong numbers, nothing refused. `_emit_nested_frame_addresses`'s own
+        docstring records the same double-add being fixed there for the same
+        reason, which is what makes this the second half of one rule rather than
+        a second rule.
         """
         for _fname, _slot, child, child_off in \
                 M.struct_block_direct_children(st, self._structs, base):
-            self._emit_nested_frame_defaults(child, child_off + self._blob_base)
+            self._emit_nested_frame_defaults(child, child_off)
         self._emit_frame_defaults(st, base)
+        self._emit_nested_ctor_stores(st, base)
+
+    def _emit_nested_ctor_stores(self, st, base: int) -> None:
+        """`st`'s own `__init__` stores at `base`, or nothing.
+
+        The x86-64 twin of arm64's, over the same reader and the same refusal:
+        a nested struct whose constructor this path cannot lower would leave its
+        frame at defaults, which is the failure the call exists to remove.
+        """
+        stores, refusal = M.nested_frame_init_stores(st, self._structs)
+        if refusal is not None:
+            raise CodegenError(refusal)
+        for _field, slot, value in stores:
+            self._emit_block_store(base, slot, value)
 
     def _emit_frame_nested_addresses(self, base: int, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -10944,14 +10980,16 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"construction's layout table and the body rather than a "
                     f"limit of the path — a compiler bug.")
             # `base` is the same arithmetic `_emit_frame_constructor` uses for a
-            # struct with a frame of its own, and the nested subtree goes up
-            # through `_emit_frame_nested` ITSELF rather than a second walk of
-            # the same rows: that helper reads only the struct and the offset
-            # out of the tuple it is handed, so passing the nested pair is the
-            # one way to bring a subtree up at an offset the layout chose.
+            # struct with a frame of its own. The nested subtree goes up through
+            # ONE call rather than the two lines this replaced, because
+            # `_emit_nested_frame_defaults` is that walk — children deepest
+            # first, this frame's defaults, this frame's `__init__` — and the
+            # third step is the one that was missing: measured, both
+            # architectures, `struct Box: var inner: Opt` where `Opt` declares
+            # `def __init__` printing `b=0` where CPython prints 41, with
+            # nothing refused. The addresses go in after, below.
             base = self._blob_base + site[1]
-            self._emit_frame_nested((nested, site[1], ()))
-            self._emit_frame_defaults(nested, base)
+            self._emit_nested_frame_defaults(nested, base)
             # …and the nested struct's OWN nested frames' ADDRESSES, which is
             # the third step and the one whose absence was a NULL SLOT. The
             # frame-valued sole field used to stop after the two above, on the

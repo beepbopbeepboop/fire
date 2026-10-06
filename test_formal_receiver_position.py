@@ -609,6 +609,49 @@ DIFF_CASES = [
      '    sys.stdout.write("v=%d" % Box().set_get(41))\n'
      "    return 0\n\n"
      "main()\n"),
+    # THE SAME LIFT over a struct whose NESTED frame declares a constructor,
+    # and it used to be the one row below that said it could not be done.  The
+    # refusal's diagnosis was "the bring-up writes each field's class-level
+    # DEFAULT and does not run a constructor" — which is FALSE now, because
+    # `formal/model.py::nested_frame_init_stores` inlines the nested
+    # constructor's stores at the bring-up and both emitters ask it.  So this is
+    # a differential row now, against CPython, and the needle it used to assert
+    # is gone.
+    #
+    # **It is a `get()` with no write because the failure it guards is a MISSING
+    # store, not a bad address.** The row above writes 41 through the receiver
+    # because a read cannot distinguish "no frame" from "a frame of zeros"; here
+    # the constructor's own `self.v = 41` is the value, so a bring-up that did
+    # not run it answers 0 and one that did answers 41, and no write can hide
+    # the difference.
+    ("a_method_call_on_a_construction_whose_nested_constructor_runs",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "    def __init__(out self):\n"
+     "        self.v = 41\n"
+     "        self.has = 1\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     '    printf("v=%d", Box().get())\n'
+     "    return 0\n",
+     "import sys\n\n"
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 41\n"
+     "        self.has = 1\n\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "    def get(self):\n"
+     "        return self.inner.v\n\n"
+     "def main():\n"
+     '    sys.stdout.write("v=%d" % Box().get())\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 # ── the refusals ────────────────────────────────────────────────────────────
@@ -1063,41 +1106,6 @@ REFUSALS = [
      "    l.k = 5\n"
      "    return l.make().take()\n",
      "is a `Widget`, and that IS established"),
-    # …and the THIRD receiver spelling, which used to be refused here and now
-    # is refused ONE ROW DOWN with a different reason, because the reason it was
-    # refused for turned out to be FALSE.  `Box()` is a CONSTRUCTION of a struct
-    # this module declares, so its type was never in question; the refusal said
-    # the construction "in an argument position never builds" the frame a
-    # one-word struct's receiver IS, and since 2026-10-03 it does: both backends'
-    # `_emit_fresh_one_word` bring the nested frame up at a site the prologue
-    # reserved and hand back its address (`model.struct_construction_yields_frame_
-    # address` is the one reader of that, and
-    # `model.construction_bringup_is_complete` is what decides whether the
-    # bring-up wrote every slot it reserved).  The differential row
-    # `a_method_call_on_a_construction_receiver` is the lift, and this is the
-    # case where lifting it would read a frame of zeros.
-    #
-    # What is refused is not the construction but the CONSTRUCTOR: a nested
-    # struct with a declared `__init__` is not run by a bring-up, which writes
-    # each field's class-level default.  Measured with the stores in `Opt`:
-    # `var b = Box(); b.get()` answers 0 where CPython answers 41, so lifting
-    # the call would move a wrong answer rather than create one — and a
-    # construction receiver is not the place to fix it
-    # (`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`).
-    ("refuse_a_method_call_on_a_construction_whose_nested_constructor_is_not_run",
-     "struct Opt:\n"
-     "    var v: Int\n"
-     "    var has: Int\n\n"
-     "    def __init__(out self):\n"
-     "        self.v = 41\n"
-     "        self.has = 1\n\n"
-     "struct Box:\n"
-     "    var inner: Opt\n\n"
-     "    def get(self) -> Int:\n"
-     "        return self.inner.v\n\n"
-     "def main() -> int:\n"
-     "    return Box().get()\n",
-     "does not run a constructor"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

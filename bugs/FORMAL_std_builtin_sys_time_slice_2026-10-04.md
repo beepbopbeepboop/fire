@@ -218,9 +218,11 @@ The construction-receiver doc (`formal13-4`'s, `Box().get()`) quoted the OLD
 sentence twice in its Status and said the advice it gives was the shape that
 crashes; both of those were right, and on 2026-10-04 the construct stopped being
 refused at all — the nested frame is now brought up at a construction site
-(`4af77b16`), so the lift runs and the residual gap is a nested struct's
-`__init__` not being run by that bring-up
-(`bugs/FORMAL_a_construction_does_not_run_a_nested_structs_constructor.md`). The
+(`4af77b16`), so the lift runs and the residual gap was a nested struct's
+`__init__` not being run by that bring-up — a gap that no longer exists:
+`formal/model.py::nested_frame_init_stores` inlines those stores at the bring-up
+on both backends, and `Box().get()` now lowers and answers CPython where it used
+to be refused with the sentence below. The
 message it quotes still does not exist, and the current one names the REPRESENTATION
 (`… because a CONSTRUCTION is not a value this path can pass as a receiver: the
 struct is named, and a one-word struct's fields live in a frame that the

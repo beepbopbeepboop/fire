@@ -17721,10 +17721,16 @@ def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
         # own and for a one-field struct whose sole field holds a placed nested
         # frame — and both backends' `_emit_fresh_one_word` bring that frame up
         # before they hand back its address, at a site the prologue reserved.
-        # So what is left to check is whether the bring-up writes every slot it
-        # reserves, which is `model.construction_bringup_is_complete`: a nested
-        # struct with a declared `__init__` is NOT run by a bring-up, and lifting
-        # over it would answer a frame of zeros where the source wrote stores.
+        # So what is left to check is whether the nested subtree is PLACEABLE at
+        # all, which is `model.construction_bringup_is_complete`. **Its
+        # `__init__` arm is gone**: a nested struct with a declared `__init__` IS
+        # run by a bring-up now — `model.nested_frame_init_stores` inlines its
+        # stores and both emitters ask it — so the refusal this verdict used to
+        # raise ("the bring-up writes each field's class-level DEFAULT and does
+        # not run a constructor") became false about every program it was
+        # printed for. What remains is the layout: a chain deeper than
+        # `MAX_NESTED_FRAME_DEPTH` gets no bytes, and a struct that reaches
+        # itself is a cycle the placement cannot terminate.
         if not M.struct_construction_yields_frame_address(
                 _st0, structs_by_name):
             return _st0, "construction"

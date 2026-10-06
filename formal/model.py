@@ -35553,25 +35553,28 @@ def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
             or one_word_sole_field_frame(struct_def, decls or {}) is not None)
 
 
-def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
-                                      _seen=None) -> tuple:
-    """`(ok, why)` — does constructing this struct write EVERY slot it reserves?
+def nested_frame_init_stores(struct_def, decls: dict, rets=None):
+    """`(stores, refusal)` — the stores a PLACED nested frame's `__init__` makes.
 
-    The question the construction emitter cannot answer for itself, and it asks
-    it about the frames rather than about the struct: a construction brings a
-    nested frame up by writing each field's class-level DEFAULT
-    (`struct_default_word`'s `("nested_frame", …)` arm, then
-    `_emit_frame_defaults`, then `_emit_frame_nested_addresses` for the frames
-    inside it), and **a declared `__init__` is not part of a bring-up** — in
-    Mojo `T(...)` CALLS it, and nothing here calls it.
+    `((), None)` for a struct that declares no constructor — the
+    overwhelming majority, and the case the frame bring-up already handled by
+    writing each field's class-level default — and for one whose constructor no
+    zero-argument call admits, for the reason the second half of this docstring
+    gives.
 
-    Measured, both architectures, on the shape this predicate exists for:
+    **This is the other half of `construction_bringup_is_complete`, and it is
+    what makes that predicate's own premise a decision rather than a wall.** In
+    Mojo `T(...)` CALLS `T.__init__`, and a nested field is default-constructed —
+    so bringing a nested frame up is a construction of that struct, and the
+    constructor's stores are part of the program. They were not run, and the
+    failure was SILENT: builds, exits 0, and leaves zeros where the source wrote
+    stores. Measured, both architectures, on the shape this exists for:
 
         struct Opt:
             var v: Int
             var has: Int
             def __init__(out self):
-                self.v = 41          # CPython: Opt().v == 41
+                self.v = 41
                 self.has = 1
 
         struct Box:
@@ -35579,15 +35582,94 @@ def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
             def get(self) -> Int:
                 return self.inner.v
 
-        Box().get()      # prints 0 on both architectures
+        Box().get()      # 0 here, 41 in CPython
 
-    `var o = Opt()` answers 41, so the stores are inlined for a construction of
-    `Opt` ITSELF (`model.init_body_stores`) and lost for one that happens inside
-    another's frame — the difference being that the frame bring-up is the
-    emitter's own placement walk and not a constructor call. So the answer is
-    "no struct in the subtree declares an `__init__`", recursively, and `why`
-    names the struct that broke it so a refusal can send a reader to the
-    declaration rather than to the shape.
+    and `var o = Opt()` — the same declarations, the same file — answers 41, so
+    two paths in one emitter disagreed about what `T()` means and neither said
+    so. `init_body_stores` is the ONE function that lowers a declared
+    constructor and both paths now go through it; a second walk of `__init__`
+    here would be a second answer to "which stores does this constructor make".
+
+    **A constructor that no zero-argument call admits is SKIPPED, not refused, and
+    the reason is a program that works today.** `init_overload_for_call([], [])`
+    is what selects the constructor here, and it says `missing` or `ambiguous`
+    for a struct whose `__init__` REQUIRES arguments — which is ordinary, because
+    a nested field is often assigned explicitly right after the frame comes up:
+
+        struct Inner2: var x: Int
+        struct Inner:
+            var inner2: Inner2
+            var z: Int
+            def __init__(self, i: Inner2, b: Int):
+                self.inner2 = i
+                self.z = b
+        struct Outer: var inner: Inner; var w: Int
+
+        var o = Outer()
+        o.inner = Inner(Inner2(5), 6)      # the construction, written out
+
+    Refusing the bring-up would break that (`test_formal_run.py`'s
+    `byref_three_level_chain_with_the_type_assigned_in_init`, green on both
+    architectures), and the frame bring-up's contract was always "write the
+    class-level defaults" — a constructor the call site supplies itself is not
+    the bring-up's business. So the frame keeps its defaults and the program's
+    own assignment constructs it.
+
+    **A constructor that a zero-argument call DOES admit and that this path
+    cannot lower is a REFUSAL**, and the asymmetry is not arbitrary: the struct's
+    own `T()` refuses with the same sentence, because `init_body_stores` is what
+    both ask. So this never turns a program that builds into one that does not —
+    it refuses the same struct the moment the program constructs it explicitly,
+    which is a refusal the program cannot route around. Skipping instead would be
+    the silent wrong answer this function exists to remove, and refusing the
+    arity case instead would be a refusal about a construct the program did not
+    write.
+
+    The `call` handed to `init_body_stores` is SYNTHETIC, and that is safe for
+    the one thing it is used for: `init_receiver_rewrite` resolves a read of
+    `self` against the block being constructed, and the block being constructed
+    here IS the nested frame — its address is what sits in the slot, and its
+    slots are what the stores land in — so a receiver read resolves against the
+    right frame. It is named after the struct it constructs so a diagnostic that
+    quotes it reads like the source.
+    """
+    shapes = struct_init_shapes(struct_def)
+    if not shapes:
+        return ((), None)
+    shape, bindings, why, names = init_overload_for_call(shapes, [], [])
+    if why is not None:
+        return ((), None)
+    call = F.CallExpr(func=F.IdentExpr(name=struct_def.name), args=[],
+                      kwargs=[])
+    return init_body_stores(struct_def, call, shape, bindings, decls or {}, rets)
+
+
+def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
+                                      _seen=None) -> tuple:
+    """`(ok, why)` — is this struct's nested subtree PLACEABLE at all?
+
+    **The `__init__` arm that used to be the whole of this predicate is GONE,
+    and the reason is that the defect it stood in front of is fixed.** It read:
+
+        Box().get()      # printed 0 on both architectures, CPython prints 41
+
+    and answered "no struct in the subtree declares an `__init__`", because a
+    construction brought a nested frame up by writing each field's class-level
+    DEFAULT and nothing here called the constructor. `nested_frame_init_stores`
+    is the fix — a nested field is default-constructed, in Mojo that CALLS
+    `__init__`, and both emitters now inline its stores at the bring-up through
+    the same `init_body_stores` a construction of the struct itself uses. So the
+    sentence those refusals carried — *"the bring-up writes each field's
+    class-level DEFAULT and does not run a constructor"* — became false about
+    every program it was printed for, and a refusal whose diagnosis is wrong
+    sends its reader to edit working code.
+
+    **What is left is the LAYOUT question, which the constructor never was.**
+    A chain deeper than `MAX_NESTED_FRAME_DEPTH` is not placed at all, and a
+    struct that reaches ITSELF is a cycle the placement cannot terminate. Both
+    are properties of `struct_block_direct_children` — the one reader that
+    decides which frames get bytes — rather than of any store, which is why they
+    are asked here and not by the emitter that would notice.
 
     `depth` is the recursion bound and it is `MAX_NESTED_FRAME_DEPTH` for the
     same reason `struct_nested_frame_fields` bounds itself: a chain longer than
@@ -35610,9 +35692,6 @@ def construction_bringup_is_complete(struct_def, decls: dict, depth=None,
         return (False, f"{key} nests inside itself")
     path.add(key)
     try:
-        if any(m.name == "__init__" for m in struct_methods(struct_def)):
-            return (False, f"{key} declares an `__init__`, and a frame bring-up "
-                            f"writes field DEFAULTS rather than calling it")
         for _fname, _slot, child in struct_nested_frame_fields(
                 struct_def, decls, depth):
             ok, why = construction_bringup_is_complete(child, decls, depth - 1,
@@ -42960,13 +43039,13 @@ CALL_RECEIVER_WHY = {
         "the callee would read is not a number the source wrote",
     "construction_frame":
         "a construction IS placed and its frame is brought up before the "
-        "method reads it, but the bring-up writes each field's class-level "
-        "DEFAULT and does not run a constructor: {reason}. So the frame the "
-        "callee "
-        "would read holds zeros where the source wrote stores, which is the one "
-        "outcome this path may not produce. Assign the field after binding the "
-        "construction to a local, which is the same program with the stores "
-        "written where they are written",
+        "method reads it, but this struct's nested subtree cannot be PLACED at "
+        "all: {reason}. So the frame the callee "
+        "would read holds whatever the reserved bytes held where the source "
+        "wrote a frame, which is the one outcome this path may not produce. "
+        "Flatten the chain, or give the nested struct its own construction and "
+        "bind it to a local first, which is the same program with the nesting "
+        "written where it is written",
     "frame":
         "a struct of {n} fields has its receiver as the ADDRESS of a frame "
         "rather than as a word, and this call site has no frame to take the "
