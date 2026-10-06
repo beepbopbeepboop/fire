@@ -4,16 +4,30 @@
 `formal/model.py`'s `struct_derived_names`, and the code paths each feeds —
 **shared, so every number here moved both backends at once.**
 
-**Status: CLOSED as an investigation. All four residues are now either FIXED or
-MEASURED-and-declined, and the numbers are in §6 and §6.2 — 2026-10-03, on this
-tree.** What is left here is the record, and the reason the record stays is that
-**fourteen comments in `formal/build.py`, `formal/model.py` and
+**Status: CLOSED as an investigation, and the family is now CLOSED too (2026-10-05).
+All four residues are either FIXED or MEASURED-and-declined (§6 and §6.2), and
+the last per-function asker of the four partition predicates — the one-word
+sole-field chain — landed with `one_field_struct_names` publishing the field's
+NAME (§7).** What is left here is the record, and the reason the record stays is
+that **fourteen comments in `formal/build.py`, `formal/model.py` and
 `test_formal_bracketed_method_field_set.py` cite this doc as the provenance of
 the 0-of-7 788 drift measurement** that justifies threading a module-level table
 at all; deleting the file would either dangle those or strip the provenance off
 the code that depends on it. A reader profiling this pipeline should read §6.2
 and stop: the two remaining residues are 0.094 s and 0.003 s on the largest file
 in the repository, and both are declined with the measurement that declines them.
+
+**§5.1's byte-identical bar is stated wrongly, and it cost this pass a run.** It
+says to `cmp` the two images, and a raw `cmp` of two builds of the SAME source
+always differs, in exactly two places: the image's random `LC_UUID` (one byte, at
+offset 49277 of `formal/examples/count.mojo`'s 67 504-byte image) and its own
+base name, which is embedded in the image text (`u1-5555` vs `u2-5555`, same
+offset). Both sides must therefore write to the SAME `-o` path and the UUID must
+be zeroed; with that, all 52 `formal/examples/*.mojo` images are byte-identical
+across `HEAD` and `HEAD~1` on both architectures, which is the result §5.1 means.
+Filed as `bugs/TEST_the_byte_identical_image_bar_needs_one_shared_output_path.md`,
+because the first thing a future session does with this § is run `cmp` and
+conclude a behaviour-preserving change is not byte-identical.
 
 Nothing in `formal/build.py` or `formal/model.py` here is a cache: the fixes
 remove two derivations of a MODULE-level table that a per-FUNCTION loop was
@@ -557,9 +571,21 @@ with the same two candidate fixes and the same warning that a memo across
 `_prepare_functions` needs an invalidation argument. Both were deleted with
 their fixes, since this doc and §6.1 are what they were waiting for: the first
 with §3 and §6.1 here, the second with `model.iter_statement_nodes`. The shape
-they measured is still visible in
-`bugs/PERF_struct_field_names_is_still_asked_once_per_function.md`, which is the
-one member of the family still open.
+they measured is still visible in one place, which was the last member of the
+family: `_one_word_sole_field_chain` asked `_sole_field_name`, which asked
+`model.struct_sole_field_name` — a second derivation of the field set the
+partition's own table had already paid for — once per FUNCTION. **Landed
+2026-10-05**, and it is one table rather than two: `one_field_struct_names`
+publishes the field's NAME as its value, so `model.sole_field_answer` reads it
+off the partition and no reader re-derives the field set. Two tables over one
+partition could have disagreed about which structs have one field; there is only
+one table, so they cannot. `struct_field_names` asks on a struct with twelve
+methods go **65 -> 7 at 20 functions and 85 -> 7 at 40**, flat in the function
+count where `test_formal_per_struct_asks.py` used to pin a `+1.00`-per-function
+slope under a `slope <= 1.0` bound that could not tell "once per struct" from
+"once per function where they coincide". **So the family this doc opened is
+closed**: every per-function asker of the four partition predicates is gone, and
+this doc's §3.1 drift measurement is what made each of the four sound.
 
 **Both candidate fixes in those docs are now measured and rejected in favour of
 threading:** the per-struct field set does not drift (§3.1, 0 of 7 788), so the

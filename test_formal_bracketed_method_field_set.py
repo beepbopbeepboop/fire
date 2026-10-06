@@ -1039,6 +1039,29 @@ def run_per_module_table_case(case, tmpdir, verbose):
                 f"{st_name}: `one_field_answer` with the table says "
                 f"{M.one_field_answer(st, one_field)} and the predicate says "
                 f"{M.struct_is_one_field(st)}")
+    # The table's VALUES are the one field's NAME (2026-10-05, when it stopped
+    # publishing the struct), so the table is also the answer to
+    # `struct_sole_field_name` and no reader re-derives the field set for it.
+    # Both halves are asserted: the VALUE against the predicate's own answer, so
+    # a table that published the struct would fail here rather than silently
+    # answering `sole_field_answer` with a struct, and `sole_field_answer`
+    # against `struct_sole_field_name` both WITH and WITHOUT the table, so the
+    # threaded path and the fallback cannot differ on the shape that reaches
+    # both — which is what "the threaded table changed the answer" would be a
+    # question about otherwise.
+    for st_name, st in sorted(structs.items()):
+        want = M.struct_sole_field_name(st)
+        if one_field.get(st_name) != want:
+            return False, (
+                f"{st_name}: the one-field table's value is "
+                f"{one_field.get(st_name)!r} and `struct_sole_field_name` says "
+                f"{want!r} — so the table would answer `sole_field_answer` with "
+                f"a different name than the derivation")
+        if M.sole_field_answer(st, one_field) != want:
+            return False, (
+                f"{st_name}: `sole_field_answer` with the table says "
+                f"{M.sole_field_answer(st, one_field)!r} and the derivation "
+                f"says {want!r}")
     # …and with NO table, which is what every caller without a module context
     # gets: the same answer, by the other path. A caller that reads a function's
     # answer with no unit in hand must not be able to tell the two apart.
@@ -1048,6 +1071,11 @@ def run_per_module_table_case(case, tmpdir, verbose):
                 f"{st_name}: `one_field_answer` with no table says "
                 f"{M.one_field_answer(st, None)} and the predicate says "
                 f"{M.struct_is_one_field(st)}")
+        if M.sole_field_answer(st, None) != M.struct_sole_field_name(st):
+            return False, (
+                f"{st_name}: `sole_field_answer` with no table says "
+                f"{M.sole_field_answer(st, None)!r} and the derivation says "
+                f"{M.struct_sole_field_name(st)!r}")
     if verbose:
         print(f"      {len(few)} structs, per-struct asks "
               f"{ {s: {q: len(a) for q, a in v.items()} for s, v in few.items()} }")
