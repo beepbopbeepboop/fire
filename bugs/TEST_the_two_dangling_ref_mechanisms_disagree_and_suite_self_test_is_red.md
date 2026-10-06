@@ -11,10 +11,21 @@ this is about (`git diff master --stat` over the five citing documents,
 `test_suite.py`'s check and both tools is empty except for that branch's
 unrelated `STALE_PER_CHILD_BUDGETS` rows).
 
-The subject is `bugs/FORMAL_a_surviving_citation_is_not_checked.md`, which
-already files the surviving citations themselves and says why they were not
-fixed. **This is its other half**: the escape hatch that document used has a
-cost, and the cost is a red gate job nobody wrote down.
+The subject is four rows across three documents that cited a document deleted
+with its fix, and said why they were not corrected in the same commit — the
+files were held by other workers' claims. **This is its other half**: the escape
+hatch that document used has a cost, and the cost is a red gate job nobody wrote
+down.
+
+**Update 2026-10-06 (`work/formal40-2`): the red is GONE and the document this
+one is about is deleted with its fix**, so the citation is written out rather
+than pointed at. `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md:40` now
+carries the fact, the baseline entry for that file is withdrawn
+(`tools/dangling_refs_baseline.py` is back at the floor of zero it started
+from), and `test_suite.py` is 342/0 — the strict check and the ratchet agree
+again. The two branches of the argument below are otherwise unchanged, and the
+last one is still the open half: `--write-baseline` can still raise a ceiling
+the strict check has no floor for, and nothing decides that except a decision.
 
 ## What I ran, what I saw
 
@@ -91,25 +102,28 @@ so a raise is visible as a raise rather than as a contradiction between two jobs
 
 ## The exact next step
 
-Two moves, and the first is the real one:
+Two moves, and the first is DONE (2026-10-06, `work/formal40-2`):
 
-1. **Delete or re-point the one citation**, in
+1. ~~**Delete or re-point the one citation**, in
    `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md:40`, and drop that
    file's baseline entry (`--ratchet --write-baseline`, which will then report it
-   going 1 → 0). The subject document
-   `bugs/FORMAL_a_surviving_citation_is_not_checked.md` already carries the
-   honest replacement text for all four of its rows and says why it could not
-   apply them: the files are held by **other workers' claims**
-   (`python3 tools/control.py claims` puts
-   `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` on `formal35-3`), and this
-   branch does not hold them. That is why this is filed rather than fixed.
+   going 1 → 0).~~ **DONE**: the row there now carries the symptom and its
+   current verdict instead of a citation of the deleted document, and
+   `tools/dangling_refs_baseline.py` no longer lists that file — the ratchet went
+   **7 → 6** and the `bugs/`-prefixed corpus is back at the floor of zero. The
+   claims that held the three files are all released (`python3 tools/control.py
+   claims` lists no worker for any of them now), which is the only reason this was
+   applyable at all.
 2. **Then decide whether `test_suite.py`'s strict check should read the baseline.**
    If the answer is yes, the honest form is `outside` minus the names the
    baseline records a non-zero ceiling for — which makes a raise a single visible
    fact in `tools/dangling_refs_baseline.py` rather than two jobs disagreeing. If
    the answer is no, say so in `test_suite.py`'s check text, because a reader who
    finds that check red after a sanctioned `--write-baseline` has no way to tell
-   a real regression from a deliberate one.
+   a real regression from a deliberate one. **This is the whole of what is left
+   here**, and it is a decision rather than a patch: nothing in the tree says which
+   of the two checks is allowed to be the strict one, and both are load-bearing
+   for different reasons.
 
 **What is deliberately NOT proposed**: widening the strict check to "ignore
 `bugs/`-prefixed names" or adding the document to its `fixtures` set. Both would

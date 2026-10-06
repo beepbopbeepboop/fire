@@ -1,4 +1,4 @@
-# 18 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them
+# 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them
 
 **Area:** FORMAL, arm64 — the proof layer over `formal/examples/*.mojo`.
 **Found 2026-10-05 on `work/formal30-proof-regression`** while seeding the
@@ -24,6 +24,29 @@ $ python3 tools/memslot.py --gb 8 --label census-seed -- \
    too-large         2   <- not a verdict on the proof
 ```
 
+**Re-measured 2026-10-06 (`work/formal40-2`), and three of those rows are now
+`proved`** — rows #4–#6, whose `lean-rejected` above was a REPLAYED verdict
+(`wall_s 0.1`, `timed_on: null`) that no run had ever produced. The re-seed is
+the documented one and it is a real elaboration, not a cache hit:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label census-seed -- \
+      python3 tools/formal_proof_census.py --remeasure --only sgt8,sle8,ug8 \
+      --write-baseline
+  [1/3] sgt8: proved 66.1s   [2/3] sle8: proved 64.0s   [3/3] ug8: proved 57.7s
+   3 examples: 3 measured by this run and 0 replayed from the verdict cache,
+   largest Lean peak 2.43 GB
+# committed summary: proved 34 -> 37, lean-rejected 12 -> 9
+```
+
+**How that was found is the reason this paragraph exists.**
+`tools/dangling_doc_refs.py::stale_verdicts` compares a document's verdict table
+against this ledger and reports the rows that disagree, and on arrival it named
+exactly these three — in the opposite direction from the way this document had
+been read a moment earlier. The instrument is the half the `--ratchet` above
+cannot be: that one counts citations of documents that are GONE, and these rows
+cite nothing, they merely assert something false.
+
 Every row is `formal.build.compile_formal(prove=True, check=True)` — the call
 `fire.py build --formal` makes — through `formal/lean.py::run_lean`'s bounds.
 The committed record is `tools/formal_proof_census_baseline.json`, one row per
@@ -48,10 +71,10 @@ $ python3 fire.py build --formal -o .tmp/ret42.aout --backend=arm64 formal/examp
 
 `test_formal.py`'s `main` splits a failed example into `KNOWN-GAP` (named in
 `EXPECTED_FAILURES`) and `FAIL` (not named), and only the second counts. So on
-this tree the `formal` suite job reports **11 `FAIL`s it has never been told
-about**.
+this tree the `formal` suite job reports **8 `FAIL`s it has never been told
+about** — it was 11 before rows #4–#6 closed.
 
-## The 18, by family, and the 11 that are undeclared
+## The 15, by family, and the 8 that are undeclared
 
 `EXPECTED_FAILURES` has seven entries: `count`, `countdown`, `fib`, `pow2`,
 `subscript_var`, `wge`, `wide_recv`.
@@ -77,6 +100,12 @@ about**.
 | — | `subscript_var` | `refused` (generate) | `model: a ListExpr has no value in the semantic model` | yes | the representation work |
 | — | `wide_recv` | `refused` (generate) | `model: a struct field read has no value in the semantic model` | yes | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` |
 
+**The `#` column is the index this table was seeded with, and rows #4–#6 are
+CLOSED** — they are kept in place, with their current verdict, so the prose below
+and above can still name them and so the row that says what fixed them does not
+disappear with it. That is why the index runs to 11 over 8 open rows and the
+title says 15: 8 undeclared open + 7 declared.
+
 **Three families, and two of them are one subject each.** The
 `Tactic 'rfl' failed` rows (#1, #2, #3 and the two declared ones) are the
 epilogue's `x30` read through a materialised address, which
@@ -94,7 +123,7 @@ something a reader should take as "the proof is wrong".
 **The `sorry` column is a separate reading and it is small.** Three of the
 rejected proofs admit holes — `countdown` 2, `sum_range` 1, `wge` 1 — and every
 `proved` example admits **zero** holes and zero admitted host contracts. So the
-34 green rows are green in the strong sense, and the three hole-bearing rows are
+37 green rows are green in the strong sense, and the three hole-bearing rows are
 all already declared.
 
 ## Next step
@@ -107,9 +136,17 @@ Per family, and in this order:
    `FAIL`, so marking them would put a green in the suite over a proof that does
    not check. If they must be declared to get `formal` green, each entry needs
    its measured reason, not "same as count".
-2. **`sgt8`, `sle8`, `ug8` (#4–#6)** are `FORMAL_arm64_a_narrow_typed_-
-   parameter_makes_the_universal_contract_false.md`'s, and that doc is claimed.
-   Check its claim before doing anything here.
+2. ~~**`sgt8`, `sle8`, `ug8` (#4–#6)**~~ **DONE (2026-10-05, re-measured
+   2026-10-06):** a narrow typed parameter's truncation reached the kernel with no
+   range hypothesis on the theorem. The universal theorem now carries
+   `nw : n < 128` and the truncation discharges against it; all three are
+   `proved` with 0 admitted `sorry`, pinned by
+   `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`, and the
+   ledger rows are re-banked from a real elaboration (the block at the top). Note
+   the obligation is spelled `t32s (t32u (t8s n))` by today's generator — the
+   extra `t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW` — so the
+   `t32s (t8s n)` in the table's row #4 is the older spelling and is quoted there
+   deliberately, as the thing that changed.
 3. **`floordiv`, `udivmod` (#10, #11)** generate no proof at all, so they cannot
    be fixed by a tactic — `FORMAL_arm64_the_universal_theorem_cannot_follow_a_
    call_into_the_same_image.md` says the fix is a return-address map in the
@@ -128,8 +165,8 @@ Per family, and in this order:
 
 ## Why this is filed and not fixed here
 
-`test_formal.py` is another area, and the fix is eleven separate judgements
-about eleven different proofs. The ratchet
+`test_formal.py` is another area, and the fix is fifteen separate judgements
+about fifteen different proofs. The ratchet
 (`tools/formal_proof_census.py`, `formal-proof-census` in `tools/suite.py`) now
 makes this exact question cheap to ask on every gate: it prints the per-example
 status table and fails when one of these rows gets worse, so the list above is a
@@ -218,9 +255,13 @@ truncation now discharges against it. **The document that owned this is deleted,
 which is why the reasoning is written out in the table above instead of cited:**
 a citation of a deleted document survives its subject, and nothing reported that
 these rows had stopped being true — the gap
-`tools/dangling_doc_refs.py` does not cover, since its ratchet counts citations
-rather than checking them. `bugs/FORMAL_a_surviving_citation_is_not_checked.md`
-is that gap's document.
+`tools/dangling_doc_refs.py` did not cover, since its ratchet counts citations
+rather than checking them. That half is now `tools/dangling_doc_refs.py::
+stale_verdicts`, which compares a document's verdict table against
+`tools/formal_proof_census_baseline.json` and reports the rows that disagree;
+`python3 tools/dangling_doc_refs.py --stale` named exactly these three rows on
+arrival, and the ledger side was the stale one — three replayed verdicts that no
+run had produced, since corrected with `--remeasure` (below).
 
 **And `test_formal.py` is one of the eight Lean-checking formal gate tests that
 are `disabled=`,** so the four re-measurements above were taken by running it
