@@ -1,5 +1,127 @@
 # `arm64/copy_chain`'s liveness check is wrong for a loop, and no x86-64 rule has a proof
 
+**Status 2026-10-05 (`work/formal40-5`): §1 IS FIXED AND `arm64/copy_chain` IS
+ENABLED.** The right fix was a real CFG — and the CFG was empty, because
+`arm64_branch_target` answered wrong for every branch form.
+
+Four defects, all in `formal/peephole.py` and none in the rule, and they are
+listed here in the order a reader has to know them because the second one hides
+the first three:
+
+1. **`arm64_branch_target` returned a wrong index for every branch form this
+   backend emits.** `_ARM64_BRANCHES` gave every row `shift = 2`, so `B`'s
+   `imm26` at bits 0..25 was read as `(word >> 2) & 0x03FFFFFF` — two bits too
+   low and then divided by four again — and `B.cond`/`CBZ`/`CBZ`/`TBZ`/`TBNZ`
+   had their `imm19`/`imm14` read from bits 2..20 instead of 5..23. Nothing
+   rescales the field, because the architecture's `<< 2` is already folded into
+   the word. Measured over `formal/examples/sqsum.mojo`'s 59 instructions:
+
+   | word at | class | old answer | the encoding says |
+   |---|---|---|---|
+   | `14000018` @35 | `B #+24` | 16777257 | 59 |
+   | `54fffe4b` @50 | `B.cond #-14` | −60 | 36 |
+   | `b5000090` @13 | `CBNZ x0, #+4` | 49 | 17 |
+   | `14000001` @52 | `B #+1` | 16777268 | 53 |
+
+   **Seven of seven wrong.** §1's `_back_edges` then filtered every one of them
+   out of range (`0 <= t < len(entries)`), so `back_edges` was `[]` on every
+   corpus example — the loop structure was invisible to the analysis, and §1's
+   "the relaxation over backward edges did not close it" was closing a set with
+   nothing in it. This is the check §1's own §"Where to look" item 1 asked for
+   ("it is worth asserting against one hand-computed loop rather than trusting
+   the sign extension of each field width"), and it is now
+   `TestTheBranchReader`, forward and backward, for all six forms plus the
+   three that must be refused.
+
+2. **The liveness analysis was a linear scan, not a dataflow.** Even with a
+   correct edge list, "is the register read anywhere after this index" cannot
+   see that a loop returns to an EARLIER index and reads it there. It is now a
+   CFG (`arm64_successors` / `arm64_control`) and the rule's condition is
+   `_Ctx.window_dead`, which is two conditions and both are needed:
+   * **`reg` is read nowhere in the image except at the window's second
+     instruction.** The rewrite replaces the first instruction's write and
+     DELETES the second, so the second's own read is consumed by the rewrite;
+     asking "is it read after the window" instead makes every window inside a
+     loop look live, because the loop comes back round to the reader the rewrite
+     removes. A whole-image reader set is the right shape for that question.
+   * **the second instruction is reachable only from the first.** A branch
+     landing on it runs `mov xc, xb` where the program had `mov xa, xb` above
+     it, so `xc` gets the wrong source — a wrong answer rather than a missed
+     rewrite, and invisible to a reader-set test.
+   * **and `x0`/`x30` have a reader at the EXIT.** Neither is read by the `ret`
+     that consumes it — x0 becomes the process's exit status — so a reader set
+     built from instructions alone called x0 dead to the end of the image. That
+     is §1's second symptom (`sqsum` answered 109 for 129) from the other end,
+     and the old `{0, 30}` seed was right about it and then subtracted itself
+     away.
+
+3. **The transfer function was `use = reads − writes`, which is wrong for
+   machine code.** A machine instruction reads every register it names before
+   it writes any of them, so the prior value of `x0` counts for `mul x0, x0, x1`
+   — and `sqsum`'s accumulator is written by exactly such a `mul`, which is why
+   §1's case answered 109. The textbook form is stated for three-address code,
+   where `x0 = x0 * x1` cannot occur because it would have been given a
+   temporary.
+
+4. **No rule that deletes an instruction re-derived the branch displacements it
+   invalidated.** A branch's target moves and the displacement inside the branch
+   is a number the assembler wrote once, so a deletion between a branch and its
+   target left the branch jumping four bytes too far — silently, in an image
+   that still runs. `_repatch_branches` re-derives every displacement through
+   `_rebuild`'s own offset table after every mutation (and once at the end), and
+   `_repatch_branch` is the inverse of `arm64_branch_target` over the same table
+   row rather than a fourth decode. **This was a live defect for every rule in
+   the pass, not only for `copy_chain`**, and §1's measurement could not have
+   found it: the two rules that were enabled fired zero times over the corpus,
+   so no image ever had a deletion ahead of a branch.
+
+**Two smaller table defects were in the same family and are fixed with them**,
+because they are the same mistake in the same three tables: the `CBZ`/`CBNZ`/
+`TBZ`/`TBNZ` rows used `0xFFC00000`/`0xFF000000`, which reach INTO the
+displacement and so only ever match a zero-displacement word — every real
+`cbz x4, #12` fell through and came out of `reads_arm64` as "reads every
+register", which is sound and makes every rule below a conditional branch
+un-fireable; `B` and `B.cond` had no read row at all, with the same effect;
+and `_ARM64_WRITES` had `0xD10000000` (nine hex digits) for `SUB Xd, Xn, #imm`,
+which matches nothing and made that class "writes every register".
+`Assembler.resolve` reads all four bit-test classes with `0x7F000000` for the
+same reason, and the tables now agree with it.
+
+### What it is worth, measured
+
+| | before | after |
+|---|---|---|
+| `formal/examples/*.mojo`, arm64, differential vs unoptimised | **2 of 52 disagree** (`sqsum` 129→109, `sum_range` hangs) | **0 of 52** |
+| x86-64, same differential | 0 of 52 (no rule is enabled) | 0 of 52 |
+| instructions removed over the corpus | 44, unsound | **20** — 10 `copy_chain`, 10 `mov_self`, of 2498 (0.8 %) |
+| `PENDING_RULES` | `arm64/copy_chain` | **empty** |
+
+**The win went DOWN and that is the point**: 44 rewrites was the number the
+unsound liveness check produced, and 20 is what is left when the rewrite is
+actually sound. `tools/formal_bench.py` reads 391 → 371 arm64 instructions.
+
+`test_formal_peephole.py` is 38 tests (was 25) and its end-to-end row now
+asserts that the pass **fired at all** — over a corpus it never touches, "52 of
+52 agree" is 52 of 52 agree with the pass switched off, which is the state this
+file's §"The rules themselves" bullet describes and the state the differential
+was in while `copy_chain` was pending.
+
+**A negative result worth recording: the fuzzer does not exercise this pass.**
+`tools/formal_fuzz.py --seed … -n 240 -j 4 --opt` over four mixes
+(`core`, `chains`, `lists`, `loopelse`, `comps`) reported `match 240 / trapped 0
+/ refusal 0` against CPython — and the pass fired on **zero** of those programs,
+so that run is evidence that nothing regressed and not evidence that
+`copy_chain` is right. Rebuilding the saved programs with `opt=True` and
+counting `result["peephole"]` is what established the zero; the corpus is where
+this rule's windows live.
+
+### What is still open, and it is §2 and §3 below
+
+Nothing here touches them. §2 is three rules with no Lean theorem, §3 is
+`X86_RULES` being empty, and §4 is a measured fact about `add_imm_fuse`. The
+pass is unchanged for a build that does not pass `--opt`, so the shipped bytes
+of the toolchain are the same as before this section.
+
 ## What this is
 
 `formal/peephole.py` is the verified peephole pass (landed 2026-10-05,

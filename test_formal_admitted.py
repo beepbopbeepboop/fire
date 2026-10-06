@@ -1139,11 +1139,9 @@ def _exit_status_claims():
 # native reduction is deprecated; assert native evaluations with axioms
 # instead") and each USE of either tactic elaborates to a fresh axiom named after
 # the declaration that used it — `work_step_mov._native.native_decide.ax_1_1`.
-# Measured, with the before/after sets in `bugs/FORMAL_native_decide_axiom.md`.
-# So `bugs/FORMAL_native_decide_axiom.md`'s "Expected output: …
-# `Lean.ofReduceBool` appearing is the confirmation" would have read a library
-# that reaches an axiom at every one of these sites as CLEAN, and the census
-# below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
+# Measured, with `test_formal_axioms.py` as the instrument.  So a census that
+# matched `Lean.ofReduceBool` would have read a library that reaches an axiom at
+# every one of these sites as CLEAN, and the census below is what replaced it.  `formal/lean.py::GENERATED_AXIOM_RE` is the shape
 # that is actually matched.
 
 
@@ -1310,8 +1308,8 @@ LIBRARY_TRUST = {
 #: prefix, so 98 attributed declarations were never asked about at all (31 in
 #: `ProofLib`, 66 in `X86`, 1 in `work`) and every one of them was filed as
 #: `clean`. The old numbers were `375 asked / 53 reaches` over five modules, and
-#: the module set was missing `IEEE754` entirely. See
-#: `bugs/FORMAL_native_decide_axiom.md`.
+#: the module set was missing `IEEE754` entirely; both are what
+#: `test_formal_axioms.py` re-derives on every run.
 #:
 #: `of_reduce_bool` is 0 everywhere, and is the row that corrects the name.
 #:
@@ -1493,7 +1491,7 @@ NATIVE_DECIDE_ALLOWED = {
 # fact over `UInt32` literals (61 of 63), `rfl` for `(1 : UInt64).toNat = 1` and
 # its `2` sibling, which are definitional and which `decide` also closes — `rfl`
 # because it reaches NO axiom at all where `decide` reaches `propext` and
-# `Quot.sound`.  Measured per shape in `bugs/FORMAL_native_decide_axiom.md`.
+# `Quot.sound`.  Measured per shape by `test_formal_axioms.py`.
 NATIVE_DECIDE_REPLACED = {
     "ProofLib": 61,      # 34 `absurd h`, 17 `absurd t`, 3 `absurd h_opc`,
                          # 5 closed `have`s, 2 `.toNat` facts
@@ -1756,7 +1754,7 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
                          f"the ceiling is {ceiling} (+{got_tactic - ceiling}). "
                          f"Each one is an axiom in the transitive closure of "
                          f"every theorem proved with it "
-                         f"(bugs/FORMAL_native_decide_axiom.md).")
+                         f"(FORMAL.md section 7, row 10).")
         elif got_tactic < ceiling:
             shrank.append(f"{mod}: {got_tactic} native_decide/bv_decide site(s) "
                           f"and the ceiling says {ceiling}. Sites were replaced "
@@ -2039,10 +2037,9 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
 
     `LIBRARY_TRUST` above pins a count per FILE, and a file-level ceiling is the
     right shape for a debt several branches pay down at once — but it is not the
-    shape the WORK has. `bugs/FORMAL_native_decide_axiom.md` item 2 asks for
-    "for each top-level `theorem`/`lemma` in `lib/`, the number of
-    axiom-carrying tactic sites in its own proof, so the ceiling can be lowered
-    per theorem rather than per file", and that is
+    shape the WORK has: "for each top-level `theorem`/`lemma` in `lib/`, the
+    number of axiom-carrying tactic sites in its own proof, so the ceiling can be
+    lowered per theorem rather than per file". That is
     `formal/admitted.py::declaration_tally`.
 
     Three things are asserted, in the order they can fail:
@@ -2135,8 +2132,8 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
     # every one of them has a measured reason `decide` cannot go, so counting
     # them made the list report 22 items of which 22 were justified and the next
     # reader would have had to re-derive that.  This is the list
-    # `bugs/FORMAL_native_decide_axiom.md` item 3 asks for by another name, and
-    # it is short enough to read — which is the point of a work list.
+    # The one-site `native_decide` work list, and it is short enough to read
+    # — which is the point of a work list.
     replaceable = sorted(r[0] for mod, rows in by_decl.items() for r in rows
                          if r[2]["axiom_tactic"] == 1
                          and r[2].get("native_decide", 0) == 1
@@ -2176,9 +2173,8 @@ ONE_SITE_THEOREMS = 36
 
 # How many theorems may carry exactly one site AND that site be a `native_decide`
 # that `NATIVE_DECIDE_ALLOWED` does not already name with a reason.  This is
-# `bugs/FORMAL_native_decide_axiom.md` item 3's list by another name, and it is
-# the sharpest version.  **0 on this tree, and that is the outcome item 3 asked
-# for**: the last four were `@[simp] theorem x86_mask_{one,two,four,eight}` and
+# The sharpest version of the one-site `native_decide` list.  **0 on this tree,
+# and that is the outcome it asked for**: the last four were `@[simp] theorem x86_mask_{one,two,four,eight}` and
 # `decide` closed them, so every one-site `native_decide` in `lib/` is now either
 # kernel-checked or justified by name — `IEEE754`'s 19 ground binary64
 # arithmetic theorems (measured: `decide` cannot reduce `Float.ofBits`, which is
