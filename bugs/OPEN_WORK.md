@@ -73,7 +73,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_smulh_has_no_model_arm.md` | **unclaimed** | the high half of a multiply is emitted and modelled nowhere |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 
-### `formal/arm64_proof_gen` — 20 documents, 10 claimed
+### `formal/arm64_proof_gen` — 19 documents, 10 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -90,7 +90,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | **unclaimed** | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | **unclaimed** | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` | **unclaimed** | `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach |
-| `FORMAL_arm64_an_extern_call_makes_the_run_never_reach_the_exit.md` | **unclaimed** | the `pre_reaches_0` obligation is FALSE for every program whose only opaque call is on the path, and it is emitted anyway |
 | `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` | **unclaimed** | FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it |
 | `FORMAL_arm64_known_proof_gaps.md` | **unclaimed** | the arm64 examples whose proof is a documented gap |
 | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` | **unclaimed** | the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it |
