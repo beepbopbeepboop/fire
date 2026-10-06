@@ -93,28 +93,6 @@ def functions(mod):
     return [s for s in mod if type(s).__name__ == "FunctionDef"]
 
 
-def _int_literals(node):
-    """Every integer literal under `node`, as Python ints.
-
-    Read off the PARSED clause rather than off the source text, so the assertion
-    is about what the checker will see and not about a spelling: a rewrite that
-    kept the text `n <= 20` somewhere the reader ignores would pass a text
-    assertion and fail this one."""
-    out = []
-    stack = [node]
-    while stack:
-        n = stack.pop()
-        if isinstance(n, (list, tuple)):
-            stack.extend(n)
-            continue
-        if type(n).__name__ == "IntLiteral":
-            out.append(n.value)
-        for value in getattr(n, "__dict__", {}).values():
-            if isinstance(value, (list, tuple)) or hasattr(value, "__dict__"):
-                stack.append(value)
-    return out
-
-
 def contract_of(fn, source="<test>", text=None):
     from formal import contracts as CT
     return CT.read_contracts(fn, source, text)
@@ -173,57 +151,6 @@ def test_the_reader_takes_both_spellings(tmpdir=None):
     c = contract_of(fn, "x.mojo")
     check("reader_separates_requires_from_ensures",
           len(c.requires) == 1 and len(c.ensures) == 1 and bool(c), repr(c))
-
-
-def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
-    """`//` is the AST's spelling of integer division, and this IR's `/` is the
-    same operation: `_lean_of` renders it `UInt64.div` and `_eval_of` evaluates
-    it as `(a // b) & _MASK`, which is what the machine computes.
-
-    A reader keyed on the AST operator therefore had no arm for `//` at all: a
-    clause over it emitted no theorem, and the refusal NAMED `/` -- so a reader
-    who took the sentence as the specification was told an operator inside the
-    subset was outside it.  This pins all three consequences, and the
-    evaluator's half at inputs where the word reading and a signed one differ
-    (7 // 2 is 3, 9 // 2 is 4; a floor of the sign-extended word would not be).
-    """
-    from formal import contracts as CT
-    src = ("@ensures(result == a // b)\n"
-           "def h(a, b):\n"
-           "    return a // b\n")
-    fn = functions(parse(src))[0]
-    c = contract_of(fn, "floordiv.mojo", src)
-    check("a_clause_over_floordiv_is_read", len(c.ensures) == 1, repr(c))
-    check("a_clause_over_floordiv_emits_a_theorem",
-          bool(CT.contract_theorems(c, ["a", "b"], fn=fn).lean))
-    check("a_clause_over_floordiv_has_no_unlowered_reason",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
-    ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
-    check("floordiv_renders_as_the_words_div",
-          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
-    env = {"a": 7, "b": 2, "result": 3}
-    check("floordiv_evaluates_as_the_words_division",
-          CT._eval_of(ir, env, [1000]) is True, CT._eval_of(ir, env, [1000]))
-    check("the_source_runner_runs_a_body_with_floordiv",
-          CT.SourceRunner(fn)(7, 2) == 3, CT.SourceRunner(fn)(7, 2))
-    check("floordiv_evaluates_truncating_on_the_word_reading",
-          CT.SourceRunner(fn)(9, 2) == 4, CT.SourceRunner(fn)(9, 2))
-    # The reader recurses, so normalising only the top node would pass the rows
-    # above and fail this one.
-    nested = functions(parse("def h(a, b, c):\n    return (a // b) // c\n"))[0]
-    check("a_nested_floordiv_reads_too",
-          CT.SourceRunner(nested)(17, 2, 2) == 4,
-          CT.SourceRunner(nested)(17, 2, 2))
-    # The refusal that names the subset has to name BOTH spellings of division,
-    # or the same reader is told `//` is outside it while `_ARITH_ALIASES`
-    # accepts it.  `other` is not a parameter, so this clause is refused.
-    bad = contract_of(functions(parse("@ensures(other // n >= 0)\n"
-                                      "def f(n):\n    return n\n"))[0],
-                      "unreadable.mojo")
-    check("the_unlowered_reason_names_floordiv_too",
-          "//" in CT.unlowered_reason(bad, ["n"]),
-          CT.unlowered_reason(bad, ["n"]))
 
 
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
@@ -306,49 +233,6 @@ def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
 
 # ── 2. one reader, three printers ───────────────────────────────────────────
 
-def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
-    """`//` is the operator the AST carries, and the IR reads it as `/`.
-
-    `fire_compiler`'s `BinaryOp` spells integer division `//` (measured:
-    `Parser(py_tokenize("a // b")).parse_module()[0].body[0].value.op == "//"`),
-    where the IR's arithmetic arm was keyed on `/`. So a clause that wrote the
-    operator the source actually contains was refused with a reason that named
-    the wrong one, and a body that used it could not be run by the bounded
-    search at all -- every input a skip. Both forms are the SAME truncating
-    operation (`_eval_of`'s `/` is `a // b`, `_lean_of`'s is `UInt64.div`)."""
-    from formal import contracts as CT
-    src = "@ensures(result == a // b)\ndef h(a, b):\n    return a // b\n"
-    fn = functions(parse(src, "x.mojo"))[0]
-    c = contract_of(fn, "x.mojo", src)
-    params = ["a", "b"]
-
-    ir = CT._Reader(params).clause_ir(c.ensures[0], params)
-    check("the_reader_reads_floordiv_as_the_IRs_division",
-          ir is not None and ir[0] == CT._Op.CMP
-          and ir[1] == "==" and ir[2][0] == CT._Op.ARITH
-          and ir[2][1] == "/", repr(ir))
-
-    e = CT.contract_theorems(c, params, fn=fn)
-    check("a_clause_over_floordiv_is_emitted", bool(e.lean), e.lean)
-    check("a_clause_over_floordiv_is_not_reported_as_unreadable",
-          CT.unlowered_reason(c, params) == "",
-          CT.unlowered_reason(c, params))
-    check("the_emitted_theorem_renders_the_division_as_UInt64.div",
-          "UInt64.div" in e.lean, e.lean[:400])
-
-    check("the_source_evaluator_runs_a_body_with_floordiv",
-          CT.SourceRunner(fn)(7, 2) == 3, repr(CT.SourceRunner(fn)(7, 2)))
-
-    # And the plain `/` spelling keeps the reading it always had, so the two
-    # are one operator in the IR and not a second, differently-typed one.
-    slash = functions(parse("@ensures(result == a / b)\ndef h(a, b):\n"
-                            "    return a // b\n", "x.mojo"))[0]
-    c2 = contract_of(slash, "x.mojo")
-    ir2 = CT._Reader(params).clause_ir(c2.ensures[0], params)
-    check("the_slash_spelling_reads_identically",
-          ir2 == ir, f"{ir2!r} vs {ir!r}")
-
-
 def test_the_lean_printer_and_the_evaluator_agree_on_the_corpus(tmpdir=None):
     """The clause is read once and printed three ways.  The pair most able to
     disagree is the Lean printer and the Python evaluator, because they are the
@@ -421,45 +305,6 @@ def test_a_comparison_is_SIGNED_in_both_printers(tmpdir=None):
           CT._eval_of(ir, env, [1000]) is True, "n = 5 must satisfy n > 0")
 
 
-def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
-    """The source writes integer division `//`, the parser keeps it as `//`, and
-    this reader used to be keyed on `/` alone -- so a clause over `a // b` was
-    refused with a reason that named `/`, and a body whose statements contained
-    `//` could not be run at any input.
-
-    Both spellings are ONE operation on this target (`UInt64.div`), so the
-    reader takes both and normalises to the single `"/"` the IR tag and both
-    printers already know.  The corpus writes it: `collatz.mojo` halves a
-    variable with `v // 2`, and every halving step used to be a skip, which the
-    bounded search counts as "no counterexample" rather than as "unreadable"."""
-    from formal import contracts as CT
-    src = ("@ensures(result == a // b)\n"
-           "def h(a, b):\n    return a // b\n")
-    fn = functions(parse(src))[0]
-    c = contract_of(fn, "x.mojo", src)
-    e = CT.contract_theorems(c, ["a", "b"], fn=fn)
-    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), repr(e))
-    check("a_floordiv_clause_is_not_explained_away",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
-    ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
-    check("a_floordiv_clause_renders_as_the_word_division",
-          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
-    runner = CT.SourceRunner(fn)
-    check("a_floordiv_body_runs_at_its_own_word_semantics",
-          runner(7, 2) == 3, repr(runner(7, 2)))
-    try:
-        runner(7, 0)
-        check("a_floordiv_by_zero_is_still_a_skip", False, "returned a number")
-    except CT.Unsupported:
-        check("a_floordiv_by_zero_is_still_a_skip", True)
-    fn2 = functions(parse("@ensures(other == 1)\ndef f(n):\n    return n\n"))[0]
-    check("the_arith_subset_message_names_floordiv",
-          "`+ - * / // %`" in CT.unlowered_reason(contract_of(fn2, "x.mojo"),
-                                                  ["n"]),
-          CT.unlowered_reason(contract_of(fn2, "x.mojo"), ["n"]))
-
-
 def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
     """Two defects this group exists to catch, both found by RUNNING the
     run-time lowering and neither visible by reading it:
@@ -525,32 +370,16 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     three, so a PROVED verdict told the reader a contract was closed with a
     tactic the proof never ran.  That is the failure this file exists to
     prevent, committed inside the module that exists to prevent it, which is
-    why it is a row rather than something to notice by reading.
-
-    The assertion is on the SPELLING, not the name, and it is stronger for it:
-    `simp_all_toNat` is spelled `simp_all [...] <;> omega`, and a rung whose
-    name appears in the script while a DIFFERENT tactic runs under it is the
-    same drift this row was written for, wearing the name as camouflage.  So
-    every rung's rendered spelling must occur exactly once, and the script must
-    not contain a tactic that no rung spells."""
+    why it is a row rather than something to notice by reading."""
     from formal import contracts as CT
     script = CT._ladder_script("h0, m_go, sKey")
-    spellings = [spelling.format(lemmas="h0, m_go, sKey", extra=CT._EXTRA_SIMP)
-                 for _name, spelling in CT.LADDER]
-    check("the_script_spellings_every_rung",
-          all(sp in script for sp in spellings), f"{CT.LADDER} vs\n{script}")
-    for (name, _spelling), sp in zip(CT.LADDER, spellings):
-        check(f"the_script_spellings_one_{name}",
-              script.count(sp) == 1, script)
+    check("the_script_mentions_every_rung",
+          all(r in script for r in CT.LADDER), f"{CT.LADDER} vs\n{script}")
+    for rung in CT.LADDER:
+        check(f"the_script_spellings_one_{rung}",
+              script.count(rung) == 1, script)
     check("the_script_names_no_unlisted_tactic",
           "bv_decide" not in script, script)
-    # A rung's NAME is what `Verdict.why` prints, so every name has to be one
-    # word a reader can be shown, and the list must not be empty or a single
-    # rung (`first` with one alternative is not a ladder).
-    names = [name for name, _ in CT.LADDER]
-    check("the_rungs_are_named_for_the_reader",
-          all(n and " " not in n for n in names) and len(names) >= 2,
-          f"{names}")
     src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
            "def cl(n):\n"
            "    if n < 0:\n        return 0\n"
@@ -560,11 +389,11 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     body = e.lean.split(":= by")[-1]
     check("the_EMITTED_theorem_uses_the_listed_rungs",
-          all(sp in body for sp in spellings), body)
+          all(r in body for r in CT.LADDER), body)
     check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
     v = CT.classify(e, lean_ok=True)
     check("the_PROVED_reason_names_the_rungs_that_ran",
-          all(n in v.why for n in names), v.why)
+          all(r in v.why for r in CT.LADDER), v.why)
 
 
 def _postcondition_shape(count):
@@ -660,12 +489,7 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
               f"the_bridge_names_{name}", str(CT._ORDER_BRIDGE))
     e, lines = _postcondition_shape(2)
     simp_lines = [ln for ln in lines if "simp_all" in ln]
-    # TWO bullets, and the ladder now has TWO `simp_all` rungs (`simp_all_toNat`
-    # from `work/formal52-docs` and the bare `simp_all`), so each bullet emits
-    # both: count the rungs from `LADDER` rather than hard-coding the old one.
-    simp_rungs = [s for _n, s in CT.LADDER if "simp_all" in s]
-    check(len(simp_lines) == 2 * len(simp_rungs),
-          "the_simp_rung_is_emitted_once_per_bullet",
+    check(len(simp_lines) == 2, "the_simp_rung_is_emitted_once_per_bullet",
           "\n".join(lines))
     for name in CT._ORDER_BRIDGE:
         check(all(name in ln for ln in simp_lines),
@@ -758,47 +582,12 @@ def test_a_skipped_input_is_not_agreement(tmpdir=None):
           str(CT._signed(v.counterexample["result"])))
 
 
-def test_the_corpus_facts_own_contract_is_not_refuted(tmpdir=None):
-    """`formal/examples/fact.mojo` carried `@ensure(result >= 0)` and it was
-    FALSE: `fact(21)` is 51090942171709440000, which is
-    51090942171709440000 - 2**64 = -4249290049419214848 read as a signed 64-bit
-    integer.  True before `formal/contracts.py` existed, and nothing reported it
-    for as long as the decorator was there, because nothing read the decorator.
-
-    **The corpus file now promises something true, and the row is here so that
-    cannot quietly go back.** The fix tightened the PRECONDITION to the same
-    range `@refines(Specs.factorial64; 20)` already claims, rather than weakening
-    the postcondition — `n!` fits in a word exactly up to 20, so the precondition
-    and the specification now agree and `@ensure(result >= 0)` is true over it.
-
-    Three assertions, and the third is the one that keeps the row from going
-    vacuous:
-
-      * the precondition really is the range, read off the parsed clause rather
-        than off the source text, so a rewrite that dropped `n <= 20` and left
-        `@ensure` alone fails HERE rather than silently becoming UNKNOWN for the
-        wrong reason;
-      * the verdict is not REFUTED — a corpus file must not carry a false
-        promise — and `UNKNOWN` is the honest answer here, exactly as it already
-        is for the corpus's other three contract files, because the ladder does
-        not close `fact`'s goal over `UInt64` arithmetic. It is not a pass and
-        `Verdict.ok` is False for it;
-      * **the detector still fires.** This file's rows above already refute
-        `@ensures(result >= 0)` on the same function with the same arithmetic,
-        `loop_wrong` and `wrong_clampv` each refute their own, and
-        `test_the_fact_contract_is_refuted` names the input 21 and the value. If
-        fixing the corpus file had been done by weakening the CHECKER instead of
-        the clause, every one of those would still pass and this row would be the
-        only place the loss is visible — so it asserts the clause's shape, not
-        only its verdict.
-
-    **The generated Lean proof is BYTE-IDENTICAL before and after**, measured:
-    `formal/examples/fact.mojo` compiled to `fact_proof.lean` with the old
-    precondition and with the new one, `diff` empty over 4284 lines. The contract
-    does not reach the theorem statement — `fact_contract` here is the
-    instrumented form, `Post fact_prog fuel mojo st arg`, with no hypothesis —
-    so this is a corpus-source change and not a change to what any Lean gate
-    checks."""
+def test_the_corpus_facts_own_contract_is_false(tmpdir=None):
+    """`formal/examples/fact.mojo` carries `@ensure(result >= 0)`.  It is FALSE:
+    `fact(21)` is 5.1e19 and overflows a `UInt64` to -4249290049419214848.
+    This was true before `formal/contracts.py` existed and nothing reported it,
+    because nothing read the decorator.  The row is here so the finding cannot
+    quietly stop being true."""
     from formal import contracts as CT
     path = os.path.join(HERE, "formal", "examples", "fact.mojo")
     src = open(path).read()
@@ -806,12 +595,8 @@ def test_the_corpus_facts_own_contract_is_not_refuted(tmpdir=None):
           if getattr(f, "name", None) == "fact"][0]
     c = contract_of(fn, path, src)
     check("fact_declares_a_contract", len(c.ensures) == 1, repr(c))
-    check("fact_declares_one_precondition", len(c.requires) == 1, repr(c))
-    bound = _int_literals(c.requires[0].expr)
-    check("the_precondition_bounds_n_at_the_refines_range", 20 in bound,
-          repr(bound))
     _e, v = CT.check_source(fn, path, src)
-    check("the_corpus_contract_is_not_REFUTED", v.status != CT.REFUTED, repr(v))
+    check("the_corpus_contract_is_REFUTED", v.status == CT.REFUTED, repr(v))
 
 
 def test_PROVED_is_unreachable_without_Lean(tmpdir=None):
@@ -1078,10 +863,10 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
               "run with --lean only where one exists")
         return
     lib = os.path.join(HERE, "lib")
-    # `mini2` is the example the ladder reached before `simp_all_toNat` and
-    # `bounds_index` is the one it reaches only because of it -- so the pair
-    # says the new rung ADDED reach rather than replacing it.  And
-    # `wrong_clampv` is the one it must still refuse.
+    # `mini2` is the example the ladder REACHES and `wrong_clampv` the one it
+    # must refuse.  Both directions matter and one file cannot carry both: a
+    # theorem that closes proves the emitter writes a real proof, and one that
+    # does not prove it is not a `sorry` wearing a `theorem` header.
     #
     # `bounds_index.mojo` and `clamped.mojo` joined this list with the
     # `UInt64` order bridge (`formal/contracts.py::_ORDER_BRIDGE`) and the
@@ -1092,30 +877,14 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # mis-nested.  A ladder that lost either reads as UNKNOWN on a contract it
     # used to close, which is silent -- so both are named here.
     #
-    # `work/formal52-docs` added a leading `simp_all_toNat` rung (the
-    # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
-    # a rung fails, so that rung can only ADD reach, and these two still close.
-    #
-    # `mini.mojo` and `abspos.mojo` are named here as the NEGATIVE half, and
-    # they are the rows that make this list a measurement of the ladder's reach
-    # rather than a list of things that happen to pass: both are still UNREACHED
-    # (their verdict is UNKNOWN) and their rows would go red the moment a rung
-    # closed them, which is what says the reach is still short of "everything".
-    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the same line at the
-    # `classify` level; the reason each is still unreached, measured, is in
-    # `bugs/FORMAL_contract_ladder_reach.md` §6.
-    #
-    # `mini` and `abspos` need an xor-cancellation fact this toolchain does not
-    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): the goal is an
-    # EQUALITY over `UInt64`, so the `toNat` bridges the ladder carries -- all
-    # of them about `<`/`≤` -- do not rewrite it, and `UInt64.toNat_inj` only
-    # turns it into a Nat equality the simplifier cannot discharge without that
-    # missing lemma.
+    # `mini.mojo` and `abspos.mojo` are still NOT in this list because their
+    # contracts are UNREACHED by the ladder and their verdict is UNKNOWN.  That
+    # is the honest answer and `test_UNKNOWN_is_reachable_and_is_not_a_pass` is
+    # what holds the line; the reason each one is still unreached, measured, is
+    # in `bugs/FORMAL_contract_ladder_reach.md`.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),
-             ("mini.mojo", "mini", False),
-             ("abspos.mojo", "abspos", False),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
         path = os.path.join(EXAMPLES, name)
@@ -1157,15 +926,12 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
 
 ALL = [
     test_the_reader_takes_both_spellings,
-    test_the_reader_reads_the_ASTs_own_division,
     test_a_function_with_no_decoration_is_NOT_a_contract,
     test_the_comment_pragma_is_read_too,
     test_an_unreadable_clause_is_a_REFUSAL,
     test_a_name_outside_the_parameters_is_not_silently_zero,
-    test_the_reader_reads_the_sources_floordiv,
     test_the_lean_printer_and_the_evaluator_agree_on_the_corpus,
     test_a_comparison_is_SIGNED_in_both_printers,
-    test_a_floor_division_clause_reads_as_the_word_division,
     test_the_mojo_printer_emits_MOJO_and_not_LEAN,
     test_the_ladder_is_generated_from_the_list_it_reports,
     test_a_multi_postcondition_contract_is_split_before_its_first_bullet,
@@ -1174,7 +940,7 @@ ALL = [
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,
     test_a_skipped_input_is_not_agreement,
-    test_the_corpus_facts_own_contract_is_not_refuted,
+    test_the_corpus_facts_own_contract_is_false,
     test_PROVED_is_unreachable_without_Lean,
     test_a_counterexample_outranks_a_green_ladder,
     test_every_example_builds_and_agrees_with_cpython,

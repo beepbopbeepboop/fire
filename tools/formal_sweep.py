@@ -907,17 +907,6 @@ _REFUSAL_FAMILIES = (
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
-    # A comprehension ELEMENT that opens a container, which is its own family
-    # because the comprehension is otherwise LOWERED — a file refused here is
-    # not a file this backend cannot build, it is a file where one compile-time
-    # reservation for an element site that runs N times would hand every
-    # iteration the same object. Both messages' spellings are here (the list /
-    # dict / set literal and the nested comprehension) so the family does not
-    # split by which container the element opened, and neither marker can be
-    # shadowed by the container-operation rows above: this one names the
-    # COMPREHENSION and those name the container.
-    ("opens a container", "comprehension element that opens a container"),
-    ("has one frame blob for it", "comprehension element that opens a container"),
     # COMPOSITION: the missing BUFFER, in the two wordings the model emits it
     # in. Named rather than left in "other refusal" because it is 114 files on
     # the 2026-10-04 b11 sweep — the largest family in the corpus by a wide
@@ -960,6 +949,20 @@ _REFUSAL_FAMILIES = (
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("is refused on a string whose text is not ASCII",
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
+    # A CONTAINER at a NUMBER conversion (`formal/model.py::
+    # printf_container_conversion_refusal`), and the row that makes the printf
+    # conversion table a family rather than three unrelated sentences. Its
+    # siblings are all in this table already — a `%s` of a number is claimed
+    # above by "is a value this function bound to an integer" (a pre-existing
+    # mis-filing, kept rather than fixed here: that message's clause is about
+    # the OPERAND and this row's is about the CONVERSION) — and the FLOAT axis
+    # (`printf_kind_conversion_refusal`) still has no row, so it files as
+    # `other refusal`.
+    #
+    # The marker is the clause only this message carries, for the reason the
+    # four container-operand rows above give: first match wins, so a marker
+    # that any sibling also contains would empty one of the rows.
+    ("reads its argument as a NUMBER", "a printf conversion of a container"),
     # A CPython BUILTIN this target does not lower, refused BY NAME before any
     # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
     # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).

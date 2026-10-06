@@ -603,27 +603,6 @@ CAUSES = (
     # lands in the unclassified bucket.
     ("a repetition whose count this path cannot read",
      (("is a REPETITION",),)),
-    # A comprehension whose ELEMENT opens a container. Its own row because the
-    # construct is one this backend LOWERS — the comprehension is built, run and
-    # correct whenever its element is a single word — and the one thing it will
-    # not do is hand every iteration the same object, which is what one
-    # compile-time frame reservation for a site that runs N times would do.
-    # Measured on both architectures: `[[y, y + 1] for y in [10, 20, 30]]`
-    # printed `31 31 31` where CPython prints `11 21 31`, and the nested
-    # comprehension printed `93` and exited 1 where CPython prints `63`. So a
-    # file refused here is refused by a decision with a stated remedy (build the
-    # containers in an explicit loop, whose `append` allocates per iteration),
-    # not by a missing feature — which is the distinction `other refusal`
-    # cannot express and the reason this row exists.
-    #
-    # TWO markers, and the reason is the same one the `a printed value that is
-    # not a value` row above gives: the FACT and the CONSTRUCT are in two
-    # clauses of `formal/model.py::comprehension_element_blob_refusal`'s own
-    # f-string, and `test_refusal_taxonomy.py`'s samples are cut from there, so
-    # a reword fails a test instead of emptying this row into `other refusal`.
-    ("a comprehension element that opens a container",
-     (("has one frame blob for it",),
-      ("opens a container",))),
     ("len() of a value that has no length",
      (("is len() of a value classified as",),)),
     # A `with` whose CONTEXT this build cannot type. `formal/model.py`'s
@@ -928,6 +907,21 @@ CAUSES = (
      (("is refused: on this path it would answer in BYTES where CPython "
        "answers in CHARACTERS",),
       ("is refused on a string whose text is not ASCII",))),
+    # A CONTAINER at a NUMBER conversion (`formal/model.py::
+    # printf_container_conversion_refusal`), and the PLANNER's row for a
+    # construct that is a refusal on every backend and a silent heap address
+    # without it: measured, `printf("v=%d", xs)` for `xs = [1, 2, 3]` printed
+    # 6137343680 on arm64 and 13051747960 on x86-64, and CPython raises
+    # `TypeError: %d format: a real number is required, not list`.
+    #
+    # It is its own cause and not a row under the string-encoding block above
+    # because that block's clearing condition is about the IMAGE and this one's
+    # is about the OPERAND's kind: nothing about the image's literals can make
+    # a `%d` of a container right. The marker is the clause only this message
+    # carries — its `%s` sibling and its float sibling both open with a
+    # different one, which is why a broader marker here would collect them.
+    ("a printf conversion of a container",
+     (("reads its argument as a NUMBER",),)),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
     # the callee has to hand the receiver back somehow. Four wordings and one
     # cause, because one convention covers the receiver and what is refused is
