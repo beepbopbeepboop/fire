@@ -18784,6 +18784,7 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
     body = list(getattr(case, "body", None) or [])
     binds: list = []
     tests: list = []
+    irrefutable = False
     for pattern in patterns:
         kind = M.match_pattern_kind(pattern, bound)
         if kind in M.MATCH_REFUSED_KINDS:
@@ -18794,20 +18795,44 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
             # Irrefutable and binds nothing: the arm is reached whenever the
             # patterns before it did not match, and nothing after this pattern
             # in this case can be evaluated.
+            irrefutable = True
             break
         if kind == "capture":
             binds.append(pattern.name)
             bound.add(pattern.name)
+            irrefutable = True
             break
         tests.append(F.BinaryOp(
             op="==", left=subject_ref, right=pattern,
             line=getattr(pattern, "line", 0), col=getattr(pattern, "col", 0)))
-    taken = _lower_case_arm(case, binds, subject_ref, body, guard, rest)
     if not tests:
-        return taken, bound
+        # Every pattern is irrefutable, so the arm runs whenever it is reached.
+        return _lower_case_arm(case, binds, subject_ref, body, guard, rest), bound
     condition = tests[0] if len(tests) == 1 else _short_circuit_or(tests, case)
-    return ([F.IfStmt(condition=condition, then_body=taken, elifs=[],
-                      else_body=rest, line=getattr(case, "line", 0),
+    # **A list that ENDS in a capture or a wildcard runs the arm on BOTH
+    # outcomes, and binds only on the second.** The reference evaluates the
+    # patterns left to right and stops at the first that matches, so a pattern
+    # after a value comparison is reached exactly when every comparison before
+    # it failed — and an irrefutable pattern matches whatever reaches it. So
+    # `case 1, other:` runs the arm whether the subject is 1 (off the `1`, with
+    # `other` unbound) or not (off the capture, with `other` = the subject), and
+    # the two are DIFFERENT arms: only the second binds.
+    #
+    # One arm in the `then` would be a wrong answer rather than a refusal:
+    # measured on this tree before the split, `f(5)` on `case 1, other:` printed
+    # `rest` where `fire.py run` prints `low` then `5`, and `case 1, _:` printed
+    # one `low` where the reference prints two.
+    #
+    # `rest` appears once per guard, which is the price of having no `goto`
+    # between the two arms, and it is unreachable on either when there is no
+    # guard — a list ending in an irrefutable pattern matches everything, so the
+    # rest of the `match` is only reachable through a guard that says no.
+    taken = _lower_case_arm(case, binds, subject_ref, body, guard, rest)
+    then_body = taken if not irrefutable else _lower_case_arm(
+        case, [], subject_ref, body, guard, rest)
+    return ([F.IfStmt(condition=condition, then_body=then_body, elifs=[],
+                      else_body=rest if not irrefutable else taken,
+                      line=getattr(case, "line", 0),
                       col=getattr(case, "col", 0))], bound)
 
 

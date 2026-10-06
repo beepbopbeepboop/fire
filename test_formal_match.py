@@ -782,6 +782,73 @@ ROWS = [
      "            print('rest')\n"
      "    print('after')\n"
      "    return 0\n", ("frontend",), "module"),
+    # A pattern list that STARTS with a capture, and therefore DEAD after it.
+    # `myinterpreter.py` walks `match_case.patterns` and STOPS at the first
+    # that matches, and a capture always matches, so the `TBL[5]` here is never
+    # evaluated — which is observable, because `TBL[5]` is one past the end of a
+    # two-element list and reading it traps (`print(TBL[5])` exits 1 on both
+    # architectures, measured). A lowering that collected every pattern into one
+    # boolean would read it, exit 1, and answer nothing. The capture binds, so
+    # the arm may read `other` on either path — which is the one shape where a
+    # capture that is not in the first position is still readable, and the
+    # reason the row below cannot read its own capture.
+    ("capture_at_the_front_of_a_pattern_list_kills_the_rest", "TBL = [10, 20]\n"
+     "\n"
+     "def f(n):\n"
+     "    match n:\n"
+     "        case other, TBL[5]:\n"
+     "            print('low')\n"
+     "            print(other)\n"
+     "        case _:\n"
+     "            print('rest')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    f(5)\n"
+     "    f(1)\n"
+     "    return 0\n", ("frontend",), "module"),
+    # A capture in the SECOND position of a pattern list. The reference reaches
+    # it exactly when every comparison before it failed, and it matches whatever
+    # reached it — so the arm runs EITHER WAY, and only the second outcome binds.
+    # A lowering that put the arm in the `then` of "one of the comparisons
+    # matched" printed `rest` for `f(5)` where `fire.py run` prints `low`, and a
+    # lowering that swapped the arms printed one `low` where the reference prints
+    # two; both were measured, on both architectures, before the split.
+    #
+    # The body does NOT read `other`, and that is not modesty: on the path where
+    # the first pattern matched, `other` is unbound, so a body that read it would
+    # be a program the reference answers with a `NameError` and this path
+    # refuses with the read-before-store message — correctly, and for a reason
+    # that has nothing to do with `match`. CPython reads `case 1, other:` as a
+    # two-element SEQUENCE pattern, so the oracle is this compiler's interpreter.
+    ("capture_in_the_second_position_runs_the_arm_either_way", "def f(n):\n"
+     "    match n:\n"
+     "        case 1, other:\n"
+     "            print('low')\n"
+     "        case _:\n"
+     "            print('rest')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    f(5)\n"
+     "    f(1)\n"
+     "    return 0\n", ("frontend",), "module"),
+    # …and a WILDCARD in the same position, which is the same rule with no
+    # binding attached — and so with no reason the body cannot read. `case 1, _:`
+    # is irrefutable, so the rest of the `match` is only reachable through a
+    # guard, and `case 9:` below it is never reached.
+    ("wildcard_in_the_second_position_of_a_pattern_list", "def f(n):\n"
+     "    match n:\n"
+     "        case 1, _:\n"
+     "            print('low')\n"
+     "        case 9:\n"
+     "            print('rest')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    f(5)\n"
+     "    f(1)\n"
+     "    return 0\n", ("frontend",), "module"),
     # `comptime __match`, the Mojo spelling, and the one place where this
     # lowering deliberately does NOT fold. Real Mojo resolves `comptime __match`
     # at compile time; this compiler's reference interpreter runs it as an
