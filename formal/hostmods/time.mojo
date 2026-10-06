@@ -65,7 +65,7 @@ rather than of this module, and every function below is shaped by them.
     argument is 36 bytes it cannot fill. Passing an integer where the pointer
     belongs instead passes a null `time_t *` and the image segfaults inside
     libc, so the honest answer here is the refusal. The capability is filed as
-    `FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee`
+    `bugs/FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`
     and the measurement is `test_formal_time.py`'s `structroute` group.
 
   * NO EXCEPTIONS. `time.sleep` on a negative argument raises `ValueError` in
@@ -80,18 +80,13 @@ rather than of this module, and every function below is shaped by them.
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
-  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT, and that is now a fact about
-    CPython's `time` rather than a limit: NONE of the names here takes a
-    parameter CPython gives a default (`sleep(secs)`, `clock_gettime(clk_id)`
-    and the rest are all required). A call into another image USED not to
-    materialize the callee's defaults — the caller had no signature to read
-    them from, so the argument register was whatever the caller last left in it,
-    measured as `need_two(1)` returning 511 in one image and 1867609072 across a
-    dylib. `formal/imports.py`'s `external_declarations` now hands the emitter
-    the callee's own declaration, so a default DOES materialize
-    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is), and this module simply has none to give. The
-    one place a default is genuinely wanted is a SECOND function of its own.
+  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT. A call into another image does
+    not materialize the callee's defaults: the caller has no signature to read
+    them from, so the argument register is whatever the caller last left in it.
+    Measured: `need_two(1)` returns 511 in one image and 1867609072 across a
+    dylib (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). So
+    the parameters CPython gives defaults are REQUIRED here, and the one place
+    a default is genuinely wanted is a SECOND function of its own.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------
