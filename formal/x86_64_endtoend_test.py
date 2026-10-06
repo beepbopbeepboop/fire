@@ -789,17 +789,21 @@ _SUCCS = {
     # the next.  That is worth stating as a property of the instrument: the Lean
     # check is one verdict per file, so it cannot count stale successors, and
     # `test_formal_sweep_truth.py::TestX86EndToEndTables` is what counts them.
+    # `x86_imul_ovf`, the model's own name for the question -- the third
+    # correction to this row, and the same lesson twice: a successor is a copy of
+    # the model, so it has to be corrected with the model.  The overflow bit is
+    # a statement about the 128-bit product and `x86_imul_ovf`'s docstring has
+    # the five counterexamples that the inlined `lo != x86_sign_extend64 lo`
+    # got wrong (`3 * 5` claimed an overflow, `(-2^63) * 2` claimed none).
     "imul_r64_r64":
         "(x86_set_flag4 "
         "{ x86_set_reg $s $dst (x86_get_reg $s $dst * "
         "x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next } "
         "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex)) "
-        "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex) "
-        "!= x86_sign_extend64 (x86_get_reg $s $dst * "
-        "x86_get_reg $s ($rm + x86_rex_b $rex))) "
-        "(x86_get_reg $s $dst * x86_get_reg $s ($rm + x86_rex_b $rex) "
-        "!= x86_sign_extend64 (x86_get_reg $s $dst * "
-        "x86_get_reg $s ($rm + x86_rex_b $rex))))",
+        "(x86_imul_ovf (x86_get_reg $s $dst) "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex))) "
+        "(x86_imul_ovf (x86_get_reg $s $dst) "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex))))",
 "alu_rr:cmp":
         "{ $s with rip := $next, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
@@ -1540,13 +1544,27 @@ def _msb(v):
 def _sign_extend64(v):
     """`x86_sign_extend64`: bit 63 replicated down the word.
 
-    The signed reading of a 64-bit unsigned value, which is what an `imul`'s
-    `cf`/`of` compare the product against -- they mean "the product does not fit
-    in 64 signed bits".  `lib/X86.lean` states it as
+    The signed reading of a 64-bit unsigned value.  `lib/X86.lean` states it as
     `if x86_msb v then 0xffffffffffffffff else 0`, and `v` is already masked to
     64 bits by `_u64` at every call site here.
     """
     return _U64 - 1 if _msb(v) else 0
+
+
+def _imul_ovf(a, b):
+    """`x86_imul_ovf`: does `IMUL`'s 128-bit signed product miss 64 bits?
+
+    `hi != x86_sign_extend64 lo` over the split product, and **not** the short
+    form `lo != _sign_extend64(lo)`, which never looks at the high half and is
+    wrong in both directions — it calls `3 * 5` an overflow and `(-2^63) * 2` a
+    non-overflow.  `lib/X86.lean`'s `x86_imul_ovf` carries the host measurement
+    and the five counterexamples; this is its transcription for the constant
+    propagation, and it is the only place in this file that answers the question.
+    """
+    p = ((a - _U64) if _msb(a) else a) * ((b - _U64) if _msb(b) else b)
+    lo = p % _U64
+    hi = (p - lo) // _U64 % _U64
+    return hi != _sign_extend64(lo)
 
 
 class _Abs:
@@ -1999,21 +2017,24 @@ def _abs_step(prev, form, raw, addr, length):
         # which had been setting no flags at all, and this walk had followed it
         # here.  A walk that does not track them cannot DECIDE a `jcc` after an
         # `imul`, and the flags are cheap arithmetic on a product it already
-        # computes -- `x86_set_flag4`'s own definitions, transcribed:
-        # `zf = res = 0`, `sf = msb res`, and `cf = of_ = (res !=
-        # x86_sign_extend64 res)`, i.e. the product does not fit in 64 signed
-        # bits.  An unknown operand leaves all four unknown rather than
-        # guessing, which is what `None` means here.
+        # computes.
+        #
+        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
+        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
+        # carried the model's own wrong version for one commit, so the rule is
+        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
+        # `lib/X86.lean`'s definition and is the only place in this file that
+        # answers the question.
         a, b = st.get(dst), st.get(src)
         if a is None or b is None:
             st.put(dst, None)
             st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
             return st
         res = _u64(a * b)
+        ovf = _imul_ovf(a, b)
         st.put(dst, res)
         st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
-                        cf=res != _sign_extend64(res),
-                        of_=res != _sign_extend64(res))
+                        cf=ovf, of_=ovf)
         return st
     if form == "setcc":
         # The NARROW write, matching `x86_set_reg_narrow` rather than the whole
@@ -2142,7 +2163,7 @@ _SIMP_FORMS = {
     "shift_imm8:sar": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
                        "x86_trunc32", "x86_sign_extend32"),
     "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
-                     "x86_set_flag4", "x86_sign_extend64"),
+                     "x86_set_flag4", "x86_imul_ovf"),
     "cqo": ("x86_cqo",),
     # `x86_set_reg_narrow` and `x86_mask`, because that is what the `setcc`
     # successor mentions now; `x86_trunc32` was here for the model's PRE-fix

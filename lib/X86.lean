@@ -680,6 +680,50 @@ def x86_split128 (p : Int) : UInt64 × UInt64 :=
   let hi := (p - lo) / (x86_two64 : Int) % (x86_two64 : Int)
   (UInt64.ofNat lo.toNat, UInt64.ofNat hi.toNat)
 
+/-- `IMUL`'s overflow answer: does the 128-bit SIGNED product of `a` and `b`
+    fail to fit in 64 signed bits?
+
+    **It is a statement about 128 bits and not about the low word, and the
+    difference is a real defect this was written to stop repeating.**  The short
+    form reads `lo != x86_sign_extend64 lo` -- "the low word is not its own sign
+    extension" -- and it is wrong in BOTH directions, because it never looks at
+    the high half at all:
+
+    | product | fits? | `lo != sext64 lo` |
+    |---|---|---|
+    | `3 * 5 = 15` | yes | **overflow** (`15` is neither `0` nor `-1`) |
+    | `(-1) * (-1) = 1` | yes | **overflow** |
+    | `(-2^63) * 1` | yes | **overflow** (`lo = 2^63`) |
+    | `(-2^63) * 2` | **no** | **fits** (`lo = 0`) |
+    | `2^62 * 2^62` | **no** | **fits** (`lo = 0`) |
+
+    Measured on this host, `imulq %rcx, %rax` in a static binary (`a`, `b`,
+    the low word, `CF`, `OF`):
+
+        a=0000000000000003 b=0000000000000005  lo=000000000000000f  cf=0 of=0
+        a=ffffffffffffffff b=ffffffffffffffff  lo=0000000000000001  cf=0 of=0
+        a=8000000000000000 b=0000000000000001  lo=8000000000000000  cf=0 of=0
+        a=8000000000000000 b=0000000000000002  lo=0000000000000000  cf=1 of=1
+        a=4000000000000000 b=0000000000000002  lo=8000000000000000  cf=1 of=1
+        a=deadbeefcafebabe b=0000000000000003  lo=9c093ccf60fc303a  cf=0 of=0
+
+    and `formal/x86_64_model_coverage_test.py::multiply_cases` is the table that
+    holds those rows.  The bug was invisible for two reasons, both structural:
+    **no `formal/examples` program reads a flag after a multiply**, and the
+    fuzzer's random operands are 64-bit values whose product does not overflow,
+    so the two agree there — on a model that claimed an overflow for `3 * 5`. -/
+def x86_imul_ovf (a b : UInt64) : Bool :=
+  let (lo, hi) := x86_split128 (x86_signed a * x86_signed b)
+  hi != x86_sign_extend64 lo
+
+/-- `MUL`'s overflow answer, which is the same question against the UNSIGNED
+    range and so has a different answer: `2^63 * 2` overflows the signed range
+    and not this one.  Beside `x86_imul_ovf` rather than inline in the arm
+    because the two were written apart and only one of them was ever checked. -/
+def x86_mul_ovf (a b : UInt64) : Bool :=
+  let (_, hi) := x86_split128 (Int.ofNat a.toNat * Int.ofNat b.toNat)
+  hi != 0
+
 /-- The largest and smallest `Int` a 64-bit register can hold: the range a
     quotient has to be inside for the instruction not to fault. -/
 def x86_int64_min : Int := -9223372036854775808
@@ -962,18 +1006,16 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       -- inputs whose product fits and the wrong answer for the rest -- and the
       -- wrong answer is invisible until something reads CF, which nothing in
       -- `formal/examples` does after a multiply.
-      let ovf := hi != 0
       some (x86_set_flag4 { s with rax := lo, rdx := hi, rip := rip + 3 }
-              lo ovf ovf)
+              lo (x86_mul_ovf s.rax a) (x86_mul_ovf s.rax a))
     else if digit = 5 then
       -- imul r/m64: RDX:RAX = RAX * r/m64, signed
       let (lo, hi) := x86_split128 (x86_signed s.rax * x86_signed a)
       -- Same overflow test, signed: the high half must be the SIGN EXTENSION of
-      -- the low half.  `x86_sign_extend32` is `movsxd`'s helper and is wrong
-      -- here for the same reason it was wrong in `sar`.
-      let ovf := hi != x86_sign_extend64 lo
+      -- the low half -- which is `x86_imul_ovf`, the one definition both `imul`
+      -- forms read rather than the one that was wrong in the other.
       some (x86_set_flag4 { s with rax := lo, rdx := hi, rip := rip + 3 }
-              lo ovf ovf)
+              lo (x86_imul_ovf s.rax a) (x86_imul_ovf s.rax a))
     else if digit = 6 then
       -- div r/m64: RAX = RDX:RAX / r/m64, RDX = remainder
       -- CF, OF, SF, ZF, AF and PF are all UNDEFINED after DIV (Intel SDM Vol. 2,
@@ -1029,12 +1071,19 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       -- invisible.  Found by `formal/x86_64_model_fuzz.py --census`:
       -- `imul_r64_r64` was WRONG on three initial states out of three, and the
       -- fields that differed were `sf`, `zf`, `cf` and `of_`.
+      --
+      -- **CF and OF were then WRONG AGAIN, in the other direction, and the
+      -- arithmetic table found it**: `x86_imul_ovf`'s own docstring has the
+      -- measurement and the five counterexamples.  `3 * 5` claimed an overflow
+      -- and `(-2^63) * 2` claimed none.  A random-operand fuzzer cannot see
+      -- either, because a random 64-bit product does not overflow and the two
+      -- readings then agree — so this needed `multiply_cases`, not more seeds.
       let modrm := code (rip + 3)
       let i := (modrm.toNat >>> 3 &&& 7) + x86_rex_r rex
       let a := x86_get_reg s i
       let b := x86_get_reg s ((modrm.toNat &&& 7) + x86_rex_b rex)
       let lo := a * b
-      let ovf := lo != x86_sign_extend64 lo
+      let ovf := x86_imul_ovf a b
       some (x86_set_flag4 { x86_set_reg s i lo with rip := rip + 4 } lo ovf ovf)
     else if op2 = 0xb6 || op2 = 0xb7 || op2 = 0xbe || op2 = 0xbf then
       -- movzx / movsx into r64
@@ -1817,18 +1866,15 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
         { x86_set_reg s dst (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
           with rip := m + 4 }
         (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
-        (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex)
-          != x86_sign_extend64
-            (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex)))
-        (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex)
-          != x86_sign_extend64
-            (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex)))) := by
-  -- `x86_set_flag4` and `x86_sign_extend64` are DELIBERATELY absent, for the same
-  -- reason `x86_set_reg` is present in this lemma and absent from
-  -- `x86_step_movsx_r64_r8`: they are on both sides of the `=`, and unfolding
-  -- them turns the goal into a 2000-line `X86State` literal. The four flags the
-  -- statement now carries are the ones `imul r64, r/m64` sets -- see the arm's
-  -- comment for what was wrong before.
+        (x86_imul_ovf (x86_get_reg s dst) (x86_get_reg s (rm + x86_rex_b rex)))
+        (x86_imul_ovf (x86_get_reg s dst) (x86_get_reg s (rm + x86_rex_b rex)))) := by
+  -- `x86_set_flag4`, `x86_imul_ovf` and `x86_sign_extend64` are DELIBERATELY
+  -- absent, for the same reason `x86_set_reg` is present in this lemma and
+  -- absent from `x86_step_movsx_r64_r8`: they are on both sides of the `=`, and
+  -- unfolding them turns the goal into a 2000-line `X86State` literal. The four
+  -- flags the statement now carries are the ones `imul r64, r/m64` sets -- see
+  -- the arm's comment for what was wrong before, and `x86_imul_ovf` for what
+  -- was wrong after that.
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_op2, h_rex, h_w, h_mod, h_reg, h_rm,
