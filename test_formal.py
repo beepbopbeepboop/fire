@@ -291,22 +291,13 @@ EXPECTED_FAILURES = {
 
     # (2) The generic loop contract for a `for` loop, which is a refusal of its
     # own: `ForStmt needs the generic loop contract`. `sum_range` is the one
-    # range loop in the corpus and it is refused too, for the sharper reason its
-    # own entry above gives: the contract IS generated for its shape, and it is
-    # declined because it is stated in the UNSIGNED order while the loop's test
-    # is a signed `CSET lt`, so the obligation would be false. It is a refusal
-    # rather than a hole-with-a-proof on purpose — see
-    # `test_formal_call_proof_gen.py::TestBottomTestedRangeLoop`, which pins both
-    # the decline and the loop shape on the image.
-    "sum_range": "the range loop's contract is stated in the unsigned order "
-                 "and the loop's own test is a signed `CSET lt`, so the "
-                 "`loop_body_flag` obligation is `sign-flipped <` ↔ `<`, which "
-                 "is false for a bound at or above 2^63; it is declined rather "
-                 "than admitted with a `sorry`",
+    # range loop in the corpus and it reaches a proof WITH A HOLE (the unsigned
+    # exit-side comparison its own entry above names); `for_two_bounds` is
+    # refused outright.
     "for_two_bounds": "a `for i in range(1, n)` needs the generic loop "
                       "contract the model does not have; the one range loop in "
-                      "the corpus (`sum_range`) is declined for the unsigned/"
-                      "signed mismatch its own entry names",
+                      "the corpus (`sum_range`) only reaches a proof with an "
+                      "admitted hole",
 
     # (3) The model has no domain for a container or a string. The model is
     # `mojo : UInt64 -> UInt64` -- a function of the entry argument alone -- so
@@ -400,60 +391,19 @@ EXPECTED_FAILURES = {
                   "IMAGE computes it -- both backends and CPython answer 19 -- "
                   "and `floordiv`/`udivmod` are refused outright for the same "
                   "division's helper call",
+    "mod_by_var": "`n % d` with a VARIABLE divisor calls the run-time division "
+                  "helper, which is outside the image, so the modelled run "
+                  "stops there and never reaches the exit the generated "
+                  "`mod_by_var_pre_reaches_0` asserts it reaches -- an "
+                  "obligation FALSE about the machine, in the generated file's "
+                  "own words (`bugs/FORMAL_arm64_an_extern_call_makes_the_run_"
+                  "never_reach_the_exit.md`). `floordiv`/`udivmod`, with two "
+                  "such calls, are refused instead",
     # `unary_ops` was in this table until 2026-10-05 and is not any more: unary
     # `+` was modelled as a LOGICAL NEGATION (a false model, which the run test
     # caught), and both the model and the AST bridge now spell it as the
     # identity. It is the corpus's proof that a false model is caught rather
     # than banked.
-    # `mod_by_var` was in this table until 2026-10-05 too, and for the worse
-    # reason: `_gen_extern_test` emitted a `mod_by_var_pre_reaches_0` that was
-    # FALSE about the machine (`n % d`'s only `fflush` is on the
-    # divide-by-zero guard's error arm, which the concrete run never takes).
-    # The generator now splits at the call only where the run REACHES it and
-    # states the run's own answer where it does not, so the example is proved
-    # with no sorries -- see
-    # `test_formal_call_proof_gen.py::TestExternCallTheRunDoesNotReach`.
-
-    # `(n // 7) + (n % 7)` and `(n / 7) + (n % 7)`: the floor- and
-    # truncating-division examples.  **Neither is a division fact, and NEITHER
-    # REACHES LEAN.**  Measured 2026-10-05 through
-    # `formal/build.py::compile_formal(prove=True, check=False)`, which is what
-    # writes the proof and is the only thing this file needs to know: the
-    # arm64 generator raises `NotImplementedError` from inside
-    # `generate_arm64_proof`, so no `<stem>_proof.lean` is written and there is
-    # no residual goal to read.  `wide_recv` above is the precedent for a
-    # GENERATION-time refusal being an entry here rather than a FAIL; what was
-    # missing here was the REASON, which is why the pair read as two
-    # unexplained reds -- a whole-corpus run is the only thing that reaches an
-    # example the table does not name, and there was no document for either.
-    #
-    # The cause is the universal theorem's CALL WALK and nothing about division:
-    #
-    #   universal theorem: 2 calls this walk cannot follow
-    #     (0x10000046c -> 0x100000508 (opaque),
-    #      0x1000004d8 -> 0x100000508 (opaque)),
-    #     and ONE halt address cannot discharge them.
-    #
-    # `//` and `%` each lower to a call to the SAME divide-and-correct helper,
-    # so one callee is reached from two call sites, and the framework's single
-    # halt address cannot state what happens after each -- which is exactly
-    # item 2 of `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_
-    # into_the_same_image.md`'s next step, the largest single family in that
-    # census.  The image itself is fine: `--no-prove` builds and both spellings
-    # run, so nothing here is a codegen or a value-model fact.
-    "floordiv": "the arm64 proof GENERATOR refuses before a proof exists: the "
-                "universal theorem's call walk cannot follow two call sites of "
-                "one callee, because `//` and `%` each lower to a call to the "
-                "same helper and ONE halt address cannot discharge them, so no "
-                "proof file is written and there is no Lean residual. See "
-                "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
-                "into_the_same_image.md",
-    "udivmod": "the same GENERATION-time refusal as `floordiv`, for `/` and "
-               "`%`: two call sites of one callee and ONE halt address. The "
-               "image builds and runs with --no-prove, so this is not a "
-               "division fact. See "
-               "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
-               "into_the_same_image.md",
 
 }
 

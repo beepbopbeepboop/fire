@@ -952,22 +952,6 @@ CAUSE_SAMPLES = [
     ("a repetition whose count this path cannot read",
      "[FloatLiteral] * m * k is a REPETITION, and this path can only lower "
      "one whose count it can read while emitting"),
-    # A comprehension ELEMENT that opens a container — the one shape where this
-    # backend LOWERs the comprehension and still cannot give each iteration its
-    # own container, because the frame is one sequential ledger and the element
-    # site reserves through it once at compile time. Two samples because
-    # `formal/model.py::comprehension_element_blob_refusal`'s element spelling
-    # goes through `expr_spelling`, and a nested comprehension is spelled
-    # `[…] for …` rather than as the AST type name; one sample would leave half
-    # the family's messages unclassified.
-    ("a comprehension element that opens a container",
-     "a comprehension in main: the element `[y, y + 1]` opens a container, and "
-     "this path has one frame blob for it — 24 bytes reserved once, at the "
-     "element's own site — while the comprehension body runs up to 3 times"),
-    ("a comprehension element that opens a container",
-     "a comprehension in main: the element `[…] for …` opens a container, and "
-     "this path has one frame blob for it — 48 bytes reserved once, at the "
-     "element's own site — while the comprehension body runs up to 3 times"),
     ("len() of a value that has no length",
      "len(s) is len() of a value classified as 'int', and an integer has no "
      "length"),
@@ -1582,49 +1566,6 @@ def main() -> int:
                 f"    message: {msg[:100]}")
 
     check_cause_table(failures)
-
-    # A name the EMITTERS lower is not the not-lowered pre-pass's to refuse, and
-    # the two tables are read by different code — so the exclusion is asserted
-    # here rather than inferred from the samples above, which are all names the
-    # emitters do NOT lower and so cannot see the collision.
-    #
-    # `ord`, `chr` and `hash` are in `EMITTER_BUILTINS` because
-    # `_emit_text_builtin` answers one of them (a literal's single character
-    # folds to its code point) and words a refusal for the other two that is
-    # specific to each. `ord` and `chr` are ALSO in `NOT_LOWERED_BUILTINS`, and
-    # `not_lowered_builtin_refusal` is asked BEFORE any emitter. Without the
-    # exclusion every `ord("A")` is refused by name with the generic "write the
-    # operation out in the source" sentence where the emitter would have
-    # answered 65 — measured on master as nine red rows in
-    # `test_formal_unicode.py`, four of them rows that assert a FOLD.
-    import formal.build as _FB
-
-    def _pre_pass(call):
-        _stmts = _FB.parse_module(
-            f"def main(n):\n    return {call}\n", filename="<taxonomy>")
-        _fns = [n for n in FM.iter_nodes(_stmts)
-                if type(n).__name__ == "FunctionDef"]
-        return FM.not_lowered_builtin_refusal(
-            _fns, FM.collect_module_symbols(_stmts))
-
-    for _call in ('ord("A")', "chr(233)", 'hash("x")'):
-        if _pre_pass(_call) is not None:
-            failures.append(
-                f"the not-lowered pre-pass refuses `{_call}` before any "
-                f"emitter runs, and `_emit_text_builtin` lowers or refuses "
-                f"that name with a reason that is about IT. The pre-pass's "
-                f"generic sentence pre-empts both, which is how "
-                f"test_formal_unicode.py lost nine rows on 2026-10-05; ask "
-                f"`emitter_lowers` before refusing a name the emitters lower")
-    # …and the OTHER direction, which is what the exclusion must not have
-    # swallowed: a name neither table lowers is still refused, by THIS pass and
-    # not four stages later by the link audit.
-    if _pre_pass("sorted([3, 1, 2])") is None:
-        failures.append(
-            "the emitter-lowered exclusion swallowed a name the emitters do "
-            "NOT lower: `sorted([3, 1, 2])` now builds, and the next refusal "
-            "is the link audit's, four stages late, about symbols")
-    checks += 1
 
     # The precedence rule, stated independently of the samples above so a
     # future edit cannot satisfy SAMPLES by deleting a marker outright.

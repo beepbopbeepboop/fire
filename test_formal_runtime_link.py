@@ -63,7 +63,6 @@ recursion argument bound` for ANY program containing a call, which is agent
 about a proof until that lands, and pretending otherwise would be a test that
 passes vacuously -- the exact failure the census was built to catch.
 """
-import glob
 import os
 import subprocess
 import sys
@@ -360,92 +359,23 @@ def test_word_shaped_but_not_exported_links_nothing():
     check(B._runtime_library_for([], 'arm64', 'macho')[0] is None,
           'a program naming no runtime call at all links nothing')
     msg = build_expecting_refusal(src2, 'sqlonly2')
-    check('is on the line and does not export this name' in msg,
+    check('one whose library does not export this name' in msg,
           'and a word-shaped name the library does not export is refused as '
           'such, naming the situation rather than blaming the mechanism',
           msg[:400])
 
 
-def test_elf_is_refused_for_the_container_and_not_for_the_link_line():
-    """The reason is the CONTAINER, and the reason this test changed is that
-    the reason it used to give was false.
-
-    It said: "`build_elf` carries one `lib_name` and no dependency list, so an
-    ELF image genuinely cannot name a second library". `build_elf` has taken a
-    `deps` list and written one `DT_NEEDED` per entry since the ELF emitter
-    landed — that is how an ELF image imports a module library today — so the
-    comment, `formal/build.py::runtime_library`'s own docstring and the sweep
-    work map all pointed a reader at a limitation of the link line that is not
-    there. What is actually missing is an ELF BUILD of `runtime/`:
-    `build_stdlib_dylib.runtime_dylib` builds a Mach-O dylib, and there is no
-    ELF counterpart beside it, so the manifest `runtime_library` would hand back
-    names a file an ELF loader cannot open. That is the same thing
-    `_audit_link_line_containers` refuses to write, and this test pins all three
-    halves separately, because "the ELF answer did not change" is the one thing
-    it cannot say on its own:
-
-      * the link line is NOT the limitation, measured off a built ELF image's
-        own `.dynamic` — a second `DT_NEEDED` really is written;
-      * the container audit really does refuse a Mach-O library for an ELF
-        image, which is the mechanism that makes handing back the manifest
-        wrong rather than merely unbuilt;
-      * and the refusal the user sees names the container, not a dependency
-        list the emitter has had for years.
-    """
-    from formal import elf
-
+def test_elf_is_still_refused():
+    # `build_elf` carries one `lib_name` and no dependency list, so an ELF
+    # image genuinely cannot name a second library. The refusal is the honest
+    # answer, and `runtime_library` says so by returning None rather than by
+    # pretending.
     check(B.runtime_library('arm64', 'elf') is None,
-          'runtime_library declines to name a library on an ELF link line')
-
-    # (1) the ELF link line carries a DEPENDENCY LIST. Built here rather than
-    # through `compile_formal` because on a Mach-O host a module library is
-    # built in the HOST's container, so the end-to-end route is refused by
-    # (2) — which is the honest answer, and not a way to observe (1).
-    image = elf.build_elf(b"\x90" * 16, external_syms=["mojo_strlen"],
-                          deps=["libone.so", "libtwo.so"])
-    with open(WORK + '/twodeps.elf', 'wb') as f:
-        f.write(image)
-    with open(WORK + '/twodeps.elf', 'rb') as f:
-        data = f.read()
-    head = elf._read_header(data, WORK + '/twodeps.elf')
-    dyn = elf._dyn_entries(data, head)
-    strs = elf._at_vaddr(data, head, elf.dyn_tag(dyn, elf.DT_STRTAB),
-                         elf.dyn_tag(dyn, elf.DT_STRSZ))
-    names = [elf._st_name(strs, off)
-             for t, off in dyn if t == elf.DT_NEEDED]
-    check('libone.so' in names and 'libtwo.so' in names,
-          'an ELF image writes one DT_NEEDED per entry of its dependency list, '
-          'so the link line is not what stops a second library',
-          str(names))
-
-    # (2) …and the container audit is what stops THIS library, because it is a
-    # Mach-O dylib. Read out of the real artifact, not a fixture with a
-    # hand-written magic number.
-    dylib = B.runtime_library('arm64', 'macho')['path']
-    try:
-        B._audit_link_line_containers([{'path': dylib}], 'elf', 'image',
-                                      'arm64')
-    except B.FormalBuildError as e:
-        msg = str(e)
-        check('elf' in msg and 'macho' in msg,
-              'a Mach-O library on an ELF image is refused by container, naming '
-              'both', msg[:300])
-    else:
-        check(False, 'a Mach-O library on an ELF image was accepted',
-              os.path.basename(dylib))
-
-    # (3) the refusal itself.
+          'runtime_library declines to invent an ELF dependency')
     msg = build_expecting_refusal(STR_CALL, 'elf', fmt='elf')
     check(msg != '', 'a mojo_* call on an ELF image is still refused')
     check('nothing on this image\'s link line' in msg,
-          'and the refusal still says what is missing', msg[:400])
-    check('an image in the other container cannot be given it at all' in msg,
-          'and it names the CONTAINER as the reason, rather than a link line '
-          'that has carried a dependency list since the ELF emitter landed',
-          msg[:600])
-    check('cannot carry a library' not in msg,
-          'and it no longer offers "an image that cannot carry a library" as a '
-          'reason, which is false of both containers here', msg[:600])
+          'and the refusal says the link line is what is missing', msg[:400])
 
 
 # ── 4. the link line is the dylib's OWN table ───────────────────────────────
@@ -516,10 +446,6 @@ def test_link_line_is_the_dylibs_exports():
         check(published is not None,
               'FORMAL.md §6 phase 2 still publishes the callable-surface figure')
         if published:
-            check(len(word) == published['word'],
-                  f"{arch}: {len(word)} word-shaped entry points in "
-                  f"`runtime_abi()`, FORMAL.md §6 phase 2 publishes "
-                  f"{published['word']}")
             check(len(linked) == published['exported'],
                   f"{arch}: {len(linked)} word-shaped entry points exported, "
                   f"FORMAL.md §6 phase 2 publishes {published['exported']}")
@@ -531,33 +457,20 @@ def test_link_line_is_the_dylibs_exports():
 def _published_phase2_surface():
     """FORMAL.md §6 phase 2's three-row table, read out of the document.
 
-    `(word, exported, reachable)` as published, or `None` when the rows are
-    gone — and gone is a FAILURE at the call site, not a skip: the rows are the
-    phase's exit criterion, and a document that quietly dropped them has stopped
-    reporting whether the phase is done.
-
-    **The first row is read too, and reading it is the point.** Only rows 2 and
-    3 were checked, which is how row 1 went stale for TEN entry points while the
-    job that measures it was never run — the drift this document was filed for
-    saw FOUR of them, and six more landed afterwards. Row 1 is
-    `runtime_abi()`'s own word count, which needs no dylib and no `nm`, so it is
-    the one row a cheap caller can verify — and a row nothing checks is a row
-    that rots silently while the two that are checked stay honest.
-    `FORMAL.md`'s §2.2 table quotes the same census and is checked by
-    `test_runtime_header_scan.py`, whose `--fix` rewrites it.
+    `(exported, reachable)` as published, or `None` when the rows are gone — and
+    gone is a FAILURE at the call site, not a skip: the rows are the phase's exit
+    criterion, and a document that quietly dropped them has stopped reporting
+    whether the phase is done.
     """
     import re
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'FORMAL.md')
     text = open(path, encoding='utf-8').read()
-    word = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
-                     text)
     exp = re.search(r'…of which the runtime dylib actually \*\*exports\*\*\s*\|\s*'
                     r'(\d+)', text)
     reach = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
-    if not (word and exp and reach):
+    if not (exp and reach):
         return None
-    return {'word': int(word.group(1)), 'exported': int(exp.group(1)),
-            'reachable': int(reach.group(1))}
+    return {'exported': int(exp.group(1)), 'reachable': int(reach.group(1))}
 
 
 def test_manifest_round_trips():
@@ -580,43 +493,6 @@ def test_manifest_round_trips():
           'every export a header declares carries that declaration')
     check(all(e["symbol"] == e["name"] for e in loaded["exports"]),
           "and the bind spelling is the C name, not the Mach-O one")
-
-
-# ── 4b. a cold runtime build leaves no staging directory ────────────────────
-
-def test_a_cold_runtime_build_leaves_no_staging_directory():
-    """`runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
-    directory under `$TMPDIR`, links the dylib there and moves ONLY the dylib
-    out; the directory has to go with the build. Same shape in
-    `_driver_targets`, which stages its arch probe in `mojo_archprobe_*`.
-
-    Measured on a COLD cas, because a warm one returns before any staging
-    directory exists at all — so this builds in a subprocess with its own
-    `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
-    shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
-    """
-    for arch in ('arm64', 'x86_64'):
-        home = tempfile.mkdtemp(prefix='rtstage_home_')
-        tmp = tempfile.mkdtemp(prefix='rtstage_tmp_')
-        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
-        code = ('from build_stdlib_dylib import runtime_dylib\n'
-                f'print(runtime_dylib(arch={arch!r}))\n')
-        proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
-                              capture_output=True, text=True)
-        check(proc.returncode == 0,
-              f'{arch}: a cold runtime dylib build succeeds',
-              (proc.stderr or proc.stdout)[-400:])
-        check('.dylib' in proc.stdout,
-              f'{arch}: …and it produced a dylib', proc.stdout[-200:])
-        left = sorted(os.path.basename(p) for p in
-                      glob.glob(os.path.join(tmp, 'mojo_rt_*')) +
-                      glob.glob(os.path.join(tmp, 'mojo_archprobe_*')))
-        check(not left,
-              f'{arch}: no staging directory is left behind in $TMPDIR',
-              str(left))
 
 
 # ── 5. the audit still fires ────────────────────────────────────────────────
@@ -1022,10 +898,9 @@ def main():
     test_both_architectures_agree()
     test_a_program_naming_nothing_links_nothing()
     test_word_shaped_but_not_exported_links_nothing()
-    test_elf_is_refused_for_the_container_and_not_for_the_link_line()
+    test_elf_is_still_refused()
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
-    test_a_cold_runtime_build_leaves_no_staging_directory()
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()

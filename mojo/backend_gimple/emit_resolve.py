@@ -661,17 +661,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._compiling_file_paths = gen._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)
                 temp_gen._asdict_dispatch_needed = gen._asdict_dispatch_needed  # share: __dict__/vars() usage flag (see its own declaration)
                 temp_gen._emitted_structs = gen._emitted_structs
-                # share: the structs a container store asked an element-repr
-                # shim for. This module's body is spliced into the ROOT's
-                # translation unit and it is the ROOT's preamble that emits the
-                # shim, so a request recorded on a private set was never seen
-                # by that preamble and `print(imported.make())` over a list of
-                # structs fell back to the generated field dump instead of the
-                # struct's `__repr__`. `_elem_repr_hosted` says the shim will
-                # exist (see `struct_elem_repr_shim`), inherited down a chain.
-                temp_gen._elem_repr_needed = gen._elem_repr_needed
-                temp_gen._elem_repr_hosted = (gen.emit_struct_defs
-                                              or gen._elem_repr_hosted)
                 temp_gen._struct_allocs_needed = gen._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                 temp_gen._str_pool = gen._str_pool
                 temp_gen._str_pool_declared = gen._str_pool_declared  # share: one forward declaration per _slit_N in the TU, not one per module (see its own declaration)
@@ -2359,24 +2348,10 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._new_val('int', f'(int){rav}'))])
-    # A BOXED CONTAINER — a module-global list/dict/set read back as an
-    # `int64_t`, or a call result whose static type is the box but whose real
-    # value, per `_get_actual_type`, is a container. `_stringify_value` (the
-    # `str()` / `%s` / f-string route) already does exactly this re-typing,
-    # and its absence here is why `repr(x)` and `'%r' % x` printed the box's
-    # decimal address while `str(x)`, `print(x)` and `'%s' % x` were right.
-    # The container arms below are the same ones `_stringify_value` uses.
-    if rat in ('int', 'int64_t', 'void *'):
-        _real = gen._get_actual_type(rat, rav)
-        if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
-            rat = _real
-            rav = gen._new_val(_real, f'({_real}){rav}')
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
         return gen._call_expr('char *', *gen._list_repr_call(rav))
-    if rat == 'MojoSet *':
-        return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
     if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
     if rat == 'MojoBytes *':
@@ -3688,7 +3663,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # dispatch (float, `None`, bool, struct), `_kw`-twin key handling and
         # callable-return note are the shared ones rather than this site's
         # third copy of each.
-        gex._emit_dict_pair_store(gen, res, node.element, node.value)
+        gex._emit_dict_pair_store(gen, res, node.element, node.key)
 
 
 
