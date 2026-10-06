@@ -1,7 +1,16 @@
 # FORMAL_a_variadic_parameter_read_has_no_abi: the row was unowned, and the refusal in it is CORRECT
 
-**Status: NOT FIXED, and correctly so at the width it is written at.** The
-refusal is right and the ABI decision is still unmade — but the CORPUS half is
+**Status: NOT FIXED, and correctly so at the width it is written at. Step 1 of
+§5 — the ABI decision, which this doc says must be written down before any
+emitter moves — is DONE (2026-10-05, `work/formal59-docs`): a `*rest` parameter
+becomes a FIXED-ARY SPECIALIZATION per call site, carried across the dylib
+boundary by the demand mechanism `doc/ABI.md`'s `Generics` section already uses
+for a type argument, so it needs no calling-convention change, no
+`lib/ProofLib.lean` change and therefore no ABI break. The decision and its five
+load-bearing properties are in `doc/ABI.md` under *Functions and methods*. The
+implementation is step 2 and is untouched.**
+
+The refusal is right and the ABI decision WAS unmade — but the CORPUS half is
 now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
 DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
 sweep measures it instead of being unable to produce the construct at all. That
@@ -92,8 +101,19 @@ receiver's frame or a folded constant — none of which is "a count of words".
 
 ## What a fix is, in order
 
-1. **Decide the variadic ABI, in writing, in `doc/ABI.md`, before any emitter moves.** The three
-   shapes that fit a one-word value model, and what each costs:
+1. ~~**Decide the variadic ABI, in writing, in `doc/ABI.md`, before any emitter moves.**~~
+   **DONE 2026-10-05 (`work/formal59-docs`): the per-instantiation fixed arity,
+   written into `doc/ABI.md`'s *Functions and methods* section** — the second
+   shape below, chosen because `Generics` already carries a specialization key
+   across the dylib boundary in `build_module_dylib`'s `demands`, already keys
+   the artifact's identity on it, and already forbids exporting a
+   specialization under its base name. So an arity is one more key on
+   machinery that exists, and the specialization is an ordinary function to
+   both emitters, the frame analysis and the value-flow model — no
+   `lib/ProofLib.lean` change and no ABI break. Its five load-bearing
+   properties are in `doc/ABI.md`; the one this doc's step 2 has to carry is
+   that the BODY is rewritten, not just re-declared. The three shapes, and what
+   each costs:
    * **a packed heap block the callee owns** — the callee needs a pointer to a count and a base,
      which is two words and a free/entry discipline at every `return`, and `lib/ProofLib.lean`
      would need the block's layout in the value model (`sdiv64`'s comment about the source model
