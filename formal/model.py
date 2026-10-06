@@ -26992,7 +26992,7 @@ def _is_statement_node(node) -> bool:
         and type(node).__name__.endswith("Stmt")
 
 
-def iter_statement_nodes(node):
+def iter_statement_nodes(node, *, enter_nested_defs=True):
     """Every STATEMENT in a statement tree, and nothing else.
 
     The descent is through LIST- and TUPLE-valued fields, through statement
@@ -27006,6 +27006,17 @@ def iter_statement_nodes(node):
     of the expressions, and the two walks agree by construction rather than by
     luck.
 
+    **`enter_nested_defs=False` stops at a nested `def`, which is a FRAME
+    boundary and not a shape.** `formal/build.py::_flatten_closures` turns a
+    nested `def` into a lifted function of its own, so its body is a separate
+    function's body with its own parameters, its own stores and its own
+    `nonlocal` declarations — and a question asked of the ENCLOSING function
+    about "does this body store `x`" gets the nested function's stores as its
+    own. `nonlocal_write_refusal` is the caller that needs the boundary, and the
+    flag is here rather than a second walker because the descent rules above are
+    the whole of what makes this walk correct over 712 corpus files, and a copy
+    would be a second thing to keep true of them.
+
     **The precondition is a corpus result and the differential is what keeps it
     one.** Over the 712 `.py`/`.mojo` files of this repository and the stdlib:
     every sub-statement is reached through a list field of a statement or of a
@@ -27015,7 +27026,7 @@ def iter_statement_nodes(node):
     one thing that needs the tuple above edited, and the differential says so
     rather than a field quietly disappearing from a struct.
 
-    This is the third caller's complaint about `struct_receiver_stores`, at 2.05 s
+    **This is the third caller's complaint about `struct_receiver_stores`, at 2.05 s
     of the 3.4 s left in a `myinterpreter.py` build: that derivation visits
     6 160 632 nodes to find the few thousand assignments it exists for, and it is
     asked once per (struct, question), so the walk multiplies by every struct in
@@ -27023,7 +27034,7 @@ def iter_statement_nodes(node):
     """
     if isinstance(node, (list, tuple)):
         for x in node:
-            yield from iter_statement_nodes(x)
+            yield from iter_statement_nodes(x, enter_nested_defs=enter_nested_defs)
         return
     names = _node_subtree_fields(node) if hasattr(node, "__dataclass_fields__") \
         else None
@@ -27031,12 +27042,28 @@ def iter_statement_nodes(node):
         return
     if _is_statement_node(node):
         yield node
+        if not enter_nested_defs and _is_function_def(node):
+            return
     elif not isinstance(node, _STATEMENT_CONTAINERS):
         return
     for name in names:
         value = getattr(node, name, None)
         if isinstance(value, (list, tuple)):
-            yield from iter_statement_nodes(value)
+            yield from iter_statement_nodes(value,
+                                            enter_nested_defs=enter_nested_defs)
+
+
+def _is_function_def(node) -> bool:
+    """Whether `node` is a nested `def` — the one FRAME boundary in a body.
+
+    A name rather than `isinstance(node, F.FunctionDef)` because the statement
+    walk is reached from tables that hold nodes by class NAME (this file's own
+    `type(node).__name__ != "NonlocalStmt"` arms do the same, for the same
+    reason: the AST classes are re-created by every importer, so an
+    `isinstance` against one module's copy is an identity test that a re-parsed
+    module fails).
+    """
+    return type(node).__name__ == "FunctionDef"
 
 
 def struct_receiver_stores(struct_def, receivers) -> set:
@@ -41572,21 +41599,74 @@ def nonlocal_write_refusal(functions) -> str:
     the function that declares them, not by whether the enclosing frame has an
     assignment: `nonlocal c` followed by `c = c + 1` inside the nested function
     is the case, and a `nonlocal` with no assignment to any of its names is the
-    read-only spelling that must keep building. `model.read_before_store`'s
-    `_names_bound_in` is the walk that answers the question for a body, and it
-    is asked per function here so the declaration and the assignment have to be
-    in the SAME frame to count.
+    read-only spelling that must keep building.
+
+    **The reader is `callee_is_a_bound_value`, and it was `_names_bound_in` until
+    2026-10-05 — which does not exist in this file and never did.**
+    `_names_bound_in` is `formal/build.py`'s, and a `nonlocal` that WRITES
+    reached this line and raised `NameError: name '_names_bound_in' is not
+    defined`, so the whole refusal was unreachable and the construct left the
+    build as a Python traceback through `fire.py` rather than as a diagnostic.
+    Measured on both architectures:
+
+        def main(n: Int) -> Int:
+            def bump():
+                nonlocal x
+                x = x + 1
+                return x
+            var x = 0
+            bump()
+            print(x)
+            return 0
+
+        build: name '_names_bound_in' is not defined
+        Traceback (most recent call last):
+          File "fire.py", line 413, in _formal_executable
+          …
+          File "formal/model.py", line 41587, in nonlocal_write_refusal
+            stored = _names_bound_in(fn) | {
+        NameError: name '_names_bound_in' is not defined
+
+    `callee_is_a_bound_value` is the reader THIS FILE already has for "is this
+    name a local of this frame", and its own docstring is the argument for
+    using it rather than adding a walk: "asking a second walk 'does this body
+    bind this name' would be a second answer to a question `_collect_var_names`
+    has already answered for the register file, and the two would disagree on
+    exactly the shapes that disagree". What is asked here is the narrower
+    question the sentence above is about — is the name STORED — and it is
+    `assignment_target_names` over `iter_statement_nodes(..., enter_nested_defs=
+    False)`, which is the reader `formal/model.py` already has for one
+    assignment's targets and the walk that reaches them. **The frame boundary is
+    what makes the read-only case answerable at all**, and it is why the two
+    programs below come out differently:
+
+        def main():                    def main():
+            var c = 5                      var x = 0
+            def read():                   def bump():
+                nonlocal c                     nonlocal x
+                return c                        x = x + 1
+            print(read())                     return x
+            return 0                     bump(); print(x)
+                                        return 0
+
+    The first has no store of `c` in the frame that declares the `nonlocal` and
+    must keep building (CPython prints 5); the second has one and is refused.
+    A reader that asked the ENCLOSING function — which is what `iter_nodes` does,
+    because it descends into a nested `def`'s body — cannot tell them apart: both
+    names are locals of `main`.
     """
     for fn in (functions or []):
-        for node in iter_nodes(getattr(fn, "body", None)):
+        frame = list(iter_statement_nodes(getattr(fn, "body", None) or [],
+                                         enter_nested_defs=False))
+        if not any(type(node).__name__ == "NonlocalStmt" for node in frame):
+            continue
+        stored = {name for node in frame for name in assignment_target_names(node)}
+        for node in frame:
             if type(node).__name__ != "NonlocalStmt":
                 continue
             names = list(getattr(node, "names", None) or ())
             if not names:
                 continue
-            stored = _names_bound_in(fn) | {
-                p[0] if isinstance(p, (tuple, list)) and p else p
-                for p in (getattr(fn, "params", None) or ())}
             written = [n for n in names if n in stored]
             if not written:
                 continue
