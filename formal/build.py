@@ -18755,6 +18755,29 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
     failed (`capture_survives_a_failed_guard`). Binding inside the arm's body
     instead would leave that read unstored, and the read-before-store check
     would refuse a correct program.
+
+    **The compare is `SUBJECT == PATTERN`, where the reference writes
+    `pattern == subject`.** `==` cannot answer differently either way on this
+    path — it is a word compare or a `strcmp` (`_emit_branch_unless`'s
+    `_emit_strcmp_flags` arm), with no `__eq__` dispatch to make it asymmetric —
+    and the two orders are NOT the same to the arm64 proof generator, which is
+    the whole reason for the choice. Measured on this tree through
+    `formal/lean.py::check_proof_cached`:
+
+        def main() -> Int:          arm64 proof
+            n = 3
+            if n == 0: ...          ok
+            if 0 == n: ...          FAILS (Application type mismatch on the
+                                   B.cond block's hcond obligation)
+
+    and a `match` with one literal case lowered to the second order fails the
+    same way while the identical program written as `if` passes. Putting the
+    subject on the left makes `match n: case 0:` emit the compare an `if` would,
+    so a `match` is provable wherever its `if` spelling is — which is the whole
+    claim this lowering makes, and it would be false of the Lean model for every
+    two-case `match` otherwise. The operand-order sensitivity itself is a
+    pre-existing gap in that generator and is filed as
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md`.
     """
     patterns = list(getattr(case, "patterns", None) or [])
     guard = getattr(case, "guard", None)
@@ -18777,7 +18800,7 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
             bound.add(pattern.name)
             break
         tests.append(F.BinaryOp(
-            op="==", left=pattern, right=subject_ref,
+            op="==", left=subject_ref, right=pattern,
             line=getattr(pattern, "line", 0), col=getattr(pattern, "col", 0)))
     taken = _lower_case_arm(case, binds, subject_ref, body, guard, rest)
     if not tests:

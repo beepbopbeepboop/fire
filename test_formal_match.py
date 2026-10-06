@@ -830,6 +830,84 @@ KNOWN_DEFECT_ROWS = [
 ]
 
 
+# ── the Lean model: is a `match` as PROVABLE as the `if` it lowers to? ─────────
+#
+# The claim this lowering makes is that a `match` becomes ordinary compares and
+# branches, so the existing conditional proof covers it and nothing new is needed
+# in either proof generator. That is a claim about the MODEL, and it is only
+# worth making if it is measured, so each pair below is the SAME program written
+# twice: once with `match`, once with the `if` chain it lowers to.
+#
+# Two verdicts, and the cheap one is the one that runs always:
+#
+#   * GENERATION — `formal.build.compile_formal(..., prove=True, check=False)`
+#     writes the `.lean` without running Lean (0.0-0.1 s per program, measured).
+#     The pair must agree on whether a proof was produced AT ALL, and a produced
+#     proof must be non-trivial. This is the "a generator that cannot produce
+#     text is worth catching" half, and it is what runs in the gate-shaped loop.
+#   * ELABORATION — `formal/lean.py::check_proof_cached` when Lean and
+#     `lib/ProofLib.olean` are both present. The pair must reach the SAME
+#     verdict, ok or not. This is the half that is expensive: 2 s (x86-64) to
+#     48 s (arm64) per program on this tree, and the arm64 numbers are why this
+#     section checks ONE pair by default (`--all-proofs` for both).
+#
+# **The two-case pair is the one that carries the operand-order claim.**
+# `formal/build.py::_lower_one_case` emits `SUBJECT == PATTERN` rather than the
+# reference's `pattern == subject`, and that is not cosmetic: measured through
+# `check_proof_cached`, `if n == 0:` elaborates on arm64 and `if 0 == n:` does
+# not (`Application type mismatch` on the `B.cond` block's `hcond` obligation —
+# `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
+# elaborate.md`). A `match` whose compare had the literal on the left would
+# therefore be unprovable while the `if` it lowers to is provable, and this pair
+# is what catches a swap.
+#
+# **The three-case pair fails on arm64 and so does its `if`.** That is stated
+# here rather than left to be discovered: it is a pre-existing gap in arm64's
+# generator for a three-block conditional chain (both spellings — the `elif`
+# chain and the nested `else: if` — were measured), it is in the family
+# `bugs/FORMAL_arm64_known_proof_gaps.md` censuses, and the property this
+# section asserts is PARITY with the `if`, not that every `match` elaborates.
+PROOF_PAIRS = [
+    ("two_cases",
+     "def main() -> Int:\n"
+     "    n = 3\n"
+     "    match n:\n"
+     "        case 0:\n"
+     "            return 10\n"
+     "        case _:\n"
+     "            return 20\n",
+     "def main() -> Int:\n"
+     "    n = 3\n"
+     "    if n == 0:\n"
+     "        return 10\n"
+     "    else:\n"
+     "        return 20\n"),
+    ("three_cases",
+     "def main() -> Int:\n"
+     "    n = 3\n"
+     "    match n:\n"
+     "        case 0:\n"
+     "            return 10\n"
+     "        case 1:\n"
+     "            return 20\n"
+     "        case _:\n"
+     "            return 30\n",
+     "def main() -> Int:\n"
+     "    n = 3\n"
+     "    if n == 0:\n"
+     "        return 10\n"
+     "    elif n == 1:\n"
+     "        return 20\n"
+     "    else:\n"
+     "        return 30\n"),
+]
+
+#: Pairs whose ELABORATION is checked when Lean is available. The two-case one
+#: is the operand-order claim; the three-case one is here for the parity check
+#: and costs 48 s on arm64, so it is opt-in.
+PROOF_CHECKED = ("two_cases",)
+
+
 # ── the runner ───────────────────────────────────────────────────────────────
 
 RESULTS = []
@@ -934,6 +1012,77 @@ def judge(name, backend, res, want, tmpdir, source):
                  % (res[1], res[2], out, rc))
 
 
+def generate_proof(tmpdir, name, source, arch):
+    """`(proof_path, None)` or `(None, why)` — generation only, no Lean.
+
+    `check=False` is what keeps this cheap: `formal/build.py` writes the `.lean`
+    and returns its path without elaborating it (measured 0.0-0.1 s per program
+    for both architectures). A generator that RAISES here is the failure worth
+    catching without a 27 MB library build, which is why this half runs even
+    where Lean does not.
+    """
+    import formal.build as fb
+    src = os.path.join(tmpdir, "%s_%s_gen.mojo" % (name, arch))
+    out = os.path.join(tmpdir, "%s_%s_gen.bin" % (name, arch))
+    with open(src, "w") as f:
+        f.write(source)
+    try:
+        r = fb.compile_formal(src, arch=arch, output=out, prove=True,
+                              check=False)
+        return r["proof_path"], None
+    except Exception as e:                       # noqa: BLE001 — reported
+        return None, "%s: %s" % (type(e).__name__, str(e)[:200])
+
+
+def _lean_ready():
+    """`(ready, why)` — Lean and a built `ProofLib.olean`, or why not."""
+    from formal.lean import find_lean
+    if not find_lean(HERE):
+        return False, "lean is not on PATH"
+    olean = os.path.join(HERE, "lib", "ProofLib.olean")
+    if not os.path.isfile(olean):
+        return False, "lib/ProofLib.olean is not built"
+    return True, ""
+
+
+def check_proofs(tmpdir, pairs, with_lean):
+    """Generation parity always; elaboration parity when Lean is available."""
+    for name, match_src, if_src in pairs:
+        for arch in BACKENDS:
+            got = {}
+            for spelling, text in (("match", match_src), ("if", if_src)):
+                path, why = generate_proof(tmpdir, "%s_%s" % (name, spelling),
+                                           text, arch)
+                got[spelling] = (path, why)
+            m_path, m_why = got["match"]
+            i_path, i_why = got["if"]
+            tag = "[%s] proof %s" % (arch, name)
+            if (m_path is None) != (i_path is None):
+                check(False, tag + " generates for both spellings",
+                      "match: %s / if: %s" % (m_why or "ok", i_why or "ok"))
+                continue
+            if m_path is None:
+                check(True, tag + " refuses to generate for both spellings "
+                                "(a shared pre-existing gap)")
+                continue
+            m_size, i_size = os.path.getsize(m_path), os.path.getsize(i_path)
+            check(m_size > 1000,
+                  tag + " generates a non-trivial model for the match "
+                        "(%d bytes, the if spelling is %d)" % (m_size, i_size))
+            if not with_lean or name not in PROOF_CHECKED:
+                continue
+            from formal.lean import check_proof_cached
+            verdicts = {}
+            for spelling, path in (("match", m_path), ("if", i_path)):
+                ok, _detail, _cached, _n = check_proof_cached(
+                    path, repo_root=HERE)
+                verdicts[spelling] = bool(ok)
+            check(verdicts["match"] == verdicts["if"],
+                  tag + " is as provable as the if it lowers to",
+                  "match elaborates=%s, if elaborates=%s"
+                  % (verdicts["match"], verdicts["if"]))
+
+
 def row_source(row):
     """The text of one row: `prog`-wrapped, or the module's own top level."""
     body = row[1]
@@ -946,6 +1095,10 @@ def main():
     ap.add_argument("-k", dest="substring", default=None)
     ap.add_argument("--only-row", type=int, default=None)
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--no-lean", action="store_true",
+                    help="skip the Lean elaboration check (generation only)")
+    ap.add_argument("--all-proofs", action="store_true",
+                    help="elaborate every pair, not just PROOF_CHECKED")
     args = ap.parse_args()
 
     if args.list:
@@ -963,6 +1116,18 @@ def main():
     if not args.substring and args.only_row is None:
         rows += [(1000 + i, r) for i, r in enumerate(KNOWN_DEFECT_ROWS)]
 
+    ready, why_not = (False, "--no-lean") if args.no_lean \
+        else _lean_ready()
+    if args.no_lean:
+        print("lean elaboration: SKIPPED (%s)" % why_not)
+    elif not ready:
+        print("lean elaboration: SKIPPED (%s) — the GENERATION half still "
+              "runs, and a generator that raises is worth catching without "
+              "Lean" % why_not)
+    elif args.all_proofs:
+        print("lean elaboration: every pair (48 s per arm64 program on this "
+              "tree)")
+
     with tempfile.TemporaryDirectory(prefix="formal-match-") as tmp:
         for i, row in rows:
             if i >= 1000:
@@ -975,6 +1140,7 @@ def main():
                       _want(want, backend), tmp, source)
             if args.verbose:
                 print("ran %s" % name, flush=True)
+        check_proofs(tmp, PROOF_PAIRS, ready and not args.no_lean)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
     print("%d/%d verdicts passed over %d rows (%d of them pinning a known "
