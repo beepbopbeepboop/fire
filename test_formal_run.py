@@ -6171,6 +6171,25 @@ ASSIGNED_TYPE_CASES = [
 # noticed for the whole life of the divergence.  (Its doc is deleted with the
 # fix; this comment is the record.)
 BOTH_ARCH_CASES = [
+    # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
+    # through `model.string_parameters_by_call_site` -- the call site's argument
+    # kind, propagated into the callee and unanimous over every site of the name.
+    # In this group rather than beside the truthiness rows it is in because the
+    # kind table is ONE `formal/model.py` reader both emitters consult, so the
+    # two machines cannot disagree about it, and the row is about that reader
+    # rather than about an arm64 instruction: `bugs/FORMAL_sweep_singles_second_half.md`
+    # §4 recorded the same reproducer refused as "len(s) is len() of a value
+    # classified as 'int', and an integer has no length", and said the row was
+    # open. It is not, and this is the row that says so on BOTH machines.
+    ("len_of_an_unannotated_parameter_from_a_string_literal",
+     "def count(s):\n"
+     "    var n = 0\n"
+     "    while n < len(s):\n"
+     "        n = n + 1\n"
+     "    return n\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d\", count(\"a\"), count(\"abcd\"), count(\"\"))\n"
+     "    return 0\n", 0, "1 4 0"),
     # …and the eq-dispatch case that is in this group for the reason the group's
     # docstring gives, read for this construct: the two backends' HOLDER
     # analysis is one shared table (`formal/build.py`'s `_frame_receivers`), so
@@ -13448,6 +13467,18 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", f(s=\"\"), f(s=\"x\"))\n"
      "    return 0\n", 0, "0 1"),
+
+    # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
+    # not answer. `bugs/FORMAL_sweep_singles_second_half.md` §4 recorded a
+    # four-line reproducer refused as "len(s) is len() of a value classified as
+    # 'int', and an integer has no length", and said the row was still open; it
+    # is not — the parameter's kind reaches `len()` through the same
+    # `model.string_parameters_by_call_site` hook the truthiness rows above pin,
+    # so the reproducer answers CPython on both architectures.
+    #
+    # **This is a CPython PAIR and not an expectation**, because the row's whole
+    # content is that the answer is a LENGTH rather than a refusal, and an
+    # expected string would only say so twice.
 
     # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`
     # was TRUE before this — a fabricated truthiness in the same family, found

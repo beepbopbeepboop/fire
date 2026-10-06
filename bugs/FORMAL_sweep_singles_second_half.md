@@ -119,15 +119,17 @@ struct) and `atom` is none of them. Same conclusion, same three options, in
 `regex_compile.py` would be a workaround for a value-model gap; the gap is the
 work.**
 
-## 4. `len()` of a value classified as an int — `unescape_c.py` — a value-model question, and the file is behind another refusal
+## 4. `len()` of a value classified as an int — `unescape_c.py` — FIXED, and the
+## map's guess about it was refuted by a measurement
 
 `unescape_c.py` does not reach this row on this tree: it stops earlier at
 
     build: __module_body__: sys.stdin reads 'stdin' out of the imported module
     `sys`, and a module is not a value this path can place …
 
-which is `FORMAL_module_state_no_storage`'s row (`formal8-7-r2`). The `len(s)`
-refusal is still there behind it, and a four-line reproducer reaches it:
+which is `FORMAL_module_state_no_storage`'s row (`formal8-7-r2`). **The `len(s)`
+refusal this section used to carry behind it is GONE**, and the reproducer the
+section itself quotes is the row that says so:
 
 ```python
 def unescape(s):
@@ -137,19 +139,62 @@ def unescape(s):
     return n
 ```
 
-    build: len(s) is len() of a value classified as 'int', and an integer has no
-    length: there is no count to read at offset 0, and the word there is the
-    integer itself. …
+    build: len(s) is len() of a value classified as 'int', and an integer has
+    no length: …                     # what this section recorded
 
-identical on x86-64. **The map's guess about this row is refuted by
-measurement**: `…_repo-c.md` §4.1 says "this one is a case where `s` *has* an
-annotation the analysis is not reading, or where the value flows from a call the
-analysis cannot follow" — `def unescape_c(s)` has NO annotation, so the first
-half is false and there is no annotation to read. What is left is a real
-inference: the only evidence that `s` holds text is its USES (`s[i] == '\\'`,
-`result.append(s[i])`), and deriving a parameter's kind from its uses is type
-inference, not a missing hook. **A note in `repo-c.md` §4.1 would save the next
-reader the probe.**
+    Built: … [arm64/macho]           # what it says now, on BOTH architectures
+    Built: … [x86_64/macho]
+
+The cause is `model.string_parameters_by_call_site`, the same reader
+`ValueKinds`' `param_kind` hook uses: an unannotated parameter takes the kind of
+its call site's argument, agreed over every site of the name in the image, so
+`unescape("abc")` classifies `s` as a string and `len(s)` is a `strlen`. It is
+the mechanism `bugs/FORMAL_string_value_model.md` records as landing on
+2026-10-03 for the truthiness case, and this section is where the `len()` reader
+was never re-measured after it.
+
+**Pinned by `test_formal_run.py::BOTH_ARCH_CASES::len_of_an_unannotated_parameter_from_a_string_literal`**,
+which builds and runs `count("a")`, `count("abcd")` and `count("")` on **both**
+architectures and requires `1 4 0`. It is in that group rather than beside the
+truthiness rows because the kind table is one `formal/model.py` reader both
+emitters consult — the two machines cannot disagree about it — so the row is
+about the reader and not about an instruction.
+
+**And the map's guess about this row stays refuted, which is the half of this
+section still worth carrying.** `…_repo-c.md` §4.1 says "this one is a case
+where `s` *has* an annotation the analysis is not reading, or where the value
+flows from a call the analysis cannot follow" — `def unescape(s)` has NO
+annotation, so the first half is false, and there is no annotation to read.
+What was left was a real inference: the only evidence that `s` holds text was
+its USES (`s[i] == '\\'`, `result.append(s[i])`). **That inference is now made,
+and from the CALL SITE rather than from the uses** — the better of the two
+answers, and the one this path can reach without type inference.
+
+**One shape beside it is still refused, and it is the same reader one level
+deeper** — named so that a reader does not take this section as "the parameter
+kind is settled":
+
+```python
+def helper(t):
+    return len(t)
+
+def outer(s):
+    return helper(s)
+
+def main(n):
+    return outer("qq")     # len(t) is refused, identically on both machines
+```
+
+`string_parameters_by_call_site` reads the argument's own SHAPE, and a bare name
+says nothing, so `helper`'s `t` claims no kind. Annotating `outer`'s `s` does
+not help; annotating `helper`'s `t` does. **That is the reader's documented
+limitation and not a gap in it** — `formal/model.py` lists it ("the CALLER's
+`ValueKinds`, so `f(some_local)` where `some_local` holds a string is still
+unclassified … reading it would mean building a ValueKinds per caller from
+inside the callee's, which is the recursion `func_kind` already guards with a
+depth limit"), for the reason it gives: a kind that depends on which function
+the emitter reached first decides whether `printf("%s", s)` formats a pointer
+or bytes. Transitive propagation would be a real fix; it is not taken here.
 
 ## 5. a method call on a value receiver — `std/format/repr.mojo`, `std/utils/_serialize.mojo` — needs a repr model, as the map says
 
