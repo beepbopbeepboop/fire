@@ -251,6 +251,47 @@ EXPECTED_FAILURES = {
             "materialised by adrp/add, so the read is at a literal rather than "
             "at sp - K and the slot peel cannot match it",
 
+    # `(n // 7) + (n % 7)` and `(n / 7) + (n % 7)`: the floor- and
+    # truncating-division examples.  **Neither is a division fact, and NEITHER
+    # REACHES LEAN.**  Measured 2026-10-05 through
+    # `formal/build.py::compile_formal(prove=True, check=False)`, which is what
+    # writes the proof and is the only thing this file needs to know: the
+    # arm64 generator raises `NotImplementedError` from inside
+    # `generate_arm64_proof`, so no `<stem>_proof.lean` is written and there is
+    # no residual goal to read.  `wide_recv` above is the precedent for a
+    # GENERATION-time refusal being an entry here rather than a FAIL; what was
+    # missing here was the REASON, which is why the pair read as two
+    # unexplained reds -- a whole-corpus run is the only thing that reaches an
+    # example the table does not name, and there was no document for either.
+    #
+    # The cause is the universal theorem's CALL WALK and nothing about division:
+    #
+    #   universal theorem: 2 calls this walk cannot follow
+    #     (0x10000046c -> 0x100000508 (opaque),
+    #      0x1000004d8 -> 0x100000508 (opaque)),
+    #     and ONE halt address cannot discharge them.
+    #
+    # `//` and `%` each lower to a call to the SAME divide-and-correct helper,
+    # so one callee is reached from two call sites, and the framework's single
+    # halt address cannot state what happens after each -- which is exactly
+    # item 2 of `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_
+    # into_the_same_image.md`'s next step, the largest single family in that
+    # census.  The image itself is fine: `--no-prove` builds and both spellings
+    # run, so nothing here is a codegen or a value-model fact.
+    "floordiv": "the arm64 proof GENERATOR refuses before a proof exists: the "
+                "universal theorem's call walk cannot follow two call sites of "
+                "one callee, because `//` and `%` each lower to a call to the "
+                "same helper and ONE halt address cannot discharge them, so no "
+                "proof file is written and there is no Lean residual. See "
+                "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
+                "into_the_same_image.md",
+    "udivmod": "the same GENERATION-time refusal as `floordiv`, for `/` and "
+               "`%`: two call sites of one callee and ONE halt address. The "
+               "image builds and runs with --no-prove, so this is not a "
+               "division fact. See "
+               "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
+               "into_the_same_image.md",
+
 }
 
 

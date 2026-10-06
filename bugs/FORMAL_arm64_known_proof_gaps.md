@@ -24,7 +24,7 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
 | `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
 | `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
-| `floordiv`, `udivmod` | not mentioned at all | **FAIL** — reproduced identically on `master`'s `formal/arm64_proof_gen.py` (measured one at a time), so pre-existing and not this file's | `bugs/FORMAL_floordiv_and_udivmod_are_red.md` |
+| `floordiv`, `udivmod` | not mentioned at all | **KNOWN-GAP** (declared 2026-10-05) — were **FAIL**, and what they were failing at is **not a Lean residual goal**: `formal/arm64_proof_gen.py` raises out of `generate_arm64_proof`, so no `_proof.lean` is written at all. The cause is the universal theorem's call walk refusing two call sites of ONE callee (`//` and `%` each lower to a call to the same divide-and-correct helper) with a single halt address | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`; declared in `test_formal.py::EXPECTED_FAILURES`, and `test_formal_call_proof_gen.py::TestTheDivisionExamplesHaveNoProofToCheck` pins that no proof file exists and that both images still build and run |
 
 **The three corrections, so a reader does not have to diff the table:**
 
@@ -56,11 +56,17 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    precisely because "the obligation became admissible" is the failure mode a
    bound can hide).  The document that owned them is deleted with the fix.
 
-   **Two more examples were missing here too and are now recorded rather than
-   found later**: `floordiv` and `udivmod` are red, were red on `master` before
-   anything of mine, and are not in `EXPECTED_FAILURES` — so they are FAILURES
-   by this file's own argument, and
-   `bugs/FORMAL_floordiv_and_udivmod_are_red.md` is where they are worked from.
+   **Two more examples were missing here too, and are now RESOLVED rather than
+   recorded**: `floordiv` and `udivmod` were red on `master` and were not in
+   `EXPECTED_FAILURES`, so they were FAILURES by this file's own argument with
+   no document anywhere saying why. Measured 2026-10-05 through
+   `compile_formal(prove=True, check=False)`: they are refused at PROOF
+   GENERATION — the arm64 generator raises before writing a proof file, so the
+   "residual goal" a reader would go looking for does not exist — and the cause
+   is the universal theorem's call walk with two call sites of one callee. Both
+   are declared in `test_formal.py::EXPECTED_FAILURES` with that reason, pinned
+   in `test_formal_call_proof_gen.py`, and the document that was tracking them is
+   deleted with the answer.
 
 **What is still true of everything below, and is why the rest of the file is
 kept as it is:** the four declared gaps are each owned by another document or by

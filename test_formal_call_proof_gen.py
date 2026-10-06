@@ -4730,6 +4730,112 @@ class TestANarrowTypedParameterGetsItsRange(unittest.TestCase):
                 shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
+    """`floordiv` and `udivmod` are refused at GENERATION time, and the reason
+    is the call walk rather than anything about division.
+
+    These two were the only red `formal/examples` stems that
+    `test_formal.py::EXPECTED_FAILURES` did not name, so a whole-corpus run
+    reported them as FAILURES with no document anywhere saying why — and the
+    natural next reading, "the floor correction has no proving case", is wrong:
+    measured through `compile_formal(prove=True, check=False)` the generator
+    RAISES, so no `<stem>_proof.lean` is ever written and there is no Lean
+    residual goal to read at all.
+
+    The refusal is the universal theorem's call walk refusing to follow TWO call
+    sites of ONE callee — `//` and `%` each lower to a call to the same
+    divide-and-correct helper — with a single halt address. That is item 2 of
+    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`,
+    and it is why `test_formal.py`'s entry for these two says so.
+
+    Pinned in both directions because both failure modes are real and neither is
+    the interesting one: a generator that STOPPED raising would leave a proof
+    file whose residual goal nobody has read (the state this class was written
+    against), and a generator that raised for a DIFFERENT reason would leave the
+    marker in `test_formal.py` describing a defect that is gone.
+    """
+
+    STEMS = ("floordiv", "udivmod")
+
+    def test_both_are_refused_before_a_proof_file_exists(self):
+        import formal.build as fb
+        for stem in self.STEMS:
+            tmp = tempfile.mkdtemp(prefix=f"a2-divrefuse-{stem}-")
+            try:
+                src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
+                with self.assertRaises(fb.FormalBuildError) as caught:
+                    fb.compile_formal(src, arch="arm64",
+                                      output=os.path.join(tmp, f"{stem}.aout"),
+                                      prove=True, check=False)
+                text = str(caught.exception)
+                self.assertIn("universal theorem", text)
+                self.assertIn("halt address", text)
+                self.assertIn("calls this walk cannot follow", text)
+                # …and the decisive half: NO proof file, so there is nothing for
+                # Lean to have rejected and nothing for a residual-goal
+                # measurement to be about.
+                written = [f for f in os.listdir(tmp) if f.endswith("_proof.lean")]
+                self.assertEqual([], written,
+                                 f"{stem} wrote a proof file, so whatever it "
+                                 f"contains is unreviewed")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_image_itself_is_fine_without_the_proof(self):
+        # The refusal is at PROOF GENERATION, so `--no-prove` builds both
+        # architectures and both spellings run and answer. If this stopped being
+        # true the two would be a codegen defect rather than a proof-layer one,
+        # and `test_formal.py`'s marker would be naming the wrong subject.
+        import subprocess
+        import formal.build as fb
+        for stem in self.STEMS:
+            for backend, runner in (("arm64", None),
+                                    ("x86_64", ["arch", "-x86_64"])):
+                tmp = tempfile.mkdtemp(prefix=f"a2-divrun-{stem}-")
+                try:
+                    out = os.path.join(tmp, f"{stem}.aout")
+                    fb.compile_formal(
+                        os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
+                        arch=backend, output=out, prove=False, check=False)
+                    proc = subprocess.run((runner or []) + [out],
+                                          capture_output=True, timeout=30)
+                    # The entry IS the function, so the exit status is its
+                    # answer. `//` is CPython's own floor and both stems'
+                    # remainder is CPython's, so ONE expectation covers both
+                    # examples — `/` is this path's documented INTEGER
+                    # TRUNCATION rather than CPython's float division (the same
+                    # stand-in `MLIR_WORD_ARITH_OPS` rewrites `index.divs`
+                    # onto), which is why `udivmod`'s CPython answer is
+                    # 4.428… and this path's is 4.
+                    want = (10 // 7) + (10 % 7)
+                    self.assertEqual(want, proc.returncode,
+                                     f"[{backend}] {stem} answered "
+                                     f"{proc.returncode}, CPython {want}: "
+                                     f"{proc.stderr[:200]!r}")
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_x86_64_proves_them_where_arm64_refuses(self):
+        # The asymmetry is the finding and it is why this is not one shared
+        # row: `formal/x86_64_proof_gen.py` catches the generator's exception,
+        # emits the model as a DISCLAIMED placeholder and suppresses the run
+        # tests, so the end-to-end theorem is `sorry` and the example is a PASS.
+        # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+        # function.md` was that family; this is where the mechanism lives now.
+        import formal.build as fb
+        for stem in self.STEMS:
+            tmp = tempfile.mkdtemp(prefix=f"a2-divx86-{stem}-")
+            try:
+                r = fb.compile_formal(
+                    os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
+                    arch="x86_64", output=os.path.join(tmp, f"{stem}.aout"),
+                    prove=True, check=False)
+                self.assertTrue(os.path.isfile(r["proof_path"]),
+                                f"{stem}: x86-64 wrote no proof either")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _generate_dir(tmp, src_path, name, out):
     """`compile_formal` on an existing `.mojo`, with NO Lean check.
 
