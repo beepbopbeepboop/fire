@@ -68,6 +68,146 @@ def check(ok, what, detail=""):
     return bool(ok)
 
 
+def kind_table_checks():
+    """The EXCEPTION KIND TABLE, asked as a pure function. No build, no Lean.
+
+    **This is shared infrastructure and it fixes nothing yet**, and the rows say
+    so: it is step 2 of six in
+    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`, and the dispatch,
+    the raise sites, the CFG and the Lean model are steps 3-6. It is pinned
+    because it is the one place a future unwinder's correctness rests, and the
+    property that matters there is not "does it produce a number" but "do two
+    images agree about which number means the same class".
+    """
+    import formal.model as M
+
+    plain = M.exception_kind_table()
+
+    check(0 not in plain.values(),
+          "kind table: 0 is reserved for 'no exception in flight'",
+          "some class was numbered 0, so a zeroed frame would be "
+          "indistinguishable from an exception being raised")
+
+    check(set(plain) == set(M.CPYTHON_EXCEPTION_BASES),
+          "kind table: every CPython exception class is numbered",
+          f"{sorted(set(M.CPYTHON_EXCEPTION_BASES) - set(plain))[:5]} missing")
+    check(len(plain) == len(set(plain.values())),
+          "kind table: one integer per class, no collisions",
+          "two classes share an integer, so a compare against it cannot say "
+          "which one is in flight")
+
+    # THE property. A dylib and the executable that links it are two
+    # `_prepare_functions` runs with DIFFERENT declared sets and the same
+    # CPython half, and the word an unwinder writes on one side has to mean the
+    # same thing in the other's. Measured on the first version of this function,
+    # which numbered one sorted set: declaring `MyErr` moved `ValueError` from
+    # 38 to 69.
+    with_one = M.exception_kind_table({"MyErr": 1})
+    with_two = M.exception_kind_table({"Aaa": 1, "Zed": 2})
+    check(plain["ValueError"] == with_one["ValueError"]
+          == with_two["ValueError"],
+          "kind table: a builtin keeps its integer whatever the image declares",
+          f"ValueError is {plain['ValueError']} / {with_one['ValueError']} / "
+          f"{with_two['ValueError']} across three images")
+    check(min(v for k, v in with_one.items() if k not in plain)
+          > max(plain.values()),
+          "kind table: the declared range starts above the CPython range",
+          "a declared class and a CPython class can collide, so one image's "
+          "declared class would read as another's builtin")
+
+    # A declared name that SHADOWS a CPython one is the same class by name, so
+    # it must not get a second integer — one name, one integer.
+    shadow = M.exception_kind_table({"ValueError": 1})
+    check(shadow["ValueError"] == plain["ValueError"],
+          "kind table: a declared class shadowing a builtin keeps its integer",
+          f"{shadow['ValueError']} against {plain['ValueError']}")
+
+    check(M.exception_kind_for("Widget", plain) is None,
+          "kind table: a class the image cannot name has NO kind",
+          "it was given one, so `except Widget:` would look matchable when the "
+          "image cannot say what Widget is")
+    check(M.exception_kind_for("ValueError", plain) == plain["ValueError"],
+          "kind table: a nameable class answers with its integer")
+    check(M.exception_kind_for("", plain) is None,
+          "kind table: no name is not a kind")
+
+    # The publish/replace/clear trio, because the numbering is only meaningful
+    # relative to ONE image and a harness that builds two programs must not have
+    # the second inherit the first's table.
+    saved = M.exception_kinds()
+    try:
+        M.publish_exception_kinds(plain)
+        check(M.exception_kinds() == plain,
+              "kind table: publish installs what it was handed")
+        M.publish_exception_kinds({"Only": 1})
+        check(M.exception_kinds() == {"Only": 1},
+              "kind table: publish REPLACES rather than merges",
+              "a second publish kept the first image's classes, so a kind would "
+              "mean different things in two images built in one process")
+        check(M.exception_kind_for("ValueError") is None,
+              "kind table: a caller with no argument reads the published one")
+    finally:
+        M.clear_exception_kinds()
+        check(M.exception_kinds() == {},
+              "kind table: clear empties it for the next image")
+        M.publish_exception_kinds(saved)
+
+
+def kind_table_in_info_checks(tmpdir):
+    """Both backends' `info` must carry the SAME published table, under one key.
+
+    The proof generators read `info`, so this is what makes "one list" true
+    rather than aspirational: two emitters that each computed their own would
+    agree today and could not be shown to. It is read out of the `(code, info)`
+    pair each backend's `compile` RETURNS — the same object the linker and the
+    proof generators are handed — rather than out of the publisher, because the
+    claim is about what a PROOF GENERATOR is given and only `info` is that.
+    """
+    import formal.build as FB
+    from formal.arm64_codegen import ARM64Codegen
+    from formal.x86_64_codegen import X86_64Codegen
+
+    src = ('class MyErr(ValueError):\n'
+           '    """no fields at all"""\n'
+           '\n'
+           '\n'
+           'def boom():\n'
+           '    raise MyErr("the message")\n'
+           '\n'
+           'def main(n):\n'
+           '    boom()\n'
+           '    return 0\n')
+    check(FB.M.exception_kind_for("MyErr") is None,
+          "kind table: nothing is published before a unit is prepared",
+          "a kind was already installed, so the numbering a proof generator "
+          "reads is not this image's")
+    seen = {}
+    for label, cls in (("arm64", ARM64Codegen), ("x86_64", X86_64Codegen)):
+        try:
+            stmts = FB.parse_module(src, filename=f"<{label}>")
+            _fns, _structs, _symbols, _slots = FB._prepare_functions(
+                stmts, synthetic=True, source_path=None)
+            _code, info = cls().compile(stmts, structs=None)
+        except Exception as exc:                          # noqa: BLE001
+            check(False, f"the kind-table program compiles on {label}",
+                  repr(exc)[:200])
+            continue
+        seen[label] = info.get("exception_kinds")
+        check(seen[label] is not None,
+              f"{label}'s info carries the exception kind table",
+              "`exception_kinds` is absent from `info`, so a proof generator "
+              "reading it would have no table to read")
+    if len(seen) == 2 and all(seen.values()):
+        check(seen["arm64"] == seen["x86_64"],
+              "both backends hand their proof generators the SAME kind table",
+              f"arm64 has {len(seen['arm64'])} entries and x86-64 has "
+              f"{len(seen['x86_64'])}, and they differ")
+        check(FB.M.exception_kind_for("MyErr") is not None,
+              "kind table: the image's own class is nameable in it",
+              "`class MyErr(ValueError)` did not get a kind, so a `raise MyErr` "
+              "would be an exception the image cannot name")
+
+
 def build(source, out, backend=None, tmpdir=None, arg=3):
     """`fire.py build --formal --no-prove -n <arg>`, as (rc, output).
 
@@ -793,6 +933,148 @@ def run_refusal(name, source, needle, tmpdir, verbose):
         print(f"      arm64 and x86-64 agree: {needle!r}")
 
 
+# ── the CROSS-MODULE refusals ───────────────────────────────────────────────
+#
+# (name, {filename: source}, needle)
+#
+# These are the shapes `RaiseGraph`'s own call graph cannot see, because the
+# `raise` is in ANOTHER MODULE of the same image — `try: boom()` contains no
+# `raise` at all. `model.RaiseGraph` is built from ONE unit's function list, so
+# before the published per-module table (`model.publish_module_raisers`, read
+# here through `formal/build.py::_publish_imported_raisers`) an imported callee
+# was UNRESOLVED, and unresolved is answered `False`.
+#
+# **That `False` was a wrong answer and not a shrug**, and the symptom is the
+# shape that is worse than a wrong number: the program BUILT. Measured on both
+# architectures before the table existed, the first row below built, printed
+# NOTHING and exited 1, where CPython prints `caught` and exits 0 — every
+# statement after the `try` missing from the image because the `raise` left it.
+CROSS_MODULE_REFUSALS = [
+    # The bare spelling, `from h2 import boom`, which is the commonest one and
+    # the one that needed `model.imported_module_bindings` to carry: `boom(…)` is
+    # a bare callee, so without the binding it is the same unresolved name as
+    # `dict.get`.
+    ("a_try_over_a_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("the message")\n'
+                 '\n'
+                 '\n'
+                 'def quiet():\n'
+                 '    return 1\n',
+      "main.mojo": 'from h2 import boom\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("caught\\n")\n'
+                   '    return 0\n'},
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
+    # The dotted spelling, `import h2` then `h2.boom()`, which needs no binding
+    # at all — the qualifier is in the AST — so it is the row that would still
+    # pass if `imported_module_bindings` were deleted, and the pair is what says
+    # both spellings of one cross-module call are answered.
+    ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("the message")\n',
+      "main.mojo": 'import h2\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        h2.boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("caught\\n")\n'
+                   '    return 0\n'},
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
+]
+
+
+def run_cross_module_refusal(name, files, needle, tmpdir, verbose):
+    """Both backends must REFUSE an image of SEVERAL modules, with the needle.
+
+    Written out rather than reusing `build` because the subject IS the
+    multi-module image: the callee has to live in a second file or the row is
+    measuring the single-module rule it sits beside.
+    """
+    for filename, text in files.items():
+        with open(os.path.join(tmpdir, filename), "w") as f:
+            f.write(text)
+    seen = {}
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        src = os.path.join(tmpdir, "main.mojo")
+        p = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             f"--backend={backend}", "-o", out, src],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        text = p.stderr or p.stdout or ""
+        if not check(p.returncode != 0,
+                     f"{name} is refused on {backend}",
+                     "it BUILT and ran, so a `try` whose callee ends the "
+                     "process in ANOTHER module is in the image as a program "
+                     "that stops where CPython goes on"):
+            continue
+        seen[backend] = text
+        check(needle in text,
+              f"{name} on {backend} names the callee it cannot resolve",
+              f"the message does not contain {needle!r}: "
+              f"{text.strip()[-300:]}")
+    if len(seen) == 2 and verbose:
+        print(f"      arm64 and x86-64 agree: {needle!r}")
+
+
+# ── the CROSS-MODULE ANSWERED table ─────────────────────────────────────────
+#
+# (name, {filename: source}, needle-in-stdout)
+#
+# **The negative half of the table above, and it is what makes the two a pair.**
+# An empty raiser set is a FACT — "this module's functions cannot end the
+# process" — and if it were not published, every call into a compiled module
+# would still be a possibility and the table above would have over-refused its
+# own corpus. So the control is a `try` around an imported function that raises
+# nothing, which must keep BUILDING and keep running the statements after the
+# `try`.
+CROSS_MODULE_ANSWERED = [
+    ("a_try_over_a_callee_that_raises_nothing_still_builds",
+     {"h2.mojo": 'def quiet():\n'
+                 '    return 1\n',
+      "main.mojo": 'from h2 import quiet\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        quiet()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("after\\n")\n'
+                   '    return 0\n'},
+     "after\n"),
+]
+
+
+def run_cross_module_answered(name, files, needle, tmpdir, verbose):
+    """Both backends must BUILD and print `needle` for a multi-module image."""
+    for filename, text in files.items():
+        with open(os.path.join(tmpdir, filename), "w") as f:
+            f.write(text)
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        src = os.path.join(tmpdir, "main.mojo")
+        p = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             f"--backend={backend}", "-o", out, src],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        text = p.stderr or p.stdout or ""
+        if not check(p.returncode == 0,
+                     f"{name} builds on {backend}", text[-400:]):
+            continue
+        rc, got, _err = run(out)
+        check(got == needle,
+              f"{name} on {backend} prints what the source says",
+              f"printed {got!r}, the source says {needle!r}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -808,6 +1090,18 @@ def main():
             if args.cases and name not in args.cases:
                 continue
             run_refusal(name, source, needle, tmpdir, args.verbose)
+        for name, files, needle in CROSS_MODULE_REFUSALS:
+            if args.cases and name not in args.cases:
+                continue
+            run_cross_module_refusal(name, files, needle, tmpdir, args.verbose)
+        for name, files, needle in CROSS_MODULE_ANSWERED:
+            if args.cases and name not in args.cases:
+                continue
+            run_cross_module_answered(name, files, needle, tmpdir,
+                                      args.verbose)
+        kind_table_checks()
+        if not args.cases:
+            kind_table_in_info_checks(tmpdir)
 
     total = len(RESULTS)
     passed = sum(1 for ok, _ in RESULTS if ok)

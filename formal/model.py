@@ -27662,6 +27662,124 @@ def builtin_base_fields(base: str) -> tuple:
     return ()
 
 
+# ── the EXCEPTION KIND TABLE: one small integer per class this image can name ──
+#
+# Shared infrastructure for the unwinder, landed on its own and fixing nothing
+# by itself — which is the honest description and the reason it is worth having
+# separately. `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
+# designs the convention: one callee-visible word per function meaning "an
+# exception is in flight", holding the KIND of the current exception, and §5
+# step 2 is this. The dispatch, the raise sites, the CFG and the Lean model are
+# steps 3-6 and are not attempted; **nothing reads this table yet**, and a
+# reader should not mistake it for a working unwinder.
+#
+# **TWO DISJOINT RANGES, and that is the whole requirement.** Both backends and
+# both proof generators must agree about which integer means `ValueError`,
+# because the word is written by one and read by another; and the agreement has
+# to survive an image DECLARING a class of its own, because a dylib and the
+# executable that links it are two `_prepare_functions` runs with different
+# declared sets and the same CPython half. Measured on the first version of this
+# function, which numbered one sorted set: adding `class MyErr` moved
+# `ValueError` from 38 to 69, so a word written by the library would have meant
+# nothing in the caller's image.
+#
+# So the ranges are separate: `CPYTHON_EXCEPTION_BASES` occupies 1..N by sorted
+# name, and a class THIS IMAGE declares occupies N+1.. by sorted name. Adding a
+# declaration cannot move a builtin, and adding a builtin cannot move a
+# declaration's relative order. 0 is reserved for "no exception in flight", so a
+# zeroed frame is a frame with nothing to dispatch and every real kind is
+# distinguishable from it without a second flag.
+_EXCEPTION_KINDS: dict = {}
+
+
+def exception_kind_table(structs=None) -> dict:
+    """`{exception class name: kind}` for every class THIS IMAGE can name.
+
+    The names are `CPYTHON_EXCEPTION_BASES` plus the classes `structs` declares,
+    in the two disjoint ranges the block comment above states. A name in both
+    takes the CPython range — it IS the same class by name, and one name must
+    not have two integers.
+
+    **`structs` is the image's own class table and it is `None`-tolerant**,
+    because the emitters and the proof generators hold the class table under
+    different names and a caller with none must still get CPython's half — which
+    is the half two images built from the same sources always agree on.
+
+    **A class the image cannot name has no entry, and that is what the callers
+    must treat as the interesting case rather than as absence.** §4's third
+    bullet: an image whose `raise` or `except` names a class from outside
+    `CPYTHON_EXCEPTION_BASES` and outside its own declarations is an UNMODELLED
+    base, and §4's answer for it is a kind that is real but not matchable by
+    name. This function deliberately does NOT invent that kind — it cannot, it
+    does not know which class is meant — and `exception_kind_for` is where a
+    caller asks the question that has an answer.
+    """
+    builtins = sorted(CPYTHON_EXCEPTION_BASES)
+    table = {name: i + 1 for i, name in enumerate(builtins)}
+    # The declared half, from the top of the reserved space and in name order,
+    # skipping any name CPython already numbers. Written as one pass with the
+    # membership test FIRST because the alternative — a `setdefault` that both
+    # inserts and leaves the counter un-advanced for a shadowing name — is
+    # exactly the off-by-one that shows up as two images disagreeing about one
+    # class's integer, which is the failure this split exists to prevent.
+    nxt = len(builtins) + 1
+    for name in sorted(str(s) for s in (structs or {})):
+        if name in table:
+            continue
+        table[name] = nxt
+        nxt += 1
+    return table
+
+
+def publish_exception_kinds(table: dict) -> None:
+    """Install `table` as this image's kind numbering.
+
+    REPLACES, for `publish_module_symbols`'s reason and not
+    `publish_non_ascii_strings`'s: this is one property of ONE image, and two
+    images built in one process must not see each other's numbering. The
+    clear is at the top of the image beside the other two.
+    """
+    global _EXCEPTION_KINDS
+    _EXCEPTION_KINDS = dict(table or {})
+
+
+def exception_kinds() -> dict:
+    """The published `{class: kind}` table. Empty before a publish."""
+    return dict(_EXCEPTION_KINDS)
+
+
+def clear_exception_kinds() -> None:
+    """Start a NEW IMAGE's kind numbering over.
+
+    The third of the three per-image tables, and it exists for the same reason
+    as the other two: without it the second program a harness builds inherits
+    the first one's numbering, and an image whose declared classes differ gets
+    the first one's integers. `formal/build.py::compile_formal` is the one
+    caller that is not a test.
+    """
+    global _EXCEPTION_KINDS
+    _EXCEPTION_KINDS = {}
+
+
+def exception_kind_for(name: str, kinds: dict = None):
+    """The kind `name` has in this image, or None when the image cannot name it.
+
+    **None is the ANSWER for an unmodelled base, not a failure to look.** §4's
+    third bullet is exactly this case — a `raise` of, or an `except` for, a class
+    from outside CPython's hierarchy and outside this image's declarations — and
+    §4 says it "gets kind 1 and is not matchable by name, which is honest rather
+    than convenient". So a caller that has a class it cannot name asks here and
+    is told so; what it does with that (refuse the arm, or give the exception a
+    single unmatchable kind) is the design question §4 records as still open,
+    and it is NOT decided here.
+
+    `kinds` defaults to the published table, so a proof generator holding `info`
+    and an emitter holding nothing answer the same question the same way.
+    """
+    table = exception_kinds() if kinds is None else kinds
+    return table.get(str(name)) if name else None
+
+
 # ── what a `raise` of an exception CLASS lowers to ─────────────────────────
 #
 # `raise E(...)` / `raise E` where `E` names a CPython builtin exception class
@@ -40666,15 +40784,31 @@ def _emitted_regions(try_stmt) -> tuple:
             getattr(try_stmt, "finally_body", None))
 
 
-def _call_keys(node) -> tuple:
-    """The distinct callee KEYS of an emitted subtree: `("plain"|"method", name)`.
+def _call_keys(node, bound_modules=None) -> tuple:
+    """The distinct callee KEYS of an emitted subtree.
 
-    `("plain", "boom")` for `boom(…)` and `("method", "get")` for `x.get(…)`,
-    deduplicated because the question is "can this region reach a raise", not
-    "how many times". A callee that is neither shape gets the key
-    `("other", "")`, and `external_call[…]` gets none at all: it is a C symbol
-    by construction, it returns, and there is no frame of ours for it to raise
-    into.
+    `(kind, name, module)`: `("plain", "boom", "")` for `boom(…)`,
+    `("method", "get", "")` for `x.get(…)`, `("method", "boom", "h2")` for
+    `h2.boom(…)`, `("plain", "boom", "h2")` for `boom(…)` in a unit that wrote
+    `from h2 import boom`. Deduplicated because the question is "can this region
+    reach a raise", not "how many times". A callee that is neither shape gets
+    `("other", "", "")`, and `external_call[…]` gets none at all: it is a C
+    symbol by construction, it returns, and there is no frame of ours for it to
+    raise into.
+
+    **The third element is what makes an imported callee resolvable, and it is
+    here rather than in `RaiseGraph` because the AST is where the two spellings
+    differ.** `x.get(…)` and `h2.boom(…)` are the same node shape — a
+    `MemberExpr` callee — and the receiver is the ONLY thing that tells a
+    method on a value from a function on a module. `bound_modules` is
+    `{bare name: module}` for the unit's own `from mod import f` statements,
+    which `import_bindings` reads and which is the other half: `boom(…)` in a
+    unit that wrote `from h2 import boom` names a bare callee, so without the
+    binding it is the same unresolved name as `dict.get`.
+
+    Both are EMPTY/None by default so that a caller with no unit in hand — the
+    `RaiseGraph` constructor's own per-function walk — gets the conservative
+    answer it always got.
     """
     out = set()
     for n in _emitted_nodes(node):
@@ -40684,11 +40818,22 @@ def _call_keys(node) -> tuple:
         if is_external_call_template(func):
             continue
         if isinstance(func, F.IdentExpr):
-            out.add(("plain", func.name))
+            out.add(("plain", func.name,
+                     (bound_modules or {}).get(func.name, "")))
         elif isinstance(func, F.MemberExpr):
-            out.add(("method", func.member))
+            # The receiver decides. A `MemberExpr` whose object is a plain name
+            # is a MODULE call when that name is a module this unit imported and
+            # a METHOD call otherwise, and the two need different answers — so
+            # the qualifier is carried and `RaiseGraph` asks the published
+            # module table with it rather than guessing here.
+            obj = getattr(func, "obj", None)
+            qualifier = ""
+            if isinstance(obj, F.IdentExpr):
+                qualifier = obj.name if (bound_modules or {}).get(
+                    obj.name, "") else ""
+            out.add(("method", func.member, qualifier))
         else:
-            out.add(("other", ""))
+            out.add(("other", "", ""))
     return tuple(sorted(out))
 
 
@@ -40720,14 +40865,22 @@ class RaiseGraph:
     answer is 14 files, the unknown answer is 82 — a five-fold over-refusal of
     the whole corpus, nearly all of it `try: … except OSError:` around I/O this
     path cannot raise from, bought against a POSSIBILITY rather than a fact.
-    So the question is asked of what can be resolved, the residual is written
-    down where a taker will find it
-    (`bugs/FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md`), and the
-    rule the pair of them obeys is: refuse on a FACT, and say so where the fact
-    is missing.
+
+    **"Cannot see" no longer includes a module this image COMPILES.** That
+    branch of the unknown answer was measured on a `RaiseGraph` built from one
+    unit, and an imported callee was in it — so the 82 was not all host
+    modules and builtins, and the part that was a resolvable module was a WRONG
+    answer rather than a shrug. `publish_module_raisers` records each compiled
+    module's raisers and `_callee_raises` asks it, so the unknown tier is now
+    exactly what it says it is: a host module, a `--link-dylib` library, or a
+    builtin method — none of which this pass can read the body of.
+
+    The rule the pair of them obeys is unchanged and is what the second half of
+    the 82 still rests on: **refuse on a FACT, and say so where the fact is
+    missing.**
     """
 
-    def __init__(self, functions, externs=()):
+    def __init__(self, functions, externs=(), bound_modules=None):
         by_name = {}
         for fn in functions or ():
             name = getattr(fn, "name", None)
@@ -40735,6 +40888,11 @@ class RaiseGraph:
                 by_name.setdefault(name, fn)
         self.externs = frozenset(externs or ())
         self.defined = frozenset(by_name)
+        # `{bare name: module}` for the unit's own `from mod import f`
+        # statements. Kept because the EDGE pass needs it too: `boom(…)` in a
+        # unit that wrote `from h2 import boom` is a call into another module,
+        # and without this it is indistinguishable from a free name.
+        self.bound_modules = dict(bound_modules or {})
         # Method dispatch on this path is BY NAME — a call site carries no
         # receiver type — so `x.f(…)` is answered by every method of that name,
         # which is the same over-approximation the dispatch itself makes.
@@ -40744,7 +40902,17 @@ class RaiseGraph:
         edges, lexical = {}, set()
         for name, fn in by_name.items():
             plain, method, other = set(), set(), False
-            for kind, callee in _call_keys(getattr(fn, "body", None)):
+            for kind, callee, module in _call_keys(getattr(fn, "body", None),
+                                                   self.bound_modules):
+                if module:
+                    # A call into ANOTHER module of this image. It cannot be an
+                    # edge to one of this unit's functions, and it is answered
+                    # by the published per-module table at ASK time rather than
+                    # here — a module's raisers are not known until it has been
+                    # compiled, which happens after this graph is built. So it
+                    # contributes no edge and is not `other` either: it is a
+                    # question with an answer, asked elsewhere.
+                    continue
                 if kind == "plain":
                     plain.add(callee)
                 elif kind == "method":
@@ -40783,14 +40951,37 @@ class RaiseGraph:
                    for other in by_name))
         self.any_raising = bool(self.raising)
 
-    def _callee_raises(self, kind, name) -> bool:
+    def _callee_raises(self, kind, name, module="") -> bool:
         """Can this callee end the process? `False` for everything unresolved.
 
-        Both branches answer `False` for a name they cannot place, which is the
-        decision the class docstring measures: a refusal on an unresolvable
-        callee would take 82 of this repository's files against a possibility,
-        and the 14 it can prove are worth having on their own.
+        `False` for a name this pass cannot place is the decision the class
+        docstring measures: a refusal on an unresolvable callee would take 82 of
+        this repository's files against a possibility, and the 14 it can prove
+        are worth having on their own.
+
+        **`module` is the third term and it is what makes that 82 smaller.**
+        A callee this image COMPILED is not unresolved: `publish_module_raisers`
+        recorded which of its functions reach a `raise` when it was built, so
+        `try: h2.boom()` and `try: boom()` (after `from h2 import boom`) are
+        both answerable. The three outcomes are kept distinct on purpose:
+
+          * a module this image compiled, with `name` in its raisers — a FACT,
+            and the refusal names the callee;
+          * a module this image compiled, with `name` NOT in them — also a fact,
+            and `False`, which is what stops every call into a compiled module
+            from becoming a possibility again;
+          * a module it did not compile (a host module, a `--link-dylib`
+            library, a builtin method) — still `False`, still the residual.
+
+        So the third case is the doc's residual and the first two are what it
+        said had to be built; the measurement to watch is the third falling
+        towards 0 while the certain tier is unchanged.
         """
+        if module:
+            raisers = module_raisers(module)
+            if raisers is None:
+                return False
+            return name in raisers
         if kind == "plain":
             if name in self.externs:
                 return False
@@ -40802,12 +40993,13 @@ class RaiseGraph:
         return False
 
     def may_reach_raise(self, node) -> tuple:
-        """`(kind, name)` for a callee in `node` that can end the process, else None.
+        """`(kind, name, module)` for a callee in `node` that can end the process,
+        else None.
 
         The first one found, in the region's own order, so the message can name
         the call the reader wrote rather than the callee set.
         """
-        for key in _call_keys(node):
+        for key in _call_keys(node, self.bound_modules):
             if self._callee_raises(*key):
                 return key
         return None
@@ -40816,6 +41008,88 @@ class RaiseGraph:
 #: The sentinel an unresolved callee contributes to the edge set. A string a
 #: program cannot spell as a function name, so it cannot collide with one.
 _UNRESOLVED = "\x00unresolved\x00"
+
+
+#: `{module identity: {function name that can end the process}}`, for the units
+#: of ONE image. See `publish_module_raisers` for why this is published rather
+#: than threaded, and why it REPLACES per module where
+#: `publish_non_ascii_strings` accumulates.
+_MODULE_RAISERS: dict = {}
+
+
+def publish_module_raisers(module: str, names) -> None:
+    """Record that `names` in the module addressed as `module` can end the process.
+
+    **This is the doc's step 1, and the reason it has to be a PUBLISHED table
+    is that the answer is not available where it is asked.** `RaiseGraph` is
+    built in `formal/build.py::_prepare_functions` from ONE unit's function
+    list, and the imported units have been compiled and thrown away by then —
+    each `build_module_dylib` is a nested `_prepare_functions` that publishes
+    ITS module's globals over ours on the way out (see the order note above
+    `check_module_symbols` in `build.py`, which is why those two tables are
+    re-published rather than published once). So a `try: mod.boom()` in the
+    entry unit, where `mod.boom` raises in a library, was unanswerable and
+    answered `False`.
+
+    **That `False` was a wrong answer and not a shrug.** Measured on both
+    architectures, `h2.mojo` with `def boom(): raise ValueError(…))` imported by
+    an entry whose `main` is
+
+        try:
+            boom()
+        except:
+            pass
+        printf("caught\\n")
+
+    BUILT, printed nothing and exited 1, where CPython prints `caught` and exits
+    0 — the whole-program class `uncatchable_raise` exists to refuse, reached
+    through the one door its own call graph cannot see. So this table is what
+    turns that build into a refusal that names the callee.
+
+    **REPLACES per module, ACCUMULATES across modules, and the two directions
+    are the same argument as `publish_non_ascii_strings` made.** A unit's own
+    answer is a fact about that unit and a second answer for the same module in
+    one image would be a conflict rather than a union — so a module's entry is
+    replaced. But which modules EXIST in an image is the union over its units,
+    exactly as the non-ASCII literal list is: `h2` compiled first and `main`
+    second is the ordinary order, and `main` must be able to ask about `h2`.
+    `clear_module_raisers` makes that union per-IMAGE rather than per-process,
+    for `clear_non_ascii_strings`'s reason.
+
+    **`module` is the dotted identity an importer spells** (`own_module_identity`
+    in `formal/imports.py`), not a source path, because the call site carries
+    the dotted name and nothing else.
+    """
+    if not module:
+        return
+    _MODULE_RAISERS[str(module)] = frozenset(str(n) for n in (names or ()))
+
+
+def module_raisers(module: str):
+    """The raising names of the module addressed as `module`, or None.
+
+    **None and an EMPTY set are different answers and must stay different.**
+    None means "this image never compiled a module by that name", which is the
+    residual — the callee is unresolved and nothing is known. An empty set means
+    "it was compiled, and none of its functions can raise", which is a fact and
+    the cheap one: it is what lets an ordinary `try: mod.helper()` around a
+    module that raises nothing keep building, instead of every call into a
+    compiled module becoming a possibility again.
+    """
+    return _MODULE_RAISERS.get(str(module)) if module else None
+
+
+def clear_module_raisers() -> None:
+    """Start a NEW IMAGE's set of compiled modules over.
+
+    The counterpart of `clear_non_ascii_strings`, and it exists for the same
+    reason: a test that builds two programs in one process must not have the
+    second one refuse a `try` because of a module only the first compiled. The
+    one caller that is not a test is `formal/build.py`'s `compile_formal`, at
+    the top of the image.
+    """
+    global _MODULE_RAISERS
+    _MODULE_RAISERS = {}
 
 
 def uncatchable_raise(fn, graph=None) -> tuple:
@@ -40990,8 +41264,15 @@ def refuse_uncatchable_raise(found) -> str:
     if stmt is not None:
         how = "this `raise` is inside the `try`"
     else:
-        kind, name = callee
-        if kind == "plain":
+        kind, name, module = (callee + ("",))[:3] if callee else ("", "", "")
+        if module:
+            # The imported spelling, and it is named in full because the reader
+            # wrote it: `h2.boom()` and `boom()` after `from h2 import boom`
+            # are the same function reached two ways, and the message has to
+            # say which one this call site used so the reader knows which file
+            # to look in.
+            how = f"the `try` body calls `{module}.{name}(…)`"
+        elif kind == "plain":
             how = f"the `try` body calls `{name}(…)`"
         elif kind == "method":
             how = f"the `try` body calls the method `{name}(…)`"
@@ -41310,6 +41591,35 @@ def _imported_names(stmt) -> list:
     says why that matters.
     """
     return list(import_bindings(stmt))
+
+
+def imported_module_bindings(stmts) -> dict:
+    """`{name this unit binds: module it came from}` over `stmts`' imports.
+
+    THE reader of "which module does a bare call in this unit reach", asked by
+    `RaiseGraph` so that `f(…)` in a unit which wrote `from m import f` is a call
+    into a KNOWN module rather than a free name — the bare half of what makes an
+    imported callee resolvable, and the half that costs nothing because it is a
+    fact about this unit's own statements. The dotted half (`m.f(…)`) needs no
+    binding at all: the qualifier is in the AST.
+
+    **A name bound twice keeps its FIRST module**, matching `dylib_syms`'s
+    `setdefault` precedence, so the call graph and the emitted call resolve
+    through the same choice. A name bound twice from DIFFERENT modules is a
+    shadowing the language forbids anyway, and answering either one is not an
+    improvement over answering the same one the linker will.
+    """
+    out: dict = {}
+    for stmt in (stmts or ()):
+        # Three, not two: `_imported_names` keeps the DEFINING name beside the
+        # local one and this table is keyed by the LOCAL spelling, so the third
+        # is not wanted here. It was unpacked as two, which is a `ValueError` on
+        # every module-level import — measured as seven rows of
+        # `test_formal_unicode.py` red with `too many values to unpack`, and
+        # invisible in every suite whose programs import nothing.
+        for _bound, _module, _defining in _imported_names(stmt):
+            out.setdefault(_bound, _module)
+    return out
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on
