@@ -163,6 +163,33 @@ CTX_PY = CTX_MOJO.replace("    def __exit__(self):",
 # A SECOND struct declaring a method Box also declares, so the NAME-based
 # dispatch a `with` alias gets (it has no declared type of its own) has two
 # owners to choose between.  `use` is the one both declare.
+# `__exit__` returning True is CPython's SUPPRESSION, and the shape every
+# hand-written suppressor is written in.  `nullcontext` returns its own
+# `exit_result` field, which is the computed case and stays answered — see
+# `model.context_exit_returns_truthy`, which is why this is one fixture and not
+# a rule about returning anything.
+SUPPRESSING_EXIT = """class Suppressor:
+    def __init__(self):
+        self.tag = 7
+        self.log = 0
+
+    def __enter__(self):
+        print('enter')
+        return self.tag
+
+    def __exit__(self):
+        print('exit')
+        return True
+"""
+
+SUPPRESSING_EXIT_ONE = SUPPRESSING_EXIT.replace("return True", "return 1")
+# …and the CPython half of the same class, whose `__exit__` takes the three
+# exception arguments every other row in this file gives it.  The two halves are
+# the same class; only that signature differs.
+SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
+    "    def __exit__(self):",
+    "    def __exit__(self, exc_type, exc_val, tb):")
+
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
@@ -521,16 +548,21 @@ FILE_CASES = [
 # (name, mojo source, cpython source)
 #
 # Everything above runs the SAME program text through both engines, which is
-# what makes a row an oracle rather than a transliteration written here.  These
-# three cannot: a DECLARED field or a declared return type is spelled `var mgr:
-# Ctx` / `fn make() -> Ctx` in Mojo and `mgr: Ctx` / `def make(self) -> Ctx` in
-# Python, and the Mojo half needs the declarations to be declarations — a `var`
-# whose value is a constructor call is refused before any type is read, and a
-# field with no annotation has no declared type at all.  So each row supplies
-# both texts, and the difference is the declaration spelling and nothing else:
-# same struct, same fields, same constructor, same protocol.
+# what makes a row an oracle rather than a transliteration written here.  A row
+# below cannot, for one of two reasons, and both are differences in the SOURCE
+# rather than in the two engines:
+#   * a DECLARED field or a declared return type is spelled `var mgr: Ctx` /
+#     `fn make() -> Ctx` in Mojo and `mgr: Ctx` / `def make(self) -> Ctx` in
+#     Python, and the Mojo half needs the declarations to be declarations — a
+#     `var` whose value is a constructor call is refused before any type is read,
+#     and a field with no annotation has no declared type at all;
+#   * one row is the SAME program with `return False` where its REFUSED sibling
+#     has `return True`, and the difference between them IS the subject.
+# So each row supplies both texts, and in every case the difference is one line
+# of the declaration or one literal: same struct, same fields, same
+# constructor, same protocol.
 #
-# They are here because the `with` context can be named in three ways this path
+# Most of them are here because the `with` context can be named in ways this path
 # used to refuse, and each is a spelling a reader meets in real code: a function
 # that BUILDS a manager (`redirect_stdout(sys.stdout) as f:`), a manager held in
 # a field (`with self.mgr as v:`), and a manager passed in as a parameter
@@ -629,6 +661,29 @@ DECLARED = [
      "\n"
      "def main(n):\n"
      "    use(Ctx())\n"
+     "    return 0\n", 3),
+    # A cleanup-only `__exit__` that returns a FALSY value, against a `raise` in
+    # the body.  This is the row that says the suppression gate is about
+    # SUPPRESSING and not about RETURNING: `TemporaryDirectory.__exit__` returns
+    # `rmtree`'s entry count and `nullcontext.__exit__` returns its own field,
+    # and a gate keyed on "returns anything" would refuse both.  The two halves
+    # differ only in the return value, which is the same kind of difference as
+    # the declaration spelling above and for the same reason — the point of the
+    # pair is that BOTH run the same protocol.
+    ("an_exit_returning_false_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return False") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return False") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
      "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
@@ -832,6 +887,33 @@ REFUSALS = [
      "        print('body')\n"
      "    return 0\n",
      "CONTEXT-MANAGER PROTOCOL", "it declares no __enter__"),
+    # ── `__exit__` that would SUPPRESS ─────────────────────────────────────
+    # **This is the one wrong ANSWER this family had, and it is measured, not
+    # argued.**  CPython suppresses the exception in flight when `__exit__`
+    # returns something true; a `raise` here runs the cleanup and then leaves the
+    # process, so the program printed `enter / body 7 / exit`, never printed
+    # `after`, and exited 1 where CPython exits 0.  The cleanup ran, so every
+    # visible line matched and the divergence was in the status and in the
+    # statements after the block — the worst place for a wrong answer to sit.
+    ("an_exit_returning_true_is_refused_as_a_suppression_it_cannot_perform",
+     SUPPRESSING_EXIT + "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and `return 1`, because the gate reads the folded VALUE rather than the
+    # spelling: in CPython `1` suppresses exactly as `True` does, so a gate keyed
+    # on the token would let `return 1` through.
+    ("an_exit_returning_one_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT_ONE + "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
     # ── a context this build cannot type ───────────────────────────────────
     # A name bound from a CALL to another function.  This is the limit the
     # ANSWERED table's NAME rows stop at, and it is a return-type table this

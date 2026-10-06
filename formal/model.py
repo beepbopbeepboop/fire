@@ -45013,6 +45013,13 @@ def struct_is_context_manager(struct_def) -> bool:
         about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
         `__exit__` that wanted them could not act on them anyway.
+      * `__exit__` does not RETURN a value CPython would read as SUPPRESSING the
+        exception (`context_exit_returns_truthy`).  The same missing unwinder,
+        seen from the other side: a `raise` in the body exits the process, so a
+        `__exit__` whose value says "carry on" produces a program that runs the
+        cleanup and then leaves anyway — the one divergence in this family that
+        is a wrong ANSWER rather than a refusal, and measured on both
+        architectures before the condition was added.
     """
     if struct_def is None or not struct_is_framed(struct_def):
         return False
@@ -45021,7 +45028,56 @@ def struct_is_context_manager(struct_def) -> bool:
         m = methods.get(name)
         if m is None or _dunder_receiver_params(m) != 1:
             return False
-    return True
+    return not context_exit_returns_truthy(methods[CONTEXT_EXIT])
+
+
+def context_exit_returns_truthy(method) -> bool:
+    """True when some `return` in `__exit__` folds to a value CPython reads as TRUE.
+
+    **`__exit__`'s RETURN VALUE is half the protocol and this path drops it.**
+    CPython suppresses the exception in flight when `__exit__` returns something
+    true, and `raise` here leaves the process after flushing the enclosing
+    `finally` clauses (`_emit_raise`'s `_flush_pending_finally` then
+    `_emit_exit`), so there is nothing left to resume into.  Measured, both
+    architectures, on the shape every hand-written suppressor is written in:
+
+        class Suppressor:
+            def __enter__(self): print('enter'); return self.tag
+            def __exit__(self):  print('exit'); return True
+        def main(n):
+            with Suppressor() as v:
+                print('body', v)
+                raise ValueError('m')
+            print('after')
+            return 0
+
+    CPython prints `enter / body 7 / exit / after` and exits 0.  This path
+    printed `enter / body 7 / exit` and exited 1 — the cleanup ran, so nothing
+    looks broken, and `after` is simply never reached.  That is the worst shape a
+    wrong answer takes on this path: the visible half is right.
+
+    **The test is FOLDABILITY, deliberately, and the direction is one-sided.**
+    `fold_literal_expr` answers a `return` whose value the build can decide —
+    `return True`, `return 1`, `return 2` are all suppressions; a bare `return`,
+    `return False`, `return None` and `return 0` are all not — and answers None
+    for anything computed.  So a COMPUTED return is not counted here and stays
+    as it was: that is the remaining limit, it is cross-FIELD flow (`nullcontext`
+    returns `self.exit_result`, and whether that is true depends on a constructor
+    argument this function cannot see), and it is the same limit
+    `_expr_is_fd` states for a descriptor in a field.  A narrower gate that
+    refused every computed return would refuse `formal/hostmods/contextlib.mojo`'s
+    own `nullcontext`, whose three CPython pairs live in
+    `test_formal_core_hostmods.py`'s `ctx` group — refusing a host module the
+    corpus depends on to catch a case the corpus does not write is the wrong
+    trade, and this says so instead of hiding it.
+    """
+    for node in iter_nodes(getattr(method, "body", None) or ()):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        value = fold_literal_expr(getattr(node, "value", None))
+        if isinstance(value, int) and not isinstance(value, bool) and value:
+            return True
+    return False
 
 
 def _dunder_receiver_params(method) -> int:
@@ -45169,6 +45225,10 @@ def with_context_manager_defect(struct_def) -> str:
       * a dunder VARIADIC — refused rather than assumed, because `*args` cannot
         be counted from the tree, exactly as a variadic CALL is
         (`refuse_variadic_parameter_read`).
+      * an `__exit__` that RETURNS a value CPython reads as suppressing the
+        exception (`context_exit_returns_truthy`) — the fix is that return value,
+        and it is the only one of the four that was a wrong ANSWER rather than a
+        refusal, so it is the one with the longest explanation.
 
     The counts are read with `_dunder_receiver_params`, the same predicate
     `struct_is_context_manager` gates on, so the sentence and the decision
@@ -45213,13 +45273,32 @@ def with_context_manager_defect(struct_def) -> str:
                 f"the receiver alone — the protocol's `__enter__` receives the "
                 f"context manager and nothing else, so the word a second "
                 f"parameter names would be an uninitialised register")
+    # Both dunders are present with one receiver parameter each, so the shapes
+    # are right and the remaining reason is what `__exit__` RETURNS.  Asked here
+    # rather than inside the loop because the loop `continue`s past both names
+    # when they are well-shaped, and putting the arm between the two `continue`s
+    # would make it reachable for `__enter__`'s arity as well.
+    if context_exit_returns_truthy(methods[CONTEXT_EXIT]):
+        return (f"it declares both dunders in the shape this path calls, but "
+                f"its `{CONTEXT_EXIT}` returns a value CPython reads as "
+                f"SUPPRESSING the exception in flight, and this path has no "
+                f"unwinder to suppress it with: a `raise` in the body runs this "
+                f"cleanup and then leaves the process, so the statements after "
+                f"the block never run and the status is 1 where CPython "
+                f"continues — the cleanup prints every line CPython printed, "
+                f"which is what makes it hard to see. Return a falsy value "
+                f"(`False`, `0`, `None`) or nothing: a cleanup-only "
+                f"`{CONTEXT_EXIT}` lowers, and that is what "
+                f"`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` "
+                f"declares")
     # Unreachable while `struct_is_context_manager` is the gate — both dunders
-    # present with one receiver parameter each IS that predicate's answer.  Kept
-    # rather than `raise`d because a reader who changes the gate should read a
-    # sentence here rather than an IndexError from three lines away.
-    return "it declares both dunders in the shape this path calls, so the " \
-           "reason is not in the struct — that is a compiler bug, not a " \
-           "program to fix"
+    # present with one receiver parameter each and no truthy return IS that
+    # predicate's answer.  Kept rather than `raise`d because a reader who
+    # changes the gate should read a sentence here rather than an IndexError
+    # from three lines away.
+    return "it declares both dunders in the shape this path calls and returns " \
+           "nothing CPython would read as a suppression, so the reason is not " \
+           "in the struct — that is a compiler bug, not a program to fix"
 
 
 def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
