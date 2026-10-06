@@ -47,6 +47,12 @@ from formal import dataclass_transform as DC
 class FormalBuildError(Exception):
     """A refusal the path states rather than guesses past, printed by callers.
 
+    `notes` is a list of extra lines a caller may print with the message.  It
+    exists for one measured reason: a build can compute an answer and then
+    refuse, and the refusal was swallowing the answer (see the raise site in
+    `compile_formal`, where the loop layer's verdicts ride along).  Empty by
+    default, so an existing caller that prints only `str(exc)` is unaffected.
+
     `proof_refused` is False here and True only on the ONE raise that re-wraps
     a proof generator's `NotImplementedError`, and it exists because that re-wrap
     is right and still costs a reader its diagnosis: `fire.py build --formal`
@@ -61,6 +67,11 @@ class FormalBuildError(Exception):
     direction matters because `codegen-refused` is the class the census's own
     docstring says a reader must not UNDER-count.
     """
+
+    #: A CLASS attribute, so `FormalBuildError.notes` is `()` on every instance
+    #: that does not set it and no existing caller can see a changed attribute.
+    #: `compile_formal` sets it on the one raise that has something to add.
+    notes = ()
 
     proof_refused = False
 
@@ -2244,6 +2255,16 @@ def compile_formal(source_path: str, output: str = None,
                 f"a function of the entry argument alone. The generator's own "
                 f"word for it: {e}")
             refused.proof_refused = True
+            # **The loop layer's verdicts ride along on the refusal**, and the
+            # reason is measured rather than tidied: the machine proof
+            # generator refuses `for` loops and while loops with an accumulator
+            # (measured on `cd2a1678`: eleven of the twelve programs in
+            # `formal/loop_examples/`), and that raise happens AFTER this build
+            # has already synthesised their invariants. So a caller who asked
+            # for `--loop-invariants` on exactly the programs the layer was
+            # written for saw NOTHING, because the note is printed after a
+            # `compile_formal` that raised.
+            refused.notes = _loop_note_lines(loop_verdicts, loop_invariants)
             raise refused from e
 # The `f_contract` theorems, APPENDED here rather than emitted by
         # `generate_proof`.  Two reasons, and the second is the one that
@@ -2393,6 +2414,35 @@ def _search_contracts(sources: dict, ordered, functions_by_source=None,
               "because the contract is a claim about the program and the "
               "program's answers do not change.")
     return out, None
+
+
+def _loop_note_lines(rows, checked):
+    """The loop layer's verdict lines, for a build that is about to refuse.
+
+    One reader for the rows and one for the wording, because `fire.py`'s
+    `_loop_note` prints the same thing on the success path and a caller that
+    compared the two would otherwise be comparing prose.
+    """
+    if not rows:
+        return []
+    out = []
+    for r in rows:
+        bits = [f"[{r['family']}]"]
+        bits.append(f"invariant `{r['invariant']}`" if r.get("invariant")
+                    else "no affine invariant")
+        bits.append(f"variant `{r['variant']}`" if r.get("variant")
+                    else "no decreasing affine variant")
+        if r.get("precondition"):
+            bits.append(f"precondition `{r['precondition']}`")
+        closed = len(r.get("discharged") or [])
+        total = len(r.get("obligations") or [])
+        out.append(f"loop {r['loop']} of `{r['fn']}`: {r['status'].upper()} — "
+                   + "; ".join(bits)
+                   + f"; {closed}/{total} obligation(s) closed by the ladder")
+    out.append("(the build is about to refuse above, and the loop layer's "
+               "verdicts were computed before it did — they are a separate "
+               "answer from the machine proof this build did not finish)")
+    return out
 
 
 def _loop_invariant_verdicts(source_path, source, ordered, check=False):

@@ -433,6 +433,13 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
             print(f"peephole: {fired}")
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
+        # A build can COMPUTE an answer and then refuse, and the refusal used
+        # to swallow it — `--loop-invariants` on a program the machine proof
+        # generator refuses printed nothing at all, which is most of the
+        # programs `formal/loop_examples/` holds.  The notes ride on the
+        # exception (`formal/build.py::FormalBuildError.notes`).
+        for note in getattr(e, "notes", ()) or ():
+            print(f"build: {note}", file=sys.stderr)
         return 1
     except Exception as e:
         print(f"build: {e}", file=sys.stderr)

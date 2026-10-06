@@ -1,0 +1,379 @@
+{
+ "lean": "Lean (version 4.32.2, arm64-apple-darwin24.6.0, commit f3b06c705e6c85f5314019d5d3baab0fec5b580c, Release)",
+ "programs": {
+  "array_copy": {
+   "family": "array-copy",
+   "invariant": null,
+   "precondition": "0 \u2264 0",
+   "rows": [
+    {
+     "family": "array-copy",
+     "loop": 3,
+     "obligation": "array_copy_loop3_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "array-copy",
+     "loop": 3,
+     "obligation": "array_copy_loop3_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "unknown"
+    },
+    {
+     "family": "array-copy",
+     "loop": 3,
+     "obligation": "array_copy_loop3_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "dcd3944620c73288e9d295970f659e982413110e1734c23353c11f7c1bb4ee49",
+   "status": "unknown",
+   "variant": "- i"
+  },
+  "array_fill": {
+   "family": "array-fill",
+   "invariant": null,
+   "precondition": "0 \u2264 0",
+   "rows": [
+    {
+     "family": "array-fill",
+     "loop": 2,
+     "obligation": "array_fill_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "array-fill",
+     "loop": 2,
+     "obligation": "array_fill_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "unknown"
+    },
+    {
+     "family": "array-fill",
+     "loop": 2,
+     "obligation": "array_fill_loop2_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "630703739bb2b50f4bb6ffd365da76e0b9c0dc5f3c4b4b3fab6a889da3306ca2",
+   "status": "unknown",
+   "variant": "- i"
+  },
+  "collatz": {
+   "family": "collatz",
+   "invariant": null,
+   "precondition": "0 \u2264 0",
+   "rows": [
+    {
+     "family": "collatz",
+     "loop": 2,
+     "obligation": "collatz_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "collatz",
+     "loop": 2,
+     "obligation": "collatz_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "refuted"
+    },
+    {
+     "family": "collatz",
+     "loop": 2,
+     "obligation": "collatz_loop2_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "b756e00254e90e2567ec2cf84ae6b23b6514593bab06bdee233fbbcb125d6d05",
+   "status": "refuted",
+   "variant": "- steps"
+  },
+  "count_acc": {
+   "family": "count-accumulator",
+   "invariant": "(c + - i) = 0",
+   "precondition": "0 \u2264 n",
+   "rows": [
+    {
+     "family": "count-accumulator",
+     "loop": 1,
+     "obligation": "count_acc_loop1_inv1_init",
+     "role": "inv-init",
+     "status": "proved"
+    },
+    {
+     "family": "count-accumulator",
+     "loop": 1,
+     "obligation": "count_acc_loop1_inv1_step",
+     "role": "inv-step",
+     "status": "proved"
+    },
+    {
+     "family": "count-accumulator",
+     "loop": 1,
+     "obligation": "count_acc_loop1_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "count-accumulator",
+     "loop": 1,
+     "obligation": "count_acc_loop1_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "count-accumulator",
+     "loop": 1,
+     "obligation": "count_acc_loop1_inv1_post",
+     "role": "var-post",
+     "status": "proved"
+    }
+   ],
+   "source_sha256": "052e955c9ae14b744abff455c3a9db411dcfbb79fa9db9b1534574900d0e30d7",
+   "status": "proved",
+   "variant": "(n + - i)"
+  },
+  "dec_measure": {
+   "family": "decreasing-measure",
+   "invariant": "(i + (2) * s) = n",
+   "precondition": "0 \u2264 n",
+   "rows": [
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "dec_measure_loop2_inv1_init",
+     "role": "inv-init",
+     "status": "proved"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "dec_measure_loop2_inv1_step",
+     "role": "inv-step",
+     "status": "proved"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "dec_measure_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "dec_measure_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "unknown"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "dec_measure_loop2_inv1_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "e15c8e29be004ec3e670fd1692d6d6ff62ead3de67bc56ac8d8782b4ad099f76",
+   "status": "unknown",
+   "variant": "i"
+  },
+  "gcd_loop": {
+   "family": "modulo-loop",
+   "invariant": null,
+   "precondition": null,
+   "rows": [
+    {
+     "family": "modulo-loop",
+     "loop": 2,
+     "obligation": "gcd_loop_loop2_no_candidate",
+     "role": "no-candidate",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "ab16594696bc52e40a5584dacf5f755fe6d1f04b71280e98919644e821f18afb",
+   "status": "unknown",
+   "variant": null
+  },
+  "linear_search": {
+   "family": "unreadable",
+   "invariant": null,
+   "precondition": null,
+   "rows": [
+    {
+     "family": "unreadable",
+     "loop": 2,
+     "obligation": "linear_search_loop2_unreadable",
+     "role": "no-candidate",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "e8ae49e2339cbac7384cdfe3855715429f340d07cf54e9ebe2e149f50c5ff0e0",
+   "status": "unknown",
+   "variant": null
+  },
+  "max_scan": {
+   "family": "max-scan",
+   "invariant": null,
+   "precondition": "0 \u2264 (5)",
+   "rows": [
+    {
+     "family": "max-scan",
+     "loop": 2,
+     "obligation": "max_scan_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "max-scan",
+     "loop": 2,
+     "obligation": "max_scan_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "max-scan",
+     "loop": 2,
+     "obligation": "max_scan_loop2_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "62d22b6837f97ab78632b1367b2fc750242613146ea238e5938973c564d81c7f",
+   "status": "unknown",
+   "variant": "(- i + (6))"
+  },
+  "min_scan": {
+   "family": "min-scan",
+   "invariant": null,
+   "precondition": "0 \u2264 (5)",
+   "rows": [
+    {
+     "family": "min-scan",
+     "loop": 2,
+     "obligation": "min_scan_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "min-scan",
+     "loop": 2,
+     "obligation": "min_scan_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "min-scan",
+     "loop": 2,
+     "obligation": "min_scan_loop2_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "e34d693611173827ec6f7b60d7209b21caeaa74746eec3ede5602a36e722b43e",
+   "status": "unknown",
+   "variant": "(- i + (6))"
+  },
+  "prod_acc": {
+   "family": "product-accumulator",
+   "invariant": null,
+   "precondition": "0 \u2264 n",
+   "rows": [
+    {
+     "family": "product-accumulator",
+     "loop": 1,
+     "obligation": "prod_acc_loop1_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "product-accumulator",
+     "loop": 1,
+     "obligation": "prod_acc_loop1_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "product-accumulator",
+     "loop": 1,
+     "obligation": "prod_acc_loop1_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "ff703eea70ba5ee3bd42a4bdda8d54142b23cfbe0a837f3d5f16af4d68f10463",
+   "status": "unknown",
+   "variant": "(n + - i)"
+  },
+  "sum_acc": {
+   "family": "sum-accumulator",
+   "invariant": null,
+   "precondition": "0 \u2264 n",
+   "rows": [
+    {
+     "family": "sum-accumulator",
+     "loop": 1,
+     "obligation": "sum_acc_loop1_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "sum-accumulator",
+     "loop": 1,
+     "obligation": "sum_acc_loop1_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "sum-accumulator",
+     "loop": 1,
+     "obligation": "sum_acc_loop1_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "6a66ae359f2ea5132fb484654ec4b8df1aeb0fb00eee1c5d7ff2ad0cd63f8560",
+   "status": "unknown",
+   "variant": "(n + - i)"
+  },
+  "while_lt_acc": {
+   "family": "decreasing-measure",
+   "invariant": null,
+   "precondition": "0 \u2264 n",
+   "rows": [
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "while_lt_acc_loop2_var1_drop",
+     "role": "var-drop",
+     "status": "proved"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "while_lt_acc_loop2_var1_nonneg",
+     "role": "var-nonneg",
+     "status": "proved"
+    },
+    {
+     "family": "decreasing-measure",
+     "loop": 2,
+     "obligation": "while_lt_acc_loop2_post",
+     "role": "var-post",
+     "status": "unknown"
+    }
+   ],
+   "source_sha256": "33a09eed9d7b5c10ba335ca83f4bee83d2f5b8aac71c27f8c25b9966d54b27b3",
+   "status": "unknown",
+   "variant": "(n + - i)"
+  }
+ },
+ "tag": "formal-loop-invariants-v1",
+ "written": "2026-10-06T05:07:12Z"
+}

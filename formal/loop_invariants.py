@@ -204,10 +204,6 @@ def _af_scale(p, k):
     return ({n: v * k for n, v in p[0].items()}, p[1] * k)
 
 
-def _af_is_const(form):
-    return not form[0]
-
-
 def affine_form(node, known):
     """`node` as `(form, None)`, or `(None, reason)` when it is not affine.
 
@@ -321,12 +317,6 @@ def show_form(form, names, rename=None):
     if len(terms) == 1:
         return terms[0]
     return "(" + " + ".join(terms) + ")"
-
-
-def show_lin(coeffs, names):
-    """A synthesised coefficient vector as Lean `Int` source."""
-    return show_form(({n: coeffs[i] for i, n in enumerate(names)
-                       if coeffs[i]}, Fraction(0)), names)
 
 
 # ── rational linear algebra ──────────────────────────────────────────────────
@@ -1209,11 +1199,6 @@ def _int_of(node, rel, what):
     return show_form(form, rel.names), None
 
 
-def _cmp_le(left, right):
-    """`Int` `<=`, spelled the one way, so no obligation spells it twice."""
-    return f"{left} ≤ {right}"
-
-
 def _offset(form, const):
     """`form + const`: a candidate's two halves as one form."""
     return _af_add(form, const)
@@ -1912,22 +1897,35 @@ def _guard_holds(guard_ir, env):
 
 
 def _arms_of(shape):
-    """The body's straight-line ARMS: `[(condition, [statements])]`.
+    """The body's straight-line ARMS: `[(conditions, [statements])]`.
 
-    An `if` in the body doubles the arms, and each arm is its own path — NOT a
-    concatenation of them.  Concatenating would apply `v = v // 2` and
-    `v = 3 * v + 1` in the same iteration, which is a state no iteration of
-    `collatz` is in, and a search that walked such a state could only report on
-    a program nobody wrote.
+    An `if` is REPLACED by the statements of one arm, in place — not kept
+    alongside them.  Two failures this shape had to be taught, and both of them
+    read as "the search found nothing":
+
+      * appending every arm's statements concatenates them, so
+        `collatz.mojo` would apply `v = v // 2` and `v = 3 * v + 1` in the same
+        iteration — a state no iteration of that loop is in; and
+      * keeping the `if` in the plan and appending its arms makes the ELSE arm
+        still contain an `IfStmt`, which `_one_step` refuses, so every input of
+        `collatz.mojo` was a skip (measured: 11 of 12).
+
+    `conditions` is the chain of enclosing `if` tests, in order, and
+    `_one_step` evaluates them against the state to choose the arm.
     """
-    arms = [(None, list(shape.body))]
+    arms = [([], [])]
     for st in shape.body:
         if type(st).__name__ != "IfStmt":
+            for _conds, plan in arms:
+                plan.append(st)
             continue
         nxt = []
-        for _cond, plan in arms:
+        for conds, plan in arms:
             for cond, sub in _if_paths_pairs(st):
-                nxt.append((cond, plan + list(sub or [])))
+                nxt.append((conds + ([cond] if cond is not None else []),
+                            plan + list(sub or [])))
+        if len(nxt) > MAX_BRANCHES:
+            return [([], list(shape.body))]
         arms = nxt
     return arms
 
@@ -1944,8 +1942,33 @@ def _if_paths_pairs(st):
     return arms
 
 
+def _word_arith(node):
+    """`//` spelled `/`, for `formal/contracts.py`'s expression IR.
+
+    That module's `_ARITH_OPS` is `{+ - * / %}`, so the source's `//` — which
+    is what `collatz.mojo` writes, and what `formal/arm64_proof_gen.py`'s own
+    model calls `UInt64.div` — has no reading there and every `//` was a skip.
+    The rewrite is on the NODE and it is one character, so the search keeps
+    using the one IR reader rather than growing a second one for an operator
+    whose IR tag already exists and whose evaluation is already the truncating
+    one (`_eval_of`'s `/` is `a // b`, measured).
+
+    The semantics are the module's WORD semantics, so `-7 // 2` reads as
+    `(-7 mod 2^64) // 2` read back SIGNED — which is what the machine computes
+    and what `formal/contracts.py`'s docstring already says its comparison
+    spelling is there for.
+    """
+    if type(node).__name__ == "BinaryOp" and getattr(node, "op", None) == "//":
+        return F.BinaryOp("/", node.left, node.right, 0, 0)
+    return node
+
+
 def _one_step(env, arms, shape, rel):
     """One iteration, evaluated from the loop's own statements.
+
+    `env` is the search state and carries the loop's whole scalar scope, which
+    is why a store to a variable the RELATION excluded (a non-linear
+    accumulator) still steps: `refute` builds that state over `shape.names`.
 
     The arm is CHOSEN by the `if` conditions, each evaluated by
     `formal/contracts.py`'s evaluator over the state; an `if` whose condition
@@ -1955,26 +1978,22 @@ def _one_step(env, arms, shape, rel):
     fuel = [CT.SEARCH_FUEL]
     names = rel.names
     chosen = None
-    for cond, plan in arms:
-        if cond is None:
-            continue
-        ir = CT._Reader(set(names) | set(env)).truth(cond)
-        if ir is None:
-            return None
-        try:
-            if CT._eval_of(ir, _word_env(env), fuel):
-                chosen = plan
-                break
-        except Exception:
-            return None
-    # The FLATTENING matters and was the bug: `arms` is a list of
-    # `(condition, [statements])`, so `[plan for cond, plan in arms …]` is a
-    # list of LISTS and iterating it hands `_one_step` a list where it expects a
-    # statement.  Every input was then a skip, and a skip looks exactly like
-    # "no counterexample" — which is why the `tilt` control found nothing on
-    # `count_acc` while the offset control still fired at iteration 0.
-    stmts = (list(chosen) if chosen is not None
-             else [s for _cond, plan in arms if _cond is None for s in plan])
+    for conds, plan in arms:
+        ok = True
+        for cond in conds:
+            ir = CT._Reader(set(names) | set(env)).truth(cond)
+            if ir is None:
+                return None
+            try:
+                if not CT._eval_of(ir, _word_env(env), fuel):
+                    ok = False
+                    break
+            except Exception:
+                return None
+        if ok:
+            chosen = plan
+            break
+    stmts = list(chosen if chosen is not None else arms[0][1])
     if not stmts:
         return None
     reader = CT._Reader(set(env))
@@ -1992,7 +2011,7 @@ def _one_step(env, arms, shape, rel):
             value = F.BinaryOp(op, F.IdentExpr(target.name), st.value, 0, 0)
         else:
             value = st.value
-        ir = reader.value(value)
+        ir = reader.value(_word_arith(value))
         if ir is None:
             return None
         try:
@@ -2050,6 +2069,16 @@ def refute(shape, rel, cand, inputs=None, steps=SEARCH_STEPS, perturb=None,
     Returns `(witness or None, skipped)`.
     """
     names = rel.names
+    # The SEARCH STATE carries every scalar variable the loop mentions, not just
+    # the relation's.  The candidate only ever mentions the relation's names —
+    # that is what makes it admissible — but the loop's BODY assigns the others,
+    # and `_one_step` returns None for a store to a name the state does not
+    # carry.  Measured: with the relation's names, `prod_acc`'s search skipped
+    # 11 of its 12 inputs because the body's `acc = acc * (i + 2)` names a
+    # variable the relation had excluded for being non-linear — and a skip
+    # reads as "no counterexample".
+    live = [n for n in shape.names
+            if type(shape.init.get(n, n)).__name__ != "ListExpr"]
     params = [p[0] for p in (getattr(shape.fn, "params", None) or [])]
     scale = Fraction(perturb) if perturb else Fraction(1)
     coeffs = {n: Fraction(v) * scale for n, v in cand.coeffs.items()}
@@ -2071,14 +2100,16 @@ def refute(shape, rel, cand, inputs=None, steps=SEARCH_STEPS, perturb=None,
     else:
         lhs = _af_add((coeffs, Fraction(0)), _af_scale(cand.const, scale))
         claim_form = ({}, Fraction(0))
-    guard_ir = _guard_compare(shape.guard, names)
+    guard_ir = _guard_compare(shape.guard, live)
     arms = _arms_of(shape)
+    if not arms:
+        return None, len(inputs or SEARCH_INPUTS)
     skipped = 0
     for value in (inputs if inputs is not None else SEARCH_INPUTS):
         env = {p: Fraction(value) for p in params}
         bad = False
-        reader = CT._Reader(set(names))
-        for nm in names:
+        reader = CT._Reader(set(live))
+        for nm in live:
             entry = shape.init.get(nm, nm)
             if isinstance(entry, str):
                 env.setdefault(nm, Fraction(value))
@@ -2284,11 +2315,6 @@ def family_of(shape):
                             f"`{_show_node(shape.guard)}` this layer read")
 
 
-def _first(text, ch):
-    i = text.find(ch)
-    return text[max(0, i - 8):i + 8] if i >= 0 else ch
-
-
 # ── one loop's verdict ───────────────────────────────────────────────────────
 
 class LoopVerdict:
@@ -2378,16 +2404,29 @@ def check_loop(shape, source="<source>", lean=None):
     if not shape.usable:
         ob = Obligation(
             f"{getattr(shape.fn, 'name', '?')}_loop{shape.index}_unreadable",
-            "no-candidate", "True", [], [], [],
+            "no-candidate", [], [], "True", [],
             why=("this loop is not one this layer's obligations are about: "
                  + shape.unusable))
         ob.status = UNKNOWN
         ob.detail = shape.unusable
+        # An UNREADABLE loop still emits a file, and that is the point: the
+        # report, the ledger and the generated `.lean` all have to be able to
+        # say "this loop is not one of ours, and here is why".  Returning a
+        # verdict with no `proof` left the emitted file empty for exactly the
+        # shapes whose reason is the interesting part — `linear_search.mojo`'s
+        # `return` inside the body — and a consumer reading `verdict.proof` got
+        # an empty string where a sentence belonged.
+        header = (f"/-!\n# Loop {shape.index} of "
+                  f"`{getattr(shape.fn, 'name', '?')}` — NOT READ\n\n"
+                  f"    Source: {source}\n"
+                  f"    Kind: {shape.kind}\n\n"
+                  f"    {shape.unusable}\n-/")
+        text_out, _index = proof_text([ob], header)
         return LoopVerdict(fn=shape.fn, index=shape.index,
                            family="unreadable",
                            why_family=shape.unusable, shape=shape, rel=None,
                            invariants=[], variants=[], obligations=[ob],
-                           status=UNKNOWN)
+                           status=UNKNOWN, proof=text_out, header=header)
     rel = Relation(shape)
     obligations, invs, variants, every_inv, every_var, precondition = \
         build_obligations(shape, rel, source)
@@ -2430,20 +2469,40 @@ def check_loop(shape, source="<source>", lean=None):
     return verdict
 
 
-def _attach_witness(obligations, cand, witness):
-    """Point every obligation about this candidate at the counterexample.
+#: Which obligation ROLES a refutation of a candidate is evidence against.
+#: Not all of them, and the split is the whole point: a variant's refutation is
+#: "the form is negative", which says nothing about the DROP — `- steps` falls
+#: by exactly 1 forever and is negative by the second iteration, and marking
+#: `var-drop` REFUTED on that evidence reported a theorem Lean had closed as
+#: refuted by a statement Lean had not been asked.  An invariant's refutation is
+#: "the form's value differs from its claim", which is precisely what `inv-init`
+#: and `inv-step` are about.
+_REFUTED_BY_ROLE = {
+    "invariant": ("inv-init", "inv-step"),
+    "variant": ("var-nonneg",),
+}
 
-    Only the obligations that CANDIDATE appears in.  A refutation found for
-    `total = i` says nothing about `total = 2 * i`, and marking the whole loop
-    REFUTED from one candidate would make the report name a theorem it has not
-    looked at.
+
+def _attach_witness(obligations, cand, witness):
+    """Point the obligations this refutation is evidence against at it.
+
+    Two restrictions, and both are needed:
+
+      * only the obligations about THAT candidate — a refutation found for
+        `c = i` says nothing about a different candidate, and marking the whole
+        loop REFUTED from one would make the report name a theorem it has not
+        looked at; and
+      * only the ROLES the refutation is evidence against (`_REFUTED_BY_ROLE`),
+        because "the variant is negative" and "the variant does not decrease"
+        are two different claims.
     """
     said = (f"the bounded search reached a state at which `{cand.text}` is "
             f"{witness['form']} against the claimed {witness['claimed']}, "
             f"after {witness['iterations']} iteration(s) from the entry value "
             f"{witness['input']}")
+    roles = _REFUTED_BY_ROLE.get(cand.role, ())
     for ob in obligations:
-        if ob.candidate is not cand:
+        if ob.candidate is not cand or ob.role not in roles:
             continue
         ob.witness = witness
         if ob.status in (None, PROVED, UNKNOWN):
@@ -2534,6 +2593,11 @@ def _file_header(shape, rel, source, family, fwhy, every_inv, every_var,
 def report_lines(verdicts, verbose=False):
     """One line per loop and one per obligation, in that order.
 
+    The module's LIBRARY surface, and the reason it exists rather than a
+    `print` inside `check_loop`: a verdict a caller cannot render is a verdict
+    the caller has to re-derive, and `tools/formal_sweep_causes.py`'s whole
+    lesson is that rows nobody renders are rows nobody reads.
+
     A reader's two questions are "what did this find" and "what did it not
     decide", so the per-loop line names the candidates in one clause and the
     per-obligation lines follow in emission order.  Every obligation gets a
@@ -2544,6 +2608,23 @@ def report_lines(verdicts, verbose=False):
     out = []
     for v in verdicts:
         out.append(v.summary())
+        # The candidates that were FOUND but NOT DISCHARGED, and what the
+        # bounded search made of each.  `build_obligations` discharges one
+        # candidate per role and reports the rest, and "reports" has to mean
+        # more than "does not appear in the header": a refuted candidate is a
+        # finding (`collatz`'s only variant is refuted at its second iteration)
+        # and a skipped one is a gap (`array_fill`'s body has a subscript the
+        # source evaluator cannot read), and neither is visible anywhere else.
+        chosen = {(c.role, c.text) for c in v.invariants + v.variants}
+        for cand in v.candidates:
+            if (cand["role"], cand["candidate"]) in chosen:
+                continue
+            said = ("REFUTED" if cand["witness"] else
+                    f"skipped {cand['skipped']} input(s), which is NOT agreement"
+                    if cand["skipped"] else "no counterexample among the "
+                    "inputs the search could run")
+            out.append(f"    also found, NOT discharged: {cand['role']} "
+                       f"`{cand['candidate']}` — {said}")
         for ob in v.obligations:
             out.append(f"    {ob.status or UNKNOWN:<8} {ob.role:<11} "
                        f"{ob.name}")
@@ -2600,6 +2681,13 @@ def ledger_rows(verdicts, source_sha256, arch="arm64", lean_version=""):
 
 def synthesize(source, name=None, text=None):
     """The loop verdicts for one source, WITHOUT running Lean.
+
+    The module's other library entry, next to `check_function` for a caller that
+    already has the AST.  `formal/build.py::_loop_invariant_verdicts` and
+    `test_formal_loop_invariants.py` both go through `check_function` directly,
+    because each wants the `LoopVerdict` objects rather than the plain dicts the
+    build publishes — so this wrapper has no caller in this tree and is here as
+    the obvious thing a script wants.
 
     Every obligation comes back UNKNOWN with "no Lean run" — which is the honest
     answer and is what a caller with no toolchain gets, and what
