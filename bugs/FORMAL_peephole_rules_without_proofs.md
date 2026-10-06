@@ -1,5 +1,64 @@
 # `arm64/copy_chain`'s liveness check is wrong for a loop, and no x86-64 rule has a proof
 
+**Status 2026-10-05 (`work/formal53-docs`): §1 is CLOSED — `arm64/copy_chain` is
+enabled, and the diagnosis this document gave for it was wrong in a way worth
+recording, because it sent the reader to the right PLACE for the wrong reason.**
+§2 and §3 are unchanged and are the remaining work. §4 unchanged.
+
+## What landed, and what the defect actually was
+
+The doc's §1 said the liveness check was "wrong for a loop" and that the
+backward-edge fixpoint "did not close" it, and pointed at
+`_Ctx.live_after`. The fixpoint was not failing to converge — **it was never
+run, because it never found an edge to relax.** There were four defects, and
+three of them are in `_successors`' inputs rather than in the dataflow:
+
+| # | defect | why the doc read as a liveness bug |
+|---|---|---|
+| 1 | **`_ARM64_BRANCHES`' displacement `shift` was wrong in all six rows** — `2` where A64 puts the field (`imm26` at bit 0, `imm19`/`imm14` at bit 5) | `arm64_branch_target` returned garbage for every branch in the corpus, so `_back_edges` (which filters `t <= i`) found no backward edge anywhere and the relaxation was a no-op |
+| 2 | **branch displacements were never re-encoded.** `Assembler.resolve()` ends with `relocs.clear()`, so by the time the pass runs the relocation table is EMPTY; `_Remap` moves labels and stubs, and a displacement is neither | the rule fired correctly and the image branched into the wrong place — a *codegen* symptom wearing a liveness symptom's clothes |
+| 3 | **six read/write table rows disagreed**, and `B`/`B.cond` had no read row at all. `SUB Xd, Xn, #imm` was covered by a row reading `0xD10000000` (nine hex digits, so it matched nothing); `B`/`B.cond` read the flags, and with no row they answered "every register" | unknown on the WRITE side is every register, and every register live at the top of a loop are both the *permissive* answers — so a rule fires rather than declining |
+| 4 | the dataflow was linear, and `use` was `reads - writes` rather than `reads` | this one really is the doc's §1: `mul x0, x0, x1` reads the PRIOR `x0` |
+
+**#1 is the one that made the doc wrong, and it is worth stating as the general
+lesson: a liveness analysis whose CFG comes from a decoder is only as good as
+that decoder, and a decoder that is wrong in the direction of "no edges" looks
+exactly like a dataflow that does not converge.** §1's own §"Where to look" said
+*"`arm64_branch_target` returns an INDEX, and it is worth asserting against one
+hand-computed loop rather than trusting the sign extension of each field
+width"* — that was the right instinct and the wrong target: the sign extension
+was fine, the SHIFT was not, and no amount of converging the fixpoint would
+have found it. The loop was the third defect in, not the first.
+
+Measured, arm64, **every** `formal/examples` file built both ways and run:
+
+| | before | after |
+|---|---|---|
+| examples whose `--opt` build disagreed with the plain one | **12 of 93** | **0 of 93** |
+| `arm64/copy_chain` firings | 0 (in `PENDING_RULES`) | **107** |
+| `arm64/mov_self` firings | 9 | 9 |
+
+`PENDING_RULES` is now **empty**, and `sqsum.mojo` answers 129 both ways
+(129 = 385 mod 256; the unoptimised build's own answer). `test_formal_peephole.py`
+is 40/40, including the end-to-end differential over the whole corpus, and 19 of
+those checks are new: every branch form's decode against `formal/arm64.py`'s own
+encoders (forward and backward), the read/write table agreement in both
+directions, and the displacement re-patch in all three shapes — a branch above
+the deletion, one below it, two below it — plus the `BL` case, which has no
+fallthrough *edge* (control returns) but does have a real displacement.
+
+**What cost it in wins.** 499 of the 633 `ADD (immediate)` instructions this
+backend emits add zero, so `copy_chain` is still the rule with the measured win;
+§1's estimate of 44 rewrites over 2498 arm64 instructions (3.4%) was taken when
+the rule could not fire, and 107 firings is the number now.
+
+**One thing the fix does NOT do, stated because #3 was a hole in the same
+place.** The read/write tables are still hand-written, and #3 was found by a
+table-agreement test rather than by anything about the pass: nothing checks a
+class against `lib/ProofLib.lean`'s `arm64_step` the way
+`formal/arm64_proof_gen.py`'s `check_step_conds` does for `_STEP_CONDS`. That
+is the durable version of #3 and it is not done here.
+
 ## What this is
 
 `formal/peephole.py` is the verified peephole pass (landed 2026-10-05,
@@ -15,7 +74,16 @@ one is a rule with no theorem at all — and the difference is why the registry
 has `RULES` (enabled) and `PENDING_RULES` (proved, matcher unsound) rather
 than one list with exceptions in it.
 
-## 1. `arm64/copy_chain` — proved, matcher wrong for a loop
+## 1. `arm64/copy_chain` — proved, matcher wrong for a loop — **FIXED, see above**
+
+Everything in this section is the diagnosis as it stood before
+`work/formal53-docs`, kept because the "Where to look" note below was closer
+to the truth than the section's own conclusion. **Its conclusion — that the
+liveness check was wrong for a loop and needed a better relaxation — was
+wrong**: the branch DECODE was wrong, so the relaxation had no edges to relax,
+and two further defects (the displacement re-patch and the table
+disagreements) were producing codegen failures that all looked like liveness
+failures. Read the status section above, not this one, for what to do next.
 
 `peephole_arm64_copy_chain` (`lib/Peephole.lean`) says that `mov xa, xb ;
 mov xc, xa` and `mov xc, xb` leave the machine model agreeing on every
