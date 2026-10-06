@@ -7,11 +7,13 @@ chains), against `lib/ProofLib.lean`'s `arm64_go_exit` and `lib/work.lean`'s
 `rec1_glue_gen` / `go_exit_step`. **arm64 only** — the x86-64 generator proves a
 different thing over `lib/X86.lean` and shares none of this code.
 
-**Status: OPEN, measured, NOT FIXED. Re-measured 2026-10-05 twice over: the
-attribution HOLDS and is now re-derivable with a committed instrument, and
-BOTH of the doc's remaining next steps are REFUTED — item 1's by a measurement
-that is the shape it proposed, item 2's already was.** Below, in the order a
-reader needs them:
+**Status: OPEN, measured, NOT FIXED. Re-measured 2026-10-05 three times over:
+the attribution HOLDS and is re-derivable with a committed instrument, and ALL
+THREE of the doc's remaining next steps are now REFUTED or RE-AIMED — item 1's
+by a measurement that is the shape it proposes, item 2's already was, and the
+`lib/ProofLib.lean` memory window this Status proposed last by a measurement
+that splits the flow's cost in half and puts the window on the wrong half.**
+Below, in the order a reader needs them:
 
 * **THE PREFIX SWEEP IS IN THE TOOL, and it re-derives the attribution this
   document was written from.** `tools/formal_proof_shape.py --mode prefix` is
@@ -33,6 +35,77 @@ reader needs them:
   it is now kept). `--list-groups` prints the 346 boundaries with **no Lean run
   at all**, which is the half a reader wants first: the full sweep is 346 runs
   of 2-20 s.
+* **HALF OF THE FLOW'S COST IS THE KERNEL, NOT THE TACTIC — and this is the
+  measurement that re-aims the next step.** `tools/formal_proof_shape.py
+  --mode flows` checks ONE group twice: as generated, and with every terminal
+  value flow's line replaced by `all_goals sorry`. **The two files differ by the
+  flows and nothing else** — same walk, same 40 hypotheses, same block chain,
+  same initial state — so the difference is the flows' own cost, attributed
+  rather than guessed. On `bitops_compiles_correctly_universal` (group 343,
+  `--runs 3`, every run printed and the report is the median):
+
+  | variant | wall | `simp` | `tactic execution` | `type checking` |
+  |---|---|---|---|---|
+  | as generated | 18.69 / 18.43 / 18.17 s | 8.31 / 8.40 / 7.99 s | 4.01 / 4.05 / 3.66 s | 7.95 / 7.72 / 7.78 s |
+  | flows -> `sorry` | 10.12 / 10.94 / 10.92 s | 4.69 / 4.92 / 5.05 s | 3.57 / 3.94 / 4.22 s | 3.87 / 4.02 / 4.04 s |
+  | **MARGINAL** | **+7.51 s** | **+3.39 s** | **+0.07 s** | **+3.76 s** |
+
+  **So the 7.8 s this document calls "the terminal value flow" is +7.5 s — the
+  attribution is right — and it is ~45 % `simp` and ~50 % the KERNEL
+  type-checking the term `simp +decide only` produced.** The second half had
+  never been measured, and **no simp-set change reaches it**: it is the cost of
+  the rewrite chain as a TERM. `tactic execution` — every tactic other than
+  `simp`, so the `bv_decide`/`grind`/`omega` closers the flow ends with — is
+  **+0.07 s**, so those are free here and are not a target either.
+
+* **AND `+decide` IS NOT THE PAYLOAD, which was the obvious next guess.** The
+  marginal above is a term-size cost, so the first question is whether the term
+  is big because `+decide` embeds a computed value in it (`of_decide_eq_true` over
+  a huge expression). **It is not.** Replacing `simp +decide only` with `simp
+  only` in the same prefix leaves the file elaborating with **0 `sorry`** — the
+  `simp only` and the `all_goals try rfl` after it close the goals themselves —
+  and costs the same:
+
+  | the flow's line | wall | `simp` | `type checking` | `sorry` |
+  |---|---|---|---|---|
+  | `simp +decide only [...]` (as generated) | 21.76 s | 9.66 s | 9.47 s | 0 |
+  | `simp only [...]` | 20.99 s | 9.22 s | 8.97 s | 0 |
+
+  So the payload is the `simp`'s own rewrite chain and not a `Decidable`
+  instance, and "stop using `+decide`" is not a fix. Reproduce by writing the
+  prefix out (`--mode flows --keep`) and editing those four lines.
+
+* **SO THE `lib/ProofLib.lean` MEMORY WINDOW THIS STATUS PROPOSED IS RE-AIMED,
+  and the reason is measurable: it was aimed at the half that is not the cost.**
+  The bullet below says the next step is "a per-block MEMORY WINDOW ... so the
+  flow reads `b4`'s two slots from `s_2.mem` instead of from the whole stack".
+  That is a *simp-set* change — more rewrites for the flow's one `simp` — and
+  the flow's `simp` is **+3.39 s of the +7.51 s**. **What the measurement says is
+  that the other +3.76 s is the kernel checking whatever the `simp` emits, and
+  the only lever on that is emitting FEWER, BIGGER steps.** A library lemma does
+  shorten the chain, because one rewrite by an already-checked lemma is one
+  `Eq.trans` where normalizing a `UInt64` read through a store stack is many, so
+  the window is still the right SHAPE — but the arithmetic it was promised
+  against was wrong, and **it should not be costed at more than its own +3.4 s
+  until a run says how much of the +3.76 s it removes.**
+
+* **AND THE GOAL THE DOC HAS BEEN MEASURING IS 0.3 % OF WHAT `--mode goal`
+  PRINTS.** `--mode goal --which 1` reports "the largest is 23 856 chars, 307
+  lines, 33 fully-expanded state literal(s)", and the memory-window argument
+  below is built on those numbers. **Split that print and the goal is its FIRST
+  LINE and 83 characters; the other 23 773 are CONTEXT** — 40 hypotheses, of
+  which the `hbnd`/`hpc_0`/`hrun_0`/`hcert_0` group each embed a 33-field
+  `Arm64State` literal. Those 33 "literals" are the ELABORATOR's pretty-print
+  expansion of `{ Arm64State.init n 4294967968 with pc := ..., x30 := ... }`,
+  which the emitter already writes in the compact `with` form (18 occurrences of
+  `x30 :=` in the 255 KB file, every one inside a `with`). **So the term handed
+  to the flow contains no `mem_read_u64` and no `mem_write_u64` at all** — the
+  memory enters when `simp` rewrites `s_2` through `hsid_2`, which is why
+  "unfold one block and count the writes" measures an INTERMEDIATE state rather
+  than the flow's input. **The measurement is not wrong; it is a measurement of
+  something one step downstream of the cost**, and the number to hold is the
+  marginal above.
+
 * **ITEM 1's NEXT STEP IS NOT WORTH DOING, and the measurement is the shape it
   proposes.** §"What is actually left" item 1 says to state the terminal value
   flow as "one `{stem}_b{k}_x0` per block, proved from that block's own short
@@ -251,9 +324,38 @@ python3 tools/memslot.py --gb 8 --label shape -- \
   python3 tools/formal_proof_shape.py formal/examples/bitops.mojo \
     --mode prefix --group-of bitops_compiles_correctly_universal
 
+# WHAT THE TERMINAL VALUE FLOWS COST, attributed rather than guessed: the
+# same group checked as generated and with every flow's line replaced by
+# `all_goals sorry`, so the two files differ by the flows and nothing else.
+# Three runs each because the difference is ~7 s of ~19 s and a single run
+# cannot tell that from the machine; the report is the median.
+python3 tools/memslot.py --gb 12 --label shape -- \
+  python3 tools/formal_proof_shape.py formal/examples/bitops.mojo \
+    --mode flows --group-of bitops_compiles_correctly_universal --runs 3
+
+# ...and the +decide ablation, which is a hand edit of the file that mode
+# writes: `--keep` leaves it on disk instead of in a temp dir.
+python3 tools/memslot.py --gb 12 --label shape -- \
+  python3 tools/formal_proof_shape.py formal/examples/bitops.mojo \
+    --mode flows --group-of bitops_compiles_correctly_universal --keep
+
 # The instrument's own text handling, with no Lean at all.
 python3 test_formal_proof_shape.py
 ```
+
+**`--mode flows` is the A/B, and its DISCARD is the load-bearing part**: the
+replacement takes out the flow's WHOLE line, because leaving the 1.7 KB simp-set
+list behind gives `all_goals sorry [h8, mojo, bitops_go, ...]` — still a valid
+tactic, still closing every goal, and measured at **12.98 s against 4.4-5.2 s**
+for the clean replacement on the same machine (`type checking` 4.56 s against
+0.97 s). It is not a slower instrument, it is a different proof, and a reader told
+"the flows are gone" has to be able to trust that. Five Lean-free tests in
+`test_formal_proof_shape.py::TestStrippingFlows` pin the discard — including that
+every line the flows do not occupy is byte-identical between the two files, which
+is the claim that rots silently. The mode reads `lean --profile`'s CUMULATIVE
+summary, which is on **stderr** and is the only place `type checking` appears at
+all; the per-call reader `--mode profile` uses is on stdout and needs the word
+`took`, so the two are disjoint and summing them would double count.
 
 **The prefix sweep is `--mode prefix`, and the constraint that makes prefixes
 (rather than deletions) the right unit is §"The measurement"'s and is now kept

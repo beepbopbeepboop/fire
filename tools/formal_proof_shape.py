@@ -24,6 +24,16 @@ This one answers the two questions a proof-cost bug needs and breadth cannot:
     nobody can act on; the goal is what says whether the cost is TERM SIZE or
     TACTIC COUNT, and those need different fixes.
 
+  * `--mode flows` — **what the terminal value flows COST**, by checking one
+    group twice: as generated, and with every flow's line replaced by
+    `all_goals sorry`. The two files differ by the flows and nothing else, so
+    the difference is attributed instead of inferred from a tactic's share of a
+    total — and it reads `lean --profile`'s cumulative summary, which is the
+    only place `type checking` is printed at all. That is how
+    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    learned that ~50 % of its 7.8 s flow is the kernel checking the term the
+    flow's `simp` produced, which no simp-set change reaches.
+
 * `--mode prefix` — **which GROUP of the file costs what**, by re-checking the
     file truncated at each top-level declaration. The bug doc attributes 83% of
     one generated proof to ONE declaration and got that number from a scratch
@@ -53,6 +63,12 @@ deliberately pays for it exactly once.
 
 WHAT THE MODES CANNOT DO
 ------------------------
+`flows` changes what is proved in the SECOND variant and says so on screen: the
+stripped file carries `sorry` where the flows were, which is a different theorem
+and is why the report prints its `sorry` warnings beside the timings. The point
+of the A/B is the DIFFERENCE, and the difference is only meaningful because both
+halves are real Lean files that elaborate.
+
 Neither mode changes what is proved — `goal` replaces one tactic with
 `trace_state` and a leaf `sorry`, so the file it elaborates is NOT the file the
 compiler would ship, and the profile it prints is the cost of the instrumented
@@ -334,6 +350,142 @@ def _prefix_sweep(text, groups, lib_dir, at, group_of, list_only=False,
                     "one a reader has to notice is wrong"}
 
 
+# ── flows mode ─────────────────────────────────────────────────────────────
+
+def profile_totals(res):
+    """`lean --profile`'s CUMULATIVE buckets, as `{label: seconds}`.
+
+    `parse_profile` above reads the per-CALL lines (`simp took 0.9s`, one per
+    call, which is what a "which tactic" question wants) and this reads the
+    summary block, which is a different set of labels — `simp`, `tactic
+    execution`, `type checking` — and the summary is the only place
+    `type checking` appears at all. The two are not summed together: a
+    cumulative bucket already contains its callees, so adding them double
+    counts, and the one number that is NOT cumulative is the wall the tool
+    measured.
+
+    The summary lands on STDERR, not stdout. That is worth stating because the
+    per-call lines are on stdout, so a reader who concatenates both gets two
+    different profiles of the same run and has to work out which is which.
+    """
+    out = {}
+    for line in (res.stderr or "").split("\n"):
+        s = line.strip()
+        parts = s.rsplit(" ", 1)
+        if len(parts) != 2:
+            continue
+        m = re.fullmatch(r"([0-9.]+)(ms|s)", parts[1])
+        if m:
+            out[parts[0]] = (float(m.group(1)) / 1000.0
+                             if m.group(2) == "ms" else float(m.group(1)))
+    return out
+
+
+def strip_flows(text):
+    """`text` with every terminal value flow's closing `simp` line replaced by
+    `all_goals sorry`, and everything else byte-identical.
+
+    This is the A/B half of `--mode flows`, and the unit is deliberate: the
+    flows are the only thing that is REPLACED, so the two files differ by the
+    flows and nothing else — the walk, its 40 hypotheses, the block chain and
+    the initial state are the same text in both. Replacing a flow with `sorry`
+    rather than deleting its lines matters for the same reason `prefix` truncates
+    rather than deletes: `sorry` is a valid tactic at that point, so what the
+    second run measures is the file MINUS its flows and not Lean's recovery from
+    a hole in the tactic sequence.
+
+    **The whole LINE goes, not just its `simp +decide only` prefix.** Leaving
+    the flow's 1.7 KB simp-set list behind turns the variant into `all_goals
+    sorry [h8, mojo, bitops_go, ...]`, which still elaborates and still closes
+    every goal -- and which measured **12.98 s against 4.4-5.2 s** for the clean
+    replacement on the same machine, with `type checking` 4.56 s against 0.97 s.
+    So it is not a slower instrument, it is a DIFFERENT proof: a reader told
+    "flows -> sorry" has to be able to trust that the flows are gone, and an
+    instrument whose own argument list is 1.7 KB per flow is measuring that
+    argument list too.
+    """
+    lines = text.split("\n")
+    at = flow_lines(text)
+    indent = TERMINAL_FLOW[:len(TERMINAL_FLOW) - len(TERMINAL_FLOW.lstrip())]
+    for i in at:
+        lines[i] = indent + "all_goals sorry"
+    return "\n".join(lines), len(at)
+
+
+def _flows_ab(text, groups, lib_dir, group_of=None, at=None, runs=2,
+              keep=False):
+    """The terminal value flows' MARGINAL cost, by checking one group twice.
+
+    `--mode profile` says a file costs N seconds and `--mode goal` says what the
+    Nth flow is trying to prove; neither says how much of the N the flows are,
+    and that is the number a fix has to be worth. So this checks the same
+    prefix twice — as generated, and with every flow replaced by `sorry` — and
+    reports both profiles, so the difference is attributed rather than guessed.
+
+    The default group is the LAST one, because that is where the walk's whole
+    hypothesis chain is in scope: a flow in a short prefix has almost no context
+    and a cost measured there says nothing about a flow in a long one.
+    """
+    if not groups:
+        return {"groups": 0, "note": "no top-level declaration found"}
+    k = len(groups)
+    if group_of:
+        want = [j for j, (_i, n) in enumerate(groups, 1) if n == group_of]
+        if not want:
+            return {"groups": len(groups),
+                    "note": "no declaration named %r" % (group_of,)}
+        k = want[0]
+    elif at:
+        k = min(max(int(str(at).split(",")[0].strip()), 1), len(groups))
+    line, name = groups[k - 1]
+    body = prefix_text(text, k)
+
+    out = {"groups": len(groups), "group": k, "line": line + 1, "name": name,
+           "runs": runs, "variants": []}
+    for label, variant in (("as generated", body),
+                           ("flows -> sorry", strip_flows(body)[0])):
+        tmpdir = tempfile.mkdtemp(prefix="proofshape-flows-")
+        try:
+            path = os.path.join(tmpdir, "flows.lean")
+            with open(path, "w") as f:
+                f.write(variant)
+            walls, simp, tac, tchk, sorries = [], [], [], [], 0
+            for _r in range(max(1, int(runs))):
+                res = run_lean_raw(path, lib_dir, extra_args=("--profile",))
+                buckets = profile_totals(res)
+                walls.append(round(res.wall_s, 2))
+                simp.append(round(buckets.get("simp", 0.0), 2))
+                tac.append(round(buckets.get("tactic execution", 0.0), 2))
+                tchk.append(round(buckets.get("type checking", 0.0), 2))
+                sorries = max(sorries, (res.stdout or "").count("`sorry`")
+                              + (res.stderr or "").count("`sorry`"))
+            row = {"variant": label, "wall": walls, "simp": simp,
+                   "tactic execution": tac, "type checking": tchk,
+                   "sorry_warnings": sorries,
+                   "flows": len(flow_lines(variant)),
+                   "bytes": len(variant)}
+            if keep:
+                row["path"] = path
+                tmpdir = None
+            out["variants"].append(row)
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def med(row, key):
+        v = sorted(row[key])
+        return v[len(v) // 2]
+
+    a, b = out["variants"]
+    out["marginal"] = {key: round(med(a, key) - med(b, key), 2)
+                       for key in ("wall", "simp", "tactic execution",
+                                   "type checking")}
+    out["note"] = ("the marginal cost of the terminal value flows in this "
+                   "group, as MEDIAN over `--runs`; the two variants differ by "
+                   "the flows and nothing else")
+    return out
+
+
 # ── prefix mode ────────────────────────────────────────────────────────────
 
 # A top-level Lean command starts at column 0. The generated proofs spell them
@@ -419,7 +571,8 @@ def main(argv=None):
     ap.add_argument("source", help="a .mojo file to generate a proof for")
     ap.add_argument("--arch", default="arm64", choices=("arm64", "x86_64"))
     ap.add_argument("--mode", default="profile",
-                    choices=("profile", "goal", "prefix", "both", "generate"))
+                    choices=("profile", "goal", "prefix", "flows", "both",
+                             "generate"))
     ap.add_argument("--which", type=int, default=1,
                     help="which terminal value flow to trace (1-based)")
     ap.add_argument("--at", default="",
@@ -433,6 +586,10 @@ def main(argv=None):
     ap.add_argument("--list-groups", action="store_true",
                     help="prefix mode: print the declaration boundaries and stop, "
                          "with no Lean run at all")
+    ap.add_argument("--runs", type=int, default=2,
+                    help="repetitions per variant in --mode flows (the "
+                         "marginal cost is reported as the median, so an odd "
+                         "count is the one that throws nothing away)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--keep", action="store_true",
                     help="keep the generated tree instead of a temp dir")
@@ -492,6 +649,12 @@ def main(argv=None):
                 text, declaration_starts(text), os.path.join(HERE, "lib"),
                 args.at, args.group_of, list_only=args.list_groups,
                 keep=args.keep)
+
+        if args.mode == "flows":
+            report["flows_ab"] = _flows_ab(
+                text, declaration_starts(text), os.path.join(HERE, "lib"),
+                group_of=args.group_of, at=args.at, runs=args.runs,
+                keep=args.keep)
     finally:
         if not args.keep:
             shutil.rmtree(outdir, ignore_errors=True)
@@ -518,6 +681,23 @@ def main(argv=None):
               f"{g['state_literals']} fully-expanded state literal(s)")
         if g["exceeded"]:
             print(f"           EXCEEDED: {g['exceeded']}")
+    if "flows_ab" in report:
+        f = report["flows_ab"]
+        if "marginal" not in f:
+            print(f"flows      {f['note']}")
+        else:
+            print(f"flows      group {f['group']} ({f['name']}) at line "
+                  f"{f['line']}, {f['runs']} run(s) each; {f['note']}")
+            for row in f["variants"]:
+                print(f"  {row['variant']:<16s} wall {row['wall']}  "
+                      f"simp {row['simp']}  tactic {row['tactic execution']}  "
+                      f"typecheck {row['type checking']}"
+                      + (f"  [{row['sorry_warnings']} sorry warning(s)]"
+                         if row["sorry_warnings"] else ""))
+            m = f["marginal"]
+            print(f"  {'MARGINAL':<16s} wall {m['wall']:+}  simp {m['simp']:+}  "
+                  f"tactic {m['tactic execution']:+}  typecheck "
+                  f"{m['type checking']:+}")
     if "prefix" in report:
         p = report["prefix"]
         print(f"prefix     {p['groups']} top-level group(s); {p['note']}")

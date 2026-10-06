@@ -395,6 +395,104 @@ class TestPrefixReading(unittest.TestCase):
                          "asking below the first answers with the first")
 
 
+class TestStrippingFlows(unittest.TestCase):
+    """`strip_flows` is the A/B in `--mode flows`, so its DISCARD is the test.
+
+    The instrument's claim is that the two files differ by the flows and nothing
+    else, and the only way that claim can rot silently is for the replacement to
+    leave part of the flow behind — which is exactly what it did once, and the
+    leftover was not a no-op: `all_goals sorry [h8, mojo, bitops_go, ...]` is
+    still a valid tactic, so it still closed every goal and still measured
+    12.98 s against 4.4-5.2 s for the clean replacement. Both readings were
+    "the flows are gone", and only one of them was true.
+    """
+
+    def test_the_whole_flow_line_goes_including_its_simp_set(self):
+        out, n = S.strip_flows(PROOF)
+        self.assertEqual(n, 4)
+        self.assertNotIn("simp +decide only", out)
+        self.assertNotIn("bitops_go", out,
+                         "the flow's 1.7 KB simp-set list is part of the flow")
+
+    def test_only_the_flow_lines_change(self):
+        out, _n = S.strip_flows(PROOF)
+        before, after = PROOF.split("\n"), out.split("\n")
+        self.assertEqual(len(before), len(after))
+        differing = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+        self.assertEqual(differing, S.flow_lines(PROOF),
+                         "a line the flows do not occupy must be byte-identical, "
+                         "or the A/B is measuring two files at once")
+
+    def test_the_walk_and_the_closers_survive(self):
+        out, _n = S.strip_flows(PROOF)
+        self.assertIn("rw [hhit_0]", out)
+        self.assertIn("rw [hsid_0]", out)
+        self.assertIn("all_goals try rfl", out,
+                      "the closers belong to the proof, not to the flow")
+
+    def test_the_indentation_is_the_flows_own_so_the_tactic_parses(self):
+        out, _n = S.strip_flows(PROOF)
+        for line in out.split("\n"):
+            if line.endswith("all_goals sorry"):
+                self.assertTrue(line.startswith(" "),
+                                "a column-0 tactic inside a `by` block is not "
+                                "the same tactic")
+
+    def test_a_file_with_no_flows_is_returned_unchanged(self):
+        out, n = S.strip_flows("import ProofLib\n")
+        self.assertEqual(n, 0)
+        self.assertEqual(out, "import ProofLib\n")
+
+
+class TestCumulativeProfile(unittest.TestCase):
+    """`profile_totals` reads the summary block, which is on STDERR.
+
+    `parse_profile` reads the per-call lines on stdout and cannot see
+    `type checking` at all — it only appears in the summary. That is why the
+    `--mode flows` marginal has a `type checking` row when `--mode profile`
+    never prints one, and getting the two apart is the whole reason this is a
+    second reader rather than a flag on the first.
+    """
+
+    class _Res:
+        def __init__(self, out, err):
+            self.stdout, self.stderr = out, err
+
+    SUMMARY = ("import took 541ms\n"
+               "cumulative profiling times:\n"
+               "\tsimp 8.31s\n"
+               "\ttype checking 8.33s\n"
+               "\tparsing 119ms\n")
+
+    def test_the_summary_buckets_are_seconds(self):
+        got = S.profile_totals(self._Res("", self.SUMMARY))
+        self.assertAlmostEqual(got["simp"], 8.31, places=2)
+        self.assertAlmostEqual(got["type checking"], 8.33, places=2)
+        self.assertAlmostEqual(got["parsing"], 0.119, places=3)
+
+    def test_the_summary_line_has_no_took_and_the_per_call_reader_misses_it(self):
+        """The two readers are disjoint because of ONE WORD, and that is the
+        whole reason this is a second reader.
+
+        The per-call block says `simp took 1.04s` and the summary says `simp
+        8.31s`. `parse_profile`'s pattern requires the `took`, so on a real run's
+        stdout it reports the per-call costs and never `type checking` — which
+        appears only in the summary, only on stderr, and only without the word.
+        """
+        per_call = dict(S.parse_profile("simp took 1.04s\nsimp took 0.9s\n"))
+        self.assertIn("simp", per_call)
+        self.assertNotIn("type checking", per_call)
+        summary = S.profile_totals(self._Res("", self.SUMMARY))
+        self.assertNotIn("simp", dict(S.parse_profile(self.SUMMARY)),
+                         "the summary must not be readable by the per-call "
+                         "reader, or summing the two double counts every tactic")
+
+    def test_a_missing_bucket_is_absent_rather_than_zero(self):
+        got = S.profile_totals(self._Res("", "nothing here\n"))
+        self.assertEqual(got, {})
+        self.assertNotIn("simp", got)
+
+
 def _index_of(groups, name):
     for k, (_i, n) in enumerate(groups, 1):
         if n == name:
