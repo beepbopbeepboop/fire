@@ -1,8 +1,112 @@
 # FORMAL: a comprehension whose ELEMENT is a container aliases every iteration's element to the LAST one
 
-**Area:** FORMAL (both backends; the comprehension lowering, which both share
-through `fire_compiler.py::genexp_body` and their own `_emit_compr_gen`-shaped
-walks).
+**Status: NOT FIXED, and the two options this document weighed are BOTH now
+measured, and the one it recommended is REFUTED by its own census.** §0 is the
+census the document's next step asked for and did not have ("That census is a
+grep and has not been run"), and it is over 50x larger than the estimate here.
+**Nothing is pinned as a passing row and nothing asserts today's wrong answer**,
+because this backend has no mechanism for the alternative; §0 says what the fix
+would actually be and why it is a layout change rather than the per-iteration
+copy this document proposed.
+
+## 0. The census, run, and what it refutes
+
+This document's §"Why it is a refusal-shaped question" priced refusing at "6 of
+the 610 stdlib modules". **Measured over this repository's own 516 `*.py`/`*.mojo`
+files: 113 files carry 323 comprehension sites whose element BUILDS a
+container.**
+
+```
+files scanned: 516
+files with a comprehension whose element BUILDS a container: 113
+comprehension sites total: 323
+of which in formal/ or test_formal_*: 53 files, 189 sites
+```
+
+"Builds a container" is the predicate the fix needs and the one this section's
+own measurements use: `F.ListExpr` / `TupleExpr` / `SetExpr` / `DictExpr` /
+`Comprehension` / `SliceExpr`, or a `+`/`|`/`*`/`or`/`and` over such a thing. **A
+bare NAME is deliberately excluded**, and that exclusion is a correctness
+requirement rather than a narrowing: `[inner for y in ys]` where `inner` is one
+object gives three references to ONE list in CPython too, so aliasing a name's
+container is the right answer and only a container the element position BUILDS is
+the bug.
+
+**A container CONSTRUCTOR call is excluded for a measured reason, not a
+convenience one**, and the measurement is a trap worth recording because it
+fooled this section's first attempt at the table below: `[list(y for y in [1])
+for z in [10, 20]]` is **REFUSED** on both architectures — "`list`: a counted
+blob this path CAN lay out (`BLOB_TYPE_CTORS`) but cannot COPY from another blob
+at run time" — so `sorted`/`set`/`reversed`/`tuple`/`dict`/`range` in an element
+position are not live shapes here and including them would overstate the census
+by 25 sites. (The first attempt read **93** for that row, which was the
+PREVIOUS row's image: the probe reused `$out` without deleting it, so a stale
+binary was measured. Both architectures are re-measured here with the output
+removed first.)
+
+Every one of the 323 is a program this backend builds today and would stop
+building under the refusal this document recommended, and 189 of them are in
+`formal/` and the `test_formal_*.py` suites that the gate runs. **So the trade
+this document called "cheap in coverage and worth considering as the interim
+answer" is not cheap, and the decision it deferred is now made: do not refuse.**
+
+The census's shape is also why the fix is not the one this document proposed.
+A per-iteration materialisation needs somewhere to put iteration `i`'s container,
+and the two candidates are both worse than they look:
+
+  * **Inside the result blob.** Its count field is the number of ELEMENTS, so a
+    flattened `[count][e0][e1]…` with a two-word element would make `v[1]` read
+    word 1 of element 0 — and `len(v)` would be 6 where CPython says 3. Making it
+    right needs a per-element length prefix, which is a new blob layout read by
+    `v[i]`, `len(v)`, iteration, `print`, and every container helper downstream.
+  * **Beside the blob, at `cap * elem_words` reserved words.** Feasible for a
+    STATICALLY sized element and not otherwise, and `cap` is an estimate rather
+    than a count, so the reservation is a claim about a loop this backend cannot
+    bound — which is the same estimate `_blob_site_growth` exists to keep honest,
+    and the same reason a reservation that cannot be kept is a wrong answer.
+
+So the honest statement of what is left is a layout change plus a
+per-iteration-copy pass, with a proof obligation per element kind (a list
+display, a tuple display, a dict display, a slice and a nested comprehension each
+materialise their result differently), and it is worth **0 sweep files today** in
+exchange for 323 program sites this repository would otherwise lose. That is a project, and a next session should price it
+against a corpus census of its own rather than against this one.
+
+## 0a. The shapes, measured on both architectures, and one this document did not test
+
+Every row is the same program with a different element, summing `v[0]` over the
+result — the observation `v[0]` rather than `len`, because three copies of the
+last iteration and one element per iteration have the SAME COUNT, and a suite
+that measured the count could not see a content defect at all.
+
+| element | CPython | arm64 | x86-64 |
+|---|---|---|---|
+| `[[y] for y in [10, 20, 30]]` | 60 | **90** | **90** |
+| `[(y, y + 1) for y in [10, 20, 30]]` | 60 | **90** | **90** |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` | 63 | **93** | **93** |
+| `[[x for x in [1, 2, 3]] for y in [10, 20, 30]]` (coincidence control) | 3 | 3 | 3 |
+| `[list(y for y in [1]) for z in [10, 20]]` (a CALL, for contrast) | 2 | REFUSED | REFUSED |
+| `[[1, 2], [3, 4]]` — the same displays, **outside** a comprehension | 4 | 4 | 4 |
+
+**The second row is new and it is a TUPLE display**, which this document's
+signature table does not contain: a list display is not the only node type that
+aliases, so a fix scoped to `F.ListExpr` alone would leave tuples. **The last row
+is the boundary the fix must not cross**: the same two list literals outside a
+comprehension are two DISTINCT objects and both backends answer CPython, so the
+defect is the comprehension's per-iteration materialisation and nothing about a
+list display as a value. **The fifth row is why the census above excludes
+constructor calls**: they are refused, not wrong.
+
+**No test is added, and that is a decision rather than an omission.** The three
+suites this construct could be pinned in all want one of two things:
+`test_formal_value_model.py`'s `CASES` rows compare against CPython and would go
+red immediately (93 vs 63), and its `REFUSALS` rows require a refusal, which this
+is not; `test_x86_64_containers.py` is a fixed-expectation table, so a row there
+would assert 93 — i.e. assert the bug. A row that pins a wrong answer is worse
+than no row, and the anti-rot this needs is a `KNOWN_DIVERGENCES` entry in
+`tools/formal_fuzz.py` plus a generator family that emits the shape on purpose,
+which is the same construction `set_order` has and the one this document's own
+§"Test coverage" declined to reach for.
 
 **Found while measuring comprehensions against CPython** in a round whose claim
 is `project33:closures-lambdas` (`test_formal_closures.py`). **Not fixed there**:
