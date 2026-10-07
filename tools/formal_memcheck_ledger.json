@@ -7,7 +7,7 @@
   ],
   "fuzz": 0,
   "mix": "core",
-  "programs": 60,
+  "programs": 101,
   "seed": "memcheck"
  },
  "rows": {
@@ -97,6 +97,178 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "accum_max.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 9,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 9,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 9,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/accum_max.mojo.arm64",
+   "name": "accum_max.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "accum_max.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 9,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 9,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 9,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/accum_max.mojo.x86_64",
+   "name": "accum_max.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "annot_params.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/annot_params.mojo.arm64",
+   "name": "annot_params.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "annot_params.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/annot_params.mojo.x86_64",
+   "name": "annot_params.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "augassign.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -180,6 +352,92 @@
    },
    "image": "build/formal_memcheck/img/augassign.mojo.x86_64",
    "name": "augassign.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "augassign_floordiv.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 3,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/augassign_floordiv.mojo.arm64",
+   "name": "augassign_floordiv.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "augassign_floordiv.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 3,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/augassign_floordiv.mojo.x86_64",
+   "name": "augassign_floordiv.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -965,6 +1223,264 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "call_both_arms.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 100,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_both_arms.mojo.arm64",
+   "name": "call_both_arms.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "call_both_arms.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 100,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_both_arms.mojo.x86_64",
+   "name": "call_both_arms.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "call_helper.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 30,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_helper.mojo.arm64",
+   "name": "call_helper.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "call_helper.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 30,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_helper.mojo.x86_64",
+   "name": "call_helper.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "call_three.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_three.mojo.arm64",
+   "name": "call_three.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "call_three.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/call_three.mojo.x86_64",
+   "name": "call_three.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "chain.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -1048,6 +1564,178 @@
    },
    "image": "build/formal_memcheck/img/chain.mojo.x86_64",
    "name": "chain.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "cmp_le_ge.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/cmp_le_ge.mojo.arm64",
+   "name": "cmp_le_ge.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "cmp_le_ge.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/cmp_le_ge.mojo.x86_64",
+   "name": "cmp_le_ge.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "cmp_ne.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/cmp_ne.mojo.arm64",
+   "name": "cmp_ne.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "cmp_ne.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/cmp_ne.mojo.x86_64",
+   "name": "cmp_ne.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -1481,6 +2169,178 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "dead_branch.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/dead_branch.mojo.arm64",
+   "name": "dead_branch.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "dead_branch.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/dead_branch.mojo.x86_64",
+   "name": "dead_branch.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "dead_store.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/dead_store.mojo.arm64",
+   "name": "dead_store.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "dead_store.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/dead_store.mojo.x86_64",
+   "name": "dead_store.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "deepif.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -1564,6 +2424,178 @@
    },
    "image": "build/formal_memcheck/img/deepif.mojo.x86_64",
    "name": "deepif.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "digits.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/digits.mojo.arm64",
+   "name": "digits.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "digits.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/digits.mojo.x86_64",
+   "name": "digits.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "early_ret.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 3,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/early_ret.mojo.arm64",
+   "name": "early_ret.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "early_ret.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 3,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 3,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/early_ret.mojo.x86_64",
+   "name": "early_ret.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -1736,6 +2768,92 @@
    },
    "image": "build/formal_memcheck/img/elif3.mojo.x86_64",
    "name": "elif3.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "elif_call.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 20,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/elif_call.mojo.arm64",
+   "name": "elif_call.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "elif_call.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 20,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/elif_call.mojo.x86_64",
+   "name": "elif_call.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -1994,6 +3112,92 @@
    },
    "image": "build/formal_memcheck/img/floordiv.mojo.x86_64",
    "name": "floordiv.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "for_two_bounds.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 45,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/for_two_bounds.mojo.arm64",
+   "name": "for_two_bounds.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "for_two_bounds.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 45,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/for_two_bounds.mojo.x86_64",
+   "name": "for_two_bounds.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -2341,6 +3545,178 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "list_len.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 4,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 4,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 4,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/list_len.mojo.arm64",
+   "name": "list_len.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "list_len.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 4,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 4,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 4,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/list_len.mojo.x86_64",
+   "name": "list_len.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "list_literal_index.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 15,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/list_literal_index.mojo.arm64",
+   "name": "list_literal_index.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "list_literal_index.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 15,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/list_literal_index.mojo.x86_64",
+   "name": "list_literal_index.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "list_subscript_past_end.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -2533,6 +3909,436 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "loop_break.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 5,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/loop_break.mojo.arm64",
+   "name": "loop_break.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "loop_break.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 5,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/loop_break.mojo.x86_64",
+   "name": "loop_break.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "main_calls_helper.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 14,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/main_calls_helper.mojo.arm64",
+   "name": "main_calls_helper.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "main_calls_helper.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 14,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/main_calls_helper.mojo.x86_64",
+   "name": "main_calls_helper.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "mixed_width.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 30,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/mixed_width.mojo.arm64",
+   "name": "mixed_width.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "mixed_width.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 30,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 30,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/mixed_width.mojo.x86_64",
+   "name": "mixed_width.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "mod_by_var.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/mod_by_var.mojo.arm64",
+   "name": "mod_by_var.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "mod_by_var.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 2,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 2,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/mod_by_var.mojo.x86_64",
+   "name": "mod_by_var.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "multi_export.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 22,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 22,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 22,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/multi_export.mojo.arm64",
+   "name": "multi_export.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "multi_export.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 22,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 22,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 22,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/multi_export.mojo.x86_64",
+   "name": "multi_export.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "n8.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -2705,6 +4511,178 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "negate_arg.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/negate_arg.mojo.arm64",
+   "name": "negate_arg.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "negate_arg.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/negate_arg.mojo.x86_64",
+   "name": "negate_arg.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "nested_loop.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 45,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/nested_loop.mojo.arm64",
+   "name": "nested_loop.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "nested_loop.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 45,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 45,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/nested_loop.mojo.x86_64",
+   "name": "nested_loop.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "nonzero.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -2788,6 +4766,92 @@
    },
    "image": "build/formal_memcheck/img/nonzero.mojo.x86_64",
    "name": "nonzero.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "not_and.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/not_and.mojo.arm64",
+   "name": "not_and.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "not_and.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 1,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 1,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/not_and.mojo.x86_64",
+   "name": "not_and.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -3049,6 +5113,350 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "precedence.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 19,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 19,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 19,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/precedence.mojo.arm64",
+   "name": "precedence.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "precedence.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 19,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 19,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 19,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/precedence.mojo.x86_64",
+   "name": "precedence.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "printf_int.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "rc": 7,
+     "stderr": "",
+     "stdout": "10\n"
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 188,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "painted": true,
+     "ran_out": false,
+     "rc": 7,
+     "stderr": "",
+     "stdout": "10\n",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "rc": 7,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/printf_int.mojo.arm64",
+   "name": "printf_int.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "printf_int.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "rc": 7,
+     "stderr": "",
+     "stdout": "10\n"
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 188,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "painted": true,
+     "ran_out": false,
+     "rc": 7,
+     "stderr": "",
+     "stdout": "10\n",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 3,
+     "digest": "917df3320d778ddb",
+     "rc": 7,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/printf_int.mojo.x86_64",
+   "name": "printf_int.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "rebind.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 12,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 12,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 12,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/rebind.mojo.arm64",
+   "name": "rebind.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "rebind.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 12,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 12,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 12,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/rebind.mojo.x86_64",
+   "name": "rebind.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "recursion_linear.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/recursion_linear.mojo.arm64",
+   "name": "recursion_linear.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "recursion_linear.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/recursion_linear.mojo.x86_64",
+   "name": "recursion_linear.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "ret42.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -3132,6 +5540,92 @@
    },
    "image": "build/formal_memcheck/img/ret42.mojo.x86_64",
    "name": "ret42.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "ret_in_loop.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 21,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/ret_in_loop.mojo.arm64",
+   "name": "ret_in_loop.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "ret_in_loop.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 21,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/ret_in_loop.mojo.x86_64",
+   "name": "ret_in_loop.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -3393,6 +5887,92 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "shift_by_var.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 20,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/shift_by_var.mojo.arm64",
+   "name": "shift_by_var.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "shift_by_var.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 20,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 20,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/shift_by_var.mojo.x86_64",
+   "name": "shift_by_var.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "shiftlr.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -3562,6 +6142,92 @@
    },
    "image": "build/formal_memcheck/img/sign.mojo.x86_64",
    "name": "sign.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "six_params.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/six_params.mojo.arm64",
+   "name": "six_params.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "six_params.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/six_params.mojo.x86_64",
+   "name": "six_params.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -3820,6 +6486,264 @@
    },
    "image": "build/formal_memcheck/img/stack_deep_recursion.mojo.x86_64",
    "name": "stack_deep_recursion.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "str_len.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 5,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/str_len.mojo.arm64",
+   "name": "str_len.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "str_len.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 5,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 5,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/str_len.mojo.x86_64",
+   "name": "str_len.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "struct_method.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 15,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/struct_method.mojo.arm64",
+   "name": "struct_method.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "struct_method.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 15,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 15,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/struct_method.mojo.x86_64",
+   "name": "struct_method.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "struct_point.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 21,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/struct_point.mojo.arm64",
+   "name": "struct_point.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "struct_point.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 21,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 21,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/struct_point.mojo.x86_64",
+   "name": "struct_point.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -4253,6 +7177,178 @@
    "verdict": "MATCH",
    "verdicts": []
   },
+  "toplevel_accum.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 14,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/toplevel_accum.mojo.arm64",
+   "name": "toplevel_accum.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "toplevel_accum.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 14,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 14,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/toplevel_accum.mojo.x86_64",
+   "name": "toplevel_accum.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "toplevel_const.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/toplevel_const.mojo.arm64",
+   "name": "toplevel_const.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "toplevel_const.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 10,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 10,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/toplevel_const.mojo.x86_64",
+   "name": "toplevel_const.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
   "twoifs.mojo|arm64": {
    "backend": "arm64",
    "build_diagnostic": "",
@@ -4594,6 +7690,264 @@
    },
    "image": "build/formal_memcheck/img/ug8.mojo.x86_64",
    "name": "ug8.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "unary_ops.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 245,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 245,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 245,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/unary_ops.mojo.arm64",
+   "name": "unary_ops.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "unary_ops.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 245,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 245,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 245,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/unary_ops.mojo.x86_64",
+   "name": "unary_ops.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "unused_param.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/unused_param.mojo.arm64",
+   "name": "unused_param.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "unused_param.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 11,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 11,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/unused_param.mojo.x86_64",
+   "name": "unused_param.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "var_typed_loop.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 55,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/var_typed_loop.mojo.arm64",
+   "name": "var_typed_loop.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "var_typed_loop.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 55,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/var_typed_loop.mojo.x86_64",
+   "name": "var_typed_loop.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
@@ -5024,6 +8378,178 @@
    },
    "image": "build/formal_memcheck/img/wge.mojo.x86_64",
    "name": "wge.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "while_ne_zero.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 55,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/while_ne_zero.mojo.arm64",
+   "name": "while_ne_zero.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "while_ne_zero.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 55,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 55,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/while_ne_zero.mojo.x86_64",
+   "name": "while_ne_zero.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "wide_expr.mojo|arm64": {
+   "backend": "arm64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 100,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/wide_expr.mojo.arm64",
+   "name": "wide_expr.mojo",
+   "verdict": "MATCH",
+   "verdicts": []
+  },
+  "wide_expr.mojo|x86_64": {
+   "backend": "x86_64",
+   "build_diagnostic": "",
+   "built": true,
+   "detail": {
+    "baseline": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": "",
+     "stdout": ""
+    },
+    "leaks": {
+     "bytes": 0,
+     "leaks": 0,
+     "nodes": 187,
+     "ok": true,
+     "ran_out": false,
+     "timed_out": false,
+     "why": ""
+    },
+    "poison": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "painted": true,
+     "ran_out": false,
+     "rc": 100,
+     "stderr": "",
+     "stdout": "",
+     "timed_out": false
+    },
+    "scribble": {
+     "bytes": 0,
+     "digest": "e3b0c44298fc1c14",
+     "rc": 100,
+     "stderr": ""
+    }
+   },
+   "image": "build/formal_memcheck/img/wide_expr.mojo.x86_64",
+   "name": "wide_expr.mojo",
    "verdict": "MATCH",
    "verdicts": []
   },
