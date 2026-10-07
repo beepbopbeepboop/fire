@@ -566,7 +566,7 @@ def _task_text(t):
     return m.group(1) if m else t["summary"]
 
 
-def restart(name, why):
+def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
     t = load()[name]
     wt = t["worktree"]
@@ -586,13 +586,13 @@ def restart(name, why):
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
-    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=getattr(a, "model", None) or t["model"])
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=model or t["model"])
     cmd_spawn(ns)
     return new
 
 
 def cmd_restart(a):
-    print("restarted as", restart(a.name, a.why))
+    print("restarted as", restart(a.name, a.why, a.model))
 
 
 def cmd_unstick(a):
