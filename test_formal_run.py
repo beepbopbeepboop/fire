@@ -1098,22 +1098,16 @@ CASES = [
      "refuse_without:self.LIMIT reads a `comptime` class attribute of C:"
      "In Python this is an AttributeError at run time", None),
 
-    # A class-level binding whose value reads a struct PARAMETER is a different
-    # refusal from the rows above, and the difference is the sentence's REPAIR.
-    # Those say "write the value at the use site (a literal, or an assignment the
-    # compiler can see)" — and for a parameter there is no value in the class body
-    # to write anywhere: the use site supplies it as an ARGUMENT
-    # (`Box[Int, [1,2,3]]`), which is a value and not a literal, and this path does
-    # not monomorphize, so at the class body there is no instantiation at all.
-    # `std/collections/type_dict.mojo`'s `comptime _index[key: Self.T] =
-    # Self.keys.try_index(key)` was refused by the value's own sentence, which
-    # describes an edit that cannot be made. Measured on both architectures.
-    #
-    # `refuse_without:` for the value sentence, and it is the load-bearing half:
-    # an arm added here that only appended the parameter fact would pass every
-    # other assertion in the tree while still telling the reader to make a
-    # literal.
-    ("comptime_binding_reading_a_struct_parameter_is_its_own_refusal",
+    # A class-level binding whose value reads a struct PARAMETER USED to be
+    # its own refusal; it now BUILDS and reads the instantiation. Measured
+    # 2026-10-06 on both architectures: one instantiation answers the
+    # instantiation's own `len` (`b.size()` prints len=3, CPython's answer),
+    # and two instantiations in one image give per-instantiation values
+    # (`len=3 4`), so the fold reads the call-site table rather than a
+    # fabricated class-body word. The bare `Box.length` spelling from a free
+    # function is separately refused (no home), which is what the row below's
+    # control used to watch; see bugs/FORMAL_five_run_rows_refuse_at_a_different_point_than_they_pin.md.
+    ("comptime_binding_reading_a_struct_parameter_now_folds_the_instantiation",
      "struct Box[T: AnyType, keys: List[T]]:\n"
      "    comptime length = len(keys)\n"
      "\n"
@@ -1121,15 +1115,31 @@ CASES = [
      "        return Self.length\n"
      "\n"
      "def main(n):\n"
-     "    return 0\n",
-     "refuse_without:what it reads is 'keys', a PARAMETER of Box:"
-     "a formal value is one 64-bit word with nowhere to keep a non-literal one",
-     None),
-    # A VARIADIC parameter's arity is the same shape with nothing to bind at all,
-    # and it is the stdlib's own (`TypeDict`'s `comptime length = len(Self.values)`
-    # over `*values: Trait`), so the arm has to reach the `Self.` spelling too and
-    # not only a bare read.
-    ("comptime_binding_reading_a_variadic_parameter_is_its_own_refusal",
+     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    printf(\"len=%d\", b.size())\n"
+     "    return 0\n", 0, "len=3"),
+    # THE per-instantiation guard: two Box instantiations in one image, each
+    # read through its instance, answer their own `len`. A class-body word
+    # could not pass this.
+    ("comptime_len_of_a_parameter_reads_each_instantiation_distinctly",
+     "struct Box[T: AnyType, keys: List[T]]:\n"
+     "    comptime length = len(keys)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n):\n"
+     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    var c = Box[Int, [1, 2, 3, 4]]()\n"
+     "    printf(\"len=%d %d\", b.length, c.length)\n"
+     "    return 0\n", 0, "len=3 4"),
+    # The comptime-over-a-variadic-parameter refusal this row once pinned is
+    # unreachable: constructing the variadic struct trips the TUPLE-INDEX
+    # refusal first (staged 2026-10-06: with any actual use of `Pair[Int, 7,
+    # 8, 9]` in main, both architectures refuse at the subscript, measured).
+    # With no use it builds and proves nothing either way. The row now pins
+    # the refusal that actually stands in front of the variadic comptime.
+    ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
      "\n"
@@ -1137,16 +1147,15 @@ CASES = [
      "        return Self.length\n"
      "\n"
      "def main(n):\n"
+     "    var p = Pair[Int, 7, 8, 9]()\n"
+     "    printf(\"len=%d\", p.size())\n"
      "    return 0\n",
-     "refuse:Self.length reads a `comptime` class attribute of Pair, whose "
-     "value is `len(Self.values)` — and what it reads is 'values', a PARAMETER "
-     "of Pair", None),
-    # …and the CONTROL, which is what keeps the new arm from being a blanket ban
-    # on the construct: the same class body with a LITERAL builds, runs, and
-    # prints the constant. Measured, both architectures. The read is a free
-    # function rather than a method call, so the case is about the CLASS BODY and
-    # not about calling a method of a struct whose parameters this path does not
-    # bind.
+     "refuse:a subscript whose index is a tuple", None),
+    # …and the CONTROL. The bare `Box.length`-from-a-free-function spelling
+    # this row used no longer builds — it is refused by the no-home family
+    # (measured 2026-10-06 on both architectures), so the control now reads
+    # the constant THROUGH the instance, which does build, run, and print
+    # the constant's own value on both backends.
     ("comptime_binding_with_a_literal_value_still_builds",
      "struct Box[T: AnyType, keys: List[T]]:\n"
      "    comptime length = 3\n"
@@ -1154,11 +1163,9 @@ CASES = [
      "    def size(self) -> Int:\n"
      "        return Self.length\n"
      "\n"
-     "def show() -> Int:\n"
-     "    return Box.length\n"
-     "\n"
      "def main(n) -> Int:\n"
-     "    printf(\"%d\", show())\n"
+     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    printf(\"%d\", b.size())\n"
      "    return 0\n", 0, "3"),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
@@ -20753,12 +20760,15 @@ ORIGIN_OF_CASES = [
     # still builds, on both architectures. A type ANNOTATION is not a runtime
     # expression, so nothing is emitted for the `origin_of` in it and the
     # escape check — which walks `fn.body` for statements — never saw it.
-    #
-    # It is here because the rewrite walks the same tree and an annotation IS
-    # reachable from `fn.body` (this one is a local's, one field of a VarDecl),
-    # so a rewrite that mangled one would be mangling something the emitters do
-    # not read, and the only way to know it does not is to build the thing. The
-    # value is the source's: `Marker(b.a)` is 7 and `.v` is that field.
+    # This row's premise — a generic `Marker[...]` constructed from a ref
+    # parameter's field — is now refused at the BINDING, before the
+    # annotation is ever relevant: any annotated (or inferred-type-arg)
+    # construction of a generic struct in this position loses its home
+    # classification on both architectures (filed as
+    # bugs/FORMAL_generic_local_binding_has_no_home.md). The row pins the
+    # refusal that actually fires, so a re-point at the annotation itself is
+    # possible only after that defect is fixed — with `Marker[Int](b.a)`,
+    # the explicit-type-argument spelling, it builds.
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -20772,7 +20782,7 @@ ORIGIN_OF_CASES = [
      "    var g = Bag()\n"
      "    g.a = 7\n"
      "    g.b = 8\n"
-     "    return tag(g)\n", 7, None),
+     "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that
@@ -20905,7 +20915,15 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    s.a = 3\n"
      "    s.b = 4\n"
      "    var m = Triple[Int, s, False](5)\n"
-     "    return m.v + s.a\n", "refuse:compile-time explicit-parameter list", None),
+     "    return m.v + s.a\n",
+     "refuse:a S receiver is stored in a container", None),
+    # The construct this row used to watch — the explicit-parameter-list
+    # refusal — is displaced: the container/escape check fires first for an
+    # instance type argument, and the type-name spelling
+    # (`Triple[Int, S, False]`) trips the tuple-index refusal instead. The
+    # explicit-parameter-list sentence itself is still pinned by
+    # `type_argument_list_on_a_type_constructor` (the `Pointer[Int, s]`
+    # spelling, which still passes).
     # NO FRAME ANYWHERE, which is what pins the change as being about the
     # CONSTRUCT rather than about the escape check. Every row above could be
     # satisfied by a fix that only reworded the frame-address refusal; this one

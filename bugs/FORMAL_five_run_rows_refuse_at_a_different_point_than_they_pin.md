@@ -19,6 +19,57 @@ The precedent for how they surface is `test_formal_call_proof_gen.py`'s
 `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`): also an
 ungated bucket, also red, also needing a reader to go and look.
 
+
+**Status 2026-10-06 (`work/formal94-docs`): the five rows are REPAIRED to pin
+what each program actually does today, the fold question is ANSWERED, and one
+newly-found defect is filed separately.**
+
+* **Row 1 (`comptime_binding...parameter`).** The two-call-site question is
+  now answerable and the answer is: **the fold reads the instantiation, and it
+  is sound.** A program with two `Box` instantiations in one image, each read
+  through its instance, answers per-instantiation (`len=3 4` on arm64 and
+  x86-64, where CPython's own reading of the source is the same); one
+  instantiation answers CPython's `3`. Two `b.size()` calls on two
+  instantiations in ONE `main` still refuse (`'size' is not one of those
+  methods of those receivers`), so the measurement uses attribute access.
+  The row becomes
+  `comptime_binding_reading_a_struct_parameter_now_folds_the_instantiation`
+  (expects `len=3`) plus a guard
+  `comptime_len_of_a_parameter_reads_each_instantiation_distinctly` (`len=3 4`).
+* **Row 2 (variadic).** The comptime-over-variadic arm is **unreachable**:
+  with any actual construction of a variadic struct the tuple-index refusal
+  fires first, and without a construction the comptime binding is never
+  read. The row now pins the tuple-index refusal under the name
+  `comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal`.
+* **Row 3 (control).** The claimed control — bare `Box.length` from a free
+  function with a LITERAL class binding — **no longer builds** (the no-home
+  refusal fires), so the row's comment was false. The control now reads the
+  constant through the instance and still prints `3`.
+* **Row 4 (`origin_of...`).** The annotation is NOT the live defect: the
+  program is refused at the BINDING — a generic struct's construction with
+  inferred type arguments (or an annotated local) loses its binding home on
+  both architectures. The row pins the actual refusal
+  (`nothing this image can see about 'm'`) and the defect is filed as
+  `bugs/FORMAL_generic_local_binding_has_no_home.md`. With the explicit
+  spelling `Marker[Int](b.a)` the same program builds, which is the control
+  that says the refusal is about the binding's classification, not the
+  annotation.
+* **Row 5 (`type_argument_list_on_a_struct_this_unit_declares`).** For an
+  instance type argument the container/escape check fires first ("a S
+  receiver is stored in a container"), and for the type-name spelling the
+  tuple-index refusal fires; no program reaches the explicit-parameter-list
+  sentence for this construct any longer. The row pins the actual refusal;
+  the explicit-parameter-list message itself is still pinned by
+  `type_argument_list_on_a_type_constructor` (`Pointer[Int, s]`), which still
+  passes.
+
+Verification: `python3 tools/memslot.py --gb 8 --label t -- python3
+test_formal_run.py <the six rows>` → `PASS=79 FAIL=0`. The sweep was NOT
+re-run (as before), so any global regression claim still rests on the narrow
+suites. The §1 "decide which is sound" question is no longer open; the
+§2 bookkeeping below is done. What remains open is the binding-home defect
+above.
+
 ## 0. What I ran
 
 ```sh
