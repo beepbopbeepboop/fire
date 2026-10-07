@@ -973,12 +973,20 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
         return None
     name = _cm_as_str(iterable.func.name)
     if name not in _GEN_DEFS:
+        # Resolved through `_callable_param_generator_names` -- the SAME
+        # mapping `_delegated` and `_delegated_yield_kind` use -- rather
+        # than by re-deriving "is this parameter's default one of my
+        # generators?" here. It was a second guess on the same dict with
+        # the same predicate, and `_delegated`'s own comment says the
+        # mapping exists precisely so the value slot and the drive "agree
+        # by construction"; a third copy is how they stop agreeing.
+        # `*args`/`**kwargs` are skipped by the mapping, which is
+        # equivalent here: a bare identifier can never name one.
         if fn is None:
             return None
-        _d = (getattr(fn, 'param_defaults', None) or {}).get(name)
-        if not (isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS):
+        name = (_callable_param_generator_names(fn) or {}).get(name, '')
+        if not name:
             return None
-        name = _cm_as_str(_d.name)
     k = _resolve_gen_kind(name)[0]
     return k if k in _SCALAR_GEN_KINDS else None
 
