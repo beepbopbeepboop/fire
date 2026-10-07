@@ -42,7 +42,7 @@ from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(MAIN)
-MODEL = os.environ.get("CONTROL_MODEL", "opencode/fledge-alpha-free")
+MODEL = os.environ.get("CONTROL_MODEL", "opencode-go/deepseek-v4.1-flash")
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
