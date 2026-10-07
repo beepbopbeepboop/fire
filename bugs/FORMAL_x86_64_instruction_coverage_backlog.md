@@ -58,9 +58,11 @@ all steppable**, all five checks green; `test_x86_64_decode.py` green;
 
 * `encode_call_r64` — the target is a register's contents, outside the harness's
   one `MAP_FIXED` region; a permanent `HARNESS_LIMITS` reason, not work.
-* `encode_and_r8_r8` / `encode_or_r8_r8` — the RBP-operand anomaly
-  `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` records and `x86-hw-fuzz`
-  owns. Their LEAN and AS columns are `yes`.
+* `encode_and_r8_r8` / `encode_or_r8_r8` — the RBP-operand anomaly, which turned
+  out to be this tree's own encoder omitting the REX prefix for SPL/BPL/SIL/DIL
+  rather than a hardware one, and which `x86-hw-fuzz` fixed with
+  `_byte_rex_required` (see "The byte-wise ALU class" below). Their LEAN and AS
+  columns are `yes`.
 * Two CENSUS-INSTRUMENT defects, reported rather than edited (the tool is
   another claim's write set): the EX column matches a form by DISASSEMBLY
   MNEMONIC, so two encodings of one instruction are indistinguishable; and the
