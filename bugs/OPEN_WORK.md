@@ -72,7 +72,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `formal59-docs` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `formal59-docs` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` | `formal74-docs` | `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach |
-| `FORMAL_arm64_an_extern_call_makes_the_run_never_reach_the_exit.md` | `formal74-docs` | the `pre_reaches_0` obligation is FALSE for every program whose only opaque call is on the path, and it is emitted anyway |
 | `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` | `formal74-docs` | FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it |
 | `FORMAL_arm64_known_proof_gaps.md` | `formal74-docs` | the arm64 examples whose proof is a documented gap |
 | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` | `formal68-docs` | the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it |
