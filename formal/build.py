@@ -17893,6 +17893,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     for _n in _overloaded_names:
         _functions_by_name.pop(_n, None)
     for fn in functions:
+        # A `match` is lowered to compares and branches HERE, before anything
+        # else in this loop reads the body, and for the same reason the `with`
+        # below is: this pass REPLACES a statement with others, so everything
+        # after it would otherwise be reading the wrong tree. It is FIRST of the
+        # two because of what the checks after the loop do with an unlowered
+        # `MatchStmt` — `check_module_symbols` walks an arm's patterns as
+        # ordinary expression reads, which is how `case _:` reached the build as
+        # "'_' has no home" and `case other:` (a capture) reached it as the same
+        # sentence about a name the author never read. See
+        # `_rewrite_match_statements`.
+        _rewrite_match_statements(fn, symbols)
         # A `with` is CPython's context-manager PROTOCOL, and this path used to
         # lower its first line and drop the two calls that ARE it — the emitters
         # said so in their own docstrings, which is how `with
@@ -18635,6 +18646,553 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
     declaring = [st for st in (structs_by_name or {}).values()
                  if any(m.name == base.member for m in M.struct_methods(st))]
     return declaring if len(declaring) > 1 else []
+
+
+# ── `match`: lowered to a decision tree of compares and branches ──────────────
+#
+# `match` is the one statement in this file's language that has NO emitter on
+# either backend: both `_emit_stmt`s fall through to "unsupported statement
+# MatchStmt", and before that `check_module_symbols` walks the arm patterns as
+# ordinary expression reads, so the FIRST thing a reader met was
+# `'X' has no home` for a name the author wrote as a pattern. Both are answered
+# here, once, in the pass every function goes through — so an arm64 image and an
+# x86-64 image of one file are lowered by the same code and cannot come to
+# disagree about what a pattern means.
+#
+# WHY A REWRITE AND NOT AN EMITTER ARM. Three reasons, and the first two are the
+# whole argument:
+#
+#   * The Lean model comes for free. A `match` lowered to `if`/`==` is a chain of
+#     conditional branches, and `formal/arm64_proof_gen.py` /
+#     `formal/x86_64_proof_gen.py` already generate and discharge the conditional
+#     statements for `if`. A new emitter arm would be a new BLOCK SHAPE in the
+#     step function, which is the expensive half of the proof work
+#     (`bugs/FORMAL_arm64_known_proof_gaps.md`), and it would have to be built
+#     twice — once per architecture — for the same language construct. It also
+#     would not have elaborated: the operand order arm64's generator accepts is
+#     the one `if <expr> == <literal>` produces, which is the second bullet of
+#     `_lower_one_case`'s docstring.
+#   * The arm bodies are ordinary control flow. `return` / `break` / `continue` /
+#     a nested `match` / a `try` inside an arm all work because the body is
+#     SPLICED into the enclosing statement list rather than called. `test_
+#     formal_match.py`'s `arm_return_exits_the_function`,
+#     `arm_break_and_continue_in_a_loop` and `match_in_a_while` are the rows.
+#   * `formal/model.py`'s read-before-store analysis, the CFG builder, the frame
+#     analysis and every emitter special case already handle `if` and `==`.
+#     Rewriting to them is what makes those analyses see the match at all: before
+#     the rewrite they saw an AST node with a `cases` list and had a
+#     `MatchStmt` arm of their own (`model.py`'s `_case_is_wildcard`,
+#     `_match_case_binds`) which is now unreachable from this pipeline.
+#
+# THE SEMANTICS ARE THE FRONTEND'S, not PEP 634's, and the difference is not
+# academic. `fire_compiler.py`'s `MatchStmt` and `myinterpreter.py`'s
+# `execute_MatchStmt` define the construct as switch-style equality dispatch:
+# each pattern is evaluated as an ordinary expression and compared with `==`,
+# first match wins, a comma-separated list is an or-pattern, and ONE case is a
+# PEP 634 capture — a bare name that is not already bound always matches and
+# binds the subject. `formal/model.py::match_pattern_kind` decides which of
+# those a pattern is, and refuses the six shapes that are PEP 634 STRUCTURAL
+# patterns (which all parse here as plain expressions and would otherwise be
+# silently mis-lowered).
+#
+# `test_formal_match.py` is the oracle table, and it names its own size rather
+# than this comment: each row is built and RUN on both architectures and
+# compared against CPython — or against `fire.py run`, for the patterns the two
+# read differently, which the file says per row. Its proof section measures the
+# claim in the first bullet above: a `match` and the `if` chain it lowers to are
+# the same pair of programs to both proof generators.
+_MATCH_TEMP_PREFIX = "_match_val"
+
+
+def _rewrite_match_statements(fn, module_names) -> None:
+    """Every `match` in `fn` becomes compares and branches, or is refused by name.
+
+    Runs FIRST in `_prepare_functions`' per-function loop, beside
+    `_rewrite_with_statements`, for the same structural reason and one more: the
+    checks that run after the loop (`check_module_symbols` and the
+    read-before-store walk inside it) read the tree, and a `MatchStmt` reaching
+    them is a pattern read as an expression — which is the "'_' has no home"
+    refusal this pass replaces with a construct the author can act on.
+
+    A NESTED `def` is descended into, and it is the one place this pass and the
+    other rewrites disagree on purpose. `_rewrite_stmt_lists` skips a nested
+    body because a lifted closure's body is that nested `def`'s own body and
+    lowering it twice would duplicate the lowering; here lowering it once, HERE,
+    is what makes the closure lift see the CAPTURE as an ordinary local
+    assignment:
+
+        def outer(n):
+            def inner(k):
+                match k:
+                    case other:      # a capture: `other` is not bound yet
+                        return other
+            return inner(n)
+
+    `_flatten_closures` runs after this loop and reads a nested body's assigns
+    (`mojo/middle/closures.py::discover_closures`'s `inner_assign_targets`). With
+    the `match` still in the tree it sees a pattern instead and would decide the
+    name is free and lift it as a by-value capture — the write-back half of
+    `FORMAL_nonlocal_write`-shaped defects, arrived at from a different
+    direction. With `other = k` in the tree it is a local, which is what it is.
+
+    `module_names` is this unit's own module-level name table
+    (`M.collect_module_symbols`), published above the loop: a `case NAME:` where
+    `NAME` is one of them is a VALUE comparison and not a capture, which is the
+    whole of the `case NODE_FUNCTION_DECL:` idiom `fire_compiler.py`'s docstring
+    is about.
+    """
+    if not any(isinstance(node, F.MatchStmt)
+               for node in M.iter_nodes(getattr(fn, "body", None))):
+        return
+    used = _fn_spelled_names(fn)
+    counter = [0]
+
+    def fresh():
+        while True:
+            counter[0] += 1
+            name = "%s%d" % (_MATCH_TEMP_PREFIX, counter[0])
+            if name not in used:
+                used.add(name)
+                return name
+
+    fn.body = _lower_match_stmts(
+        getattr(fn, "body", None), _match_scope_names(fn, module_names),
+        fresh, fn, module_names)
+
+
+def _match_scope_names(fn, module_names) -> set:
+    """The names a `case` pattern in `fn` finds ALREADY BOUND, before any match.
+
+    This is the compile-time reading of `myinterpreter.py`'s
+    `not self.scope.has(pattern.name)`, and the two agree on every shape that
+    matters:
+
+      * the function's own parameters — a parameter is bound before the body
+        runs, so `case n:` next to `def f(n)` is a comparison;
+      * this unit's module-level names (`module_names`) — including the folded
+        constants, which is the `case CONST:` idiom;
+      * `None` / `True` / `False`, which the interpreter's scope carries and
+        CPython reads as value patterns (`case True:` matches `True` and not
+        every subject — measured, `fire.py run` and CPython agree).
+
+    A NESTED `def` also sees the ENCLOSING function's bindings, because the
+    interpreter's `Scope.has` walks the scope chain — see
+    `_lower_match_descend`, which is where that inheritance is applied.
+
+    The conservative direction is a CAPTURE, because a capture lowers to an
+    assignment of the subject and a comparison lowers to a READ of a name this
+    pass would otherwise have to prove has a home; so a name this pass fails to
+    see bound becomes a fresh local rather than a read of something unbound.
+    The direction is also the one both oracles take for the shape it decides:
+    a name bound only by a statement AFTER the `match` is a CAPTURE in CPython
+    and in the interpreter alike (measured, both print `capture 3` then
+    `after 5` for `case v:` … `v = 5`), so reading it as unbound is not a
+    fallback here — it is the answer. What CPython refuses to compile at all is
+    the neighbouring shape, `case v:` followed by `case _:` ("name capture 'v'
+    makes remaining patterns unreachable"), and this path lowers it as the
+    capture-then-wildcard it reads as.
+    """
+    names = {"None", "True", "False"}
+    names |= set(module_names or ())
+    for param in (getattr(fn, "params", None) or ()):
+        name = param[0] if isinstance(param, (tuple, list)) and param else param
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def _statement_binds(stmt) -> set:
+    """The names ONE statement binds, for `match`'s capture-or-compare question.
+
+    A different question from `formal/model.py::stmt_bound_names`, which asks
+    "does a loop's body rebind a name this site reads" and therefore
+    deliberately EXCLUDES a loop's own target (the counter is bound by the loop,
+    not grown by the body). Here a loop target is exactly what has to count:
+    `for v in xs:` above a `case v:` makes the pattern a comparison.
+
+    `M.assignment_target_names` is the shared answer for the assignment shapes
+    (`x = …`, `var x`, `x, y = …`), so this is not a second derivation of it.
+    """
+    if isinstance(stmt, (F.AssignStmt, F.VarDecl, F.AugAssignStmt,
+                         F.MultiAssignStmt)):
+        return {n for n in M.assignment_target_names(stmt) if isinstance(n, str)}
+    if isinstance(stmt, F.ForStmt) or isinstance(stmt, F.ComptimeForStmt):
+        target = getattr(stmt, "target", None)
+        if isinstance(target, str):
+            return {target}
+        # A tuple target (`for k, v in …`) is a `TupleExpr` of names here, and
+        # the walk answers every name in it — including the base of a subscript,
+        # which over-counts. Over-counting makes a later pattern a COMPARISON
+        # where a capture was meant, and a comparison of a name with no home is
+        # a refusal; under-counting makes it a capture, which is an assignment
+        # that works. So the answer errs toward the capture.
+        return {node.name for node in M.iter_nodes(target)
+                if isinstance(node, F.IdentExpr) and isinstance(node.name, str)}
+    if isinstance(stmt, F.WithStmt):
+        return {getattr(it, "alias", None)
+                for it in (getattr(stmt, "items", None) or [])
+                if isinstance(getattr(it, "alias", None), str)}
+    if isinstance(stmt, F.TryStmt):
+        return {getattr(h, "name", None)
+                for h in (getattr(stmt, "handlers", None) or [])
+                if isinstance(getattr(h, "name", None), str)}
+    if isinstance(stmt, F.FunctionDef):
+        # A nested `def` binds its own name in the enclosing frame, which is a
+        # fact about the OUTER scope and is why `case inner:` below one is a
+        # comparison rather than a capture.
+        return {stmt.name} if isinstance(getattr(stmt, "name", None), str) else set()
+    if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
+        # A `global K` / `nonlocal K` DECLARES the name bound somewhere else, so
+        # a `case K:` after it is a comparison in both oracles: CPython's
+        # `global` makes the name a module-level one and its pattern is a value
+        # pattern, and the interpreter's scope finds it in the outer frame. Both
+        # emitters treat the declaration itself as a no-op
+        # (`_emit_stmt`'s `GlobalStmt` arm), so this only moves the DECISION.
+        return {n for n in (getattr(stmt, "names", None) or ())
+                if isinstance(n, str)}
+    return set()
+
+
+def _lower_match_stmts(stmts: list, bound: set, fresh, fn, module_names) -> list:
+    """`stmts` with every `match` REPLACED by the chain it lowers to.
+
+    `bound` is threaded through the list IN ORDER and MUTATED, because "is this
+    name already bound" is a question about the statements before this one: a
+    name the statement ABOVE binds has been bound, and one bound only inside a
+    branch that has not run has not. One set threaded down the list is the whole
+    of that ordering, and it is why this cannot be `_rewrite_stmt_lists` with a
+    visitor — that one has no state to thread.
+
+    `fn` is the OUTERMOST function — the one the temporaries are collision-checked
+    against and the one a refusal names — and it stays that one through a nested
+    `def`, because a nested body's captures are that nested function's locals and
+    the enclosing frame's names are inherited through `bound` rather than
+    through the function identity (see `_lower_match_descend`).
+    """
+    out = []
+    for stmt in (stmts or []):
+        if isinstance(stmt, F.MatchStmt):
+            pieces, bound = _lower_one_match(stmt, bound, fresh, fn,
+                                            module_names)
+            out.extend(pieces)
+            continue
+        _lower_match_descend(stmt, bound, fresh, fn, module_names)
+        bound |= _statement_binds(stmt)
+        out.append(stmt)
+    return out
+
+
+def _lower_match_descend(stmt, bound: set, fresh, fn, module_names) -> None:
+    """Recurse into `stmt`'s statement containers, threading `bound` in order.
+
+    The containers are the two tables `_rewrite_stmt_lists` already owns
+    (`_STMT_LIST_FIELDS` and `_STMT_TUPLE_LIST_FIELDS`), read from here rather
+    than written out, because a THIRD copy of "which fields hold statements" is
+    how a `match` under some arm of some statement comes to be missed — and the
+    one field that is not a `list` (`IfStmt.elifs`, a list of tuples) is already
+    a measured defect in this tree.
+
+    A nested `def` INHERITS `bound` and adds its own parameters, which is the
+    interpreter's rule rather than CPython's: `myinterpreter.py`'s
+    `self.scope.has(pattern.name)` walks the scope chain, so a name an
+    ENCLOSING function bound is found and the pattern is a value comparison.
+    Measured on `bound_local_of_an_enclosing_function_is_a_value_comparison` —
+    with `K` a local of the enclosing function, `fire.py run` prints the
+    value-comparison answer and CPython prints the capture answer, and the
+    reference interpreter is the authority for this compiler's `match`
+    (`fire_compiler.py`'s `MatchStmt` docstring is explicit that it is not
+    PEP 634).
+
+    The consequence on this path is that the read is of a CLOSURE CAPTURE:
+    `_flatten_closures` runs after this loop, sees `K` read in the nested body
+    and lifts it as a leading by-value parameter, which is exactly what the
+    interpreter's enclosing-scope lookup means here.
+
+    A `lambda` is not descended (`_SKIP_DESCEND_FIELDS`) because its body is an
+    expression.
+    """
+    kind = type(stmt).__name__
+    for field in _STMT_LIST_FIELDS.get(kind, ()):
+        if (kind, field) in _SKIP_DESCEND_FIELDS:
+            continue
+        value = getattr(stmt, field, None)
+        if isinstance(value, list):
+            if kind == "MatchStmt":
+                # Reached only for the `cases` list, and the elements are
+                # `MatchCase`s: `_STMT_LIST_FIELDS` lists `cases` so a walk
+                # finds the arms, and each arm's own `body` is the container
+                # that holds statements. Recursing through `_lower_match_stmts`
+                # here would hand a CASE to a function that treats what it is
+                # given as a statement.
+                for case in value:
+                    _lower_match_descend(case, bound, fresh, fn,
+                                         module_names)
+                continue
+            value[:] = _lower_match_stmts(value, bound, fresh, fn,
+                                          module_names)
+    for field in _STMT_TUPLE_LIST_FIELDS.get(kind, ()):
+        for pair in (getattr(stmt, field, None) or []):
+            if isinstance(pair, (list, tuple)) and len(pair) == 2 \
+                    and isinstance(pair[1], list):
+                pair[1][:] = _lower_match_stmts(pair[1], bound, fresh, fn,
+                                                module_names)
+    if isinstance(stmt, F.FunctionDef) and stmt is not fn:
+        nested = set(bound) | _match_scope_names(stmt, module_names)
+        stmt.body = _lower_match_stmts(stmt.body, nested, fresh, fn,
+                                       module_names)
+
+
+def _lower_one_match(stmt, bound: set, fresh, fn, module_names) -> tuple:
+    """One `match` as `(statements, bound_after)`.
+
+    The shape it emits, for `match s:` over cases `[c0, c1]` — a decision tree
+    of compares and branches, with every arm's body SPLICED IN. NESTED `else`
+    and not `elifs`, so one `case` is one `IfStmt` and a case with a guard is
+    that case's `else`:
+
+        _match_val1 = s                       # the subject, ONCE
+        if p0 == _match_val1: <arm0>
+        else:
+            if p1 == _match_val1: <arm1>
+
+    and with a guard on `c0`, the guard is the arm's own `if` and the chain
+    continues in its `else`:
+
+        if p0 == _match_val1:
+            if g0: <arm0>
+            else: <c1 lowered>
+        else:
+            <c1 lowered>
+
+    `elifs` would read a little flatter and mean the same thing to both emitters,
+    but a chain built from `elifs` cannot express a guard (there is nowhere to
+    put the `else` that continues the match), so the whole match would need two
+    shapes. One is enough.
+
+    **The subject is bound to a temporary unless it is already a bare name.**
+    CPython evaluates the subject expression exactly once, before the first
+    pattern, and every pattern then compares against that value. Re-evaluating
+    it per pattern would call it once per pattern — `test_formal_match.py`'s
+    `subject_evaluated_once` prints from inside the subject and counts — and
+    re-binding it to the same name would make a capture in an arm observe a
+    value the match had already clobbered.
+
+    **A case's `patterns` list is a short-circuit OR of compares, not a chain of
+    nested tests.** `case p1, p2:` must evaluate `p1`, compare, and evaluate `p2`
+    only if `p1` did not match — that is `myinterpreter.py`'s loop over
+    `match_case.patterns` and it is observable whenever a pattern has a side
+    effect (`or_comma_short_circuits_before_a_bad_read` /
+    `or_comma_second_pattern_matches`, the two rows that can see it at all).
+    `(p1 == s) or (p2 == s)` in this AST is a `BinaryOp('or')`, which both
+    emitters already lower as a short-circuit chain with its own branch, so the
+    arm and the rest-of-the-match stay one decision per pattern and the emitted
+    code is the shape `formal/model.py`'s conditional proof already covers.
+
+    **A capture or a wildcard ENDS the case's pattern list.** Both match
+    whatever reaches them, so every later pattern in the same `case` is
+    unreachable — CPython drops them too, and the row that can see it dropping
+    one is `capture_at_the_front_of_a_pattern_list_kills_the_rest`. This is also
+    what keeps the binding order right: a capture binds the subject and matches,
+    so nothing after it is evaluated and nothing after it is bound. What the
+    capture does to the arm AROUND it — the arm runs on both outcomes of the
+    comparisons before it — is `_lower_one_case`'s business, not this one's.
+
+    **Every arm body is lowered BEFORE the chain is built, in source order.**
+    An arm body is ordinary statements, so it can hold a `match` of its own, and
+    the chain is assembled from the bodies — so a body that was copied verbatim
+    into the new `IfStmt` would arrive at the emitter with a `MatchStmt` still in
+    it and be refused as "unsupported statement MatchStmt" from inside an arm.
+
+    **…and each body is walked on a COPY of `bound`, so a name an arm's body
+    assigns does not decide that arm's own pattern.** `case v:` with `v = v + 10`
+    in the arm is a CAPTURE — the store comes after the pattern is read, and
+    reading `v` to compare it would be a read before anything stored it (which
+    `check_module_symbols` refuses, correctly). Sharing the set made the body's
+    own store visible to the pattern above it and turned the capture into a
+    comparison of an unstored name; the copy also stops an arm's bindings from
+    reaching a LATER arm's pattern, which is the conservative direction —
+    a name bound only on the path that reached the first arm is not bound on
+    the path that reaches the second, so treating it as a capture can only
+    produce a working assignment where a comparison would have produced a read
+    of nothing.
+
+    `bound` comes back in the return value rather than being mutated in place,
+    because the arms' captures join it and the caller threads it down the
+    statement list.
+    """
+    subject = stmt.subject
+    cases = list(getattr(stmt, "cases", None) or [])
+    for case in cases:
+        case.body = _lower_match_stmts(list(getattr(case, "body", None) or []),
+                                       set(bound), fresh, fn, module_names)
+    if isinstance(subject, F.IdentExpr):
+        tmp, head = None, []
+        subject_ref = subject
+    else:
+        tmp = fresh()
+        head = [F.AssignStmt(target=F.IdentExpr(name=tmp), value=subject,
+                             line=getattr(stmt, "line", 0),
+                             col=getattr(stmt, "col", 0))]
+        subject_ref = F.IdentExpr(name=tmp, line=getattr(subject, "line", 0),
+                                  col=getattr(subject, "col", 0))
+    rest: list = []
+    for case in reversed(cases):
+        rest, bound = _lower_one_case(case, subject_ref, rest, bound, fn)
+    return head + rest, bound
+
+
+def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
+    """One `case` as `(statements, bound_after)`, given the rest of the match.
+
+    `rest` is what runs when this case does not match, and it appears EXACTLY
+    ONCE in what this returns. That is the whole reason the case is not a chain
+    of nested `if`s: `If(p0, then=…, else=If(p1, then=…, else=rest))` with a
+    guard inside each arm's `then` would splice `rest` into 2^k places for k
+    patterns, and the emitted image would carry k copies of every later arm. The
+    flat shape keeps one:
+
+        [capture assignments] + [If(OR-of-compares, then=<the matched arm>,
+                                    else=rest)]
+
+    where the guard's own `else` is the arm that continues the match, so a guard
+    that says no falls to the NEXT case rather than to the end of the match
+    (`myinterpreter.py`: `if match_case.guard is not None and not
+    self.eval_expr(match_case.guard): continue`).
+
+    **A capture binds BEFORE the guard is tested, and stays bound when the guard
+    says no.** That is the reference's order — `self.scope.define(...)` then the
+    guard test — and it is observable: `case v if v > 3:` followed by
+    `case _:` that reads `v` finds a name that only exists because the guard
+    failed (`capture_survives_a_failed_guard`). Binding inside the arm's body
+    instead would leave that read unstored, and the read-before-store check
+    would refuse a correct program.
+
+    **The compare is `SUBJECT == PATTERN`, where the reference writes
+    `pattern == subject`.** `==` cannot answer differently either way on this
+    path — it is a word compare or a `strcmp` (`_emit_branch_unless`'s
+    `_emit_strcmp_flags` arm), with no `__eq__` dispatch to make it asymmetric —
+    and the two orders are NOT the same to the arm64 proof generator, which is
+    the whole reason for the choice. Measured on this tree through
+    `formal/lean.py::check_proof_cached`:
+
+        def main() -> Int:          arm64 proof
+            n = 3
+            if n == 0: ...          ok
+            if 0 == n: ...          FAILS (Application type mismatch on the
+                                   B.cond block's hcond obligation)
+
+    and a `match` with one literal case lowered to the second order fails the
+    same way while the identical program written as `if` passes. Putting the
+    subject on the left makes `match n: case 0:` emit the compare an `if` would,
+    so a `match` is provable wherever its `if` spelling is — which is the whole
+    claim this lowering makes, and it would be false of the Lean model for every
+    two-case `match` otherwise. The operand-order sensitivity itself is a
+    pre-existing gap in that generator and is filed as
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md`.
+
+    **Adding a capture's name to `bound` is a STATIC answer to a question the
+    reference asks at RUN TIME, and it is the right one.** The reference asks
+    `scope.has(name)` when it reaches each later `case`, and a case that contains
+    a capture or a wildcard ALWAYS matches — so the only path that reaches a
+    later case is a GUARD that said no, and the guard runs AFTER the capture has
+    already bound the name (`self.scope.define(...)` and then the guard test). On
+    every reachable path the name is bound by the time a later pattern reads it,
+    which is what `bound.add` records. A path on which the capture was never
+    reached is a path on which the case holding it MATCHED, and a case that
+    matches is not fallen through.
+    """
+    patterns = list(getattr(case, "patterns", None) or [])
+    guard = getattr(case, "guard", None)
+    body = list(getattr(case, "body", None) or [])
+    binds: list = []
+    tests: list = []
+    irrefutable = False
+    for pattern in patterns:
+        kind = M.match_pattern_kind(pattern, bound)
+        if kind in M.MATCH_REFUSED_KINDS:
+            raise CodegenError(M.match_pattern_refusal(
+                kind, M.spelled(pattern), fn.name or "<module>",
+                getattr(pattern, "line", 0) or getattr(case, "line", 0) or 0))
+        if kind == "wildcard":
+            # Irrefutable and binds nothing: the arm is reached whenever the
+            # patterns before it did not match, and nothing after this pattern
+            # in this case can be evaluated.
+            irrefutable = True
+            break
+        if kind == "capture":
+            binds.append(pattern.name)
+            bound.add(pattern.name)
+            irrefutable = True
+            break
+        tests.append(F.BinaryOp(
+            op="==", left=subject_ref, right=pattern,
+            line=getattr(pattern, "line", 0), col=getattr(pattern, "col", 0)))
+    if not tests:
+        # Every pattern is irrefutable, so the arm runs whenever it is reached.
+        return _lower_case_arm(case, binds, subject_ref, body, guard, rest), bound
+    condition = tests[0] if len(tests) == 1 else _short_circuit_or(tests, case)
+    # **A list that ENDS in a capture or a wildcard runs the arm on BOTH
+    # outcomes, and binds only on the second.** The reference evaluates the
+    # patterns left to right and stops at the first that matches, so a pattern
+    # after a value comparison is reached exactly when every comparison before
+    # it failed — and an irrefutable pattern matches whatever reaches it. So
+    # `case 1, other:` runs the arm whether the subject is 1 (off the `1`, with
+    # `other` unbound) or not (off the capture, with `other` = the subject), and
+    # the two are DIFFERENT arms: only the second binds.
+    #
+    # One arm in the `then` would be a wrong answer rather than a refusal:
+    # measured on this tree before the split, `f(5)` on `case 1, other:` printed
+    # `rest` where `fire.py run` prints `low` then `5`, and `case 1, _:` printed
+    # one `low` where the reference prints two.
+    #
+    # `rest` appears once per guard, which is the price of having no `goto`
+    # between the two arms, and it is unreachable on either when there is no
+    # guard — a list ending in an irrefutable pattern matches everything, so the
+    # rest of the `match` is only reachable through a guard that says no.
+    taken = _lower_case_arm(case, binds, subject_ref, body, guard, rest)
+    then_body = taken if not irrefutable else _lower_case_arm(
+        case, [], subject_ref, body, guard, rest)
+    return ([F.IfStmt(condition=condition, then_body=then_body, elifs=[],
+                      else_body=rest if not irrefutable else taken,
+                      line=getattr(case, "line", 0),
+                      col=getattr(case, "col", 0))], bound)
+
+
+def _short_circuit_or(tests: list, case):
+    """`t0 or t1 or …` as a left-nested `BinaryOp`, for a case's pattern list.
+
+    Left-nested on purpose: the short-circuit chain is walked left to right by
+    both emitters (`formal/arm64_codegen.py::_emit_truthy_word` and x86-64's
+    `_emit_truthy_word` both recurse into the left operand first and branch
+    between the two), so the tests evaluate in SOURCE order and the first one
+    that matches stops the rest — which is the order
+    `myinterpreter.py::execute_MatchStmt` evaluates `match_case.patterns` in.
+    """
+    out = tests[-1]
+    for test in reversed(tests[:-1]):
+        out = F.BinaryOp(op="or", left=test, right=out,
+                         line=getattr(case, "line", 0),
+                         col=getattr(case, "col", 0))
+    return out
+
+
+def _lower_case_arm(case, binds: list, subject_ref, body: list, guard,
+                    rest: list) -> list:
+    """The arm's own statements: the capture stores, then the guard, then the body."""
+    out = [F.AssignStmt(target=F.IdentExpr(name=name), value=subject_ref,
+                        line=getattr(case, "line", 0),
+                        col=getattr(case, "col", 0))
+           for name in binds]
+    if guard is not None:
+        out.append(F.IfStmt(condition=guard, then_body=body, elifs=[],
+                            else_body=rest, line=getattr(case, "line", 0),
+                            col=getattr(case, "col", 0)))
+    else:
+        # No guard: the arm MATCHED, so the rest of the match does not run and
+        # is not emitted on this path at all. It is still on the `If`'s else
+        # above, which is the path that reaches it.
+        out.extend(body)
+    return out
 
 
 # ── `with`: lowered to the protocol, or refused by name ───────────────────────
