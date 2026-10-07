@@ -842,9 +842,9 @@ def _setcc(reg: Reg, cc: int) -> bytes:
     (`C4`-`C7`) name the HIGH bytes AH/CH/DH/BH of RAX/RCX/RDX/RBX, so
     `0F 96 C5` is `setbe ch` and never `setbe bpl`.  This encoder used to omit
     the prefix for 4-7, which assembled to a correct-looking instruction that
-    wrote the wrong register; `test_x86_64_encoders.py` pins the four against
-    `as`, and `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` records the
-    fuzz rows it was misread as a hardware anomaly through.
+    wrote the wrong register — and the fuzzer, which executes these exact bytes,
+    read the CPU's correct decode as a hardware anomaly for a while.
+    `test_x86_64_encoders.py` pins the four against `as`.
     """
     enc = [0x0F, 0x90 + cc]
     if _byte_rex_required(reg):

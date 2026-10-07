@@ -836,15 +836,20 @@ def divide_cases():
 
     **The samples above ask whether the model can STEP a form; this asks
     whether the divide it steps is the division.** `x86_step`'s group-3 arm is
-    the only place in this model where a wrong answer is arithmetically
-    checkable without a hardware oracle, because both halves are defined by an
-    identity (`n = q*d + r`, `|r| < |d|`) rather than by another instruction —
-    and `formal/x86_64_model_test.py`, which does compare against the CPU,
-    cannot be used for the cases that MATTER here: this host's `idiv` disagrees
-    with exact arithmetic on 8 of 28 register triples (see
-    `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` §"The fourth class"),
-    and every one of the 8 has a negative RAX of large magnitude, which is
-    exactly the shape a random dividend has.
+    the one place in this model where the answer is fixed by an identity
+    (`n = q*d + r`, `|r| < |d|`) rather than by another instruction, so it can
+    be checked against exact integer arithmetic — and that is stronger than the
+    CPU here for two reasons: the CPU FAULTS (`#DE`) on several of the boundary
+    rows below and so cannot answer them, and the fuzzer's random dividends are
+    exactly the shape that made the old signed-low reconstruction look right.
+
+    **This table found that bug**: `x86_idiv128` reconstructed the dividend as
+    `hi * 2^64 + lo` with `lo` SIGNED, so a dividend whose LOW word had bit 63
+    set was divided by the wrong value. The old rows could not see it because
+    `idiv_row` built its `n` from the same signed-low pair the model used; it
+    now takes the exact 128-bit value and DERIVES the register split, which is
+    what makes the three rows at the bottom a regression rather than a
+    restatement.
 
     The expectation is computed here, not pinned, so a rule change has to be
     argued rather than retyped: `want` is `None` where the instruction FAULTS
@@ -1099,15 +1104,13 @@ def multiply_cases():
     """[(label, enc, rax, rdx, rm, want)] — the three MULTIPLY forms' product,
     destination registers and flags, against EXACT INTEGER ARITHMETIC.
 
-    **This is the table `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`
-    names as the only gap left in that doc**, and it is here for the reason
-    `divide_cases` and `shift_cases` are: the CPU is not an available oracle on
-    this host.  `formal/x86_64_model_fuzz.py` attributes a difference at a
-    three-operand `imul`'s destination "by resemblance" — its rule is a
-    documented host anomaly whose reach is not known — because the multiply has
-    no arithmetic table to attribute it with, so there is nothing to compare
-    against.  A model bug and a mistranslated `imul` are indistinguishable in
-    that row and a table is what separates them.
+    **This is the arithmetic table for the multiply**, and it exists because the
+    CF/OF answer is a statement about the FULL 128-bit product that no random
+    operand reaches: a random 64-bit product does not overflow, so a model that
+    claims an overflow for `3 * 5` and one that computes the right thing agree
+    on every random row. The CPU is not needed for it — the product and its fit
+    are fixed by exact arithmetic — and this table is what found the model's own
+    low-word overflow bug (`x86_imul_ovf`'s docstring has the measurement).
 
     Three forms, three different products, and each has a boundary that only one
     side of gets right:

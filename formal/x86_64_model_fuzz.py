@@ -71,10 +71,8 @@ stub into the region does not work.
 
 Until 2026-10-07 this file carried a third verdict, `HARNESS`, for a
 disagreement "no x86-64 CPU can produce" — two classes, both measured on this
-host under Rosetta 2 and both written up in
-`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`. **Both were wrong, and
-the defect was in this tree rather than in Rosetta**, which is why they are gone
-rather than kept:
+host under Rosetta 2. **Both were wrong, and the defect was in this tree rather
+than in Rosetta**, which is why they are gone rather than kept:
 
   * **`setcc` into RBP, RSI or RDI.** The bytes this file executed were
     `0f 96 c5`/`c6`/`c7`, and the CPU is RIGHT about them: with no REX prefix
