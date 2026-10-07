@@ -31881,6 +31881,28 @@ def _binding_values(fn, name: str) -> list:
         — a list of them is `map.mojo`'s own shape — so "the iterable is a
         container" says nothing about the element.
 
+    **A write THROUGH a name is a different question from a write OF it, and
+    this walk now records the two separately** (`_container_element_writes`
+    below, one walk and two lists, so the two readers cannot disagree about
+    which is which). Before it did not, and the asymmetry was a defect in both
+    directions rather than a gap in one:
+
+      * a SUBSCRIPT STORE (`xs[0] = v`, `d["k"] = v`) writes an ELEMENT of the
+        container the name holds and does not rebind the name, so recording it
+        as a binding made `caller_local_element_holds` claim unanimity over a
+        literal whose element the source had since REPLACED — a FALSE REFUSAL of
+        `xs = [10, 20, 30]; xs[0] = dbl; …xs[0]`, measured on both
+        architectures, where CPython runs it;
+      * an `APPEND` (`xs.append(v)`) writes an element the walk could not see at
+        all, so `xs = []; xs.append(17); …xs[0]` had no stated element and the
+        build emitted the image anyway — measured SIGBUS 138 on arm64 and SIGSEGV
+        139 on x86-64 where CPython raises `TypeError`.
+
+    Both are sites of the ELEMENT question and neither is a site of the VALUE
+    question, which is why they are one walk returning two lists rather than two
+    walks: the same disagreement this function's own paragraph warns about, in
+    the only place the shapes are visible.
+
     `iter_nodes` rather than a second statement walk, for the reason every
     shared walk in this file is shared: the shapes that bind a name are
     `mojo/middle/boundnames.py`'s to own, and a private copy is how a 1-tuple
@@ -31896,6 +31918,15 @@ def _binding_values(fn, name: str) -> list:
     `_names_bound_in` documents about the allocator's own table, and the caller
     below requires the value model's UNANIMITY as well, which is what catches
     the disagreement rather than the missed shape.
+
+    One shape this walk deliberately does NOT record, and it is a gap rather than
+    an answer: **a name a function declares `global` is bound by the MODULE's
+    statement, not by this function's**, and this walk only ever saw the
+    function's. `_global_slot_value` is what closes that from the slot table
+    rather than from a second walk of the module body, for the reason every other
+    reader of a module global in this file reads the table: the table is where
+    the module-level binding's shape ended up, so a name asked about twice gets
+    one answer.
     """
     sites = []
     for node in iter_nodes(getattr(fn, "body", None) or []):
@@ -31920,6 +31951,160 @@ def _binding_values(fn, name: str) -> list:
                 if name in _target_leaves(getattr(item, "alias", None)):
                     sites.append(None)
     return sites
+
+
+class _ElementWrite(NamedTuple):
+    """One value a statement stores into a container a name holds.
+
+    `index` is the subscript's index or key NODE when the source spells it as a
+    literal and `None` when it is computed — `xs[i] = v` and `xs["k"] = v` say
+    where they land and `xs[n] = v` does not, and that difference is the whole
+    of the precision below. `value` is the value written, or `None` where this
+    walk cannot state one (an augmented store, an `append` of several arguments,
+    a `del`, which removes an element rather than writing one).
+
+    `appends` and `removes` are the two writes that change where a LATER
+    `append` lands, and nothing else does: an `append` adds an element at the
+    end and a `del` removes one. They are separate fields rather than one
+    `shifts` because only the first of them is excludable by the length
+    argument — a `del` makes the count shorter, which is the direction that
+    argues FOR including an `append`, so a reader that treated the two alike
+    would exclude an `append` a `del` had moved into range.
+    """
+    index: object
+    value: object
+    appends: bool
+    removes: bool
+
+
+
+def _container_element_writes(fn, name: str) -> list:
+    """Every value a statement of `fn` stores as an ELEMENT of `name`.
+
+    The other half of `_binding_values`, and it answers the other of the two
+    questions: `xs[0] = v` and `xs.append(v)` write into the container a name
+    holds without rebinding the name, so the value question has nothing to learn
+    from them and the ELEMENT question cannot proceed without them. Before this
+    existed the walk recorded neither, and both mistakes were measurable on both
+    architectures:
+
+      * the MISSING append built and trapped (`xs = []; xs.append(17)` has no
+        stated element, so the element reader said nothing and the image went
+        out) — SIGBUS 138 on arm64, SIGSEGV 139 on x86-64, where CPython raises
+        `TypeError: 'int' object is not callable`;
+      * the SUBSCRIPT STORE recorded as if it bound the name produced a FALSE
+        REFUSAL of `xs = [10, 20, 30]; xs[0] = dbl; … xs[0]`, which CPython runs
+        and which this path used to build as well.
+
+    An `append` whose receiver is a SUBSCRIPT or an attribute (`fs[0].append(v)`,
+    `d["k"].append(v)`) is recorded as an unstated write rather than as its
+    argument: this walk cannot see which container the receiver names, and a
+    wrong container would be a refusal of a program that is correct.
+
+    `extend` is the same shape with a LIST argument rather than a single value
+    and is deliberately absent: it is not in `BUILTIN_VALUE_METHODS`, so no
+    emitter lowers it, and a reader that answered for a shape no backend has
+    would be answering about a program that cannot be built at all.
+    """
+    out: list = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
+            value = getattr(node, "value", None)
+            for target in _subscript_targets(getattr(node, "target", None)):
+                if not _names_container(target.obj, name):
+                    continue
+                out.append(_ElementWrite(
+                    target.index, None if isinstance(node, F.AugAssignStmt)
+                    else value, False, False))
+        elif isinstance(node, F.DelStmt):
+            for target in _subscript_targets(
+                    [t for t in (getattr(node, "targets", None) or ())]):
+                if not _names_container(target.obj, name):
+                    continue
+                # `del xs[i]` REMOVES an element, which is why it is its own
+                # flag: the next `append` lands one position earlier than it
+                # otherwise would, so the length argument that excludes an
+                # `append` does not apply while one of these is in the function.
+                out.append(_ElementWrite(target.index, None, False, True))
+        elif isinstance(node, F.ExprStmt):
+            call = getattr(node, "value", None)
+            if not isinstance(call, F.CallExpr):
+                continue
+            func = getattr(call, "func", None)
+            if not isinstance(func, F.MemberExpr) or func.member != "append":
+                continue
+            if not _names_container(func.obj, name):
+                continue
+            args = list(getattr(call, "args", None) or ())
+            out.append(_ElementWrite(None, args[0] if len(args) == 1 else None,
+                                     True, False))
+    return out
+
+
+def _subscript_targets(target) -> list:
+    """Every `SubscriptExpr` inside a binding target, at any nesting depth.
+
+    `xs[0] = v` and `(a, d["k"]) = t` are the same shape at two depths, and the
+    walk is over `iter_nodes` rather than over one level of the target precisely
+    so the depth is not something a second reader has to agree about.
+    """
+    return [n for n in iter_nodes([target])
+            if isinstance(n, F.SubscriptExpr)
+            and not isinstance(getattr(n, "index", None), F.SliceExpr)]
+
+
+def _names_container(obj, name: str) -> bool:
+    """Whether `obj` is the bare name `name` — and only the bare name.
+
+    A subscript or attribute receiver is deliberately `False`: `fs[0].append(v)`
+    stores into a container this walk cannot name, and treating it as a store
+    into `fs` would be a refusal of a program whose elements are elsewhere.
+    """
+    return isinstance(obj, F.IdentExpr) and obj.name == name
+
+
+def _literal_index_value(node):
+    """The value of a subscript index the source spells as a literal, else None.
+
+    One reader for both containers, because both answers are the same question —
+    "did the source say which one" — and two readers would be two places for the
+    sequence and the mapping spellings to drift on it. `IntLiteral` and
+    `StringLiteral` are the only two that can, and a computed index is the
+    whole-set case the caller handles.
+    """
+    if isinstance(node, F.IntLiteral):
+        return ("seq", node.value)
+    if isinstance(node, F.StringLiteral):
+        return ("dict", node.value)
+    return None
+
+
+def _global_slot_value(fn, name: str):
+    """The value the MODULE binds a `global name`, when this function says so.
+
+    The one write site of a module global that is not in the function that reads
+    it, and it is asked of the SLOT TABLE rather than by walking the module body
+    again: `GlobalSlot.site` is the module-level statement itself, so this reads
+    the source rather than the words the linker laid out, which is the reason
+    `global_slot_kind` gives for reading the same table.
+
+    `None` for every function that does not declare the name `global`, and for a
+    declared name the module does not publish a slot for — a slot the table does
+    not have is a binding this walk cannot see, which is silence and not an
+    answer. The `GlobalStmt` itself is what makes the question askable: without
+    it a name that merely shares a module global's spelling is a local, and
+    asking the table about it would answer for a name it does not bind.
+    """
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, F.GlobalStmt):
+            continue
+        if name not in (getattr(node, "names", None) or ()):
+            continue
+        slot = module_slot(name)
+        if slot is None:
+            return None
+        return getattr(slot.site, "value", None)
+    return None
 
 
 def _target_leaves(target) -> list:
@@ -31965,7 +32150,7 @@ def _element_of_a_literal_container(arg) -> bool:
     return False
 
 
-def value_argument_is_not_an_address(arg, caller=None) -> str | None:
+def value_argument_is_not_an_address(arg, caller=None, _asked=frozenset()) -> str | None:
     """What the argument's OWN SHAPE says it holds, when that is not an address.
 
     The PASSING end of the section's subject, asked from
@@ -32019,20 +32204,20 @@ def value_argument_is_not_an_address(arg, caller=None) -> str | None:
     if _element_of_a_literal_container(arg):
         return "an element read out of a container"
     if isinstance(arg, F.UnaryOp):
-        return value_argument_is_not_an_address(arg.operand, caller)
+        return value_argument_is_not_an_address(arg.operand, caller, _asked)
     if isinstance(arg, F.BinaryOp):
         # `and`/`or` HAND BACK ONE OF THEIR SIDES, so one side being a number
         # says nothing about the other; every other operator computes.  A
         # comparison is `0`/`1` by definition, which is why it is named rather
         # than left to the operands.
         if arg.op in ("and", "or"):
-            left = value_argument_is_not_an_address(arg.left, caller)
-            right = value_argument_is_not_an_address(arg.right, caller)
+            left = value_argument_is_not_an_address(arg.left, caller, _asked)
+            right = value_argument_is_not_an_address(arg.right, caller, _asked)
             return left if left and right else None
         if arg.op in _COMPARISON_OPS:
             return "the result of a comparison"
-        return (value_argument_is_not_an_address(arg.left, caller)
-                or value_argument_is_not_an_address(arg.right, caller))
+        return (value_argument_is_not_an_address(arg.left, caller, _asked)
+                or value_argument_is_not_an_address(arg.right, caller, _asked))
     if isinstance(arg, F.CompareChain):
         return "the result of a comparison"
     if isinstance(arg, F.SubscriptExpr) and caller is not None:
@@ -32042,14 +32227,15 @@ def value_argument_is_not_an_address(arg, caller=None) -> str | None:
             ann = param_annotation(caller, base.name)
             if ann and not value_callee_can_hold_a_function(ann):
                 return f"an element read out of `{ann.strip()}`"
-            element = caller_local_element_holds(caller, base.name)
+            element = caller_local_element_holds(caller, base.name, arg.index,
+                                                _asked)
             if element is not None:
                 return element
     if isinstance(arg, F.IdentExpr) and caller is not None:
         ann = param_annotation(caller, arg.name)
         if ann and not value_callee_can_hold_a_function(ann):
             return f"a value declared `{ann.strip()}`"
-        holds = caller_local_holds(caller, arg.name)
+        holds = caller_local_holds(caller, arg.name, _asked)
         if holds is not None:
             return holds
     return None
@@ -32067,6 +32253,16 @@ def _syntactic_write_values(fn, name: str) -> list:
     one `callee_word_is_not_an_address`'s own paragraph describes for the CALLING
     end's syntactic leg.
 
+    **A `global` declaration contributes the MODULE's binding of the name** (see
+    `_global_slot_value`), and it contributes it as a SITE rather than replacing
+    the function's own writes, so `global g; g = compute()` still asks the
+    unanimity question over both rather than answering from whichever came
+    first. Before this existed the function's own writes were the only sites, so
+    a name bound ONLY at module level had no site at all — measured: `var g = 17`
+    with `global g` in `main` and `g` passed to a function that calls it through
+    a value built on both architectures and died of SIGSEGV, where CPython raises
+    `TypeError`.
+
     Named separately so both readers of it (the value's own reader and the
     element's) ask the same walk: two walks over the same shapes is how a name
     two statements disagree about becomes a refusal in one reader and a pass in
@@ -32074,10 +32270,14 @@ def _syntactic_write_values(fn, name: str) -> list:
     """
     if not name:
         return []
-    return _binding_values(fn, name)
+    sites = _binding_values(fn, name)
+    module_site = _global_slot_value(fn, name)
+    if module_site is not None:
+        sites.append(module_site)
+    return sites
 
 
-def caller_local_holds(fn, name: str) -> str | None:
+def caller_local_holds(fn, name: str, _asked=frozenset()) -> str | None:
     """What a LOCAL of `fn` holds, when every site that writes it says so.
 
     The PASSING end's half for an argument the caller BOUND rather than spelled,
@@ -32111,11 +32311,27 @@ def caller_local_holds(fn, name: str) -> str | None:
     unit does not compile (`helper()` returns nothing in particular — a caller
     that binds `g = mk()` has no answer here), and a name the walk does not bind
     at all. Both are silence.
+
+    **`_asked` is a CYCLE guard and it is not optional.** This reader, the
+    element reader and `value_argument_is_not_an_address` are mutually
+    recursive — asking what `xs[0]` holds asks what each of the elements holds,
+    which asks what those names hold — so `var a = b` and `var b = a` in one
+    function is a loop with no base case. Measured over this repository's corpus
+    (every `.py` and `.mojo`, the reader driven with the
+    `parameters_called_through_a_value` conjunct dropped): `RecursionError` on
+    real files, before this guard. The key is the `(function, name)` QUESTION
+    rather than the function alone, because asking two different names of one
+    function is not a cycle, and re-asking one is: a question already on the
+    stack has no smaller instance of itself to reduce to, so the answer is
+    silence — which is this reader's answer for everything it cannot see.
     """
+    if (id(fn), name) in _asked:
+        return None
+    asked = _asked | {(id(fn), name)}
     sites = _syntactic_write_values(fn, name)
     if not sites or any(v is None for v in sites):
         return None
-    phrases = {value_argument_is_not_an_address(v, fn) for v in sites}
+    phrases = {value_argument_is_not_an_address(v, fn, asked) for v in sites}
     if None in phrases:
         # A site whose value is an ordinary local or a call states nothing this
         # reader can use, which is silence and not agreement.
@@ -32133,46 +32349,194 @@ def caller_local_holds(fn, name: str) -> str | None:
     return phrases.pop()
 
 
-def caller_local_element_holds(fn, name: str) -> str | None:
-    """What `name[i]` holds, when `name` is a local built only from LITERALS.
+def caller_local_element_holds(fn, name: str, index=None,
+                             _asked=frozenset()) -> str | None:
+    """What `name[i]` holds, when the walk can see every value it can hold.
 
     The element case, and it is narrower than the value case on purpose. An
     element of a container can be a function — a list of them is
     `std/collections/map.mojo`'s own shape — so `xs[i]` on a list is not an
-    answer, which is why the doc's own reader stops at "a subscript of a NAME".
-    What IS an answer is the one case where the walk can see every element the
-    subscript could ever hand back: **every syntactic write of the name is a
-    container LITERAL, and every element of every such literal is itself
-    something `value_argument_is_not_an_address` refuses as an address.** Then
-    the element is one of those values and the answer follows.
+    answer in general. What IS an answer is the one case where the walk can see
+    every value the subscript could ever hand back: **every element the name
+    holds comes from a container LITERAL or from a store this walk can see, and
+    every such value is itself something `value_argument_is_not_an_address`
+    refuses as an address.** Then the element is one of those values and the
+    answer follows.
 
-    A name bound to `[]` and then appended to is refused here, because an
-    `append` is not a literal and its argument is a value this reader would have
-    to trace; `xs = []; xs.append(dbl)` is a list of functions, and the walk that
-    cannot see it is silent, not wrong.
+    **The sites are the literals PLUS the writes THROUGH the name**
+    (`_container_element_writes`), which is what makes the rule above true
+    rather than nearly true. Reading only the literals was wrong in both
+    directions, and both were measured on both architectures:
+
+      * `xs = []; xs.append(17)` states no element in any literal, so the reader
+        was silent, the build emitted the image, and it died of SIGBUS 138 on
+        arm64 / SIGSEGV 139 on x86-64 — CPython raises `TypeError: 'int' object
+        is not callable`;
+      * `xs = [10, 20, 30]; xs[0] = dbl` — a correct program, run by CPython —
+        was REFUSED, because the walk saw only the literal and did not know the
+        source had replaced element 0 with a function. Its dict spelling
+        (`d = {"k": 17}; d["k"] = dbl`) was not refused at all, so the two
+        spellings of one shape got two answers.
+
+    A DICT literal is one of the literals because its VALUES are what a subscript
+    hands back and they are as visible as a list's elements: `d["k"]` on
+    `{"k": 17}` is 17, and `d[k]` on `{"k": 17}` is 17 or a `KeyError`, never a
+    function. That is the answer `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+    called missing ("a subscript of a DICT name … which no spelling
+    distinguishes from a list") — no spelling of the SUBSCRIPT distinguishes
+    them, but the spelling of the BINDING does, and that is what this reader
+    reads.
+
+    **`index` narrows the question to the element the source NAMED, and it is
+    what keeps a correct program out of the refusal.** With no index the reader
+    has to hold that EVERY element of the container is a non-address, which is
+    right and is silence the moment one of them is a function — `xs = [10, 20];
+    xs.append(dbl); xs[0]` cannot be answered, because the reader cannot see
+    that the `append` lands at index 2 and `xs[0]` is still the `10`. With an
+    index of `0` it can: the literal's element at 0 is a candidate, the `append`
+    is not one (see below), and the answer is "an integer". The rule for
+    excluding an `append` is stated where it is used because it is the one place
+    this reader reasons about POSITION rather than about values.
+
+    A name bound to a literal-shaped site this reader cannot read, and a name
+    with any store the walk cannot attribute (`fs[0].append(v)`, an `append` of
+    several arguments, an augmented store), are silence rather than wrong: this
+    reader cannot claim a name is a number when a statement writes a word it does
+    not understand. `_asked` is the same CYCLE guard `caller_local_holds`
+    documents, carried through the same mutual recursion.
     """
+    if (id(fn), name) in _asked:
+        return None
+    asked = _asked | {(id(fn), name)}
     sites = _syntactic_write_values(fn, name)
     if not sites:
         return None
-    elements: list = []
+    # `(which container, its elements)` per binding site, in the walk's order.
+    literals: list = []
     for site in sites:
-        if not isinstance(site, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            # An `append` target, a loop target, a subscript store — every shape
-            # whose elements the source does not state in one place.
+        if isinstance(site, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            literals.append(("seq", list(site.elements or ())))
+        elif isinstance(site, F.DictExpr):
+            # The VALUES, not the keys: `d[k]` hands back a value, and the count
+            # word the blob carries is the pair count either way.
+            literals.append(("dict", [(k, v) for (k, v) in (site.pairs or ())]))
+        else:
+            # A loop target, a subscript store of something that is not a
+            # container literal — every shape whose elements the source does not
+            # state in one place.
             return None
-        elements += list(site.elements or ())
-    if not elements:
+    writes = _container_element_writes(fn, name)
+    # NOT `asked`: that is the cycle guard, and reusing the name here
+    # overwrote the guard with this None on every computed index.
+    at = _literal_index_value(index)
+    candidates = (_elements_at(literals, writes, at) if at is not None
+                  else _every_element(literals, writes))
+    if not candidates:
         # `xs = []` states no element, so there is nothing to have read one out
-        # of and nothing to answer.
+        # of and nothing to answer — unless an `append` added one, which is why
+        # the walk above is asked before this test and not after it.
         return None
-    phrases = {value_argument_is_not_an_address(e, fn) for e in elements}
-    phrases.discard(None)
+    phrases = {value_argument_is_not_an_address(e, fn, asked)
+               for e in candidates}
+    if None in phrases:
+        # A value this walk cannot classify is EXACTLY the case this reader
+        # exists to be right about: `[dbl, dbl]` is a list of addresses and
+        # `xs[0]` is one, and `[dbl, 17]` is a list whose element 0 is one. So
+        # an unclassified candidate makes the answer silence and never agreement.
+        return None
     if len(phrases) != 1:
-        # A function name among the elements is the case this whole reader
-        # exists to be right about: `[dbl, add]` is a list of ADDRESSES, and
-        # `xs[0]` is one.
         return None
     return "an element read out of a container literal"
+
+
+def _every_element(literals: list, writes: list) -> list:
+    """Every value the container can hold, for a subscript the source did not
+    narrow to one element.
+
+    The whole-container question, and the reason it is the whole container is
+    that `xs[i]` with a computed `i` can read any of them — which is why
+    `_literal_index_value` returning `None` is not a smaller answer but a
+    different one.
+    """
+    out: list = []
+    for container, elements in literals:
+        out += ([v for (_k, v) in elements] if container == "dict"
+                else list(elements))
+    out += [w.value for w in writes]
+    return out
+
+
+def _elements_at(literals: list, writes: list, asked) -> list:
+    """The values a subscript naming `asked` (`("seq", i)` / `("dict", k)`) can
+    hand back.
+
+    Three sources, and the third is the only one that needs a position argument:
+
+      * the element (or the value under that key) of every literal that HAS
+        one — a literal too short states nothing about that position, which is
+        silence rather than an out-of-range answer this path has no message for;
+      * every store whose own index is either the one asked for or COMPUTED,
+        because a computed index could have landed there. A store whose index is
+        a different LITERAL is excluded: it says where it went;
+      * every `append`, unless the literals rule it out. **The rule:** an
+        `append` lands at the element after the last one, so it cannot be at
+        position `i` if EVERY literal binding of the name holds MORE than `i`
+        elements. `xs = [10, 20]; xs.append(dbl)` with `xs[0]` is that case and
+        is measured (it built and trapped before this existed); `xs = []` with
+        `xs.append(17)` and `xs[0]` is not, because the empty literal holds no
+        more than 0 elements and the append is element 0 — which is exactly the
+        program that used to trap. A `del` disables the rule outright, because
+        it removes an element and so moves every later `append` one place
+        earlier than any literal states.
+
+    A `dict` has no positions, so the `append` rule is sequence-only and a dict
+    subscript excludes appends outright — `d.append(v)` is not a dict operation
+    on this path at all.
+    """
+    kind, key = asked
+    out: list = []
+    for container, elements in literals:
+        if container != kind:
+            continue
+        if kind == "dict":
+            out += [v for (k, v) in elements
+                    if _literal_index_value(k) == asked]
+        elif isinstance(key, int) and -len(elements) <= key < len(elements):
+            out.append(elements[key])
+    for w in writes:
+        if w.removes or not w.appends:
+            # A `del` at the position asked, or a computed `del`, is a removal
+            # this reader cannot price; a plain store is a candidate when its
+            # own index is the one asked for or could have been it.
+            if w.removes and _literal_index_value(w.index) != asked:
+                continue
+            if w.index is None or _literal_index_value(w.index) == asked:
+                out.append(w.value)
+    if any(w.appends for w in writes) and not _appends_cannot_reach(
+            kind, key, literals, writes):
+        out += [w.value for w in writes if w.appends]
+    return out
+
+
+def _appends_cannot_reach(kind, key, literals: list, writes: list) -> bool:
+    """Whether no `append` can land at the position a subscript named.
+
+    True only when the name is a SEQUENCE, the key is an integer position, some
+    literal binding holds an element at that position, and EVERY literal binding
+    of that container holds more elements than the position — so the count an
+    `append` sees is at least one past it. A `del` makes it False outright: it
+    removes an element, so the count afterwards is one lower than the literals
+    say and the argument no longer holds. A binding this reader could not read
+    never reaches here — its site is not a literal, and the reader has already
+    answered None.
+    """
+    if kind != "seq" or not isinstance(key, int):
+        return False
+    if any(w.removes for w in writes):
+        return False
+    lengths = [len(e) for container, e in literals if container == "seq"]
+    return bool(lengths) and all(n > key for n in lengths)
+
 
 
 def callee_word_is_not_an_address(fn, name: str, vkinds=None) -> str | None:

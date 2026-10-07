@@ -580,7 +580,7 @@ AUDIT_CASES = [
      'def main():\n    s = "ab"\n    print(s + "cd")\n    return 0\n',
      "build: '+' on two strings is refused on this path. A string here is a "
      "bare `char *`, so `+` is integer arithmetic on two addresses.",
-     (0, "abcd\n"), "true", "+"),
+     (F.OracleAnswer(0, "abcd\n"), ""), "true", "+"),
     # The method-call head, unquoted — the shape half of these messages use and
     # the one a quoted-token-only rule would call unnamed.
     ("a_dotted_method_head",
@@ -588,14 +588,14 @@ AUDIT_CASES = [
      "build: s.upper() is a real method of String, but it returns a NEW "
      "string of the same length, and the only buffer available for it is the "
      "receiver's own bytes.",
-     (0, "AB\n"), "true", "s.upper()"),
+     (F.OracleAnswer(0, "AB\n"), ""), "true", "s.upper()"),
     # …and the same message about a dict receiver.
     ("a_dict_method_head",
      'def main():\n    d = {10: 100}\n    print(d.keys())\n    return 0\n',
      "build: d.keys() is a method call on a value, and this backend lowers "
      "only append, close, write and the string methods count, endswith, find, "
      "lstrip, startswith — 'keys' is not one of those",
-     (0, "dict_keys([10])\n"), "true", "d.keys()"),
+     (F.OracleAnswer(0, "dict_keys([10])\n"), ""), "true", "d.keys()"),
     # A `line N:` site prefix in front of a quoted keyword. The prefix names
     # WHERE and must not become the construct: five of `limits`' first ten
     # programs were filed under the construct `line` before the prefix was
@@ -605,7 +605,7 @@ AUDIT_CASES = [
      "    print(q)\n    return 0\n",
      "build: line 29: a bare `except:` is a handler arm with a body this path "
      "cannot put in the image, so it is refused rather than dropped",
-     (0, "1\n"), "true", "except:"),
+     (F.OracleAnswer(0, "1\n"), ""), "true", "except:"),
     # A construct named as an AST node, which no token of the program can
     # match: `xs[1:3]` does not contain the word `SliceExpr`.
     ("a_slice_through_print",
@@ -613,7 +613,7 @@ AUDIT_CASES = [
      "build: print() cannot tell whether SliceExpr is a string or a number on "
      "the formal arm64 path, and guessing would print an address as if it were "
      "text.",
-     (0, "[2, 3]\n"), "true", "print()"),
+     (F.OracleAnswer(0, "[2, 3]\n"), ""), "true", "print()"),
     # A construct named in PROSE, with no token of the program to match it: a
     # 2100-element literal of bare integers, and a message about "a list
     # literal". Flagged `unnamed` without the construct-word vocabulary, and that
@@ -624,7 +624,7 @@ AUDIT_CASES = [
      "    print(len(BL))\n    return 0\n",
      "build: a list literal does not fit in the frame: it needs 17608 bytes "
      "and this function has 16344 left for containers.",
-     (0, "2100\n"), "true", "list"),
+     (F.OracleAnswer(0, "2100\n"), ""), "true", "list"),
     # THE FINDING, and it is FIXED: an unlowered callee used to reach the link
     # audit, whose message opened with the FILE name and named the symbol in the
     # middle of a sentence about symbols — four plausible leading tokens, none
@@ -646,7 +646,7 @@ AUDIT_CASES = [
      "library that provides it. Every name in this list is one of the calls "
      "named above, so nothing about the link line is left to explain. (Provider "
      "check: asked the C library (dlsym).)",
-     (0, "3\n"), "true", "sum"),
+     (F.OracleAnswer(0, "3\n"), ""), "true", "sum"),
     # The same shape with an INTERNAL diagnostic, which never reaches the audit
     # because `run_on` gives it its own verdict first — asserted here because
     # the two classifications are adjacent and a reordering would let the second
@@ -655,7 +655,7 @@ AUDIT_CASES = [
      "def main():\n    print(1)\n    return 0\n",
      "build: internal: label 'main_ip1_end' is defined twice, at 0x1000003ba "
      "and at 0x1000003ba.",
-     (0, "1\n"), "unnamed", "unnamed"),
+     (F.OracleAnswer(0, "1\n"), ""), "unnamed", "unnamed"),
     # A promise about CPython, KEPT: the message says UnboundLocalError for a
     # read before its store and CPython raises UnboundLocalError.
     ("a_kept_cpython_promise",
@@ -663,8 +663,9 @@ AUDIT_CASES = [
      "build: main: 'y' is read at line 2 before anything in this function "
      "stores it, and CPython raises UnboundLocalError for that program "
      "(NameError at module level).",
-     ("error", "UnboundLocalError: local variable 'y' referenced before "
-               "assignment"), "true", "y"),
+     (None, "UnboundLocalError: local variable 'y' referenced before "
+            "assignment"),
+     "true", "y"),
     # …and REFUTED, which is the only `false` this tool can decide: the same
     # message over a program CPython runs. A refusal whose promise the reference
     # refutes is worse than one that names nothing, because the reader has been
@@ -684,7 +685,7 @@ AUDIT_CASES = [
      "build: main: 'y' is read at line 2 before anything in this function "
      "stores it, and CPython raises UnboundLocalError for that program "
      "(NameError at module level).",
-     None, "no-predicate", "y"),
+     (None, ""), "no-predicate", "y"),
 ]
 
 
@@ -698,8 +699,9 @@ def check_audit(verbose):
     builds and compare ANSWERS, and neither of them looks at a diagnostic.
     """
     failures = 0
-    for name, text, diag, cpython, want, want_construct in AUDIT_CASES:
-        got, detail = F.audit_refusal(text, diag, cpython)
+    for name, text, diag, oracle, want, want_construct in AUDIT_CASES:
+        cp, why = oracle
+        got, detail = F.audit_refusal(text, diag, cp, why)
         if got != want:
             failures += _fail(
                 f"audit_{name}",
@@ -736,21 +738,19 @@ def check_audit(verbose):
 #: outcomes beyond the obvious one — the reduction still disagrees, it stopped
 #: disagreeing, the shrinker removed nothing, and the reduction is a program
 #: CPython cannot run — and only the first is the one the old code could say.
-#: `None` for the oracle is `cpython_answer`'s TIMEOUT, and `("error", …)` is
-#: its rejection, which are two different "no answers" and both have to survive
-#: into the record rather than becoming an empty one.
+#: `None` for the oracle is `cpython_answer`'s "no answer" — a CPython TIMEOUT
+#: and a program CPython REJECTS are now the same shape with different reasons,
+#: which is what §4.14 of `bugs/FORMAL_fuzz_ledger.md` asked for; both have to
+#: survive into the record rather than becoming an empty one.
 RECORD_CASES = (
-    ("the reduction_still_reproduces", True, (0, "1\n"), {"x86_64": "9\n",
-                                                          "arm64": "9\n"},
-     None, "MISMATCH-X86"),
-    ("the reduction_stopped_reproducing", True, (0, "1\n"), {"x86_64": "1\n",
-                                                             "arm64": "1\n"},
-     None, "match"),
-    ("the shrinker_removed_nothing", False, (0, "1\n"), {"x86_64": "9\n",
-                                                         "arm64": "9\n"},
-     None, "MISMATCH-X86"),
-    ("the_reduction_is_not_a_differential_test", True, ("error", "SyntaxError"),
-     {}, None, "generator-error"),
+    ("the reduction_still_reproduces", True, (F.OracleAnswer(0, "1\n"), ""),
+     {"x86_64": "9\n", "arm64": "9\n"}, None, "MISMATCH-X86"),
+    ("the reduction_stopped_reproducing", True, (F.OracleAnswer(0, "1\n"), ""),
+     {"x86_64": "1\n", "arm64": "1\n"}, None, "match"),
+    ("the shrinker_removed_nothing", False, (F.OracleAnswer(0, "1\n"), ""),
+     {"x86_64": "9\n", "arm64": "9\n"}, None, "MISMATCH-X86"),
+    ("the_reduction_is_not_a_differential_test", True,
+     (None, "SyntaxError: invalid syntax"), {}, None, "generator-error"),
 )
 
 
@@ -784,11 +784,15 @@ def check_record(verbose=False):
 
     F.make_program = make_program
     try:
-        for name, did_shrink, ref, red_outs, blamed, want_reduced in RECORD_CASES:
-            def oracle(text, tmpdir, n, argv="", _r=ref):
+        for name, did_shrink, ref_pair, red_outs, blamed, want_reduced in RECORD_CASES:
+            def oracle(text, tmpdir, n, argv="", _r=ref_pair):
                 # The reduction's answers are what the case is about; the
-                # original's are the same in every row.
-                return (want, "") if text == original else (_r, "")
+                # original's are the same in every row.  `_r` is already the
+                # `(oracle, reason)` PAIR, because that is what `cpython_answer`
+                # returns and a stub that rebuilt it here would be a second
+                # spelling of the return convention.
+                return ((F.OracleAnswer(*want), "")
+                        if text == original else _r)
 
             def answer(backend, text, tmpdir, n, _o=red_outs):
                 got = outs if text == original else _o
@@ -832,10 +836,12 @@ def check_record(verbose=False):
                 if rec["reduced_verdict"] != want_reduced:
                     say(f"the reduction is reported as "
                         f"{rec['reduced_verdict']!r}, expected {want_reduced!r}")
-                if ref == ("error", "SyntaxError"):
+                red_ref, _red_why = ref_pair
+                if F.oracle_answer(red_ref) is None:
                     if rec["reduced_want"] is not None:
                         say("a reduction CPython rejects recorded answers")
-                elif rec["reduced_want"] != {"exit": ref[0], "stdout": ref[1]}:
+                elif rec["reduced_want"] != {"exit": red_ref.exit,
+                                             "stdout": red_ref.stdout}:
                     say(f"`reduced_want` is {rec['reduced_want']!r}")
                 # …and both programs on disk, which is what makes the record
                 # re-derivable without `original_text` at all.
@@ -1022,6 +1028,94 @@ def check_reduction_tally(verbose=False):
     return failures
 
 
+def check_oracle_shape(verbose=False):
+    """The oracle's return shape cannot be read the wrong way.
+
+    §4.14 of `bugs/FORMAL_fuzz_ledger.md`, and it is a row about a TYPE rather
+    than about a value. `cpython_answer` used to return `((exit, stdout),
+    stderr)` with the first element being `("error", text)` when CPython rejected
+    the program and `None` when it timed out — two non-answers and one answer,
+    told apart by a string comparison every caller had to make, at a nesting
+    depth where reading it one level wrong is silent:
+
+        has_oracle(cpython_answer(...))   ->  True for a REJECTED program
+
+    Measured on this tree before the change, both by hand and in a minimiser
+    written against the nested shape, which reported a disagreement on every
+    program it was pointed at (including `class H: … def main(): return 0`) and
+    reduced a real x86-64 miscompile to a one-line `SyntaxError`.
+
+    The fix is not a convention, it is a shape: an answer is an `OracleAnswer`
+    and BOTH non-answers are `None`, with the reason beside them. So the wrong
+    reading has nothing left to find — `oracle_answer` returns None for the pair
+    itself, and `has_oracle` is now a one-liner over it rather than a hand-rolled
+    `ref[0] != "error"`.
+
+    No compiler: this is the return convention of a function, asked directly.
+    """
+    import tempfile
+
+    failures = 0
+    with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, ".tmp")) as td:
+        answered, why = F.cpython_answer(
+            "def main():\n    print(1)\n    return 0\n", td, "ok")
+        rejected, rwhy = F.cpython_answer(
+            "def main():\n    print(nosuchname)\n    return 0\n", td, "bad")
+        if F.oracle_answer(answered) is None:
+            failures += _fail("oracle_shape_answered",
+                              "a program CPython RAN has no oracle", verbose)
+        if F.oracle_answer(answered) != (0, "1\n"):
+            failures += _fail("oracle_shape_answered_value",
+                              f"answered {F.oracle_answer(answered)!r}, "
+                              f"expected (0, '1\\n')", verbose)
+        if why != "":
+            failures += _fail("oracle_shape_answered_reason",
+                              f"an answered program carries a reason: "
+                              f"{why!r}", verbose)
+        # The two non-answers are ONE shape, and this is the whole of §4.14:
+        # the rejected program is not `None`-and-something-else, it is `None`.
+        if rejected is not None:
+            failures += _fail("oracle_shape_rejected",
+                              f"a program CPython REJECTS came back as "
+                              f"{rejected!r}, not None", verbose)
+        if not rwhy:
+            failures += _fail("oracle_shape_rejected_reason",
+                              "a rejected program carries no reason, so the "
+                              "two non-answers cannot be told apart", verbose)
+        if F.oracle_answer(rejected) is not None:
+            failures += _fail("oracle_shape_rejected_read",
+                              "a rejected program reads as an oracle", verbose)
+        if F.has_oracle(rejected):
+            failures += _fail("oracle_shape_rejected_has_oracle",
+                              "`has_oracle` says yes for a program CPython "
+                              "rejects", verbose)
+        # …and the reading the doc measured going wrong, spelled out, because
+        # "the accessor is safe" is a claim and this is the measurement of it.
+        pair = (rejected, rwhy)
+        if F.has_oracle(pair):
+            failures += _fail("oracle_shape_ununpacked",
+                              "`has_oracle` on the UN-unpacked return value "
+                              "says yes for a program CPython rejects — this "
+                              "is the §4.14 defect", verbose)
+        if F.oracle_answer(pair) is not None:
+            failures += _fail("oracle_shape_ununpacked_accessor",
+                              "the accessor on the un-unpacked return value "
+                              "returns an oracle for a rejected program", verbose)
+        # A TIMEOUT is the other `None`, and it is the reason that tells it from
+        # a rejection — which is why `is_oracle_timeout` exists as a function
+        # over a free-text reason rather than as three literals.
+        if F.is_oracle_timeout(rwhy):
+            failures += _fail("oracle_shape_rejection_reads_as_timeout",
+                              "a REJECTION reads as a timeout", verbose)
+        if not F.is_oracle_timeout(F.ORACLE_TIMEOUT_REASON):
+            failures += _fail("oracle_shape_sentinel",
+                              "the timeout sentinel does not answer its own "
+                              "reader", verbose)
+    print(f"formal fuzz: oracle     {'PASS' if not failures else 'FAIL'} "
+          f"7 shape checks (no compiler)")
+    return failures
+
+
 def check_shrink_predicate(verbose=False):
     """`_still_fails` preserves the KIND of disagreement it was given.
 
@@ -1031,8 +1125,8 @@ def check_shrink_predicate(verbose=False):
     whether or not the finding was about an answer — so `strings` seeds
     sweepD 4000-4001 shrank two wrong-number findings into programs CPython
     itself rejects, and the record's new `reduced_verdict` was the only place
-    that said so. Four rows: the two kinds of finding against the two kinds of
-    candidate.
+    that said so. Five rows: the two kinds of finding against the two kinds of
+    candidate, plus the one §4.13 of `bugs/FORMAL_fuzz_ledger.md` is about.
     """
     import tempfile
 
@@ -1041,7 +1135,15 @@ def check_shrink_predicate(verbose=False):
     candidate = "def main():\n    print(1)\n    return 0\n"
 
     def cpython_answer(text, tmpdir, name, argv=""):
-        return (0, "1\n"), ""
+        # `_still_fails` reads the WHOLE `(oracle, reason)` pair, and
+        # `cpython_answer.next` is already that pair — so this returns it as it
+        # is. Wrapping it a second time is what made the first version of this
+        # row report `False` for a candidate that plainly still disagrees: the
+        # oracle arrived as a pair where an `OracleAnswer` was expected, so
+        # `oracle_answer` said None and the comparison never ran.
+        return cpython_answer.next
+
+    cpython_answer.next = (F.OracleAnswer(0, "1\n"), "")
 
     def run_on(backend, text, tmpdir, name):
         state = run_on.next
@@ -1050,10 +1152,11 @@ def check_shrink_predicate(verbose=False):
 
     run_on.calls = 0
 
-    def check(name, want, ok_state, refusal_diag, expect):
+    def check(name, want, ok_state, refusal_diag, expect, oracle=None):
         nonlocal failures
         run_on.next = ok_state
         run_on.calls = 0
+        cpython_answer.next = oracle or (F.OracleAnswer(0, "1\n"), "")
         F.cpython_answer, F.run_on = cpython_answer, run_on
         args = argparse.Namespace(backends=["x86_64"], min_kind="x86",
                                   work=os.path.join(ROOT, ".tmp"))
@@ -1083,10 +1186,19 @@ def check_shrink_predicate(verbose=False):
     check("a_refusal_finding_keeps_a_refusal",
           {"x86_64": ("refusal", "build: 's' is a String receiver ...")},
           refused, "", True)
+    # §4.13 of `bugs/FORMAL_fuzz_ledger.md`, pinned here because the predicate is
+    # what it is about: a candidate CPython REJECTS is not a reduction of
+    # anything, whatever the image does with it. The oracle being `None` is the
+    # only thing that stops the comparison, and `oracle=` above is how the two
+    # non-answers are told apart — which is only possible because they are one
+    # shape with two reasons.
+    check("a_candidate_cpython_rejects_is_not_a_reduction",
+          {"x86_64": ("ok", "")}, ok_wrong, "", False,
+          oracle=(None, "NameError: name 'w1' is not defined"))
     for name, fn in real.items():
         setattr(F, name, fn)
     print(f"formal fuzz: shrink    {'PASS' if not failures else 'FAIL'} "
-          f"4 predicate rows (no compiler)")
+          f"5 predicate rows (no compiler)")
     return failures
 
 
@@ -1355,6 +1467,7 @@ def main():
     failures += check_record(args.verbose)
     failures += check_attribution(args.verbose)
     failures += check_reduction_tally(args.verbose)
+    failures += check_oracle_shape(args.verbose)
     failures += check_shrink_predicate(args.verbose)
     failures += check_frame_budget(args.verbose)
     for mix in mixes:

@@ -709,28 +709,30 @@ def behaviour(arch, text, inputs, proven_input, nparams, tmpdir, name):
         words = ", ".join([str(value)] + ["0"] * (nparams - 1))
         ref, rerr = F.cpython_answer(text, tmpdir, f"{name}.{value}",
                                      args=words)
-        if isinstance(ref, tuple) and ref and ref[0] == "error":
+        answer = F.oracle_answer(ref)
+        if answer is None and not F.is_oracle_timeout(rerr):
+            # CPython REJECTED the program, which is a generator bug and not a
+            # finding about the backends.  The reason carries its traceback.
             info["verdict"] = "generator-error"
-            info["detail"] = ref[1]
+            info["detail"] = rerr
             verdict = "generator-error"
             per[value] = info
             continue
-        if not F.has_oracle(ref):
+        if answer is None:
             # The oracle could not finish, which is not the same as the oracle
-            # saying the generator is wrong — `has_oracle` is the one reader of
-            # the three answers, and reading it any other way unpacks the
-            # timeout's `None` three lines below. These programs are RECURSIVE
-            # by construction (`--stmts` grows the recursion depth), so a
-            # CPython recursion-limit or wall-clock timeout is reachable here
-            # and not hypothetical.
+            # saying the generator is wrong — and it is the REASON that tells
+            # the two apart now that both non-answers are `None`. These programs
+            # are RECURSIVE by construction (`--stmts` grows the recursion
+            # depth), so a CPython recursion-limit or wall-clock timeout is
+            # reachable here and not hypothetical.
             info["verdict"] = "CPYTHON-TIMEOUT"
             info["detail"] = rerr
             if verdict == "match":
                 verdict = "CPYTHON-TIMEOUT"
             per[value] = info
             continue
-        info["want_exit"], info["want_stdout"] = ref
-        if exit_code != ref[0] or stdout != ref[1]:
+        info["want_exit"], info["want_stdout"] = answer
+        if exit_code != answer.exit or stdout != answer.stdout:
             info["verdict"] = "MISMATCH"
             # A mismatch at ANY input is a disagreement; the record says which
             # of them the proof was generated for, because that is what decides

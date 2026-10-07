@@ -1,5 +1,157 @@
 # A call through a VALUE is not proved to be a call: the word might not be an address
 
+**Status 2026-10-05 (`work/formal28-4`): the PASSING end's walk-visible shapes
+are CLOSED, and closing them found that the reader they rest on was wrong in
+BOTH directions — including two FALSE REFUSALS of programs CPython runs, which
+this doc never named because a doc written from the trap side does not look for
+them.**
+
+One root cause, in one place. `_binding_values` recorded the statements that
+BIND a name and nothing else, so both readers built on it were reasoning about
+an incomplete set of the sites that decide what a word holds — and an incomplete
+site set is not a weaker answer, it is a wrong one in whichever direction the
+missing sites pointed.
+
+Measured on **both** architectures before the change (`fire.py run` is the
+oracle, and it raises `TypeError` on every row below):
+
+| shape | before | now |
+|---|---|---|
+| `xs = []; xs.append(17)` … `xs[0]` | **built, SIGBUS 138 / SIGSEGV 139** | refused by name |
+| `var g = 17` + `global g` … `g` | **built, SIGSEGV 139** | refused by name |
+| `d = {"k": 17}` … `d["k"]` | **built, SIGBUS 138** | refused by name |
+| `xs = [10, 20]`; `xs.append(dbl)`; `xs[0]` | **built, SIGBUS 138** | refused by name |
+| `xs = [10, 20]`; `xs[0] = 17`; `xs[0]` | **built, SIGBUS 138** | refused by name |
+| `xs = [10, 20, 30]`; `xs[0] = dbl`; `xs[0]` | **REFUSED** (CPython answers 6) | builds, answers 6 |
+| `xs = [dbl, 17]`; `xs[0]` | **REFUSED** (CPython answers 6) | builds, answers 6 |
+| `d = {"k": 17}`; `d["k"] = dbl`; `d["k"]` | built, answered 6 — right for the wrong reason | builds, answers 6 |
+
+**The two false refusals are the finding, and one of them is a reader deciding
+in the direction that is supposed to be safe.** `caller_local_element_holds`
+ended with
+
+```python
+    phrases = {value_argument_is_not_an_address(e, fn) for e in elements}
+    phrases.discard(None)
+    if len(phrases) != 1:
+        return None
+```
+
+`discard(None)` throws away the one element the walk could not classify — and an
+unclassifiable element is *exactly* the evidence that says STOP, because
+`[dbl, dbl]` is a list of addresses and `[dbl, 17]` is a list whose element 0 is
+one. With it discarded, `xs = [dbl, 17]` reduced to the surviving "an integer"
+and read as unanimity, and the reader refused a program CPython runs. The
+`…and a list of FUNCTIONS is still one, on both` row that guarded this boundary
+never caught it, because that row's literal is `[dbl, dbl]` — a list of nothing
+but functions, where discarding the `None` leaves the set EMPTY and the
+`len(phrases) != 1` test happens to catch it. **The existing row tested the
+boundary with a value that made the bug invisible.** It is now `[dbl, 17]`.
+
+### What landed
+
+  * **`formal/model.py::_container_element_writes`** — the walk's other half.
+    `xs[0] = v`, `xs.append(v)` and `del xs[i]` write into the container a name
+    HOLDS without rebinding the name, so the VALUE question has nothing to learn
+    from them and the ELEMENT question cannot proceed without them. One walk
+    (`iter_nodes`, as `_binding_values` already used) and `_ElementWrite`
+    carrying *where* the value went, because `xs[i]` says and `xs[n]` does not —
+    which is the whole of the precision below.
+  * **`caller_local_element_holds` takes the subscript's index**, and for a
+    LITERAL index answers about the element the source NAMED rather than about
+    the whole container. That is what keeps `xs = [10, 20]; xs.append(dbl);
+    xs[0]` out of the refusal: an append lands at the end, so it cannot be
+    element 0 when every literal binding holds more than 0 elements. A computed
+    index stays the whole-container question; a `del` disables the length
+    argument, because it removes an element and moves every later append one
+    place earlier than any literal states.
+  * **A DICT literal is one of the literals**, read through its VALUES. That is
+    this doc's "a subscript of a DICT name (`d[k]`, which can hand back a
+    function and which no spelling distinguishes from a list)" — **closed, and
+    the doc's reasoning about it was half wrong**: no spelling of the SUBSCRIPT
+    distinguishes `d[k]` from `xs[i]`, and the doc was right about that, but the
+    spelling of the BINDING does distinguish them, and that is the one thing the
+    reader reads. A dict's values are as visible as a list's elements.
+  * **`formal/model.py::_global_slot_value`** — a name a function declares
+    `global` is bound by the MODULE's statement, which the function's own walk
+    cannot see, so this asks the SLOT TABLE as a site **beside** the function's
+    own writes rather than instead of them (`global g; g = compute()` still
+    asks the unanimity question). Reading the table rather than walking the
+    module body twice is `global_slot_kind`'s own stated reason.
+  * **`phrases.discard(None)` is gone**, and the `None` is the answer.
+
+### And a HANG, found by the corpus check this doc's own discipline requires
+
+The three readers are **mutually recursive** — asking what `xs[0]` holds asks
+what each of its elements holds, which asks what those names hold, which asks
+what *their* bindings hold — so `var a = b` and `var b = a` in one function is
+that recursion with no base case. Driving the reader over every `.py` and
+`.mojo` in this tree with the `parameters_called_through_a_value` conjunct
+dropped hit **`RecursionError` on real files on master**. `_asked` is now a
+`(function, name)` question set threaded through the cycle: the question, not
+the function, because asking two names of one function is not a cycle and a
+depth bound would refuse both. A question already on the stack has no smaller
+instance of itself to reduce to, so the answer is `None` — silence, which is
+what a caller at this position does with it.
+
+### Corpus, and the gates
+
+The same over-approximating harness, `master` vs this tree, 571 files parsed:
+**0 hits before and 0 after.** No file in the repository newly refuses.
+
+```
+python3 test_formal_specialization.py   PASS=22 FAIL=0   (two new rows, both
+                                         RED without the fix — verified by
+                                         reverting formal/model.py)
+python3 test_refusal_taxonomy.py        PASS (359/359 checks, 52 families, 71 causes)
+python3 test_formal_value_model.py      PASS=111 FAIL=0
+python3 test_formal_globals.py          PASS=56 FAIL=0
+```
+
+`test_refusal_taxonomy.py`'s family and cause counts are UNCHANGED, and that is
+the point rather than a coincidence: all five new refusals reuse
+`not_a_code_address_refusal`, so this is one cause for one construct rather than
+three for three shapes — which is the discipline that message's own docstring
+gives for existing at all.
+
+**Not run here and owed by the integrator:** `make gate` (this touches
+`formal/model.py`, which the project's own rule makes a full gate), and a
+`formal_sweep` re-run. This worker is a light one and runs neither.
+
+### What is still open, and it is now a different list from the one above
+
+The PASSING end's **walk-visible** shapes are closed. What remains is everything
+this doc's own closing paragraph called unseeable, and it is unchanged:
+
+  * **a write from a function this unit does not compile** — `g = mk()` where
+    `mk` is in a linked image and this module has no body. `_global_slot_value`
+    reads the MODULE's own binding; it cannot read another image's.
+  * **the PASSING end across a dylib boundary** — a callee in another image is
+    not in `callee_defs`, so its parameters are not in the table and nothing is
+    checked. This is the half §"What closing it would take" says "crosses a
+    dylib boundary", and it needs the callee's body or a manifest row that says
+    which of its parameters are called through a value.
+  * **the CALLING end for a name bound by a shape this walk does not name** —
+    `callee_word_is_not_an_address` asks `_binding_values`, so a site it cannot
+    see is a site whose agreement is not established. Note the asymmetry this
+    round established: the reader is now correct about writes THROUGH a name,
+    and still permissive about writes it cannot attribute at all
+    (`fs[0].append(v)` is recorded as an unstated write rather than a store into
+    `fs`, because this walk cannot see which container that receiver names).
+  * **the runtime check**, still declined for this doc's own reasons (O(n)
+    comparisons per call, no coverage of another image, and a static property
+    turned into a runtime one).
+
+And one new residual, which is a limit of the index precision rather than a
+missed shape: `caller_local_element_holds` excludes an `append` from a literal
+index on the length argument, and that argument is about the LITERALS only. A
+loop that appends an unknown number of times before the subscript leaves the
+count unbounded, so `_appends_cannot_reach` excludes an append on a container
+whose count the literals understate. The direction is a REFUSAL of a correct
+program, which is why it is written here rather than left to be found — the
+sound version needs the count at the append, which is the compile-time trip
+count `formal/model.py::walk_stmt_trips` computes for a different reason.
+
 **Status 2026-10-05 (`work/formal19-3-r2`): the PASSING end's caller-LOCAL half
 landed too, on both architectures, so what is left of that end is only the
 shapes a walk cannot SEE — `apply_arg(3, xs[0])` with `xs` a local list, which
@@ -153,6 +305,17 @@ python3 test_formal_dylib.py             PASS=24 FAIL=0
   (`d[k]`, which can hand back a function and which no spelling distinguishes
   from a list). Each is silence rather than a wrong answer, and each is a shape
   `_binding_values`' own residual paragraph names.
+
+  > **SUPERSEDED 2026-10-05 (`work/formal28-4`) — read this before acting on the
+  > list above.** Three of these four are CLOSED, and they were not "silence":
+  > the `append`, the `global` slot and the dict subscript each BUILT and
+  > TRAPPED, measured on both architectures, because the reader's site list was
+  > incomplete rather than permissive. The fourth (`g = mk()` from an image this
+  > unit does not compile) is genuinely still open. Fixing the three also turned
+  > up two shapes this list never named — two FALSE REFUSALS of correct
+  > programs — and a `RecursionError` reachable from the build. **The Status at
+  > the head of this file is the current one, and the residual it leaves is
+  > listed there.**
 * **the PASSING end across a dylib boundary** — a callee in another image is not
   in `callee_defs`, so its parameters are not in the table and nothing is
   checked. This is the half the doc's own §"What closing it would take" says
