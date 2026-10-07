@@ -3718,6 +3718,140 @@ def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared
           f"{text.strip()[-300:]}")
 
 
+METHOD_CALL_MODULE = (
+    "def widen[T: Intable](v: T) -> T:\n  return v\n")
+
+
+def _bare_template_call_program(caller: str) -> str:
+    return ("from mylib import widen\n" + caller)
+
+
+def test_the_bare_call_refusal_names_the_method_the_call_is_in(tmpdir, _shared):
+    """A bare call to an imported template from inside a struct's METHOD names
+    `Struct.method`, and the empty name means only what it now means.
+
+    `formal/imports.py::check_library_free_calls` produced
+    `model.imported_callee_refusal`, whose entire value is that it names the
+    function the call is in, and it computed that name as
+    `st.name if isinstance(st, FunctionDef) else ""`. A `StructDef`'s `body` is
+    the list of its METHODS — which is where the corpus's calls are: the
+    `sweep43:export-gate` row's gate produced **133 of its 145 refusals with no
+    function name at all**, and the file it then sent the reader to is
+    `std/memory/alloc.mojo`, which has four `write_to` methods and three
+    `FormatStruct(…)` sites.
+
+    So the walk is per FUNCTION and a method is reached through its struct, and
+    the diagnostic prints `Holder.show` — the spelling a reader can search for,
+    and the one the symbol table carries. This is a boundary case for the
+    function above it (a bare call from a top-level `def`, which already named
+    itself and must keep doing so) and for the module-level store, which is the
+    ONE place there is no enclosing function and so the only place `""` is now
+    allowed to mean.
+    """
+    root = os.path.join(tmpdir, "genericonly_method")
+    os.makedirs(root)
+    write_tree(root, {
+        "mylib.mojo": METHOD_CALL_MODULE,
+        # Three scopes, one call each, so the test says WHICH scope is named
+        # rather than that some name appeared.
+        "prog.mojo": _bare_template_call_program(
+            "struct Holder:\n"
+            "  var n: Int\n"
+            "  def show(self) -> Int:\n"
+            "    return widen(3)\n"
+            "def at_top() -> Int:\n"
+            "  return widen(4)\n"
+            "def main() -> Int:\n"
+            "  var h = Holder(1)\n"
+            "  return h.show() + at_top()\n"),
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a bare call to an imported template built successfully; one trie "
+          "entry cannot be two instantiations")
+    check("Holder.show:" in text,
+          f"the refusal does not name the METHOD the call is in, so a reader "
+          f"of a file with several methods cannot find the line: "
+          f"{text.strip()[-300:]}")
+    check("at_top:" in text or "Holder.show" in text,
+          f"the refusal named neither scope it walked: {text.strip()[-300:]}")
+
+
+def test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store(
+        tmpdir, _shared):
+    """`_enclosing_scopes` is asked directly: a trait method is `Trait.method`,
+    a top-level function is its own name, and a module-level store is `""`.
+
+    Asked of the READER rather than only through a build, because the three
+    answers are one walk's and a build can only show the one it happens to hit
+    first: a program whose first bare call is in a module-level store never
+    reaches the trait. And the `""` case is pinned as the module-level store it
+    is, because before the reader existed an empty name meant "the walk did not
+    look" and a reader had no way to tell that from "there is no enclosing
+    function here" — which is the whole of what this test's subject was.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import parse_module
+    from formal.imports import _enclosing_scopes
+    src = (
+        "TOP = widen(1)\n"
+        "trait Shape:\n"
+        "  def area(self) -> Int:\n"
+        "    return widen(2)\n"
+        "struct Box[T: Intable]:\n"
+        "  var n: T\n"
+        "  def get(self) -> Int:\n"
+        "    return widen(3)\n"
+        "def free() -> Int:\n"
+        "  return widen(4)\n")
+    got = _enclosing_scopes(parse_module(src, filename="scopes.mojo"))
+    names = [n for n, _b in got]
+    check("" in names,
+          f"a module-level store has no enclosing function and must be the "
+          f"empty name; got {names}")
+    check("Shape.area" in names,
+          f"a trait method is reached through its trait, which is the only "
+          f"scope the source has for it: got {names}")
+    check("Box.get" in names,
+          f"a struct method is reached through its struct: got {names}")
+    check("free" in names,
+          f"a top-level function is its own scope name: got {names}")
+    # Every scope's body must be non-empty and carry the call it is named for,
+    # or the name and the walk have come apart — which is the failure mode a
+    # list-of-pairs shape invites.
+    for name, body in got:
+        check(bool(body),
+              f"scope {name!r} was yielded with nothing to walk")
+    widths = {n: len(list(_iter_calls(b))) for n, b in got}
+    check(widths.get("Box.get") == 1 and widths.get("free") == 1,
+          f"each named scope walked exactly its own call, so the name says "
+          f"which site the reader is being sent to: {widths}")
+    # A struct's FIELDS are expressions too — a declared type and a default are
+    # walked by `model.iter_nodes` — so the struct is still yielded, right after
+    # its methods and under the empty name, or a bare call in a field
+    # initializer would stop being asked about by this gate at all. Which is a
+    # coverage hole a name fix must not open, and it is invisible in the three
+    # shapes above.
+    for owner in ("Shape", "Box"):
+        at = names.index(f"{owner}.area" if owner == "Shape" else f"{owner}.get")
+        after_name, after_body = got[at + 1]
+        check(after_name == ""
+              and any(getattr(n, "name", None) == owner for n in after_body),
+              f"{owner} is yielded right after its methods and unnamed, so a "
+              f"call in one of its fields is still refused: "
+              f"{after_name!r} {[getattr(n, 'name', None) for n in after_body]}")
+
+
+def _iter_calls(body):
+    """Every `CallExpr` in `body`, through the ONE node walker."""
+    from formal import model as M
+    for node in M.iter_nodes(body):
+        if type(node).__name__ == "CallExpr":
+            yield node
+
+
 def test_a_generic_template_is_not_exported_under_its_base_name(tmpdir,
                                                                 _shared):
     """The export set is empty for a generic-only module, and is the concrete
@@ -5022,6 +5156,10 @@ TESTS = [
      test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
     ("a bare call to a template is refused by the export rule",
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
+    ("the bare-call refusal names the method the call is in",
+     test_the_bare_call_refusal_names_the_method_the_call_is_in),
+    ("the enclosing-scope reader names a trait method and a module store",
+     test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a constants-only module is not told nothing could be added",

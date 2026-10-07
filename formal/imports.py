@@ -3311,9 +3311,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             exempt.setdefault(defining, spelled)
     if not exempt:
         return
-    for st in stmts or []:
-        fn_name = st.name if isinstance(st, F.FunctionDef) else ""
-        for node in M.iter_nodes(getattr(st, "body", None) or [st]):
+    for scope, body in _enclosing_scopes(stmts):
+        for node in M.iter_nodes(body):
             if not isinstance(node, F.CallExpr):
                 continue
             callee = node.func
@@ -3324,7 +3323,65 @@ def check_library_free_calls(importer_path: str, stmts: list,
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, fn_name))
+                M.imported_callee_refusal(callee.name, sym, scope))
+
+
+def _enclosing_scopes(stmts: list) -> list:
+    """`[(name to print for a diagnostic, body to walk), …]` for `stmts`.
+
+    **The NAME is half of what this walk is for, and it was empty for every
+    call inside a struct's method.** The refusal this feeds is
+    `model.imported_callee_refusal`, whose whole value is that it names the
+    function the call is in, and the walk computed that name as
+    `st.name if isinstance(st, F.FunctionDef) else ""` over
+    `iter_nodes(getattr(st, "body", None) or [st])` — and a `StructDef` has no
+    `body` at all, so every one of its methods was walked under `""` through the
+    walker descending into them. Measured on the `sweep43:export-gate` row over
+    its own 148-file scope on `master` 2026-10-05: **133 of the 145 refusals
+    that gate produced named no function at all**, and the one file the reader
+    is then sent to is `std/memory/alloc.mojo`, which has four `write_to`
+    methods and three `FormatStruct(…)` sites in it.
+
+    So the walk is per FUNCTION, and a method is reached through its struct: the
+    diagnostic says `Allocation_1_T_1.write_to`, which is the spelling the
+    reader can search for and the name the symbol table carries — an
+    instantiated struct's methods are emitted under the mangled struct's name,
+    so the bare method name would be a name no reader of the image can find.
+
+    One reader, and it is `model.struct_methods` — the same one
+    `find_method_owner` and `structs_declaring_method` ask, because "the
+    methods a struct declares" is one question with one answer. A `TraitDef`'s
+    methods are reached the same way, with the trait's name: a trait method body
+    is compiled into whatever struct implements it, so naming the trait is the
+    only scope the source has.
+
+    **The struct itself is still yielded, LAST and under `""`, and that is a
+    coverage requirement rather than tidiness.** `iter_nodes` over a `StructDef`
+    reaches its FIELDS as well as its methods, and a field's declared type and
+    default are expressions like any other — so dropping the struct from the
+    walk would stop asking this gate about a bare call in a field initializer.
+    Yielding it last keeps that question asked (under the empty name, which is
+    the truth: a field initializer is in no function) while the per-method walks
+    come first, so the more specific scope is the one reported whenever both
+    could answer.
+
+    A top-level statement that is neither a function, a struct nor a trait is
+    walked under `""` — a module-level store is the one place there is no
+    enclosing function to name, and that is what the empty string then means
+    rather than "the walk did not look".
+    """
+    from formal import model as M                   # lazy — cycle
+    out = []
+    for st in stmts or []:
+        if isinstance(st, F.FunctionDef):
+            out.append((st.name, st.body))
+        elif isinstance(st, (F.StructDef, F.TraitDef)):
+            for m in M.struct_methods(st):
+                out.append((f"{st.name}.{m.name}", m.body))
+            out.append(("", [st]))
+        else:
+            out.append(("", [st]))
+    return out
 
 
 def own_module_identity(source_path: str, project_root: str = None) -> str:

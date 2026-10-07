@@ -119,7 +119,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_dataclass_runtime_reflection.md` | **unclaimed** | `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag |
 
-### `formal/imports` — 12 documents, 8 claimed
+### `formal/imports` — 13 documents, 8 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -135,6 +135,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_dotted_base_bracket_list_is_not_classified.md` | **unclaimed** | the predicate answers no for every dotted base, and the asking pass cannot have the table it needs |
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
+| `FORMAL_the_export_gate_row_is_148_files_and_one_gate.md` | **unclaimed** | the corpus's largest codegen row re-measured on master, ONE gate behind it, and 133 of its 145 refusals named no line |
 
 ### `formal/lean` — 13 documents, 11 claimed
 
