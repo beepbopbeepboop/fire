@@ -6817,5 +6817,67 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
                          "out-of-image call — it is keyed on the wrong condition")
 
 
+class TestTheReachedWalkIsPerPath(unittest.TestCase):
+    """`_reached_without_a_condition` asks whether the HALT is on a path that
+    crosses no SOURCE conditional — not whether a source conditional is
+    reachable at all.
+
+    The two are different questions and the first implementation answered the
+    second: it returned `False` the moment it MET a source conditional anywhere
+    reachable from the entry, so a program whose halt is on a condition-free
+    path was refused whenever any OTHER path carried an `if`. That refused ten
+    of the twelve examples `TestTheRecursionFamiliesStillGenerate` pins as
+    generating (`formal/examples/count.mojo` and its family), and it is why the
+    walk now carries `(block, crossed)` and answers True only for a block that
+    CONTAINS the halt with `crossed` False.
+
+    Built from real ARM64 encodings so the test exercises the function rather
+    than a description of it:
+
+        entry 0x1000  CBZ x0, ->0x1008   (NOT a source conditional)
+        fall  0x1004  BL ->0x9000        (the halt, on the condition-free path)
+        taken 0x1008  CBZ x1, ->0x1010   (a SOURCE conditional, cond_branches)
+        fall  0x100c  RET
+        taken 0x1010  RET
+
+    The halt is at 0x1004, reached by the entry branch's fall-through with no
+    source conditional crossed; the source conditional at 0x1008 is reachable
+    on the other edge. The old walk returned False (it met 0x1008); the halt at
+    0x100c, which IS behind the source conditional, is False under both.
+    """
+
+    @staticmethod
+    def _code():
+        from formal.arm64 import encode_cbz_xn, encode_bl, encode_ret
+        base = 0x1000
+        return base, (encode_cbz_xn(0x8, 0)          # 0x1000 -> 0x1008
+                      + encode_bl((0x9000 - 0x1004) // 4)   # 0x1004 -> 0x9000
+                      + encode_cbz_xn(0x8, 1)        # 0x1008 -> 0x1010
+                      + encode_ret()                 # 0x100c
+                      + encode_ret())                # 0x1010
+
+    def test_a_halt_on_a_condition_free_path_is_reached(self):
+        import formal.arm64_proof_gen as G
+        base, code = self._code()
+        self.assertTrue(
+            G._reached_without_a_condition(
+                code, base, base, base + 0x14, base + 0x4,
+                cond_branches={base + 0x8}),
+            "the halt at 0x1004 is on the entry branch's condition-free "
+            "fall-through, but the walk refused it because a source "
+            "conditional (0x1008) is reachable on the other edge")
+
+    def test_a_halt_behind_the_source_conditional_is_not_reached(self):
+        import formal.arm64_proof_gen as G
+        base, code = self._code()
+        self.assertFalse(
+            G._reached_without_a_condition(
+                code, base, base, base + 0x14, base + 0xc,
+                cond_branches={base + 0x8}),
+            "the halt at 0x100c is on the fall-through of the source "
+            "conditional at 0x1008, so the premise is about the data and the "
+            "walk must refuse it")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

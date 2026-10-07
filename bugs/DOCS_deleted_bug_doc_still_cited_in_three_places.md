@@ -25,20 +25,22 @@ moved, which is this doc's subject happening again rather than a new bug:**
 $ python3 tools/dangling_doc_refs.py
 7 citations of 6 bugs/ docs that are not there, across 2 files
      1  <the -b13 sweep map>            # spelled WITHOUT the `bugs/` prefix on
-         bugs/FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
-                                        # purpose: quoting a walk's own output
+         <the rf-prefix reader doc:59>   # purpose: quoting a walk's own output
      1  NEVER_WRITTEN.md                # reproduces a citation, which is how
          test_suite.py:2653             # this measurement found itself, once
          test_suite.py:5216
      … (the four `test_suite.py` marker fixtures)
 ```
 
-*(The `-b13` map is named without its `bugs/` prefix above on purpose: this file
-quotes a walk that REPORTED that path, and writing it out with the prefix makes
-the quote itself a citation — the walk then reports eight instead of seven, and
-`--ratchet` fails on this file.  Measured, and it is the sharpest version of this
-doc's own subject: a document that names a missing doc in order to report it has
-to name it in a spelling the walk cannot see.)*
+*(The two docs named above in angle brackets are spelled that way on purpose:
+this file quotes a walk that REPORTED those paths, and writing a missing doc's
+path out with the `bugs/` prefix makes the quote itself a citation — the walk
+then reports one more than it should, and `--ratchet` fails on this file.
+Measured, and it is the sharpest version of this doc's own subject: a document
+that names a missing doc in order to report it has to name it in a spelling the
+walk cannot see. The second of the two was itself deleted when its `rf"…"` fix
+landed, which is why it is named by what it was — the prefix reader bug — rather
+than by a path.)*
 
 The seventh was the `-b13` sweep map, **deleted** when `-b14` replaced it, cited
 from one bug doc that predates the replacement.  **Fixed on this branch**: the

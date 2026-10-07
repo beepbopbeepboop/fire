@@ -11232,6 +11232,41 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+_INTERP_PREFIX_LETTERS = 'fFtTrRbBuU'
+
+
+def interpolated_literal_delimiters(spelled: str) -> tuple:
+    """`(quote, body_start)` — where an interpolated literal's own text begins.
+
+    THE prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`, `b`
+    and `u` in any order and any number of them, so `rf"…"`, `fr"…"` and `Rb"…"`
+    are all one quote at an index the caller cannot guess from the token's shape.
+    `spelled[1]` is right only for the one-letter spellings (`f"…"`, `t"…"`);
+    asking it for a two-letter one (`rf"…"`, `fr"…"`) reads the second flag as the
+    quote and refuses a token whose next character IS a quote — which is a
+    sentence FALSE about the source (`tools/wave2_extract_shared.py`'s
+    `rf"…"` was the one file in the 768-file scope to reach it).
+
+    `rawness` does NOT change where the chunks and `{…}` fields are: a raw string
+    changes what `\\s` means, not the brace rules, and those are
+    prefix-independent in both spellings. So this returns only the boundary, and
+    a caller that later wants a chunk's VALUE rather than its spelling records
+    rawness separately. The letters are spelled out with `==`-style set
+    membership (`in` on a string) only because `spelled` is text here and not a
+    compiled `char *`; the same test lives in `fire_compiler.py`'s
+    `_string_prefix_start` / `_prefix_is_interpolated`, which is why the two
+    cannot disagree about what a prefix is.
+    """
+    i, n = 0, len(spelled)
+    while i < n and spelled[i] in _INTERP_PREFIX_LETTERS:
+        i += 1
+    if i >= n or spelled[i] not in ('"', "'"):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: the "
+            f"character after the prefix is not a quote")
+    return spelled[i], i
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11301,22 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
+    # THE prefix is a SET OF SPELLING FLAGS, not one character (`rf"…"` and
+    # `fr"…"` are two of them), so the quote's index is asked of the shared
+    # boundary reader rather than assumed to be 1 — the bug this line replaces
+    # refused every two-letter prefix with "the character after the prefix is
+    # not a quote", which is false about a token whose next character IS one.
+    quote, q_at = interpolated_literal_delimiters(spelled)
+    if spelled[q_at:q_at + 3] == quote * 3:
         term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
     else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
-    if not spelled.endswith(term):
+        term = quote
+    if not spelled.endswith(term) or len(spelled) < q_at + 2 * len(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[q_at + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)

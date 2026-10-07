@@ -6648,36 +6648,54 @@ def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
     if func_entry not in words:
         return True                    # nothing to decide: leave it to Lean
     blocks = _cfg_blocks(words, func_entry, func_end)
+    by_start = {b["start"]: b for b in blocks}
     order = [b["start"] for b in blocks]
+    # The walk carries WHETHER A SOURCE CONDITIONAL HAS BEEN CROSSED, per path,
+    # rather than returning False the moment it MEETS one anywhere in the CFG.
+    # Those are different questions and only the first is the one the theorem
+    # asks: a program can have a source conditional on one reachable path and
+    # still reach the halt address on another path that crosses none, and the
+    # premise is about the path the run takes. Returning on the first source
+    # conditional seen refused `formal/examples/count.mojo` — whose halt is the
+    # `@require(n >= 0)` trap's `fflush` on the entry path, while the `if n == 0`
+    # test at the other end of the function is a source conditional reachable
+    # from the entry too. So the state is `(block, crossed)` and the answer is
+    # True when a block CONTAINING `pc` is reached with `crossed` False.
     seen = set()
-    reached = set()
-    queue = [func_entry]
+    queue = [(func_entry, False)]
     while queue:
-        start = queue.pop()
-        if start in seen or start not in order:
+        start, crossed = queue.pop()
+        if (start, crossed) in seen or start not in by_start:
             continue
-        seen.add(start)
-        reached.add(start)
-        block = blocks[order.index(start)]
+        seen.add((start, crossed))
+        block = by_start[start]
+        if pc in block["instrs"] and not crossed:
+            return True
         if block["kind"] == "b":
             tgt = block["targets"][0]
             if tgt is not None:
-                queue.append(tgt)
+                queue.append((tgt, crossed))
         elif block["kind"] == "cbz":
-            if cond_branches and block["instrs"][-1] in cond_branches:
-                return False           # a SOURCE condition sits on the path
+            # A source condition on THIS block is crossed by every path through
+            # it, so a successor inherits `crossed` OR this block's own
+            # condition. A branch that is not a source condition is the
+            # emitter's own structure and crosses nothing, so it keeps the
+            # caller's flag.
+            #
             # BOTH edges of a branch that is not a source condition.  The walk
             # cannot know which way an emitter-internal branch goes — `a // b`
             # puts its `__div0` call on the TAKEN edge of the guard's own
             # `CBZ Xb` — and following both is the over-approximating answer,
             # which is the permissive direction for a question whose failure
             # mode is a false refusal.
-            queue.extend(t for t in block["targets"] if t is not None)
+            step = crossed or bool(cond_branches
+                                   and block["instrs"][-1] in cond_branches)
+            queue.extend((t, step) for t in block["targets"] if t is not None)
         elif block["kind"] == "seq":
             i = order.index(start)
             if i + 1 < len(order):
-                queue.append(order[i + 1])
-    return any(pc in b["instrs"] for b in blocks if b["start"] in reached)
+                queue.append((order[i + 1], crossed))
+    return False
 
 
 
