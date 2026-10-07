@@ -1230,7 +1230,14 @@ LIBRARY_TRUST = {
     # What is pinned here is the figure AFTER the 63 replacements, so `Contracts`
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
-    "ProofLib": (0, 0, 1518, 1518),
+    # **1585, not 1518: +67 arrived in the merge** (2026-10-06).  The formal
+    # branches merged here modelled more of arm64 in `lib/ProofLib.lean` — the
+    # `SMULH`/`SMULL`/`STUR`/`TST` step arms among them — and each new
+    # `work_step_*` lemma is proved by `bv_decide` over a quantified word, which
+    # is the right tool for that shape and still an axiom in the closure of every
+    # theorem proved with it.  The per-module census moved with the source, so
+    # this is the sanctioned "record new debt" raise, not a replacement.
+    "ProofLib": (0, 0, 1585, 1585),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
