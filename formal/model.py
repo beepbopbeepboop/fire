@@ -27869,6 +27869,314 @@ def exception_kind_for(name: str, kinds: dict = None):
     return table.get(str(name)) if name else None
 
 
+# ── §4's SUPERCLASS question, ANSWERED: the table grows a base relation ──────
+#
+# `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 asks for the one
+# design decision in that document with no answer in the code, and §5 step 1
+# says to decide it BEFORE the emitters are written: "either the kind table
+# grows a `SUPERCLASS_OF` bit, or the word is a pointer and the base walk moves
+# into the dispatch".
+#
+# **It grows the base relation, and here is why that is the answer rather than
+# the other one.** The word stays one 64-bit word because it has to: it is
+# written by a callee into its own frame and read by a call site that must also
+# leave the value in the return register, so a second return value is not
+# available (§4's own reason for a word rather than a pair). The alternative —
+# make it a POINTER to an exception object — turns one convention into two
+# frame questions at once, because `except A as e:` then needs an object to
+# bind and an object is a FRAME on this path (`model.BUILTIN_EXCEPTION_FIELDS`
+# is `("args",)`, so one per raise site is a `_blob_cap` question). That is §4's
+# THIRD open question, and taking it on at the same time as the first is how a
+# design ends up with two unsolved halves instead of one solved one.
+#
+# **The base relation is a BUILD-TIME fact on both halves, which is what makes
+# the word enough.** CPython's hierarchy is a constant of the interpreter (the
+# same provenance as `CPYTHON_EXCEPTION_BASES`, and generated the same way), and
+# a class this image DECLARES has a base the source writes down. So
+# `except A:` is discharged at run time by comparing the word against A's kind
+# and against each of A's ancestors' kinds — a finite list computed here, once,
+# per build — and the dispatch emits one compare per distinct kind rather than a
+# base walk in the image.
+#
+# **And the one case the word genuinely cannot answer is now stated instead of
+# papered over.** A class outside CPython's hierarchy and outside this image's
+# declarations is an UNMODELLED base (§4's third bullet), and nothing can say
+# whether it is an `Exception`, because nothing here knows its bases. A kind for
+# it would be real but unmatchable, so `handler_arm_kinds` answers **None**
+# rather than a set, and a caller must treat that as "cannot decide" — which is
+# a refusal of the arm, not a silent non-match. Returning an empty set instead
+# would make `except Exception:` quietly stop catching it, which is the exact
+# wrong answer this project refuses everywhere else.
+
+#: CPython's own exception hierarchy: `{class: its direct base(s)}`, restricted
+#: to classes in `CPYTHON_EXCEPTION_BASES`. Generated from the interpreter this
+#: compiler runs on —
+#: `{n: tuple(b.__name__ for b in v.__bases__ if
+#:           issubclass(b, BaseException))
+#:   for n, v in vars(builtins).items()
+#:   if isinstance(v, type) and issubclass(v, BaseException)}`
+#: — for `CPYTHON_EXCEPTION_BASES`'s reason: the answer is a fact about CPython
+#: and a hand-kept list is a list that goes stale silently.
+#:
+#: **A base outside the set is dropped, and that is not a gap.** `object` is the
+#: only one CPython has, and `BaseException` is the hierarchy's root; `object`
+#: is not an exception, so an `except` arm can never name it.
+#: **A class with TWO bases keeps both** — `ExceptionGroup` derives from
+#: `BaseExceptionGroup` and `Exception`, and CPython's `issubclass` says yes to
+#: both, so a matcher that kept one would be wrong about half of them.
+CPYTHON_EXCEPTION_BASE = {
+    "ArithmeticError": ('Exception',),
+    "AssertionError": ('Exception',),
+    "AttributeError": ('Exception',),
+    "BaseException": (),
+    "BaseExceptionGroup": ('BaseException',),
+    "BlockingIOError": ('OSError',),
+    "BrokenPipeError": ('ConnectionError',),
+    "BufferError": ('Exception',),
+    "BytesWarning": ('Warning',),
+    "ChildProcessError": ('OSError',),
+    "ConnectionAbortedError": ('ConnectionError',),
+    "ConnectionError": ('OSError',),
+    "ConnectionRefusedError": ('ConnectionError',),
+    "ConnectionResetError": ('ConnectionError',),
+    "DeprecationWarning": ('Warning',),
+    "EOFError": ('Exception',),
+    "EncodingWarning": ('Warning',),
+    "EnvironmentError": ('Exception',),
+    "Exception": ('BaseException',),
+    "ExceptionGroup": ('BaseExceptionGroup', 'Exception'),
+    "FileExistsError": ('OSError',),
+    "FileNotFoundError": ('OSError',),
+    "FloatingPointError": ('ArithmeticError',),
+    "FutureWarning": ('Warning',),
+    "GeneratorExit": ('BaseException',),
+    "IOError": ('Exception',),
+    "ImportError": ('Exception',),
+    "ImportWarning": ('Warning',),
+    "IndentationError": ('SyntaxError',),
+    "IndexError": ('LookupError',),
+    "InterruptedError": ('OSError',),
+    "IsADirectoryError": ('OSError',),
+    "KeyError": ('LookupError',),
+    "KeyboardInterrupt": ('BaseException',),
+    "LookupError": ('Exception',),
+    "MemoryError": ('Exception',),
+    "ModuleNotFoundError": ('ImportError',),
+    "NameError": ('Exception',),
+    "NotADirectoryError": ('OSError',),
+    "NotImplementedError": ('RuntimeError',),
+    "OSError": ('Exception',),
+    "OverflowError": ('ArithmeticError',),
+    "PendingDeprecationWarning": ('Warning',),
+    "PermissionError": ('OSError',),
+    "ProcessLookupError": ('OSError',),
+    "PythonFinalizationError": ('RuntimeError',),
+    "RecursionError": ('RuntimeError',),
+    "ReferenceError": ('Exception',),
+    "ResourceWarning": ('Warning',),
+    "RuntimeError": ('Exception',),
+    "RuntimeWarning": ('Warning',),
+    "StopAsyncIteration": ('Exception',),
+    "StopIteration": ('Exception',),
+    "SyntaxError": ('Exception',),
+    "SyntaxWarning": ('Warning',),
+    "SystemError": ('Exception',),
+    "SystemExit": ('BaseException',),
+    "TabError": ('IndentationError',),
+    "TimeoutError": ('OSError',),
+    "TypeError": ('Exception',),
+    "UnboundLocalError": ('NameError',),
+    "UnicodeDecodeError": ('UnicodeError',),
+    "UnicodeEncodeError": ('UnicodeError',),
+    "UnicodeError": ('ValueError',),
+    "UnicodeTranslateError": ('UnicodeError',),
+    "UnicodeWarning": ('Warning',),
+    "UserWarning": ('Warning',),
+    "ValueError": ('Exception',),
+    "Warning": ('Exception',),
+    "ZeroDivisionError": ('ArithmeticError',),
+    "_IncompleteInputError": ('SyntaxError',),
+}
+
+
+#: CPython's 71 exception NAMES are 69 class OBJECTS, and the two that are not
+#: are aliases: `EnvironmentError` and `IOError` are `OSError`. Generated from
+#: the interpreter by identity (`v is w`), because the consequence is not
+#: cosmetic — `issubclass(BlockingIOError, IOError)` is True in CPython, and a
+#: matcher that walks a NAME hierarchy answers False for all 18 of `OSError`'s
+#: subclasses under an `except IOError:` arm. Measured over every ordered pair
+#: of the 71 names: 5041 comparisons, 36 disagreements, every one of them under
+#: an alias. This table is what makes that zero, and it is the reason
+#: `exception_base_chain` canonicalises a name before walking it.
+CPYTHON_EXCEPTION_ALIAS = {"EnvironmentError": "OSError", "IOError": "OSError"}
+
+
+def _declared_exception_base(name, structs) -> tuple:
+    """The base names this IMAGE's own declaration of `name` gives, or None.
+
+    A declared class's bases are written in the source, so they are the one part
+    of the hierarchy that is not a constant — and they WIN over
+    `CPYTHON_EXCEPTION_BASE` for the same reason `raise_class_name` lets
+    `structs` win: `class ValueError(Exception)` is this image's class, and
+    reading its base from CPython's table would be reading a different
+    declaration.
+
+    `None` for a class this image does not declare, which is the ordinary case
+    and not a failure: the CPython table answers it.
+    """
+    decl = (structs or {}).get(str(name)) if hasattr(structs or {}, "get") else None
+    if decl is None:
+        return None
+    return tuple(str(b) for b in (getattr(decl, "bases", None) or []))
+
+
+def _canonical_exception_name(name, structs) -> str:
+    """`name` with a CPython ALIAS resolved, unless this image declares it.
+
+    One reader of that rule, because `exception_base_chain` and both matchers
+    have to agree about it and a second spelling is how they would not.
+    """
+    text = str(name)
+    if (structs or {}) and hasattr(structs, "get") and text in structs:
+        return text
+    return CPYTHON_EXCEPTION_ALIAS.get(text, text)
+
+
+def exception_base_chain(name, structs=None) -> tuple:
+    """`(ancestors, unresolved)` — `name`'s base chain, and where it stops being
+    knowable.
+
+    `ancestors` starts at `name` itself and walks UP, breadth-first over
+    multiple bases, so an arm for a class matches every class below it.
+    `unresolved` names the bases the walk could not follow — a class outside
+    CPython's hierarchy and outside this image's declarations — and is the
+    reason a caller cannot conclude "this arm matches exactly these kinds".
+
+    **Cycles terminate** rather than hanging, because a source-level cycle is a
+    program this path already refuses elsewhere and a hang in a matcher is worse
+    than an answer about a prefix of the chain. A name repeated in the walk is
+    dropped, so the result is finite whatever the declaration says.
+
+    **A CPython ALIAS is canonicalised before the walk** (`CPYTHON_EXCEPTION_ALIAS`),
+    so `except IOError:` and `except OSError:` are the same arm — which is what
+    CPython says, since they are the same class object. A DECLARED class is never
+    canonicalised: `class IOError(...)` in this image is a different class from
+    the builtin by that name, and `raise_class_name` already gives a declaration
+    precedence over the builtin for the same reason.
+    """
+    root = _canonical_exception_name(name, structs)
+    seen, order, todo = set(), [], [root]
+    unresolved = []
+    while todo:
+        cur = todo.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        order.append(cur)
+        declared = _declared_exception_base(cur, structs)
+        if declared is not None:
+            bases = declared
+        elif cur in CPYTHON_EXCEPTION_BASE:
+            bases = CPYTHON_EXCEPTION_BASE[cur]
+        else:
+            unresolved.append(cur)
+            continue
+        todo.extend(b for b in bases if b not in seen)
+    return tuple(order), tuple(unresolved)
+
+
+def handler_arm_kinds(name, kinds=None, structs=None):
+    """The KINDS an `except <name>:` arm's dispatch has to compare against, or
+    **None** when that list cannot be fixed at build time.
+
+    **The direction is DESCENDANTS, not ancestors, and getting it backwards is
+    the mistake this docstring exists to prevent.** The word holds the kind of
+    the class actually raised, so `except ArithmeticError:` catching a
+    `ZeroDivisionError` means the word says `ZeroDivisionError` and the ARM has
+    to know that `ZeroDivisionError` is below it — an ancestor walk would answer
+    the opposite question and report a non-match.
+
+    So the set is `{kind(C) for every class C this image can name with
+    `name ∈ ancestors(C)`}`, and it is exactly the compare list the dispatch
+    emits — one compare per distinct kind, which is why §4's "the word is not a
+    pointer" answer does not need a base walk in the image.
+
+    **None is the answer for the two cases where the list is not a fact about
+    the ARM ALONE, and both must be refusals upstream rather than a guess:**
+
+      * the chain reaches a base this image cannot follow (an unmodelled base),
+        so `name` may have subclasses nothing here knows;
+      * `name` is a DECLARED class with a DECLARED subclass. A dylib and the
+        executable that links it are two images whose declared sets differ, and
+        the two-numbering argument in `exception_kind_table`'s block comment is
+        why a declared class's kind is not the same integer in both. A compare
+        list built from one image's declared subclasses is therefore a list that
+        means something else in the other image — the exact failure the disjoint
+        ranges exist to prevent, one level up.
+
+      A CPython arm is safe from the second by construction: its whole
+      descendant set lives in `CPYTHON_EXCEPTION_BASE`, which is a constant of
+      the interpreter and identical in every image.
+    """
+    chain, unresolved = exception_base_chain(name, structs)
+    table = exception_kinds() if kinds is None else kinds
+    root = _canonical_exception_name(name, structs)
+    if unresolved or root not in table:
+        return None
+    declared = set()
+    for cls in (structs or {}):
+        cchain, c_unresolved = exception_base_chain(cls, structs)
+        if c_unresolved:
+            return None
+        if root in cchain and cchain[0] != root:
+            declared.add(cls)
+    if declared:
+        return None
+    out = set()
+    for cls in table:
+        cchain, c_unresolved = exception_base_chain(cls, structs)
+        if c_unresolved:
+            return None
+        if root in cchain:
+            out.add(table[cls])
+    # An EMPTY set is the answer to nothing: every class is its own subclass, so
+    # a name that matched none of them did not resolve. Returning `set()` here
+    # would make the dispatch compare against nothing and silently never take an
+    # arm, which is the worst of the three answers.
+    return frozenset(out) if out else None
+
+
+def handler_arm_matches(arm_name, flying_name, kinds=None, structs=None):
+    """Would CPython's `except <arm_name>:` catch a `<flying_name>` exception?
+
+    `True`, `False`, or **None** for "cannot be decided" — the three answers are
+    kept apart because a dispatch has to tell a non-match (fall through to the
+    next arm) from an undecidable one (refuse the image), and a boolean would
+    collapse them into a silently wrong catch.
+
+    **The two halves need different evidence and that is the whole reason both
+    of them exist.** The test is membership of the ARM's name in the RAISED
+    class's chain, so `True` and `False` need only that chain — the arm's own
+    ancestry never enters, which is why an arm whose own base is unmodelled is
+    still decidable here. What is NOT decidable is a raised class whose chain
+    stops at an unmodelled base: `except Exception:` does not catch a
+    `class Mine(ExternalBase)` whose own bases nothing here knows, and answering
+    `False` there would drop an exception CPython catches.
+
+    This is the question the SOURCE answers and the one `handler_arm_kinds` does
+    not: it says what CPython would do, which is what the model's `except` needs,
+    while the other says what the image can compare, which is what the dispatch
+    needs. Pinning both is what keeps §4's design question from being answered
+    twice and differently.
+    """
+    if arm_name is None:
+        return None
+    fly_chain, fly_unresolved = exception_base_chain(flying_name, structs)
+    if fly_unresolved:
+        return None
+    return _canonical_exception_name(arm_name, structs) in fly_chain
+
+
 # ── what a `raise` of an exception CLASS lowers to ─────────────────────────
 #
 # `raise E(...)` / `raise E` where `E` names a CPython builtin exception class

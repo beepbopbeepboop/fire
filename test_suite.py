@@ -5585,6 +5585,120 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
           f'vacuously')
 
 
+def test_a_verdict_the_ledger_no_longer_agrees_with_is_reported():
+    """A citation that RESOLVES and is still FALSE about the tree.
+
+    `test_a_deleted_bug_doc_is_not_still_cited` above covers the citation of a
+    document that is GONE, which is the half CLAUDE.md's delete-a-fixed-doc rule
+    manufactures. The other half is a document that names something that still
+    exists and is no longer true of it, and nothing in the tree checks that:
+    three rows of one verdict table said a proof was `lean-rejected` months
+    after it started passing, in the same direction, beside a document that had
+    already been corrected. Both sides were committed records and a reader
+    could not tell which to believe.
+
+    So `tools/dangling_doc_refs.py::stale_verdicts` compares a `bugs/`
+    document's verdict TABLE against the committed ledger of those verdicts
+    (`tools/formal_proof_census_baseline.json`) and reports the rows that
+    disagree. It reports rather than fails, for the reason `BARE_REF` gives: a
+    verdict table is prose-adjacent, either side can be the stale one, and this
+    tool does not get to decide which.
+
+    **The negative control is the substance of this test.** Every case below is
+    a fixture table, because the only thing that proves the reader can fail is a
+    table whose verdict is wrong on purpose; a check asserted only against the
+    live corpus passes just as happily against a corpus it cannot read, which is
+    the shape of the `walk is not vacuous` failure above and the reason it is
+    spelled the way it is.
+    """
+    sys.path.insert(0, os.path.join(HERE, 'tools'))
+    try:
+        import dangling_doc_refs
+    except ImportError as e:
+        check('stale verdicts: the reader is importable', False, repr(e))
+        return
+
+    LEDGER = {'sgt8': ('lean-rejected', None, True),
+              'fact': ('lean-rejected', '2026-10-05', False),
+              'n8': ('proved', '2026-10-04', False)}
+
+    def rows(text):
+        """The DISAGREEING rows of one fixture document, as (line, stem, said).
+
+        Built from the two halves of the reader rather than from `stale_verdicts`
+        itself, so a fixture exercises the parsing and the comparison separately
+        and a change to either half is visible as a change to this test rather
+        than as a fixture that quietly stopped being read.
+        """
+        return [(n, s, said) for n, s, said
+                in dangling_doc_refs.verdict_claims(text, LEDGER)
+                if said != LEDGER[s][0]]
+
+    check('stale verdicts: a wrong verdict IS reported (the negative control)',
+          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` |\n')
+          == [(1, 'sgt8', 'proved')],
+          'a row whose verdict cell disagrees with the ledger must be '
+          'reported; a reader that cannot fail is not a reader, and the whole '
+          'defect class is rows nothing reported')
+
+    check('stale verdicts: a verdict that agrees is NOT reported',
+          not rows('| 3 | `fact` | `lean-rejected` | the same goal |\n')
+          and not rows('| 4 | `n8` | `proved` | — |\n'),
+          'a check that reported every row it read would be the '
+          'instrument-gap bug with a second name: the value is in naming the '
+          'rows that disagree')
+
+    # The spellings a real table is written in. Each of these is a case the
+    # reader missed at some point while it was being written, and each is the
+    # shape the corpus actually uses — `**PASS (2026-10-05)**` is what
+    # `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+    # says, and `refused` (generate) is what the same table says for a proof
+    # that never reached Lean.
+    check('stale verdicts: emphasis, backticks and a date qualifier are one '
+          'claim, not three',
+          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` |\n')
+          and rows('| 4 | sgt8 | proved | — |\n')
+          and rows('| 4 | `sgt8` | `proved` | — |\n'),
+          'the markdown around a verdict must not change whether it is read; a '
+          'strip that runs once instead of to a fixpoint finds no verdict at '
+          'all in the ONE spelling that dates its claim')
+
+    check('stale verdicts: a former verdict inside a sentence is not the claim',
+          rows('| 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on '
+              '`sgt8_proof.lean:2332:41` |\n') == [(1, 'sgt8', 'proved')],
+          'these tables are written chronologically — "was X, now Y" — so a '
+          'reader that took the last status word on the line would read every '
+          'corrected row backwards and report the opposite disagreement')
+
+    # A row that names a stem the ledger has no row for is not a verdict about
+    # anything measurable, and a row whose verdict cell says something else
+    # entirely (`lean-rejected`, **2 holes**) is not a verdict this reader owns:
+    # it states more than a status and the extra half is the reader's problem,
+    # not a disagreement.
+    check('stale verdicts: it reads verdicts, not prose, and not a stem it '
+          'cannot resolve',
+          not rows('| 5 | `countdown` | `lean-rejected`, **2 holes** | — |\n')
+          and not rows('| 9 | `sum_range` | **unsolved goals s : Arm64State** | '
+                       '— |\n'),
+          'a substring reader would match every prose cell in `bugs/` that '
+          'mentions a stem and the word PASS somewhere')
+
+    check('stale verdicts: the live corpus is reported, not asserted empty',
+          callable(dangling_doc_refs.stale_verdicts),
+          'the reader must be callable over the tracked corpus; a test that '
+          'only ever ran fixtures would not notice it stopped walking')
+
+    ledger = dangling_doc_refs.load_verdict_ledger()
+    check('stale verdicts: the ledger it compares against is really there',
+          len(ledger) > 40 and all(
+              v[0] in dangling_doc_refs.SAID_TO_STATUS.values()
+              for v in ledger.values()),
+          f'{len(ledger)} rows from '
+          f'tools/formal_proof_census_baseline.json; a reader pointed at a '
+          f'ledger it cannot read reports green because it read nothing, '
+          f'which is the one thing this whole tool must not be able to do')
+
+
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
 
@@ -5806,9 +5920,10 @@ def main():
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-               test_a_deleted_bug_doc_is_not_still_cited,
-               test_the_formal_doc_index_is_current,
-               test_no_test_preflights_on_an_unbuildable_artifact,
+                test_a_deleted_bug_doc_is_not_still_cited,
+                test_the_formal_doc_index_is_current,
+                test_a_verdict_the_ledger_no_longer_agrees_with_is_reported,
+                test_no_test_preflights_on_an_unbuildable_artifact,
                # A missing DELEGATE is the same class of defect and the same
                # escape: `'GimpleGen' object has no attribute
                # '_emit_dict_int_value_store'` is an AttributeError raised

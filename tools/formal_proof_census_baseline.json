@@ -3,17 +3,9 @@
  "examples": 52,
  "lean": "Lean (version 4.32.2, arm64-apple-darwin24.6.0, commit f3b06c705e6c85f5314019d5d3baab0fec5b580c, Release)",
  "measured_this_write": [
-  "absval",
-  "bigconst",
-  "bitops",
-  "chain",
-  "fact",
-  "identity",
-  "localmul",
-  "nonzero",
-  "pair",
-  "shiftlr",
-  "sum"
+  "sgt8",
+  "sle8",
+  "ug8"
  ],
  "records": {
   "absval": {
@@ -751,26 +743,26 @@
   },
   "sgt8": {
    "arch": "arm64",
-   "cached": true,
+   "cached": false,
    "decide_sites": {
-    "bv_decide": 12,
-    "native_decide": 493
+    "bv_decide": 13,
+    "native_decide": 591
    },
-   "decide_total": 505,
-   "lean_cpu_s": null,
-   "lean_peak_gb": null,
-   "lean_wall_s": null,
+   "decide_total": 604,
+   "lean_cpu_s": 67.8,
+   "lean_peak_gb": 2.4,
+   "lean_wall_s": 65.5,
    "n_admitted": 0,
    "n_sorries": 0,
-   "peak_gb": 0.07,
+   "peak_gb": 2.4,
    "phase": "check",
-   "proof_lines": 2994,
-   "reason": "sgt8_proof.lean:2332:41: error: unsolved goals",
+   "proof_lines": 3113,
+   "reason": "",
    "source_sha256": "7062aeb24791b0b59e2bc52868dd5edb1609add9350a25de76a34f0aadcef1e9",
-   "status": "lean-rejected",
+   "status": "proved",
    "stem": "sgt8",
-   "timed_on": null,
-   "wall_s": 0.1
+   "timed_on": "2026-10-05",
+   "wall_s": 66.1
   },
   "shiftlr": {
    "arch": "arm64",
@@ -820,26 +812,26 @@
   },
   "sle8": {
    "arch": "arm64",
-   "cached": true,
+   "cached": false,
    "decide_sites": {
-    "bv_decide": 12,
-    "native_decide": 493
+    "bv_decide": 13,
+    "native_decide": 591
    },
-   "decide_total": 505,
-   "lean_cpu_s": null,
-   "lean_peak_gb": null,
-   "lean_wall_s": null,
+   "decide_total": 604,
+   "lean_cpu_s": 66.3,
+   "lean_peak_gb": 2.43,
+   "lean_wall_s": 63.9,
    "n_admitted": 0,
    "n_sorries": 0,
-   "peak_gb": 0.07,
+   "peak_gb": 2.43,
    "phase": "check",
-   "proof_lines": 2994,
-   "reason": "sle8_proof.lean:2332:41: error: unsolved goals",
+   "proof_lines": 3113,
+   "reason": "",
    "source_sha256": "15481174d1d69a1dd2b2bdd39cb86643dec2e2f82befc4a7cc150f9716683e0c",
-   "status": "lean-rejected",
+   "status": "proved",
    "stem": "sle8",
-   "timed_on": null,
-   "wall_s": 0.1
+   "timed_on": "2026-10-05",
+   "wall_s": 64.0
   },
   "sqsum": {
    "arch": "arm64",
@@ -1044,26 +1036,26 @@
   },
   "ug8": {
    "arch": "arm64",
-   "cached": true,
+   "cached": false,
    "decide_sites": {
-    "bv_decide": 12,
-    "native_decide": 438
+    "bv_decide": 13,
+    "native_decide": 522
    },
-   "decide_total": 450,
-   "lean_cpu_s": null,
-   "lean_peak_gb": null,
-   "lean_wall_s": null,
+   "decide_total": 535,
+   "lean_cpu_s": 60.4,
+   "lean_peak_gb": 2.37,
+   "lean_wall_s": 57.5,
    "n_admitted": 0,
    "n_sorries": 0,
-   "peak_gb": 0.07,
+   "peak_gb": 2.37,
    "phase": "check",
-   "proof_lines": 2874,
-   "reason": "ug8_proof.lean:2212:41: error: unsolved goals",
+   "proof_lines": 2979,
+   "reason": "",
    "source_sha256": "e72d0fee2aefe93dd93308363621ff4586115e84c30c96b3460558d808244dd9",
-   "status": "lean-rejected",
+   "status": "proved",
    "stem": "ug8",
-   "timed_on": null,
-   "wall_s": 0.1
+   "timed_on": "2026-10-05",
+   "wall_s": 57.7
   },
   "vardecl": {
    "arch": "arm64",
@@ -1202,13 +1194,13 @@
   }
  },
  "summary": {
-  "lean-rejected": 12,
-  "proved": 34,
+  "lean-rejected": 9,
+  "proved": 37,
   "refused": 4,
   "too-large": 2
  },
  "tag": "formal-proof-census-v2",
  "time_factor": 2.0,
- "timed_rows": 25,
- "written": "2026-10-05T19:14:00Z"
+ "timed_rows": 28,
+ "written": "2026-10-06T01:47:37Z"
 }

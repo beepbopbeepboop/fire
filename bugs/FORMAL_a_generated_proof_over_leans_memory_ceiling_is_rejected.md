@@ -5,16 +5,96 @@ run). Found 2026-10-03 on `work/formal16-7`, while landing a change to
 `formal/arm64_proof_gen.py` and running `test_formal_short_circuit_cond.py` as
 one of the narrow files that cover it.
 
-**Status: the CAUSE is now measured and it is none of the three things this
-doc listed; NOT FIXED. The cost is `native_decide`/`bv_decide` in the
-per-block BRANCH-CONDITION facts, and what is missing is a lemma for a
-short-circuit condition's value flow, not a smaller record and not a larger
-ceiling.** §2 is the bisection; §3 is the fix direction; §4 is what was
-already tried and measured against.
+**Status: the CAUSE is measured AGAIN on today's tree and §3's answer is now
+REFUTED. NOT FIXED. The cost is the SUM of the walk theorem's 237 proof terms;
+there is no hot spot, the twelve branch-condition facts are 12 of 237, and
+removing every one of them leaves the ceiling error exactly where it was.** The
+2026-10-03 diagnosis below was right about the record and wrong about the
+branch-condition facts, and §0b is the measurement that says so — which moves
+the next step to `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`'s
+HOIST and away from the short-circuit lemma §3 asks for. §0b is the part to read
+first.
 **§5 — the census half of this doc, the half that made the regression above
 invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
 ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
 as coverage again.**
+
+## 0b. Re-measured 2026-10-06 (`work/formal40-2`): §3's branch-condition lemma is
+## the WRONG next step, and there is no hot spot to aim a lemma at
+
+**The failure still reproduces, and it is the walk theorem's header:**
+
+```
+$ python3 tools/memslot.py --gb 8 --label lean -- python3 .tmp/checklean.py \
+      .tmp/scc/either_proof.lean
+rc=1 wall=173.9s cpu=183.7s peak=7.49GB
+either_proof.lean:2684:8: error: (kernel) excessive memory consumption detected
+```
+
+**Five bisections, all on the same generated file with one edit each, all through
+`formal/lean.py::run_lean`.** `checklean.py` is `run_lean` with `LEAN_PATH` =
+this worktree's `lib/` and `wall_s=1500 cpu_s=5400`; the run-certs library is
+already built by any `formal-proof-census` run, and no number below needed a
+rebuild. `either_proof.lean` is 4306 lines today (the doc records 7259 for a
+2026-10-03 build — the generator has moved, which is the first reason to
+re-measure rather than re-read).
+
+| the file | wall | peak | verdict |
+|---|---|---|---|
+| as emitted | 173.9 s | **7.49 GB** | the ceiling error at `:2684` |
+| **the twelve `hcond_*` goals replaced by `sorry`** | 183.2 s | **7.02 GB** | **the SAME error at the SAME line** |
+| cheap tactics tried BEFORE the decision procedures, everywhere (`first \| decide \| omega \| (simp (disch := decide)) \| rfl \| bv_decide`) | 167.1 s | **7.47 GB** | unchanged — nothing was being skipped |
+| the 15 `hprior_*` bodies `sorry` | 201.5 s | 7.34 GB | the same error |
+| the 16 `hx30_*`/`hjump_*` bodies `sorry` | 151.9 s | 6.82 GB | the same error |
+| the 38 `h_adv_*` bodies `sorry` | 214.9 s | 7.28 GB | the same error |
+| **all 237 `have` bodies `sorry`** | 8.5 s | **1.77 GB** | no error (the statement is not yet proved) |
+| …the FIRST 115 of them `sorry` | 8.3 s | **1.77 GB** | no error |
+| …the LAST 114 of them `sorry` | 81.6 s | **3.73 GB** | no error |
+| …every OTHER one `sorry` (115 of 237) | 174.5 s | **7.18 GB** | **the same error** |
+| control: the file up to `theorem either_compiles_correctly_universal` | 5.2 s | 1.65 GB | **rc=0** |
+
+**Three things follow, and the first two refute this document.**
+
+1. **§2's finding 3 and §3's fix direction are refuted on this tree.** §2 row 6
+   measured "`native_decide`/`bv_decide` (44 sites) replaced, body otherwise
+   untouched → 2.82 GB, the ceiling error is GONE". On today's file the twelve
+   branch-condition goals — the ones §3 asks for a value-flow lemma about — are
+   `sorry`-ed away and the ceiling error is **still there at the same line, with
+   94 % of the memory still in use**. The doc's 44 sites are 76 in the theorem
+   today (48 `native_decide`, 28 `bv_decide`, 16 `grind`), and none of the three
+   families is load-bearing on its own: `hprior_*` 15 facts, `hx30_*`/`hjump_*`
+   16, `h_adv_*` 38, `hcond_*` 12, out of **237**.
+2. **The fallback chain is not skipping a cheaper tactic.** Putting `decide`,
+   `omega`, `simp (disch := decide)` and `rfl` in front of every `bv_decide`
+   and `native_decide` in the theorem moves the peak by 0.02 GB. So §3's
+   premise — that the branch-condition leaves need a lemma *because* a decision
+   procedure is reached for — is right about the tactic and wrong about the
+   cause: `bv_decide` is reached for because it is the only one that works, and
+   what it is working on is the whole term.
+3. **There is no hot spot; the peak tracks the SUM.** `sorry`-ing the first
+   half of the walk's proof terms is free (1.77 GB) and `sorry`-ing the second
+   half is nearly free (3.73 GB), but `sorry`-ing every other one — a half by
+   COUNT — is 7.18 GB and still over the ceiling. Peak elaboration memory is not
+   one expensive moment here; it is what 237 moderately large proof terms cost
+   to hold at once. **That is `bugs/FORMAL_a_three_branch_certificate_exceeds_
+   the_lean_bound.md`'s growth finding, measured here on a program whose blowup
+   has a different supposed cause**, and it is why the next step below is that
+   document's HOIST and not a lemma.
+
+**What the branch-condition goal actually looks like, traced rather than
+described** — `trace_state` in place of one `hcond`'s chain, and the residual
+after the preceding `simp only`/`try rw` is `arm64_matches_condition` unfolded
+into a `decide (…)` tree over `(Arm64State.init n 4294967968).x0` with no
+`mem_read` left in it (the spill `rw` did its work). So the value flow is
+*already* resolved and the cost is the SIZE of the unfolded flag chain, which is
+a statement about emission rather than about a missing lemma.
+
+**What this does NOT do:** it does not fix anything, and it does not make
+`either` or `both` check. It relocates the work, and the relocation is measured
+rather than argued: a reader who takes §3 next will spend a day on a lemma for
+12 of 237 facts. **Reproduce with `.tmp/checklean.py` (see "Reproducing"),
+`--gb 8`, and one edit per row; every row above is the same file with one
+change.**
 
 ## What was run, and what it showed
 
@@ -139,6 +219,16 @@ reach for a decision procedure. A straight-line `if` closes on `simp`;
 these four do not.
 
 ## 3. The fix direction
+
+> **SUPERSEDED by §0b (2026-10-06).** The premise below is right and the
+> conclusion is refuted: the branch-condition leaves are 12 of the walk theorem's
+> 237 proof terms, `sorry`-ing all twelve leaves the ceiling error unchanged at
+> 94 % of its memory, and the peak tracks the SUM rather than any one family. The
+> lemma is a real gap — the merge block's register does need a value-flow fact
+> §0b's `trace_state` confirms the goal is about SIZE, not flow — and it is worth
+> 5 % of what §3 believes. **The next step is `bugs/FORMAL_a_three_branch_
+> certificate_exceeds_the_lean_bound.md` §5's HOIST**, which §0b measures on this
+> program too. Read §0b before starting anything below.
 
 **A lemma for a short-circuit condition's value flow, not a cheaper decision
 procedure.** The generator already knows the shape — `_sc_by_merge` in
@@ -283,3 +373,53 @@ EOF
 
 `formal/examples/both.mojo`, `short_and.mojo` and `short_or.mojo` are the
 other three, and every number above holds for the one that was measured.
+
+### §0b's bisection, which is the one to redo (2026-10-06)
+
+**Three steps, and the second is the only thing that needs a scratch script.**
+Never launch `lean` directly: `formal/lean.py::run_lean` is the only launcher,
+and it is what applies the wall/CPU/heartbeat bounds.
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+mkdir -p .tmp/scc && cat > .tmp/scc/either.mojo <<'EOF'
+def either(n):
+    if n > 10 or n == 0:
+        return 1
+    else:
+        return 0
+EOF
+
+# 1. the file, with the proof CHECK stubbed so no Lean runs while generating
+python3 tools/memslot.py --gb 8 --label gen -- python3 - <<'PY'
+import formal.lean as L
+L.check_proof_cached = lambda *a, **k: (True, "gen only", False, 0)
+import sys, fire
+sys.argv = ['fire', 'build', '--formal', '-o', '.tmp/scc/either.out',
+            '--backend=arm64', '.tmp/scc/either.mojo']
+fire.main()
+PY
+
+# 2. .tmp/checklean.py: run_lean(lean, [src]) with LEAN_PATH=lib, printing
+#    rc / wall / cpu / peak and the FIRST error lines (never the last 1200).
+#    `LeanRun`'s memory field is `peak_rss`, not `peak` — a name that cost this
+#    pass one run.  `lib/*.olean` must already exist; any `formal-proof-census`
+#    run builds them, and building them by hand peaks near 8 GB.
+python3 tools/memslot.py --gb 8 --label lean -- \
+  python3 .tmp/checklean.py .tmp/scc/either_proof.lean      # 7.49 GB, `:2684`
+
+# 3. one edit per §0b row, each its own file.  The families:
+#    hcond_* 12 · hprior_* 15 · hx30_*/hjump_* 16 · h_adv_* 38 — of 237 `have`s.
+#    Replace a family's PROOF BODIES (keeping every STATEMENT, which later
+#    `simp only` lists name) with a single `sorry`.  A `have` whose statement
+#    spans lines ends at the line ending `:= by`; the body is everything more
+#    indented than the `have`.
+```
+
+**Two traps, both of which make a row look like a fix.** Replacing a family with
+`sorry` but dropping a STATEMENT turns the experiment into a parse error, and an
+edit that introduces a syntax error makes the file look CHEAP because
+elaboration aborts at the error — §2 says this and it cost that pass an hour
+before it was noticed. And `maxHeartbeats` accumulates over the whole
+declaration, so lowering it names a tactic that merely ran out of budget on a
+cumulative count, not the one that is expensive.

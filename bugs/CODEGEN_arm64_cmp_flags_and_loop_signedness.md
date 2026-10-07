@@ -62,8 +62,15 @@ Note the obligation's spelling also moved: this sentence recorded
 different `t8u n = n` entirely. Pinning is in
 `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. The
 document that used to own this is deleted, so the fact is recorded here rather
-than left to a citation of it — which is the whole of
-`bugs/FORMAL_a_surviving_citation_is_not_checked.md`.
+than left to a citation of it — and the mechanism that gap needed is now here
+too: `tools/dangling_doc_refs.py::stale_verdicts` reports a `bugs/` document
+whose verdict TABLE disagrees with `tools/formal_proof_census_baseline.json`,
+which is the half the ratchet above cannot see (it counts citations of documents
+that are gone; it does not check that a surviving claim is still true). It found
+three rows of exactly this table saying `lean-rejected` beside a document that
+had already been corrected, and the three ledger rows it named were replayed
+verdicts that no run had ever produced — re-banked with `--remeasure`, which
+moved the census from 34 proved to 37.
 
 **The other half of master's sentence is the same fact stated for the
 census entry above**: `bugs/FORMAL_arm64_known_proof_gaps.md` records that

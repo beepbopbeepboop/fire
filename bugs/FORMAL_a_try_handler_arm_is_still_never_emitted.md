@@ -2,11 +2,34 @@
 # fixing in one function is that EVERY arm in this repository calls something
 
 **Area:** FORMAL, exceptions. Claim `project33:exceptions`, measured 2026-10-05
-on `work/formal33-exceptions`. **OPEN, with §5 step 2 LANDED (2026-10-05,
-`work/formal40-2`).** The uncaught half of the exception contract landed on that
-branch (three commits: `raise` of a class leaving with CPython's status, a float
-`/` by a zero divisor leaving, and a failing `assert` running its message and its
-enclosing `finally`) and this is the remainder.
+on `work/formal33-exceptions`. **OPEN, with §5 step 1 ANSWERED (2026-10-06,
+`work/formal40-2`) and §5 step 2 LANDED (2026-10-05, `work/formal40-2`).** The
+uncaught half of the exception contract landed on that branch (three commits:
+`raise` of a class leaving with CPython's status, a float `/` by a zero divisor
+leaving, and a failing `assert` running its message and its enclosing `finally`)
+and this is the remainder.
+
+**§5 step 1 is DONE — both of §4's design questions are answered, and one of the
+answers came with code and a hole in the design it corrects.** §4 asks for the
+superclass question and the `as e` question; the answers are in **§4a** (the
+kind word grows a base relation, and here is the comparison list it compares
+against, with the three cases that make that list undecidable) and **§4b** (`as e`
+is refused until the exception has a representation). **Both answers were
+measured against CPython over every ordered pair of its 71 exception names —
+5041 comparisons — and the first version of the matcher disagreed on 36 of
+them**, all under the two names that are aliases of `OSError`. Steps 3, 4, 5 and
+6 are untouched and no emitter reads any of it yet.
+
+**And the answer carries a correction to step 2, which is the more useful half.**
+The two disjoint ranges make a **BUILTIN**'s integer image-independent; they do
+**not** make a **declared** class's integer image-independent, because the
+declared range is numbered by sorted name over the declared SET and a dylib and
+its caller declare different things. That is not a defect in the landed table —
+its docstring claims the builtin property and only the builtin property — but it
+does mean an image that declares an exception class cannot give an
+`except Exception:` arm a compare list that means the same thing in both images.
+§4a says what the emitters must do about it, and it is a refusal rather than a
+number.
 
 **§5 step 2 is done and it is shared infrastructure that fixes nothing by
 itself** — which is what §5 said it would be, and it is landed separately for
@@ -17,9 +40,8 @@ per-image trio beside the other two, `formal/build.py::_prepare_functions`
 publishes it at the point `structs_by_name` is first complete, and **both**
 emitters put `M.exception_kinds()` into `info["exception_kinds"]` so the two
 proof generators read one list rather than one each. **Nothing reads the table
-yet**; steps 1, 3, 4, 5 and 6 are untouched and §4's two open design questions
-(the superclass-matching question and the `as e` question) are still open and
-still block the emitters, exactly as §5 step 1 says.
+yet**; steps 3, 4, 5 and 6 are untouched and §4's design questions are answered
+in §4a and §4b rather than open.
 
 **The one design decision this step had to make, and it is not §4's two:** the
 numbering has to survive an image DECLARING a class, because a dylib and the
@@ -197,11 +219,119 @@ representation. The one this tree already has is `model.BUILTIN_EXCEPTION_FIELDS
 a FRAME on this path and copying one per raise site is a frame-budget question
 (`_blob_cap`), not a code question.
 
+## 4a. §4's SUPERCLASS question, answered (2026-10-06) — the word grows a base
+## relation, and here is what the dispatch compares against
+
+**The decision: the kind table grows the base relation. The word does NOT become
+a pointer.** §4 offers the two as alternatives and this is the first.
+
+* **The word has to stay one word.** It is written by a callee into its own
+  frame and read by a call site that must also leave the value in the return
+  register, so a second return value is not available — §4's own reason for a
+  word rather than a pair, and it does not change under this decision.
+* **A pointer takes on §4's THIRD question at the same time**, which is how a
+  design ends up with two unsolved halves instead of one solved one. `except A
+  as e:` needs an object to bind, an object is a FRAME on this path
+  (`model.BUILTIN_EXCEPTION_FIELDS` is `("args",)`), and one per raise site is a
+  `_blob_cap` question.
+* **The base relation is a BUILD-TIME fact on both halves**, which is what makes
+  the word enough: CPython's hierarchy is a constant of the interpreter
+  (`model.CPYTHON_EXCEPTION_BASE`, generated from it the way
+  `CPYTHON_EXCEPTION_BASES` was), and a class this image DECLARES has a base the
+  source writes down.
+
+**The two functions, and why there are two.** Both are in `formal/model.py`, both
+are pure, and both are pinned by `test_formal_exceptions.py::
+handler_arm_matching_checks` (13 checks, no build and no Lean).
+
+| | the question | answers |
+|---|---|---|
+| `handler_arm_matches(arm, flying)` | **what CPython would do** | `True` / `False` / `None` |
+| `handler_arm_kinds(arm)` | **what the image can compare** | a `frozenset` of kinds, or `None` |
+
+**They are separate because they have different answers for the same input**,
+which is the whole reason §4's question had two halves and not one:
+
+* `except ArithmeticError:` catches `ZeroDivisionError` — so the arm has to know
+  about **DESCENDANTS** of itself. An ancestor walk answers the opposite
+  question. Measured: all 71 arms disagree with CPython's descendant sets if
+  the walk goes the other way.
+* **`True`/`False` need only the RAISED class's chain**, never the arm's own
+  ancestry — the test is membership of the arm's NAME in it. So an arm whose own
+  base is unmodelled is still decidable as a source question.
+* **`False` is not always available.** `except Exception:` does not catch a
+  `class Mine(External)` whose own bases nothing here knows, and answering
+  `False` there would drop an exception CPython catches. That case is `None`,
+  and `None` means REFUSE, never "no match".
+
+**Three cases make `handler_arm_kinds` answer `None`, and each is a refusal the
+emitters must implement rather than a gap to note:**
+
+1. **an unmodelled base** in the chain — §4's third bullet, now a refusal rather
+   than an unmatchable kind;
+2. **a class the image cannot name at all**;
+3. **a DECLARED class with a DECLARED subclass** — the correction to step 2, and
+   the only one that is a surprise. The declared range is numbered by sorted name
+   over the declared SET, so a dylib (which declares `Mine`) and an executable
+   (which declares `Mine` and `Other`) number `MineSub` differently, and a
+   compare list built from one image's declared subclasses means something else
+   in the other. A CPython arm is safe from this by construction: its whole
+   descendant set lives in `CPYTHON_EXCEPTION_BASE`.
+
+**The alias, which is the thing a reader would not have predicted.** CPython's 71
+exception NAMES are **69 class objects**, and `EnvironmentError` and `IOError`
+ARE `OSError`. `issubclass(BlockingIOError, IOError)` is therefore True, and a
+NAME hierarchy that does not canonicalise answers `False` for all 18 of `OSError`'s
+subclasses under either alias. Measured over every ordered pair of the 71 names —
+5041 comparisons — **36 disagreements before `model.CPYTHON_EXCEPTION_ALIAS`, 0
+after.** A DECLARED `class IOError(...)` is deliberately NOT canonicalised: it is
+a different class from the builtin of that name, and `raise_class_name` already
+gives a declaration precedence for the same reason.
+
+**What `except BaseException:` now costs, measured:** one compare per kind, 71
+of them. §4 says this arm is the commonest in real code and cannot be left to
+the cheap version, and this is the measurement that says the cheap version gets
+it right anyway — the whole list is a build-time constant of the interpreter.
+
+## 4b. §4's `as e` question, answered (2026-10-06): REFUSE, until the exception
+## has a representation
+
+**The decision: `except A as e:` is refused while `e` would have a value.** The
+three options §4 lists are bind `e` to the word, refuse the arm, or give the
+exception a representation, and it is the second — with the third named as the
+work that lifts it.
+
+* **Binding `e` to the kind word is the wrong answer and this project has a rule
+  about it.** `str(e)` is the first thing anybody writes in an arm, and a
+  convention where `e` is an integer prints a number where CPython prints
+  `IOError: [Errno 2]`. That is `bugs/FORMAL_string_value_model.md`'s class: the
+  question is what the path does when the source says something the word cannot
+  hold, and the answer must not be a plausible number.
+* **The representation is close and is not a code question.**
+  `model.BUILTIN_EXCEPTION_FIELDS = ("args",)` already gives every builtin
+  exception class a one-word slot for its message, so an object is not far away —
+  but a class with an `args` slot is a FRAME on this path, and copying one per
+  raise site is a `_blob_cap` question. That is §5 step 6's neighbour and it is
+  worth doing **with** the unwinder rather than before it.
+* **So the refusal names the construct, not a symbol**, which is the rule the
+  two landed commits above already follow, and it goes in beside
+  `model.refuse_dropped_handler_arm` rather than replacing it: the arm with no
+  binding is emittable and the arm with one is not.
+
+**What this does NOT decide:** whether the exception object is a one-word cell
+with an `args` word in it, or something with a message buffer. §4's third option
+is still open and it is the frame-budget project.
+
 ## 5. The exact next steps, in order
 
-1. **Decide §4's superclass question and the `as e` question.** Both are
-   design, both block the emitters, and neither is discoverable by reading more
-   code. Write the answers here.
+1. ~~**Decide §4's superclass question and the `as e` question.**~~ **DONE**
+   (2026-10-06, `work/formal40-2`): **§4a** and **§4b** above. The superclass
+   answer is `model.exception_base_chain` / `handler_arm_kinds` /
+   `handler_arm_matches`, pinned against CPython's own `issubclass` over all
+   5041 ordered pairs of the 71 names, and the `as e` answer is a refusal to
+   write when step 3 lands. **The emitters' step 3 must implement the three
+   `None` cases in §4a as refusals**, because a dispatch that treats one as a
+   non-match is the failure §4a was written to prevent.
 2. ~~**The kind table** in `formal/model.py`: `{class name -> integer}`, from
    `CPYTHON_EXCEPTION_BASES` plus this unit's declarations, published in
    `info` so both emitters and both proof generators read ONE list. This is
@@ -213,7 +343,8 @@ a FRAME on this path and copying one per raise site is a frame-budget question
    disjoint ranges rather than one sorted set, which the Status measures and
    explains: a dylib and its caller are two images with different declared
    sets, so a single sorted set made `ValueError` mean 38 in one and 69 in the
-   other.
+   other. **§4a adds the limit of that fix: it makes a BUILTIN's integer
+   image-independent and does not make a DECLARED class's.**
 3. **The raise sites** already know their class on this branch: `RaiseStmt`
    (`model.raise_class_name` / `raise_declared_class_name`),
    `_emit_div_shift_pow`'s integer `div0_label` and
