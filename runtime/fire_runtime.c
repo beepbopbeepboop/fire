@@ -6042,7 +6042,9 @@ int mojo_set_contains_bytes(MojoSet *s, MojoBytes *b)
     char *k = mojo_bytes_cstr_key(b);
     int64_t idx = _set_slot_str_tag(s, k, 2 /* bytes domain */);
     free(k);
-    return idx >= 0;
+    /* The probe is find-OR-INSERT: an absent needle yields the index of the
+     * first EMPTY slot it reached, so "found" is the slot's tag, not idx. */
+    return idx >= 0 && s->slots[idx].tag == 2;
 }
 
 /* Re-materialize a tag-2 (bytes) slot as a real MojoBytes value. */

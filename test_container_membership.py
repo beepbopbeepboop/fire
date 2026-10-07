@@ -293,6 +293,22 @@ CASES = [
         '    print("z" in d)',
         '    print(10 in d)',
         "    return 0")),
+    # `mojo_set_contains_bytes` used to read the slot probe's answer as
+    # "present", but that probe is find-OR-INSERT: for a needle that is
+    # absent it returns the index of the first EMPTY slot it reaches, so
+    # `b'z' in {b'a', b'c'}` printed True. The int and str `contains` filter
+    # on the slot's tag for exactly this reason; the bytes one did not.
+    ("set-bytes-missing-needle", _p(
+        "def main() -> Int:",
+        "    var s = {b'a', b'c'}",
+        "    print(b'a' in s)",
+        "    print(b'z' in s)",
+        "    print(b'c' in s)",
+        "    var t = {b'a', b'b', b'c', b'd', b'e'}",
+        "    print(b'z' in t)",
+        "    print(b'e' in t)",
+        "    print(len(t))",
+        "    return 0")),
     ("set-typed-local", _p(
         "def main() -> Int:",
         '    var s = {"a", "b"}',
