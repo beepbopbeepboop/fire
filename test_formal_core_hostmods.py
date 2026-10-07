@@ -637,6 +637,100 @@ def group_functools_absent(tmpdir, verbose):
     return True, f"{len(absent) + 1} absent functools names refused"
 
 
+def group_decorator_member(tmpdir, verbose):
+    """A decorator that spells a MEMBER of an imported module is asked the
+    same export-map question the bare attribute read asks
+    (`FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells`),
+    with the exemptions measured safe: `dataclasses.dataclass` (claimed by
+    the transform), compile-time hints, and bare names."""
+    # The negative, on a `def` — `@os.definitely_not_published` must refuse
+    # with the same sentence the bare read `os.definitely_not_published`
+    # gets.
+    src = ("import os\n\n"
+           "@os.definitely_not_published\n"
+           "def f() -> int:\n"
+           "    return 0\n\n"
+           "def main() -> int:\n"
+           "    return f()\n")
+    tmp = os.path.join(TEMP, "decorator_member_absent.mojo")
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "-o", os.path.join(TEMP, "decorator_member_absent"), tmp],
+        capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+    check(r.returncode != 0,
+          "@os.definitely_not_published BUILT — the dropped decorator is "
+          "invisible to name resolution, which is the bug being pinned")
+    msg = r.stderr or r.stdout
+    check("definitely_not_published" in msg and "os" in msg,
+          f"the refusal did not name the module and leaf: "
+          f"{msg.strip()[-300:]}")
+    # The SAME negative on a class, whose decorator list is a list of STRINGS
+    # rather than nodes — the string form must ask the same question.
+    src = ("import os\n\n"
+           "@os.definitely_not_published\n"
+           "class Point:\n"
+           "    x: int\n"
+           "    y: int\n\n"
+           "def main() -> int:\n"
+           "    return 0\n")
+    tmp = os.path.join(TEMP, "decorator_member_absent_class.mojo")
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "-o", os.path.join(TEMP, "decorator_member_absent_class"), tmp],
+        capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+    check(r.returncode != 0,
+          "@os.definitely_not_published on a CLASS BUILT — the struct "
+          "decorator's string form did not ask the export-map question")
+    msg = r.stderr or r.stdout
+    check("definitely_not_published" in msg and "os" in msg,
+          f"the class-side refusal did not name the module and leaf: "
+          f"{msg.strip()[-300:]}")
+    # The measured exemptions keep building: the dotted dataclasses spelling
+    # the transform claims, and a bare-name decorator the image can place.
+    src = ("import dataclasses\n\n"
+           "@dataclasses.dataclass\n"
+           "class Point:\n"
+           "    x: int\n"
+           "    y: int\n\n"
+           "def main(n):\n"
+           "    p = Point(3, 4)\n"
+           '    printf("p=%d,%d", p.x, p.y)\n'
+           "    return 0\n")
+    tmp = os.path.join(TEMP, "decorator_member_dataclasses.mojo")
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "-o", os.path.join(TEMP, "decorator_member_dataclasses"), tmp],
+        capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+    check(r.returncode == 0,
+          f"@dataclasses.dataclass stopped building: {(r.stderr or r.stdout)[-300:]}")
+    src = ("def deco(f):\n"
+           "    return f\n\n"
+           "@deco\n"
+           "def g(x) -> int:\n"
+           "    return x * 2\n\n"
+           "def main() -> int:\n"
+           "    print(g(3))\n"
+           "    return 0\n")
+    tmp = os.path.join(TEMP, "decorator_member_bare.mojo")
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "-o", os.path.join(TEMP, "decorator_member_bare"), tmp],
+        capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+    check(r.returncode == 0,
+          f"bare @deco stopped building: {(r.stderr or r.stdout)[-300:]}")
+    if verbose:
+        print("    decorator on imported module: refused x2, dataclasses + bare OK")
+    return True, "decorator export check: 2 refused, 2 building"
+
+
 # ── `traceback` and `signal` ───────────────────────────────────────────────────
 #
 # BOTH IN THIS FILE for the reason the docstring's second section gives: a
@@ -1200,6 +1294,7 @@ GROUPS = {
     "ctx": group_ctx,
     "ctx-absent": group_ctx_absent,
     "functools-absent": group_functools_absent,
+    "decorator-member": group_decorator_member,
     "tb": group_tb,
     "tb-absent": group_tb_absent,
     "sig": group_sig,
