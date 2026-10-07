@@ -551,14 +551,16 @@ HOST_MODELLED = frozenset((
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     #
-    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`
-    #     and `randrange` only, a Mersenne Twister over a 624-word
+    #   `random`  — WRITTEN 2026-10-05, `formal/hostmods/random.mojo`: `seed`,
+    #     `getrandbits` and `randrange`, a Mersenne Twister over a 624-word
     #     module-level state, every answer checked against CPython's own
     #     `random` by `test_formal_random.py` on BOTH backends: the two call
     #     sites in this repository verbatim (forty draws of
     #     `randrange(140, 5000)` after `seed(23)`, and a hundred and twenty
     #     draws of `randrange(1, 4_000_000_000 * 10**9)` after `seed(17)`),
-    #     one case per branch of `getrandbits`, 700 draws so the 624-word
+    #     the whole `getrandbits` width matrix (7 seeds x widths 1..64 = 448
+    #     answers, `k = 64` compared modulo `2**64` because its value can
+    #     carry the sign bit), 700 draws so the 624-word
     #     twist is inside the corpus, fifteen seeds of one, two and three key
     #     words in both signs, and seven widths just under a power of two so
     #     the rejection loop runs.

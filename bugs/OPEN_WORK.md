@@ -119,7 +119,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_dataclass_runtime_reflection.md` | **unclaimed** | `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag |
 
-### `formal/imports` — 12 documents, 8 claimed
+### `formal/imports` — 11 documents, 7 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -127,7 +127,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_comptime_class_attribute_of_a_generic_struct_read_through_its_template_name.md` | `formal67-docs` | `TypeDict.length`: a `comptime` class attribute of a generic struct, read through the TEMPLATE's name |
 | `FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md` | `formal40-1-r2` | `Span[StaticString, ImmStaticOrigin]` is two links behind an MLIR template, and neither link says so |
 | `FORMAL_a_linked_library_path_is_in_the_image.md` | `formal67-docs` | one image cannot be byte-identical across two CAS roots, and the reason is dyld |
-| `FORMAL_getrandbits_is_private_so_its_width_matrix_is_unmeasured.md` | `formal75-docs` | `random.getrandbits` is deliberately private, and the consequence is that its width matrix is not measured |
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | `formal29-4` | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
 | `FORMAL_stdlib_module_names_are_not_classified.md` | `formal73-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal29-4` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
