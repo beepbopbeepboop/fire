@@ -760,6 +760,69 @@ def pool():
         k, g = r.randrange(8), _reg(r, GENERAL)
         return "movq xmm%d, %s" % (k, g.name), X.encode_movq_xmm_rm64(k, g)
 
+    # ── the SSE2 scalar binary64 forms, and the hardware differential they get
+    #
+    # All nine are emitted by `formal/x86_64_codegen.py` and none was in this
+    # pool, so `tools/formal_isa_census.py`'s FUZZ column read `no` for each and
+    # the model's SSE arms (added with the decoder and the samples in the same
+    # change) had no CPU to be compared against.  See
+    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+    #
+    # The XMM FILE is compared word for word by this harness (the entry stub
+    # loads it, the dump stub stores it), and the initial values are RANDOM
+    # 64-bit patterns, so the arithmetic rows exercise NaN, infinity and
+    # denormal operands as well as ordinary ones.  **A NaN PAYLOAD is the one
+    # place the two engines are allowed to differ**: Lean's `Float.ofBits`/
+    # `toBits` normalises a signalling NaN to the canonical quiet NaN
+    # (`lib/IEEE754.lean`'s `ofBits_toBits_normalises_a_nan_payload`), while the
+    # CPU propagates the first operand's payload.  A row whose only difference
+    # is a quiet NaN's payload bits is the model being faithful to IEEE's VALUE
+    # and not to the payload, which is stated there and is not a model bug.
+    _SSE_FP = {"addsd": X.encode_addsd_xmm, "subsd": X.encode_subsd_xmm,
+               "mulsd": X.encode_mulsd_xmm, "divsd": X.encode_divsd_xmm}
+
+    @add(3, "sse_fp")
+    def _(r):
+        op = r.choice(("addsd", "subsd", "mulsd", "divsd"))
+        dst, src = r.randrange(8), r.randrange(8)
+        return ("%s xmm%d, xmm%d" % (op, dst, src),
+                _SSE_FP[op](dst, src))
+
+    @add(2, "ucomisd")
+    def _(r):
+        dst, src = r.randrange(8), r.randrange(8)
+        return ("ucomisd xmm%d, xmm%d" % (dst, src),
+                X.encode_ucomisd_xmm(dst, src))
+
+    @add(1, "xorpd")
+    def _(r):
+        dst, src = r.randrange(8), r.randrange(8)
+        return ("xorpd xmm%d, xmm%d" % (dst, src),
+                X.encode_xorpd_xmm(dst, src))
+
+    @add(1, "movq_r64_xmm")
+    def _(r):
+        xmm, g = r.randrange(8), _reg(r, GENERAL)
+        return ("movq %s, xmm%d" % (g.name, xmm),
+                X.encode_movq_r64_xmm(g, xmm))
+
+    @add(1, "cvtsi2sd")
+    def _(r):
+        xmm, g = r.randrange(8), _reg(r, GENERAL)
+        return ("cvtsi2sd xmm%d, %s" % (xmm, g.name),
+                X.encode_cvtsi2sd_xmm_r64(xmm, g))
+
+    # `cvttsd2si` is the one SSE row a RANDOM XMM mostly drives OUT OF RANGE:
+    # a random 64-bit pattern is a magnitude near 2^1000, and the hardware
+    # answers the integer indefinite `0x8000000000000000` with the invalid flag
+    # set.  `x86_cvttsd` models that, so the row is a real comparison of the
+    # indefinite answer rather than a row that only ever sees ordinary values.
+    @add(1, "cvttsd2si")
+    def _(r):
+        xmm, g = r.randrange(8), _reg(r, GENERAL)
+        return ("cvttsd2si %s, xmm%d" % (g.name, xmm),
+                X.encode_cvttsd2si_r64_xmm(g, xmm))
+
     @add(1, "nop")
     def _(r):
         return "nop", X.encode_nop()

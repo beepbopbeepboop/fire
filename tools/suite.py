@@ -491,6 +491,11 @@ MEASURED_PEAK_GB = {
     'formal-receiver-position': (0.07, 'measured'),  # 16 s, 38 cases (was "2 s, 12 cases")
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
+    # The x86-64 PARITY differential, measured 2026-10-06 under
+    # `tools/memslot.py --gb 8`: 30 s and 0.1 GB peak across the tree, 83 cases
+    # x 2 backends, every image built `--formal --no-prove` and RUN, the x86-64
+    # half under Rosetta.  `tiny` from that number rather than from the shape.
+    'formal-x86-parity':      (0.1, 'measured'),
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
     # by anything: `formal/x86_64_model_test.py` is spelled `*_test.py` and the
     # estate check's walk counted only `test_*.py`, so it was in no bucket and
@@ -1688,6 +1693,37 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
             + GIMPLE_SOURCES),
      desc="the new-modular syntax parses, and still does NOT parse where it "
           "must not (ellipsis, float literals, attribute access)")
+# The x86-64 PARITY differential, registered 2026-10-06 (`work/x86-coverage-endtoend`)
+# because it was in NO bucket and in no `UNREGISTERED` list — the shape
+# `test_suite.py`'s estate check exists to report: a test file neither
+# registered nor excused, counted as covered while no run executes it. That is
+# the bug this registration closes (its doc was deleted with the fix).
+#
+# What it holds that nothing else does: every case is checked on BOTH backends
+# against a CPython oracle computed at run time, so a construct one architecture
+# lowers and the other refuses — or the two lower differently — is the defect it
+# is about, and a one-sided assertion stays green through the whole class. It
+# builds and RUNS every image, the x86-64 half under Rosetta.
+#
+# `tiny` from the measurement (30 s, 0.1 GB peak across the tree under
+# `tools/memslot.py --gb 8`, 83 cases x 2 backends), not from the shape: the
+# builds are `--formal --no-prove` single-file compiles, and the doc's guess of
+# `small`/`module` was not what the instrument said. The one remaining red is
+# the filed PRE-EXISTING arm64 float-operand refusal, and the marker states its
+# count so the harness's `PASS=82 FAIL=1` is checked against it.
+test('formal-x86-parity', [PY, 'test_formal_x86_64_parity.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_x86_64_parity.py', 'formal/x86_64.py',
+            'formal/arm64.py', 'formal/x86_64_codegen.py',
+            'formal/arm64_codegen.py'],
+     expect="1 of 83: `printf_float_operand_read_from_an_xmm_register` — the "
+            "arm64 backend REFUSES a float operand read from an XMM register "
+            "rather than converting it, because the conversion is the source's "
+            "decision. PRE-EXISTING on master (filed at "
+            "bugs/TEST_a_parity_row_pins_an_xmm_float_operand_the_tree_refuses.md "
+            "when the file was measured ungated), and the marker's count is the "
+            "83 the harness now prints",
+     desc='both backends answer every construct, and the CPython oracle')
 test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      deps=['preflight'],
      expect="1 of 60 on x86_64: the `with-statement` case is refused by the "
@@ -3944,7 +3980,13 @@ BUCKETS = {
             # observed going green, which is the whole argument for the
             # `the buckets:` checks in test_suite.py. Its marker states its
             # count.
-            'x86-containers'],
+            'x86-containers',
+            # `formal-x86-parity` builds and RUNS every case on BOTH backends
+            # against a CPython oracle, 30 s / 0.1 GB, and was in no bucket and
+            # no exemption until 2026-10-06 — the same hole `x86-decode` and the
+            # two examples jobs above had. It is the only two-architecture
+            # differential over this construct corpus.
+            'formal-x86-parity'],
     # The compiled-path async/await and coroutine cluster: ten
     # `expect=`-marked suites that were registered and in no bucket, so the
     # gate walked past ~69 declared failing cases and reported nothing, and no

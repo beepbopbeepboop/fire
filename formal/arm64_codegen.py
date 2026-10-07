@@ -890,6 +890,12 @@ dylib_exports: list = None, globals_base: int = None,
         # disagree. Defaulted here because a stale value from a previous
         # subscript in the same function would silently pick a width.
         self._sub_width = 8
+        # …and whether that element is SIGNED, which decides between `LDRSB`
+        # and `LDRB` (and their 2- and 4-byte twins) for a sub-word load.
+        # `_emit_subscript_addr` sets it from the same tuple that gives the
+        # width, so an `Int32` element sign-extends and a `UInt32` does not.
+        # Defaulted `True` because width 8 has no extension to choose.
+        self._sub_signed = True
         # {function name: model.ValueKinds}, for the whole module. `_functions`
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
@@ -5284,16 +5290,50 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         ONE place, because the read, the store's own read-modify and the
         augmented assignment each used to spell this choice separately and the
-        pointer route made a third width possible. A one-byte element is
-        zero-extended by `LDRB`, which is what a `UInt8` read is; anything
-        wider is the full 64-bit load, and the sub-word widths the pointee
-        table can return (2 and 4) are the same two instructions
-        `_emit_dereference` uses for them.
+        pointer route made a third width possible. The four loads are the four
+        `_emit_dereference` uses, chosen by the element's WIDTH and its
+        SIGNEDNESS — both of which `_emit_subscript_addr` set from the same
+        `pointee` tuple, so the address and the load cannot disagree.
+
+        **`_sub_width == 1` used to be the whole of this test, and it read the
+        SUB-WORD widths (2 and 4) with a full 64-bit `LDR`.** A
+        `Pointer[Int32]` element is four bytes; an eight-byte load walked into
+        the next element (or the next object), so `q[0]` read `q[1]`'s bytes as
+        its own high half and `q[0] += 5` stored eight bytes over a four-byte
+        slot. The parity differential's `aug_through_int32_pointer` case is the
+        one that found it, on BOTH backends, once Rosetta could run the x86-64
+        half.
         """
         if self._sub_width == 1:
-            self.asm.emit(encode_ldrb_wd_wn(reg, base, 0))
+            self.asm.emit(encode_ldrsb_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldrb_wd_wn(reg, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_ldrsh_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldrh_wt_wn_imm(reg, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_ldrsw_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldr_wt_wn_imm(reg, base, 0))
         else:
             self.asm.emit(encode_ldr_xt_xn_imm(reg, base, 0))
+
+    def _emit_subscript_store_at(self, base: int, value: int) -> None:
+        """Store the low `_sub_width` bytes of X{value} at [X{base}].
+
+        The store half of `_emit_subscript_load`, and the same bug lived here:
+        `_sub_width == 1` was the whole test, so a 2- or 4-byte element was
+        written with a full 64-bit `STR` and clobbered the bytes after it. It is
+        a silent corruption rather than a fault on a `malloc`'d buffer, which is
+        why it needs a case that reads the NEXT element back. A store has no
+        signedness to consult — it truncates to the width.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_strb_wd_wn(value, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_strh_wt_wn_imm(value, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_str_wt_wn_imm(value, base, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(value, base, 0))
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """Stack-allocate a dict pair-blob: [count_pairs][k0][v0][k1][v1]…
@@ -5815,6 +5855,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # default here is the word because it is the answer for the two that
         # reach their own branch and set it before returning.
         self._sub_width = 8
+        self._sub_signed = True
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -5876,6 +5917,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if why is not None:
                 raise CodegenError(why)
             self._sub_width = 1
+            self._sub_signed = False          # a string byte is a UInt8
             self._emit_expr(e.obj)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.index, "X1")
@@ -5893,7 +5935,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # is its first FIELD, so `w.d[0]` read `w.d` as a container and
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
-        shape, width, _signed, sub_why = M.subscript_base_lowering(
+        shape, width, signed, sub_why = M.subscript_base_lowering(
             self._cur_fn, e.obj, self._structs, self._functions, self._structs)
         if shape is None:
             raise CodegenError(sub_why)
@@ -5909,6 +5951,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count and
             # `model.subscript_base_lowering`, which owns the decision.
             self._sub_width = width
+            self._sub_signed = signed
             self._emit_expr(e.obj)                    # X0 = the address
             self.asm.emit(encode_stp_sp_pre(0, 2))    # save it
             self._emit_expr_to(e.index, "X1")         # X1 = index
@@ -5981,6 +6024,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         obj_kind = self._expr_str_kind(e.obj)
         stride = M.blob_elem_stride(obj_kind)
         self._sub_width = stride
+        # A byte blob's element is a `UInt8` (hence `LDRB`), and a word blob's
+        # width is 8 where the extension choice does not arise.
+        self._sub_signed = False
         self.asm.emit(encode_add_xd_xn_imm(4, 9, M.BLOB_HEADER_BYTES))
         if stride == 1:
             self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))
@@ -6055,10 +6101,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # nothing is emitted between the load and the store. The value is at
         # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(5, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self._emit_subscript_store_at(9, 5)
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop addr
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
@@ -6111,10 +6154,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(0, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
+        self._emit_subscript_store_at(9, 0)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
 

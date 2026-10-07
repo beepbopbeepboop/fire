@@ -81,26 +81,47 @@ test `!isNaN` directly rather than going through this predicate — they need
 def isFinite (b : Bits) : Bool := !isInf b
 
 /-- `true` when the value can take part in an ORDERED comparison, i.e. when it
-is neither NaN nor infinity.  This is the predicate the four ordering readings
-use, and it is weaker than `isFinite` in exactly one direction per answer:
-`+inf > 1.0` is a TRUE ordered comparison, so an infinity is comparable and
-finite is not a synonym for it. -/
-def comparable (b : Bits) : Bool := !isNaN b && !isInf b
+is NOT a NaN.  This is the predicate the four ordering readings use, and it is
+strictly weaker than `isFinite`: `+inf > 1.0` is a TRUE ordered comparison, so
+an infinity is comparable and `isFinite` is not a synonym for it.
 
-/-- The magnitude-ordered key: flipping the SIGN BIT turns IEEE order into
-unsigned integer order.
+**The `!isInf b` conjunct this carried was a bug, and an EXECUTABLE comparison
+is what found it.**  With it, every ordering reading was `false` whenever either
+operand was `±inf`, so `x < +inf` was false for every finite `x` and the flags
+`UCOMISD` sets for `1.0` against `+inf` disagreed with the CPU on CF.  The prose
+above already stated the right predicate — an infinity IS ordered — and the
+`key` function below handles infinities correctly; only the guard was wrong.
+Found by `formal/x86_64_model_fuzz.py --census` once the SSE compare had a model
+arm and a pool entry (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+def comparable (b : Bits) : Bool := !isNaN b
 
-**The zero is normalised first, and that is load-bearing.**  The bare flip maps
-`+0.0` to `0x8000…` and `-0.0` to `0x0000…`, so the two zeros get DIFFERENT
-keys — `+0.0 < -0.0` and `+0.0 != -0.0`, both false, and IEEE-754 §6.3 says
-they are equal.  Measured: `native_decide` on `eqBits 0x0000000000000000
-0x8000000000000000` answered `false` with the bare flip.  Clearing the sign bit
-of a zero first puts both at `0x0000…` and the flip then gives both the same
-key, while every nonzero value keeps its distinct one: `-1.0` and `+1.0` land on
-`0x3FF0…` and `0xBFF0…`, so they order and are unequal. -/
+/-- The order-preserving key: an unsigned integer that sorts the same way the
+`double` does, so `ltBits`/`leBits`/`eqBits` are `UInt64` comparisons on it.
+
+**The transform is the standard one and it is TWO cases, not one flip.**  A
+positive value has its sign bit SET; a negative value has ALL its bits flipped,
+because every bit of a negative binary64 (exponent and mantissa) is inverted
+relative to the magnitude ordering — a bigger magnitude is a MORE negative
+value, so it must get a SMALLER key.  Flipping only the sign bit (which is what
+this did) leaves the negatives ordered by magnitude ASCENDING, i.e. backwards.
+
+**This was a bug, and an EXECUTABLE comparison found it** —
+`formal/x86_64_model_fuzz.py --census` on `ucomisd xmm3, xmm1` with
+`xmm3 = 0xa76a4b1fd2f36434` (a tiny negative) and `xmm1 = 0xdf501586dd43ebbf`
+(≈ -0.001): the model read `xmm3 < xmm1` (CF=1) where the CPU reads
+`xmm3 >= xmm1` (CF=0).  The half-flip had a theorem for the two zeros and none
+for a nonzero negative, so nothing saw it.
+
+**The zero is normalised first, and that is load-bearing.**  Without it `-0.0`
+is a negative and would be flipped to `0x7FFF…` while `+0.0` maps to `0x8000…`,
+so the two zeros get DIFFERENT keys — `+0.0 < -0.0` and `+0.0 != -0.0`, both
+false, and IEEE-754 §6.3 says they are equal.  `key` is not injective on the
+zeros in the other direction either: a finite value's key is never `0`, so
+mapping both zeros to `0` before the transform is safe. -/
 def key (b : Bits) : Bits :=
   let b := if (b &&& 0x7FFFFFFFFFFFFFFF) == 0 then 0 else b
-  b ^^^ 0x8000000000000000
+  if (b &&& 0x8000000000000000) != 0 then b ^^^ 0xFFFFFFFFFFFFFFFF
+  else b ^^^ 0x8000000000000000
 
 /-- `a < b`, and FALSE for any NaN on either side.  CPython's rule, and the
 one both architectures' integer conditions get wrong. -/
@@ -284,6 +305,24 @@ theorem the_two_zeros_are_equal_and_neither_orders :
     eqBits 0x0000000000000000 0x8000000000000000 = true ∧
       ltBits 0x0000000000000000 0x8000000000000000 = false ∧
       leBits 0x0000000000000000 0x8000000000000000 = true := by
+  native_decide
+
+/-- Two nonzero negatives order by VALUE and not by magnitude: `-0.001` (the
+    larger magnitude) is LESS than a tiny negative.  This is the exact pair
+    `formal/x86_64_model_fuzz.py` disagreed with the CPU on
+    (`ucomisd xmm3, xmm1`), and it is here so the half-flip can never come
+    back without a failure. -/
+theorem negative_values_order_by_value_not_by_magnitude :
+    ltBits 0xdf501586dd43ebbf 0xa76a4b1fd2f36434 = true ∧
+      ltBits 0xa76a4b1fd2f36434 0xdf501586dd43ebbf = false := by
+  native_decide
+
+/-- An INFINITY is ordered, which is the half `comparable` used to exclude: a
+    finite `1.0` is less than `+inf`, and `+inf` is less than nothing. -/
+theorem an_infinity_is_ordered :
+    comparable 0x7FF0000000000000 = true ∧
+      ltBits 0x3FF0000000000000 0x7FF0000000000000 = true ∧
+      ltBits 0xFFF0000000000000 0x3FF0000000000000 = true := by
   native_decide
 
 /-! **Three theorems are NOT here, and that is a measurement, not an omission.**
