@@ -1,4 +1,113 @@
-# The x86-64 rows the model-vs-hardware fuzzer cannot attribute to the model
+## Status 2026-10-05 (`work/formal42-5`): the multiply table is DONE and it found a MODEL defect on its first run — and the byte-wise ALU found a NEW host class
+
+**The doc's "what is still open, and it is one thing" is closed, and closing it
+was worth more than the doc predicted.** `formal/x86_64_model_coverage_test.py`
+now carries `multiply_cases` beside `divide_cases` and `shift_cases`: **32 rows
+over the three multiply forms at REAL ENCODINGS, against exact integer
+arithmetic**, going through `x86_step` because all three products are spelled
+out inline in the arms and there is no `x86_mul128` to ask. On the first run
+**11 of 32 failed**, every one of them a CF/OF bit, every one of them `0F AF`.
+
+### The model bug: `imul r64, r64`'s overflow flag was a statement about the low word
+
+The arm computed
+
+```
+let lo := a * b
+let ovf := lo != x86_sign_extend64 lo
+```
+
+which never looks at the high half and is wrong in **both** directions.
+Measured on this host, `imulq %rcx, %rax` in a statically linked binary:
+
+| a | b | low word | CF | OF | the model said |
+|---|---|---|---|---|---|
+| `0000000000000003` | `0000000000000005` | `…0f` | 0 | 0 | **overflow** |
+| `ffffffffffffffff` | `ffffffffffffffff` | `…01` | 0 | 0 | **overflow** |
+| `8000000000000000` | `0000000000000001` | `8…0` | 0 | 0 | **overflow** |
+| `8000000000000000` | `0000000000000002` | `…00` | 1 | 1 | **fits** |
+| `4000000000000000` | `0000000000000002` | `8…0` | 1 | 1 | **fits** |
+| `deadbeefcafebabe` | `0000000000000003` | `9c…3a` | 0 | 0 | **overflow** |
+
+A program testing `a * b` for overflow read CF set for `3 * 5`. The fix is two
+named definitions, and `F7 /5` now reads the same one the `0F AF` arm does —
+which is the deduplication that matters, because the two were written apart and
+only one was ever checked:
+
+```lean
+def x86_imul_ovf (a b) := let (lo, hi) := x86_split128 (x86_signed a * x86_signed b)
+                         hi != x86_sign_extend64 lo
+def x86_mul_ovf  (a b) := let (_, hi)  := x86_split128 (Int.ofNat a.toNat * Int.ofNat b.toNat)
+                         hi != 0
+```
+
+`x86_step_imul_r64`'s conclusion, `formal/x86_64_endtoend_test.py`'s
+`_SUCCS["imul_r64_r64"]` row, its `_SIMP_FORMS` entry and `_abs_step`'s
+`imul_r64_r64` arm all move with it — the last of those had carried the model's
+own wrong version for one commit, transcribed as `_imul_ovf`.
+
+**Why nothing saw it, which is the half worth keeping.** No `formal/examples`
+program reads a flag after a multiply. And `formal/x86_64_model_fuzz.py --census
+--per-form 3 --seed 11` reports **byte-identical output before and after this
+fix** — same 1 FAULT, same HARNESS set, 0 WRONG, same exit code — because a
+random 64-bit product does not overflow, so a model claiming an overflow for
+every random product and one claiming the right thing agree on every random
+product. **An arithmetic table was needed; more seeds cannot help**, and this
+doc's own instrument (a random-program fuzzer) is structurally blind to it.
+
+### The new host class: an RBP operand in a byte-wise ALU
+
+Adding the byte-wise `and`/`or` found a disagreement this harness has and a
+static binary does not, on an **RBP operand**, one instruction and one fixed
+register file at a time (RAX = `0xefaeef4cddfebb42`, the source = `0xff`):
+
+| encoding | this harness | exact | a static binary |
+|---|---|---|---|
+| `and RAX, RCX` — `20 c8` | `…42` | `…42` | correct |
+| `and R8, R9` — `45 20 c8` | `…42` | `…42` | correct |
+| `and RAX, RBP` — `20 e8` | `…00` | `…42` | correct |
+| `and RCX, RBP` — `20 e9` | `…02` | `…42` | correct |
+
+with RBP = `0xff` before and after in every row. `and bpl, al` (ModRM `cd`,
+`rm` = rbp) behaves the same way, so it is not the `reg` field alone. This is
+the same family as `HARNESS_SETCC_DESTS` below — an RBP operand misbehaving in a
+region entered by `setcontext` into an `mmap`'d RWX page — with a different
+byte, and **`HARNESS_MUL_FORMS`/the pool do not absorb it**: `and`/`or` are NOT
+in `formal/x86_64_model_fuzz.py`'s pool, because a verdict class that cannot
+attribute a difference is worse than not running the row, and the `HARNESS`
+verdict is excluded from that script's exit status, so a class in it has to be
+an attribution.
+
+**What is left, and it is the characterisation of that class**: which ModRM
+bytes carrying an RBP operand misbehave in this harness, whether it is the
+`reg` field, the `rm` field or the `c5`/`c6`/`c7` byte shape this doc's
+measurement already names, and whether the answer is one rule or two. The
+instrument to make it is the one this doc already argues for — a
+one-instruction census over all sixteen `rm` and all eight `reg` values. The
+measurement above is in `formal/x86_64_model_fuzz.py`'s pool comment and in
+`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`.
+
+### And `imul_r64_r64_imm` joins the multiply class
+
+`HARNESS_MUL_FORMS` gains it: `imul RDX, R12, -1` in this harness leaves SF
+clear where the product says set, the `imul_r64_r64` class one form over. A
+form missing from that set is reported as a **model verdict**, so an incomplete
+set is a wrong verdict rather than a missing row.
+
+### Measured, this pass
+
+| | before | after |
+|---|---|---|
+| `multiply_cases` | did not exist | **32 rows, 0 FAILED** (11 on the first run) |
+| `--census --per-form 3 --seed 11` | 204 AGREE, 1 FAULT, 10 HARNESS, 0 WRONG | **206 AGREE, 1 FAULT, 11 HARNESS, 0 WRONG** |
+| `-n 16 --ninstr 6 --seed 5` | 9 AGREE, 1 FAULT, 6 HARNESS | **11 AGREE, 5 HARNESS, 0 WRONG** |
+| `x86_step_imul_r64` on a random product | CF/OF set for every product | set only when the 128-bit product misses 64 signed bits |
+
+`python3 test_x86_64_model_fuzz.py` 12/12 and `python3 test_formal_sweep_truth.py`
+136/136, both after.
+
+**The doc stays**, for the class above and for the reason its last section gives:
+the last word on the hardware still needs hardware this tree does not run on.
 
 **Status 2026-10-05 (`work/formal40-7`): the harness is EXONERATED and so is the
 REPORTER — four reporter defects, measured, and two of them the whole reason this

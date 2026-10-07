@@ -8,7 +8,90 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
-**Status 2026-10-05 (`work/formal40-7`): SHAPE 3 is DONE and one row of SHAPE 2
+## Status 2026-10-05 (`work/formal42-5`): SHAPE 2 is three of four done, and each row went all the way
+
+`encode_imul_r64_r64_imm`, `encode_call_r64`, `encode_and_r8_r8` and
+`encode_or_r8_r8` had a decoder arm, a MODEL arm, a `samples()` row and a
+`test_x86_64_decode.py` row each by the end of this pass. The doc's next step
+asked for exactly that and the measurement says it is the whole of the gap: with
+the three shapes named in the census as `NO` on its LEAN column, `x86_step`
+could not step an image the backend emits, and an unsteppable form reads as
+result 0.
+
+| row | census now | what closed it |
+|---|---|---|
+| `encode_imul_r64_r64_imm` | **yes / yes / yes** | `6B /r ib` (not `69 /r id`, which the BACKLOG note says — see below), `x86_step`'s new arm, `x86_step_imul_r64_imm`, two `samples()` rows with both immediate signs, a pool row. The census's LEAN, FUZZ and AS columns are all `yes`. |
+| `encode_call_r64` | **yes / NO / yes** | `FF /2` with `mod=11`, a model arm in front of the old `0xff` arm (which fed the same two bytes to `x86_mem_addr`, refused it, and left `x86_step` returning `none`), `x86_step_call_r64`, two `samples()` rows. FUZZ cannot: the instruction jumps to a register's contents and a random 64-bit value is outside the harness's one `MAP_FIXED` region, the same reason arm64's `encode_br_xn` is in `HARNESS_LIMITS`. |
+| `encode_and_r8_r8`, `encode_or_r8_r8` | **yes / NO / yes** | `20 /r` and `08 /r`, one shared `x86_step_alu_r8` for BOTH decoders (the encoder emits a REX byte when either register is r8-r15, so an arm in one of them left the rest unsteppable — measured, `and R11, R10` = `45 20 d3` was a `NORUN`), two step lemmas, four `samples()` rows. FUZZ cannot yet, and the reason is a measurement rather than a policy: see §"The class the byte-wise ALU found" below. |
+
+Two things this pass found that the doc did not predict, both worth the next
+reader's time:
+
+* **The three-operand `imul`'s destination is a TARGET, not a third
+  multiplicand.**  The first version of the model arm multiplied in `dst`'s old
+  value, and the CPU disagreed on all three census states.  Measured here, one
+  instruction and one fixed register file through this project's own harness:
+  `imul RDX, R12, -1` with RDX = `0x0123456789abcdef` and
+  R12 = `0xfedcba0987654321` leaves RDX = `0x012345f6789abcdf`, which is
+  `R12 * -1`.  `x86_step_imul_r64` (the two-operand `0F AF` form) IS the one that
+  reads its destination.
+* **The BACKLOG note for `encode_imul_r64_r64_imm` is false in its first
+  clause and false in its fix.**  It says "`69 /r id`: no decoder arm (only
+  `0F AF` is decoded)"; the encoder emits `6B /r ib`, and the four-bytes-later
+  difference between the two spellings is the whole reason it does — the doc's
+  own §"What is NOT a gap here" half says so.  The note also claims the fix's
+  motivation ("8 examples are blocked from being walked") is not what is
+  happening, which the doc's Status already measured.  The note lives in
+  `tools/formal_isa_census.py`, which is another claim's write set
+  (`bug:FORMAL_arm64_instruction_coverage`), so it is **reported and not
+  edited**: the row is now over-covered, and the only thing left about it is a
+  sentence that says why it no longer needs to be in `BACKLOG`.
+
+### The class the byte-wise ALU found, and why it is not in the pool
+
+`formal/x86_64_model_fuzz.py` does not draw `and`/`or` yet, and the reason is
+that this harness disagrees about them on an **RBP operand** and the class is
+not characterised:
+
+| one instruction, one fixed register file | this harness | exact |
+|---|---|---|
+| `and RAX, RCX` (`20 c8`) | `rax = efaeef4cddfebb42` | same |
+| `and R8, R9` (`45 20 c8`) | `r8 = efaeef4cddfebb42` | same |
+| `and RAX, RBP` (`20 e8`) | `rax = efaeef4cddfebb00` | `…42` |
+| `and RCX, RBP` (`20 e9`) | `rcx = efaeef4cddfebb02` | `…42` |
+
+with RBP = `0xff` before and after, and a **statically linked binary answering
+all four correctly** — so it is this host's emulated region and not `and r/m8,
+r8`.  It is the same family as this repo's
+`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` `HARNESS_SETCC_DESTS`
+(an RBP operand misbehaving under `setcontext`-into-RWX) with a different byte,
+and `and bpl, al` (ModRM `cd`, `rm` = rbp) behaves the same way, so it is not
+the `reg` field alone.  **The row is out of the pool rather than absorbed**,
+because a verdict class that cannot attribute a difference is worse than not
+running the row — the `HARNESS` verdict is excluded from the fuzzer's exit
+status, so a class in it must be an attribution.
+
+**What is left in this file is shape 1** — the nine SSE2 scalar binary64
+encoders, each of which needs a decoder arm, a model arm, a sample and a pool
+entry, and `ucomisd`'s unordered case is the one that decides whether the model
+can be trusted for the other eight.  Its next step is unchanged and still the
+right one.  Shape 2's fourth row, `encode_movq_xmm_rm64`, was closed with
+`work/formal40-7` as a `samples()` row.
+
+**Measured, this pass.**  `formal/x86_64_model_coverage_test.py`: 193 samples
+over 71 forms, **all steppable** (was 185/67).  Its successor comparison is
+**RED on three rows** — `shift_imm8:shl` / `:shr` / `:sar`, whose successors
+set only ZF and SF where `x86_shift_post` sets four — and that is a real
+finding with its own doc,
+`bugs/FORMAL_shift_successor_leaves_cf_and_of_alone.md`, which the rows added
+here found.  The other four checks are green.
+`formal/x86_64_model_fuzz.py --census --per-form 3 --seed 11`: 206 AGREE,
+11 HARNESS, 1 FAULT, 1 NORUN, **0 WRONG**.  `-n 16 --ninstr 6 --seed 5`:
+11 AGREE, 5 HARNESS, 0 WRONG.  `test_x86_64_decode.py`,
+`test_x86_64_encoders.py`, `test_x86_64_model_fuzz.py` and
+`test_formal_sweep_truth.py` (136/136) green.
+
+## Status 2026-10-05 (`work/formal40-7`): SHAPE 3 is DONE and one row of SHAPE 2
 with it — 18 backlog rows are 13, and all five were closed by asking the CPU a
 question rather than by editing a table.** The two `BACKLOG` reasons this file
 recorded for three of them are FALSE of this harness and are worth stating,

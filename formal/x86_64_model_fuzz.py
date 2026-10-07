@@ -761,6 +761,63 @@ def pool():
     def _(r):
         return "nop", X.encode_nop()
 
+    # The three forms that were emittable, undecodable and unmodelled until
+    # 2026-10-05 and are in the pool for the same reason every other row here
+    # is: a form the fuzzer never runs has no model-vs-hardware case at all.
+    # None of the three branches, so each runs to the terminator like the rest.
+    #
+    # The scale is drawn from BOTH signs on purpose: the immediate is signed, and
+    # a positive-only pool would leave the negative half of the row untested —
+    # which is the half a C subscript uses.
+    @add(2, "imul_imm")
+    def _(r):
+        dst, src = _reg(r, GENERAL), _reg(r, GENERAL)
+        imm = r.choice([1, 2, 4, 8, -1, -4, -8])
+        return ("imul %s, %s, %d" % (dst.name, src.name, imm),
+                X.encode_imul_r64_r64_imm(dst, src, imm))
+
+    # **The BYTE-WISE `and`/`or` are deliberately NOT here, and the measurement
+    # is in the bug doc rather than a guess.**  They are emittable, they were
+    # undecodable and unmodelled until 2026-10-05, and they now have a decoder
+    # arm, a model arm, a step lemma each and a `samples()` row each -- so
+    # `tools/formal_isa_census.py`'s LEAN column reads `yes` and `x86_step` is
+    # asked about both.  What is missing is the hardware differential, and the
+    # reason is that this harness disagrees about them on an RBP operand and the
+    # disagreement is NOT yet attributed.  Measured here, one instruction, one
+    # fixed register file, run through this file's own harness:
+    #
+    #     and RAX, RCX   20 c8   -> rax=efaeef4cddfebb42   (correct)
+    #     and R8,  R9    45 20 c8 -> r8 =efaeef4cddfebb42   (correct)
+    #     and RAX, RBP   20 e8   -> rax=efaeef4cddfebb00   (BPL read as 0)
+    #     and RCX, RBP   20 e9   -> rcx=efaeef4cddfebb02   (BPL read as neither
+    #                                                        0 nor 0xff)
+    #
+    # and a STATICALLY LINKED binary with the same four instructions and the same
+    # register values answers all four correctly, so it is this host's harness
+    # rather than `and r/m8, r8`.  That is the same family as
+    # `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`'s `HARNESS_SETCC_DESTS`
+    # -- an RBP operand misbehaving in an emulated region entered by
+    # `setcontext` -- but the byte is a different one and the class is not
+    # characterised, and a verdict class that cannot attribute a difference is
+    # worse than not running the row.  The doc records what is left.
+    #
+    # `and bpl, al` (rm = rbp, ModRM `cd`) disagrees in the same way, so it is
+    # not the reg field alone.
+
+    # **`call r64` is deliberately NOT here, and this is a HARNESS property
+    # rather than a model gap.**  It jumps to a register's contents, and a
+    # random 64-bit value is outside the one `MAP_FIXED` region the harness
+    # maps, so every case would fault at the jump and the comparison would never
+    # happen — the same reason arm64's `encode_br_xn` is in
+    # `tools/formal_isa_census.py`'s `HARNESS_LIMITS`.  The alternative — a call
+    # to a known address inside the region — is a different instruction from the
+    # one a function-value call emits, so it would be testing the pool rather
+    # than the encoder.
+    #
+    # The form is not therefore untested: `samples()` asks `x86_step` about it
+    # and `x86_step_call_r64` is a theorem about it, so the model side has a
+    # check and only the hardware differential is missing.
+
     return out
 
 
@@ -1765,8 +1822,14 @@ def _has_group3_div(code):
 #: anomaly belongs to. `formal/x86_64_decode.py` names them, so a form it
 #: renames cannot leave this stale: `F7 /4` and `F7 /5` are `group3:mul` and
 #: `group3:imul1`, and `0F AF /r` is `imul_r64_r64`.
+#: `imul_r64_r64_imm` is here for the same reason and by the same measurement:
+#: `imul RDX, R12, -1` in this harness leaves SF clear where the product says
+#: set, which is the `imul_r64_r64` class one form over.  A form missing from
+#: this set is a row the class does not absorb, and a row the class does not
+#: absorb is reported as a model verdict -- so the set has to be complete or the
+#: verdict is wrong.
 HARNESS_MUL_FORMS = frozenset(["group3:" + D._GROUP3[4], "group3:" + D._GROUP3[5],
-                               "imul_r64_r64"])
+                               "imul_r64_r64", "imul_r64_r64_imm"])
 
 #: FORM-name prefixes of the instructions that SET the flags, from the decoder's
 #: own naming: the ALU forms (`alu_rr:`/`alu_ri32:`/`alu_ri8:`) and the shifts

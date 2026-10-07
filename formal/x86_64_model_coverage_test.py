@@ -228,6 +228,22 @@ def samples():
     add("alu_rr32:xor", "xor edx, edx", X.encode_xor_edx_edx())
     add("imul_r64_r64", "imul rax, rbx", X.encode_imul_r64_r64(R.RAX, R.RBX))
     add("imul_r64_r64", "imul r12, r15", X.encode_imul_r64_r64(R.R12, R.R15))
+    # The three-operand form with an immediate, and BOTH immediates' signs: a
+    # pointer subscript's scale is positive and a C subscript's negative index
+    # moves the address backwards, so the one-byte immediate has to be read as
+    # signed or `p[-1]` reads `p + 127*4`.
+    for dst, src, imm in ((R.RAX, R.RBX, 4), (R.R10, R.R11, -8)):
+        add("imul_r64_r64_imm", "imul %s, %s, %d" % (dst.name, src.name, imm),
+            X.encode_imul_r64_r64_imm(dst, src, imm))
+    # The byte-wise `and`/`or`, which exist so a floating `==` can read the
+    # conjunction of ZF and PF without reading the seven bytes a `SETcc` left
+    # in the register.  Two register pairs, because REX.B and REX.R both have to
+    # be decoded and a low pair cannot show that.
+    for dst, src in ((R.RAX, R.RCX), (R.R11, R.R10)):
+        add("alu_rr8:and", "and %s, %s" % (dst.name, src.name),
+            X.encode_and_r8_r8(dst, src))
+        add("alu_rr8:or", "or %s, %s" % (dst.name, src.name),
+            X.encode_or_r8_r8(dst, src))
 
     # ALU register/immediate
     for enc, name, w in ((X.encode_add_r64_imm32, "add", 32),
@@ -286,6 +302,13 @@ def samples():
     add("call_rel32", "call rel32", X.encode_call_rel32(-0x2000))
     add("call_rm64", "call [rip+x]", X.encode_call_rm64(0x40))
     add("call_rm64", "call [rip-x]", X.encode_call_rm64(-0x40))
+    # `FF /2` with mod=11 — the call through a function VALUE.  It is a
+    # different instruction from the `FF 15` above (two bytes, and the target
+    # is a register's contents), so it needs its own row: a sample under
+    # `call_rm64`'s name would ask `x86_step` about bytes the model answers
+    # differently.
+    for reg in (R.RAX, R.R11):
+        add("call_r64", "call %s" % reg.name, X.encode_call_r64(reg))
     add("jmp_rm64", "jmp [rip-x]", X.encode_jmp_rm64(-0x30))
     return out
 
@@ -701,20 +724,34 @@ def _memory_samples():
 #:
 #: The two answer different questions and both have been needed.  A `cqo` whose
 #: `_SUCCS` row said `x86_sign_extend32` while the model's arm computes
-#: `x86_cqo` left every hypothesis satisfiable — so the row above was green —
+#: `x86_cqo` left every hypothesis satisfiable -- so the row above was green --
 #: and the end-to-end proof of that step was a proof of a different instruction.
 #: That is the whole argument for having this: the applicability check cannot
 #: see a successor at all, and a successor is a second copy of the model that
 #: has to be kept in step with it.
 #:
-#: Read out of the ENCODER, so the bytes are the ones the backend emits, and the
-#: successor out of `_resolve`, so the check is against what the generator
-#: actually writes rather than against a hand-written copy of it.
-#: `(form, encoding, probe)` — the probe is `X86State -> (Nat x UInt64)`, the
-#: `rip` and the ONE field the instruction writes.  It is a fact about the
-#: instruction, not a copy of the successor, so the check below stays
-#: non-circular: it compares the model's step against the emitter's successor on
-#: the fields the instruction is ABOUT.
+#: **The `setcc` row is the second instance of that, and it is why the third
+#: field exists.**  `e54d2f4e` (2026-10-04) changed the model's narrow register
+#: write so a 1- or 2-byte write leaves the high bytes alone, corrected all three
+#: `setcc` lemmas in `lib/X86.lean` to conclude `x86_set_reg_narrow`, and did not
+#: touch `x86_64_endtoend_test.py`'s `_SUCCS`, which kept `x86_set_reg`.  All 26
+#: `terminates` cases carrying a `setcc` then failed to ELABORATE --
+#: `Type mismatch | x86_step_setcc_r8 sN ...`, with both 30-field records
+#: printed and neither naming the width.  Nothing caught it, because a check at
+#: `X86State.init 10 _` cannot see this difference at all: `init` leaves every
+#: general register 0 except RDI, and `x86_set_reg_narrow s 7 1 1` and
+#: `x86_set_reg s 7 1` both answer `1` when the destination is 0 or 10.  **A
+#: check run at a state where the wrong successor gives the same answer is not a
+#: check**, and it was one for every row here before the `init` became
+#: per-row.
+#:
+#: `(form, encoding, probe, state)` -- `probe` is
+#: `X86State -> (Nat x UInt64 x Bool x Bool x Bool x Bool)`: the `rip`, the ONE
+#: field the instruction writes, and ALL FOUR FLAGS; and `state` is the
+#: `X86State.init` term the row runs at, i.e. which register values make the
+#: difference VISIBLE.  `probe` is a fact about the instruction, not a copy of
+#: the successor, so the check stays non-circular: it compares the model's step
+#: against the emitter's successor on the fields the instruction is ABOUT.
 #:
 #: `RDI` and not `R12` for the `movq` source, and that is the whole reason the
 #: row has teeth.  `X86State.init 10 _` sets `rdi := 10` and every other general
@@ -724,9 +761,49 @@ def _memory_samples():
 #: successors differ.  At `x12`/`r12`, which is the pair the applicability rows
 #: use, both halves are 0 and the swap is invisible.
 SUCCESSOR_FORMS = (
-    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)"),
+    # `RAX` carries bit 63, so `x86_cqo` answers `0xffffffffffffffff` where the
+    # `x86_sign_extend32` this row used to name answers `0xffffffff80000000`.
+    # `X86State.init` cannot supply that -- RAX is one of the fifteen registers
+    # it zeroes -- so this row names its own state, and that is the difference
+    # between a check and a green.
+    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx, t.zf, t.sf, t.cf, t.of_)",
+     "{ X86State.init 10 %d with rax := 0x8000000000000000, zf := true, sf := true, cf := true, of_ := true }"),
     ("movq_xmm_rm64", X.encode_movq_xmm_rm64(3, X.Reg.RDI),
-     "fun t => (t.rip, t.xmm3)"),
+     "fun t => (t.rip, t.xmm3, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    # `setcc al` (`0F 9C C0`), the condition `n > n`, and the destination RAX at
+    # a value with its high bytes set: the model narrows to
+    # `0xdeadbeefcafebabf` and a whole-register write answers `1`.  `rm = 0` is
+    # RAX and NOT RDI, so this row has to supply the destination's value itself
+    # for the same reason the `cqo` row does.
+    ("setcc", X.encode_setle(R.RAX), "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)",
+     "{ X86State.init 10 %d with rax := 0xdeadbeefcafebabe, zf := true, sf := true, cf := true, of_ := true }"),
+    # **The shift and the register ALU, added 2026-10-05 because the corpus
+    # sweep found their rows drifted too and nothing had asked.**  `e54d2f4e`
+    # was not the only commit to change the model: the shift's `CF`/`OF` have
+    # been computed by `x86_shift_post` for longer than the emitter's
+    # `shift_imm8:*` rows have existed, and those rows set only `zf` and `sf`
+    # with a comment saying the shifts "leave CF and OF alone".  The corpus
+    # reported `FAIL lean exited 1: error: Type mismatch | x86_step_shl_imm8 s18`
+    # on `shift_by_var` and `shiftlr` because of it, and it was INVISIBLE behind
+    # the `setcc` elaboration error that killed every file first.
+    #
+    # These rows are what make that class countable rather than discovered: with
+    # `shift_imm8:shl` here, the row reports the drift by name and this file is
+    # red until the successor is corrected.
+    ("shift_imm8:shl", X.encode_shift_r64_imm8("<<", R.RAX, 2),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("shift_imm8:shr", X.encode_shift_r64_imm8(">>", R.R12, 3),
+     "fun t => (t.rip, t.r12, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("shift_imm8:sar", X.encode_shift_r64_imm8(">>signed", R.RAX, 63),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:add", X.encode_add_r64_r64(R.RAX, R.RBX),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:xor", X.encode_xor_r64_r64(R.R12, R.R13),
+     "fun t => (t.rip, t.r12, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_rr:cmp", X.encode_cmp_r64_r64(R.RAX, R.RBX),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("alu_ri8:cmp", X.encode_cmp_r64_imm8(R.RAX, 7),
+     "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     # The stack-floor guard's two, and the reason they are HERE rather than
     # only in `_FORMS`.  Both are forms every image emits and neither had a
     # successor row, so `_plan` refused the whole corpus by name before any of
@@ -739,11 +816,13 @@ SUCCESSOR_FORMS = (
     # at 0 in `X86State.init 10 _`, which is what makes them discriminating: a
     # successor that added the immediate instead of subtracting it, or that
     # addressed the mode from a base register, differs from the model here and
-    # agrees nowhere else.
-    ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(X.Reg.R10, 0x780000),
-     "fun t => (t.rip, t.r10)"),
-    ("lea_r64_rip", X.encode_lea_r64_rip(X.Reg.R11, 0x3ffc24),
-     "fun t => (t.rip, t.r11)"),
+    # agrees nowhere else.  (The subtraction is still visible with R10 = 0 -- the
+    # result is `-immediate` rather than `0` -- so `init` is the right state for
+    # these two and the per-row one is only for the rows that need it.)
+    ("alu_ri32:sub_reg", X.encode_sub_r64_imm32(R.R10, 0x780000),
+     "fun t => (t.rip, t.r10, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("lea_r64_rip", X.encode_lea_r64_rip(R.R11, 0x3ffc24),
+     "fun t => (t.rip, t.r11, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
 )
 
 
@@ -987,6 +1066,223 @@ def shift_failures(out, rows):
     return bad
 
 
+def multiply_cases():
+    """[(label, enc, rax, rdx, rm, want)] — the three MULTIPLY forms' product,
+    destination registers and flags, against EXACT INTEGER ARITHMETIC.
+
+    **This is the table `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`
+    names as the only gap left in that doc**, and it is here for the reason
+    `divide_cases` and `shift_cases` are: the CPU is not an available oracle on
+    this host.  `formal/x86_64_model_fuzz.py` attributes a difference at a
+    three-operand `imul`'s destination "by resemblance" — its rule is a
+    documented host anomaly whose reach is not known — because the multiply has
+    no arithmetic table to attribute it with, so there is nothing to compare
+    against.  A model bug and a mistranslated `imul` are indistinguishable in
+    that row and a table is what separates them.
+
+    Three forms, three different products, and each has a boundary that only one
+    side of gets right:
+
+    * `0F AF /r` — `imul r64, r64`, the two-operand form this backend lowers a
+      signed multiply of two runtime values to.  Only the low 64 bits are kept,
+      so `CF`/`OF` ask whether the 128-bit signed product does not fit in 64
+      signed bits: `hi != sext64(lo)` for the 128-bit product, and `lo` itself
+      is the unsigned product's low word, which is the same number either way.
+      The row that separates that from the tempting `lo != sext64(lo)` is
+      `3 * 5` (fits, and `15` is neither `0` nor `-1`), beside
+      `(-2^63) * 2` (does not fit, and its low word IS `0`).
+    * `F7 /4` — `mul r/m64`, unsigned, writing `RDX:RAX`.  `CF`/`OF` are
+      `hi != 0`, which is a different question from the signed one and the
+      distinction is invisible on every product that fits: `2^63 * 2` overflows
+      the SIGNED range and not the unsigned one, and `-1 * -1` overflows
+      neither.
+    * `F7 /5` — `imul r/m64`, signed, writing `RDX:RAX`.  `CF`/`OF` are
+      `hi != sext64(lo)`, and the rows are the two edges: `-2^63 * 1` fits
+      exactly (`hi = -1`, `lo = 2^63`) while `-2^63 * 2` does not, and
+      `-1 * -1` fits while `-1 * 2^63` does not either.
+
+    `0` is in the table twice, because it is the row a range check gets wrong
+    only if it is a range check at all: the product is `0`, so `ZF` is set and
+    both overflow bits are clear whichever reading is right.
+
+    The rows go through `x86_step` at REAL ENCODINGS, not through a named
+    helper, because the three products are spelled out INLINE in the group-3 and
+    `0F AF` arms — there is no `x86_mul128` to ask.  Asking the arm is the
+    stronger half of the question and it is the one a `formal/examples` program
+    cannot ask: nothing there reads a flag after a multiply.
+    """
+    rows = []
+    two64 = 1 << 64
+    mask = two64 - 1
+
+    def sext(v):
+        """`x86_sign_extend64` over a 64-bit unsigned value."""
+        return mask if v >> 63 else 0
+
+    def signed(v):
+        return v - two64 if v >> 63 else v
+
+    def want3(lo, hi, fits):
+        """`(rax, rdx, ZF, SF, CF, OF)` from a 128-bit `RDX:RAX` product."""
+        return (lo, hi, lo == 0, bool(lo >> 63), not fits, not fits)
+
+    def two_op(label, a, b, d=0x5A5A5A5A5A5A5A5A):
+        """`0F AF /r`: the low word, and CF/OF against the SIGNED range.
+
+        **The overflow test is the 128-bit one**, `hi != sext64(lo)`, and the
+        distinction is the whole content of this table.  The tempting short form
+        is `lo != sext64(lo)` -- "the low word is not its own sign extension" --
+        and it is wrong in BOTH directions: it calls `3 * 5` an overflow (15 is
+        neither 0 nor −1) and calls `(-2^63) * 2` a non-overflow (its low word
+        is 0).  Measured on the host, `imulq %rcx, %rax`:
+
+            a=0000000000000003 b=0000000000000005 -> lo=0f            cf=0 of=0
+            a=ffffffffffffffff b=ffffffffffffffff -> lo=01            cf=0 of=0
+            a=8000000000000000 b=0000000000000001 -> lo=8000…0        cf=0 of=0
+            a=8000000000000000 b=0000000000000002 -> lo=00            cf=1 of=1
+            a=4000000000000000 b=0000000000000002 -> lo=8000…0        cf=1 of=1
+            a=deadbeefcafebabe b=0000000000000003 -> lo=9c093ccf…303a cf=0 of=0
+
+        and the sixth row is the one no reading of the low word can get right:
+        the product fits in 64 signed bits and its low word has bit 63 set.
+
+        RDX comes in as `d` and must come out as `d`: the two-operand `imul`
+        has no high half, and a model that put the product's high word there
+        would agree with this one on every flag and disagree on RDX.
+        """
+        p = signed(a) * signed(b)
+        lo = p % two64
+        hi = ((p - lo) // two64) % two64
+        rows.append((label, X.encode_imul_r64_r64(R.RAX, R.R12), a, d, b,
+                     (lo, d, lo == 0, bool(lo >> 63), hi != sext(lo),
+                      hi != sext(lo))))
+
+    def mul1(label, a, d, b):
+        """`F7 /4`: unsigned `RDX:RAX`, and CF/OF against the UNSIGNED range."""
+        p = a * b
+        lo, hi = p & mask, (p >> 64) & mask
+        rows.append((label, X.encode_mul_r64(R.R12), a, d, b,
+                     want3(lo, hi, hi == 0)))
+
+    def imul1(label, a, d, b):
+        """`F7 /5`: signed `RDX:RAX`, and CF/OF against the SIGNED range."""
+        p = signed(a) * signed(b)
+        lo = p % two64
+        hi = ((p - lo) // two64) % two64
+        rows.append((label, X.encode_imul_r64_1op(R.R12), a, d, b,
+                     want3(lo, hi, hi == sext(lo))))
+
+    zero = 0
+    ones = mask
+    top = 0x8000000000000000          # MSB set: -2^63 as a signed value
+    half = 0x4000000000000000          # bit 62: the largest positive 2-power
+    big = 0x4000000100000000
+    # `0F AF`, with a non-zero incoming RDX in every row: this form has no high
+    # half, so RDX is the row that says it does not touch one.
+    two_op("imul r64,r64: 1 * 1 fits", 1, 1)
+    two_op("imul r64,r64: 0 * anything is 0", zero, ones)
+    two_op("imul r64,r64: 7 * 9", 7, 9)
+    two_op("imul r64,r64: -1 * -1 = 1 fits", ones, ones)
+    two_op("imul r64,r64: -1 * 2^63 does NOT fit", ones, top)
+    two_op("imul r64,r64: -1 * 2^63 + 1 fits (a negative product)", ones, big)
+    two_op("imul r64,r64: -2^63 * 1 fits (lo has bit 63 set)", top, 1)
+    two_op("imul r64,r64: -2^63 * 2 does NOT fit (lo is 0)", top, 2)
+    two_op("imul r64,r64: 2^62 * 2^62 does NOT fit", half, half)
+    two_op("imul r64,r64: 2^62 * 2 does NOT fit", half, 2)
+    two_op("imul r64,r64: 2^63 * 2^63 does NOT fit", top, top)
+    two_op("imul r64,r64: -1 * 2 fits (a negative product)", ones, 2)
+    two_op("imul r64,r64: 0xdeadbeefcafebabe * 1 fits (it is negative)",
+           0xdeadbeefcafebabe, 1)
+    two_op("imul r64,r64: 0xdeadbeefcafebabe * 3 fits (measured on the host)",
+           0xdeadbeefcafebabe, 3)
+    # `F7 /4`, unsigned. The three overflow classes, and each is a row.
+    mul1("mul r/m64: 7 * 9 fits", 7, 0, 9)
+    mul1("mul r/m64: 0 * anything is 0", zero, 0, ones)
+    mul1("mul r/m64: 2^63 * 2 overflows the SIGNED range only", top, 0, 2)
+    mul1("mul r/m64: 2^63 * 2^63 overflows both", top, 0, top)
+    mul1("mul r/m64: -1 * 2 = 2^65-2, hi = 1", ones, 0, 2)
+    mul1("mul r/m64: 2^32 * 2^32 fits", 1 << 32, 0, 1 << 32)
+    mul1("mul r/m64: 0xdeadbeefcafebabe * 0xdeadbeefcafebabe overflows both",
+         0xdeadbeefcafebabe, 0, 0xdeadbeefcafebabe)
+    # `F7 /5`, signed. The two edges, and `-2^63 * 1` is the row that separates
+    # a range check from a "the product looks negative" guess.
+    imul1("imul r/m64: 7 * 9 fits", 7, 0, 9)
+    imul1("imul r/m64: 0 * anything is 0", zero, 0, ones)
+    imul1("imul r/m64: -1 * -1 = 1 fits", ones, 0, ones)
+    imul1("imul r/m64: -1 * 2^63 does NOT fit", ones, 0, top)
+    imul1("imul r/m64: -2^63 * 1 fits exactly (hi = -1 = sext of lo)",
+          top, 0, 1)
+    imul1("imul r/m64: -2^63 * 2 does NOT fit (hi = -1, lo = 0)", top, 0, 2)
+    imul1("imul r/m64: -2^63 * -2^63 does NOT fit", top, 0, top)
+    imul1("imul r/m64: -1 * 1 fits", ones, 0, 1)
+    imul1("imul r/m64: 0xdeadbeefcafebabe * 1 fits (sext of itself)",
+          0xdeadbeefcafebabe, 0, 1)
+    imul1("imul r/m64: 0xdeadbeefcafebabe * -1 does NOT fit",
+          0xdeadbeefcafebabe, 0, ones)
+    # RDX is a parameter and is not read by any of the three forms, so one row
+    # carries a non-zero one to say so: `mul r/m64` WRITES RDX, and a model that
+    # read the incoming RDX into the product would answer this row differently.
+    mul1("mul r/m64: an incoming RDX is overwritten, not multiplied in",
+         7, ones, 9)
+    return rows
+
+
+def multiply_lean_source(rows):
+    """The multiply file: one `#eval!` per row, over `x86_step` at a real
+    encoding.
+
+    RAX carries the first multiplicand and R12 the second in every row, because
+    that is the pair both encoders can be asked for (`encode_imul_r64_r64` names
+    a destination and a source; `_group3` names only an operand) and because R12
+    is a register `X86State.init` leaves at 0 — so an encoding whose operand
+    were RAX would silently multiply by zero instead of testing anything.
+
+    The expectation is read off the STATE, not recomputed here: `rax`, `rdx` and
+    the four flags are what the instruction wrote, and a table that recomputed
+    them in Lean would be checking this file's arithmetic against itself.
+    """
+    out = ["import X86", "",
+           "def showMul : X86State → String",
+           "  | s => toString s.rax ++ \"/\" ++ toString s.rdx ++ \" \"",
+           "        ++ (if s.zf then \"Z\" else \"-\") ++ (if s.sf then \"S\" else \"-\")",
+           "        ++ (if s.cf then \"C\" else \"-\") ++ (if s.of_ then \"O\" else \"-\")"]
+    for i, (label, enc, rax, rdx, rm, _want) in enumerate(rows):
+        items = ", ".join("0x%02x" % b for b in enc)
+        out.append("-- %s  [%s]" % (label, enc.hex(" ")))
+        out.append("def mst_%d : X86State :=" % i)
+        out.append("  { X86State.init 10 %d with rax := %d, rdx := %d, r12 := %d }"
+                   % (BASE + 8 * i, rax, rdx, rm))
+        out.append("def mcode_%d (code : Nat) : UInt8 :=" % i)
+        out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
+                   % (BASE + 8 * i, items, BASE + 8 * i))
+        out.append('#eval! "%d " ++ showMul ('
+                   '(x86_step (mst_%d) mcode_%d).getD (mst_%d))'
+                   % (i, i, i, i))
+    return "\n".join(out) + "\n"
+
+
+def multiply_failures(out, rows):
+    """[(label, want, got)] for every row the model answered differently."""
+    got = {}
+    for line in out.splitlines():
+        line = line.strip().strip('"')
+        head, _, rest = line.partition(" ")
+        if rest and head.isdigit():
+            got[int(head)] = rest
+    bad = []
+    for i, (label, _enc, _rax, _rdx, _rm, want) in enumerate(rows):
+        text = got.get(i)
+        lo, hi, zf, sf, cf, of = want
+        want_text = "%d/%s %s%s%s%s" % (
+            lo, str(hi), "Z" if zf else "-",
+            "S" if sf else "-", "C" if cf else "-", "O" if of else "-")
+        if text is None:
+            bad.append((label, want_text, "nothing"))
+        elif text != want_text:
+            bad.append((label, want_text, text))
+    return bad
+
+
 def successor_lean_source(forms):
     """`(text, checks)` — one `native_decide` per form's successor claim.
 
@@ -996,18 +1292,39 @@ def successor_lean_source(forms):
     is not decidable and `native_decide` reports "failed to synthesize Decidable"
     -- which is an error, so it is caught, but it says nothing about the
     successor.  Mapping both sides through a probe puts them in
-    `Option (Nat x UInt64)`, which is decidable and computable.
+    `Option (Nat x UInt64 x Bool x Bool x Bool x Bool)`, which is decidable and
+    computable.
+
+    **The probe carries ALL FOUR FLAGS and every row's state has all four SET,
+    and both are load-bearing.** A probe of `rip` and one register cannot see a
+    successor that disagrees about a FLAG, and a state with the flags CLEAR
+    cannot see one either -- `x86_shift_post` writing `cf := false` and a
+    successor leaving `cf` alone are the same state when `cf` was already
+    false.  That is not hypothetical: the shift rows set only `zf` and `sf`
+    while `x86_shift_post` sets four, the corpus reported
+    `Type mismatch | x86_step_shl_imm8 s18` on two examples, and every row of
+    this check was GREEN until the probe grew the flags.
+
+    **The state's `%d` is the ENTRY ADDRESS and the row's `state` is the register
+    file it runs at**, so a row can put a value in a register `X86State.init`
+    zeroes -- which is what makes a `setcc`'s width visible at all, and what
+    makes `cqo`'s sign extension visible at all.  The two cases this check
+    existed to catch had been invisible for that reason rather than for want of
+    a row, so the state is per row and every row has to say what it is.  The
+    `%d` is required rather than defaulted: a row that forgot the entry address
+    would put its instruction at 0 and the `rip` half of the claim would fail for
+    a reason that says nothing about the successor.
     """
     out = ["import X86", ""]
     checks = []
-    for i, (form, enc, probe) in enumerate(forms):
+    for i, (form, enc, probe, state) in enumerate(forms):
         m = BASE + 16 * i
         items = ", ".join("0x%02x" % b for b in enc)
         out.append("def scode_%d (code : Nat) : UInt8 :=" % i)
         out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
                    % (m, items, m))
-        out.append("def sst_%d : X86State := X86State.init 10 %d" % (i, m))
-    for i, (form, enc, probe) in enumerate(forms):
+        out.append("def sst_%d : X86State := (%s)" % (i, state % m))
+    for i, (form, enc, probe, _state) in enumerate(forms):
         succ = ET._resolve(form, enc, BASE + 16 * i, "s", 0, length=len(enc),
                            code_name="code")[1]
         claim = ("(let s := sst_%d; let code := scode_%d; "
@@ -1274,6 +1591,30 @@ def main():
                   "means nothing.")
             return 1
         sout2 = cp.stdout + cp.stderr
+        # The MULTIPLY, for the third time and for the same reason.  Three forms
+        # (`0F AF /r`, `F7 /4`, `F7 /5`) with three different products and three
+        # different overflow questions, none of which the CPU is an available
+        # oracle for on this host -- and none of which anything in
+        # `formal/examples` asks, because nothing there reads a flag after a
+        # multiply.  This is the table that lets
+        # `formal/x86_64_model_fuzz.py`'s three-operand-`imul` class be an
+        # attribution rather than a resemblance.
+        mrows = multiply_cases()
+        mtext = multiply_lean_source(mrows)
+        mname = "Multiply.lean"
+        mpath = os.path.join(workdir, mname)
+        with open(mpath, "w") as f:
+            f.write(mtext)
+        cp = L.run_lean(lean, [mpath], cwd=workdir, env=env,
+                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+        if cp.exceeded:
+            print("\nFAIL: " + cp.exceeded)
+            print("  the multiply check is UNMEASURED, not satisfied: a run "
+                  "that stopped early answered some rows and no others, and "
+                  "reporting the answered ones as agreement is a green that "
+                  "means nothing.")
+            return 1
+        mout = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
         if ("example : (x86_step (X86State.init 10 %d) code_%d" % (BASE + i * 16, i)) in text:
@@ -1333,6 +1674,19 @@ def main():
     if sbad:
         print("      `ZZZZ` is a count of zero, which moves no flag at all; "
               "every other row is CF and OF as x86 defines them.")
+        rc = 1
+    mbad = multiply_failures(mout, mrows)
+    print("\nthe multiply's product and flags vs exact integer arithmetic: %d "
+          "case(s) \u2014 %s"
+          % (len(mrows), "every one as the arithmetic says"
+             if not mbad else "%d FAILED" % len(mbad)))
+    for label, want, got in mbad:
+        print("  %-56s want %-24s got %s" % (label, want, got))
+    if mbad:
+        print("      CF/OF are `the product does not fit` and the RANGE is "
+              "the instruction's: 64 UNSIGNED bits for `mul r/m64` (`F7 /4`) "
+              "and 64 SIGNED for both `imul` forms, which is a difference no "
+              "product that fits can see and the whole point of the table.")
         rc = 1
     return rc
 
