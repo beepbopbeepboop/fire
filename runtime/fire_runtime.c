@@ -7057,7 +7057,24 @@ int mojo_isinstance(int64_t obj, int type_id) {
      * (190 of 191 in the compiler's own generated output) — and does so
      * for already-generated .ci files too, since they take this
      * prototype from the header rather than declaring it themselves. */
-    if (type_id == 5 || type_id == 7)  /* list / tuple-as-list */
+    /* `type_id == 5` (`list`) EXCLUDES a tuple. A Python tuple literal lowers
+     * to the very same `MojoList` a list literal does (there is no separate
+     * container struct -- see `mojo_mark_as_tuple`'s doc comment), so the
+     * marker is the only thing telling them apart and
+     * `mojo_is_registered_list` cannot see it. Answering `list` for a marked
+     * list makes every tuple report itself a list, which is the
+     * silently-wrong direction: measured `isinstance(x, list)` printing True
+     * for both `('a','b')` and `str.partition`'s result. This mirrors what
+     * the codegen's own pointer-typed `isinstance(x, list)` lowering already
+     * does (see `_isinstance_one_type`'s `mojo_is_tuple` arm in
+     * mojo/backend_gimple/emit_calls.py) -- the two are the same question
+     * asked on the two C types a value can have, so they must not answer
+     * differently. `type_id == 7` (`set`) is a separate container and is
+     * left as it was. */
+    if (type_id == 5)  /* list: a registered MojoList that is NOT a tuple */
+        return mojo_is_registered_list(obj)
+            && !mojo_is_tuple((MojoList *)(intptr_t)obj);
+    if (type_id == 7)
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
@@ -7069,8 +7086,12 @@ int mojo_isinstance(int64_t obj, int type_id) {
 }
 
 int mojo_isinstance_p(int64_t obj, int type_id) {
-    /* Full-width sibling of mojo_isinstance -- no pointer truncation. */
-    if (type_id == 5 || type_id == 7)
+    /* Full-width sibling of mojo_isinstance -- no pointer truncation; see the
+     * `type_id == 5` note above for why a tuple is not a `list`. */
+    if (type_id == 5)
+        return mojo_is_registered_list(obj)
+            && !mojo_is_tuple((MojoList *)(intptr_t)obj);
+    if (type_id == 7)
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);

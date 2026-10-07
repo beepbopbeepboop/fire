@@ -6786,6 +6786,33 @@ fn main():
 """, "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
      "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
 
+    # The SAME question as `gimple_tuple_type_preserved_by_ops` above, but
+    # asked through a value the codegen cannot type statically: a tuple
+    # literal lowers to the very `MojoList` a list literal does, so the
+    # tuple MARKER is the only thing telling them apart, and the boxed path
+    # (an untyped parameter, which is `int64_t`) delegates to the runtime
+    # `mojo_isinstance` rather than to the codegen's pointer-typed lowering.
+    # `mojo_isinstance`'s `type_id == 5` arm used to answer `list` for a
+    # marked list, so every tuple reaching it through an untyped binding
+    # reported itself a list — the silently-wrong direction. The codegen
+    # path already excluded the marker; the two are the same question and
+    # had to stop disagreeing. `str.partition`'s unmarked result is still a
+    # list (its own filed bug:
+    # bugs/RUNTIME_str_partition_does_not_mark_its_result_as_a_tuple.md),
+    # while the `bytes` half, which sets the marker, is a tuple.
+    test_gimple_stdout("gimple_isinstance_list_excludes_tuple_on_the_boxed_path", """\
+def probe(x):
+    if isinstance(x, list):
+        print("list")
+    else:
+        print("not list")
+
+probe([1, 2])
+probe((1, 2))
+probe(b'a=b'.partition(b'='))
+probe('a=b'.partition('='))
+""", "list\nnot list\nnot list\nlist\n")
+
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
     print(bytes.fromhex('68656c6c6f'))
