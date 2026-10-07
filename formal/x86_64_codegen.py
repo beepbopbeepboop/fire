@@ -807,6 +807,14 @@ class X86_64Codegen:
         # Nesting depth of for-in (blob iteration) loops; selects the
         # `_fi{d}`/`_fb{d}` temps. Reset per function.
         self._for_depth = 0
+        # …and the BLOB-walk depth beside it, which counts ONLY
+        # `for x in <container>`.  `_for_depth` above counts a
+        # `for … in range(...)` as well, and `del d[k]` inside a range loop is
+        # legal CPython, so the two are different questions —
+        # `model.del_during_walk_refusal` needs the second one and must not be
+        # given the first.  arm64's twin is `_for_list_depth`; two names for one
+        # fact is the drift this change is about, so it is stated here.
+        self._for_blob_depth = 0
         # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
         # so a comprehension nested in a for-list cannot alias its temps.
         self._compr_depth = 0
@@ -828,6 +836,16 @@ class X86_64Codegen:
         # Names bound to a dict pair-blob pointer, whose subscript is a key
         # lookup rather than an index. Mutually exclusive with the above.
         self._dict_vars = set()
+        # Names bound to a SET, which `_blob_vars` cannot distinguish
+        # from a list because a set lowers as one.  arm64's twin carries the
+        # same table, and the same question — `a | b` is a union only when
+        # both sides are sets, and Python defines `|` for nothing else.
+        self._set_vars = set()
+        # Names bound to a TUPLE, for the same reason as the set
+        # above and for the same missing fact — a tuple lowers as a
+        # list here — but asked by a different question: a tuple is
+        # IMMUTABLE, so a subscript store into one is refused.
+        self._tuple_vars = set()
         # Names bound to a list/tuple/set blob. This is what makes `a + b`
         # on two LOCALS a concatenation: without it, two bare idents are
         # indistinguishable from two integers, and the operator silently
@@ -1344,11 +1362,19 @@ class X86_64Codegen:
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._for_depth = 0
+        # …and the BLOB-walk depth beside it, which counts only
+        # `for x in <container>`.  `_for_depth` above counts a
+        # `for … in range(...)` as well, and a `del d[k]` inside a
+        # range loop is legal CPython, so the two are different
+        # questions — arm64's twin is `_for_list_depth`.
+        self._for_blob_depth = 0
         self._compr_depth = 0
         self._compr_scopes = []
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
+        self._set_vars = set()
+        self._tuple_vars = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -3004,6 +3030,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._store_var(name, Reg.RAX)
             return
         ttype = self._ttype(stmt.target)
+        # `a += [3]` IS `a = a + [3]`, and the binary form is already lowered on
+        # this backend, so this desugars onto it rather than growing a second
+        # copy of the concat.  Asked after the divide-ops delegation above has
+        # returned, so what reaches it is the pure-ALU set, and the operators
+        # with no container lowering have already been refused by the shared
+        # gate.  `model.aug_assign_operands_are_blobs` is the one question and
+        # both backends ask it; the measurements that make it necessary — `a +=
+        # [3]` was 0 on arm64 and a SIGSEGV here, `a *= 3` a SIGSEGV on both —
+        # are in that function's docstring.
+        if M.aug_assign_operands_are_blobs(
+                self._expr_str_kind(stmt.target),
+                self._expr_str_kind(stmt.value)):
+            self._emit_binop(F.BinaryOp(op=op, left=stmt.target,
+                                        right=stmt.value))
+            self._store_var(name, Reg.RAX)
+            return
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
         # one, and RAX is holding the right one. R11 is written as the left
@@ -5172,7 +5214,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
         self._emit_jmp(ok)          # in range: skip the exit
         self.asm.label(oob)
-        self._emit_overflow_diagnostic(
+        self._emit_stop_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
@@ -5334,7 +5376,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_jmp_rel8(0))
         self.asm.emit_label_rel8(endl, here_offset=-1)
         self.asm.label(trap)
-        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
+        self._emit_stop_diagnostic(M.int_parse_trap_message(base))
         self._emit_call_exit(M.SHIFT_TRAP_STATUS)
         # ONCE, and the arm64 twin is the reason to say so: this carried a
         # second, identical `self.asm.label(endl)` from the commit that added the
@@ -5348,10 +5390,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # `test_formal_x86_64_parity.py`'s `int_parse_*` rows are the pin.
         self.asm.label(endl)
 
-    def _emit_overflow_diagnostic(self, text: str) -> None:
-        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+    def _emit_stop_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHAT was hit before stopping.
 
-        The arm64 twin of this (`ARM64Codegen._emit_overflow_diagnostic`), on
+        Named for what it is: it was `_emit_overflow_diagnostic` while only the
+        integer-overflow trap used it, and six other bounded stops use it too —
+        a dict with no room for its key, a blob past its frame reservation, an
+        int parse, a division by zero — none of which is an overflow.  A name
+        describing one of seven call sites is how the eighth gets its own copy.
+
+        The arm64 twin of this (`ARM64Codegen._emit_stop_diagnostic`), on
         the same message from `formal/model.py`, and for the same reasons: the
         two architectures printing two different sentences for one limit is how
         a reader ends up looking for a construct one of them invented, and a
@@ -5413,7 +5461,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         allows and the immediate form's range would make the guard silent for
         every large reservation — exactly the programs whose estimate is most
         likely to be low. R11 is free here (the copy loops use R10 and RAX) and
-        `_emit_overflow_diagnostic` below sets up its own argument registers.
+        `_emit_stop_diagnostic` below sets up its own argument registers.
 
         `total_reg` holds the element total the caller computed — `nL + nR` for
         a concatenation, `nL * count` for a repetition — and the caller computes
@@ -5429,7 +5477,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._while_counter += 1
         ok = f"{self.func_name}_{tag}ok{self._while_counter}"
         self._emit_jcc(COND_BE, ok)                     # fits → skip the block
-        self._emit_overflow_diagnostic(
+        self._emit_stop_diagnostic(
             M.blob_growth_overflow_message(what, capacity))
         self._emit_call_exit(1)
         self.asm.label(ok)
@@ -6327,6 +6375,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_scalar_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
         self._refuse_frame_slot_element("a membership test", right)
+        # A container NEEDLE is the one shape this scan gets wrong, and arm64
+        # got a different wrong for the same source — `model.
+        # container_membership_refusal` holds the three-row measurement, and it
+        # is asked here as well as there so the two architectures cannot keep
+        # disagreeing about `in`.  A SCALAR needle is a linear scan and is
+        # answered below, which is why the question is about the needle alone.
+        reason = M.container_membership_refusal(
+            M.spelled(left), M.spelled(right), self._expr_str_kind(left))
+        if reason is not None:
+            raise CodegenError(reason)
         # The dict question, asked here for the same reason the `for`-in walk
         # asks it and for the same reason `model.walk_stride` exists: a dict is
         # a PAIR blob, so at the element stride this scan compares half the
@@ -6402,6 +6460,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         advances — the same contract the range loop has."""
         d = self._for_depth
         self._for_depth += 1
+        self._for_blob_depth += 1
         try:
             it = stmt.iterable
             if not isinstance(it, (F.IdentExpr, F.ListExpr, F.TupleExpr,
@@ -6518,6 +6577,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._loops.pop()
         finally:
             self._for_depth -= 1
+            self._for_blob_depth -= 1
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """A dict literal → its pair-blob address in RAX.
@@ -6673,10 +6733,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
         if cap is None:
-            if why_no_room is not None:
-                self._emit_overflow_diagnostic(why_no_room)
+            # A bounded stop NAMES its bound, and this one had nothing to name
+            # it with: the three dict STORE messages all need a capacity, and a
+            # READ's base has no reservation to know one by.  Measured on this
+            # tree, both backends, `d = {"a": 1}` then `d["z"]` exited 1 with
+            # nothing on stdout and nothing on stderr, which a reader cannot
+            # tell from an assert, a divide by zero or a crash.  arm64's twin
+            # arm says the same thing from the same message.
+            self._emit_stop_diagnostic(
+                why_no_room if why_no_room is not None else M.dict_lookup_miss_message(
+                    M.spelled(getattr(e, "obj", None)),
+                    M.spelled(getattr(e, "index", None))))
             self._emit_call_exit(1)
         else:
+            # The INSERT arm of a dict store, and it is the one that answers
+            # `dict changed size during iteration`: whether the miss happens at
+            # all is a RUN-TIME question, so this cannot be a build-time
+            # refusal the way `del_during_walk_refusal` is for `del`, and the
+            # BLOB-walk depth is read here while emitting.  Only reached when
+            # the emitter is inside a `for … in <container>`, so a program that
+            # does not do this pays one branch on an arm it never takes.
+            if self._for_blob_depth > 0:
+                self._emit_stop_diagnostic(M.dict_walk_mutation_message(
+                    "`d[k] = v`",
+                    "INSERTS a pair that was not there"))
+                self._emit_call_exit(1)
             oob_label = f"{fn}_dl{wid}_oob"
             self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
             self._emit_setcc_bool(Reg.R8, "setae")
@@ -6693,7 +6774,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_mov_imm(Reg.RAX, 0)       # the assignment's None
             self._emit_jmp(end_label)
             self.asm.label(oob_label)
-            self._emit_overflow_diagnostic(
+            self._emit_stop_diagnostic(
                 M.dict_store_overflow_message(base_name or "<expr>", cap))
             self._emit_call_exit(1)
         self.asm.label(end_label)
@@ -7203,6 +7284,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
+        # `|` on a container is a SET UNION only between two SETS, and it has
+        # to be asked HERE rather than at the concat branch below: that branch
+        # recognises a container by `_is_container_expr`, which on this backend
+        # does list `F.DictExpr` but still misses a NAME bound to a dict when
+        # nothing else in the function is a container expression, so the two
+        # architectures' gates would cover different shapes. `_expr_str_kind`
+        # classifies every blob — a dict is a counted blob too — so this is the
+        # one site that knows, and `model.container_union_refusal` is the one
+        # decision, so a pair of operands cannot get one answer from one
+        # architecture and a different one from the other. Measured on this
+        # tree, arm64 before the gate: `{"a": 1} | {"b": 2}` reported 1 where
+        # CPython reports 2, and `[1, 2] | [3]` reported 3 where CPython raises
+        # TypeError. `+` is deliberately not gated: a concatenation is exactly
+        # what CPython means by `+` on two lists and two tuples.
+        if op == "|" and (M.container_operand_is_blob(
+                self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            reason = M.container_union_refusal(
+                M.spelled(e.left), M.spelled(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
+                left_is_dict=self._is_dict_subscript(e.left),
+                right_is_dict=self._is_dict_subscript(e.right))
+            if reason is not None:
+                raise CodegenError(reason)
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -7244,15 +7349,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                  or self._is_container_expr(e.left)
                                  or self._is_container_expr(e.right)):
             if op == "|":
-                # `|` on two containers is a SET UNION: the elements of the
-                # right that the left already has are dropped.  This backend
-                # has no union emitter, and lowering it as a concatenation
-                # answers `[1, 2] | [2, 3]` with `[1, 2, 2, 3]` — a list with
-                # a repeat, which is not a set and sums to 8 where CPython says
-                # 6.  Measured on the pre-change tree, exit 0 and the wrong
-                # number, so this was a wrong answer rather than a refusal.
-                # arm64's `_emit_set_union` does lower it; saying so here is
-                # what makes the refusal an answer rather than a shrug.
+                # This backend has no union emitter, and it used to lower the
+                # operator as a plain CONCATENATION — answering `[1, 2] | [2, 3]`
+                # with `[1, 2, 2, 3]`, a list with a repeat, which sums to 8
+                # where CPython says 6. Measured on the pre-change tree, exit 0
+                # and the wrong number, so this was a wrong answer rather than a
+                # refusal. arm64 lowers it correctly FOR TWO SETS, which is what
+                # makes the refusal an answer rather than a shrug.
                 raise CodegenError(M.set_union_refusal(
                     M.spelled(e.left), M.spelled(e.right)))
             self._emit_list_concat(e.left, e.right)
@@ -8155,6 +8258,13 @@ preference.
         ADDRESS is what gets written. That failure is invisible in any program
         that does not read the element back.
         """
+        # A STORE INTO A TUPLE is a TypeError in CPython and this gate is what
+        # stops it being one here.  Asked FIRST, before the value is pushed and
+        # before the address is computed, because the refusal costs nothing and
+        # the push is not free.  The question is about the BASE, so it is asked
+        # before the dict/sequence split rather than inside the sequence arm: a
+        # dict store is correct and a dict is not a tuple.
+        self._refuse_tuple_store(target)
         self._push_slot(src)                       # value
         if self._is_dict_subscript(target.obj):
             # The one subscript whose store is not "compute an address and
@@ -8269,10 +8379,19 @@ preference.
             self.asm.emit(encode_mov_rm64_r64(Reg.R10, 0, Reg.RAX))
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
-        raise CodegenError(
-            "assignment to a slice target is not lowered on the formal "
-            "x86-64 path: a slice is a materialized copy here, so writing "
-            "through one would have to write back into its source blob")
+        # The same construct arm64 lowers as a SAME-LENGTH in-place replace,
+        # and the reason is the same one stated there: a formal blob cannot
+        # change length without a compaction pass, so there is nowhere for the
+        # difference between the range and the replacement to go.  This backend
+        # refuses the WHOLE construct rather than the half it cannot implement,
+        # because a slice here is a materialised copy and writing through one
+        # would have to write back into its source blob — so the refusal is
+        # wider, the reason is one sentence, and `model.slice_store_static_
+        # length_refusal` is the narrower arm arm64 asks for the decidable
+        # cases of the same question.  Measured on this tree, arm64 before that
+        # narrower arm: `a = [3, 1, 2]` then `a[0:1] = [9, 9, 9]` exited 1 with
+        # no output at all.
+        raise CodegenError(M.slice_store_refusal())
 
     # ── `del` ───────────────────────────────────────────────────────────────
     #
@@ -8311,6 +8430,19 @@ preference.
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "
                     "on the formal x86-64 path")
+            # A `del` from a DICT inside a walk over it changes the size
+            # unconditionally, so whether CPython would accept the program is
+            # decidable while emitting — unlike the store's INSERT arm, which
+            # asks the same rule at run time (`dict_walk_mutation_message`).  A
+            # `del` from a LIST inside the walk is not refused: CPython permits
+            # it and this path agrees.
+            if isinstance(target, F.SubscriptExpr):
+                walk = M.del_during_walk_refusal(
+                    M.spelled(target.obj),
+                    self._is_dict_subscript(target.obj),
+                    self._for_blob_depth)
+                if walk is not None:
+                    raise CodegenError(walk)
             why = M.del_refusal(
                 target,
                 self._is_string_subscript(target.obj)
@@ -8482,6 +8614,12 @@ preference.
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RCX))
         self._emit_jmp(end_label)
         self.asm.label(miss_label)
+        # LOUD, for the same reason the READ's miss is: one rule ("that key is
+        # not in that dict") said in one place, at both sites.  Measured on this
+        # tree, both backends, `del d["a"]` twice — the second of which misses —
+        # exited 1 with nothing on stdout and nothing on stderr.
+        self._emit_stop_diagnostic(M.dict_lookup_miss_message(
+            M.spelled(target.obj), M.spelled(target.index)))
         self._emit_call_exit(1)
         self.asm.label(end_label)
 
@@ -9782,6 +9920,94 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
             self._blob_var_est.pop(name, None)
+        # SET-NESS is its OWN block rather than a fourth arm of the chain above,
+        # because it is not one of the mutually exclusive kinds: a set lowers as
+        # a list here (`model.is_set_expr`'s docstring says why), so
+        # `_blob_vars` holds a set and a list alike and this is the only record
+        # of which one a name is.  arm64's twin carries the same table and the
+        # same reader — `model.container_union_refusal` — so the two
+        # architectures cannot disagree about whether `a | b` is a union.
+        if self._expr_is_set_like(value):
+            self._set_vars.add(name)
+        else:
+            self._set_vars.discard(name)
+        # And TUPLE-NESS, for the same reason and asked by one consumer: a tuple
+        # is the same blob as a list, and the one question that needs telling
+        # them apart is whether a subscript may be WRITTEN — a tuple is
+        # immutable in CPython, so `t[0] = 9` is a TypeError there.
+        if self._expr_is_tuple_like(value):
+            self._tuple_vars.add(name)
+        else:
+            self._tuple_vars.discard(name)
+
+    def _expr_is_set_like(self, e) -> bool:
+        """True when `e` is a set literal, a set comprehension, or a NAME this
+        function has bound to one.
+
+        The flow-sensitive half of `model.is_set_expr`, beside `_dict_vars` and
+        for the reason `_note_binding`'s docstring gives for that one: a name
+        gets its kind from the assignment it is bound by, and the assignment is
+        not at the use.  `_blob_vars` cannot answer it — a set and a list are
+        the same blob on this path, which is exactly why `|` needs this and `+`
+        does not.
+        """
+        if M.is_set_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._set_vars
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
+            # `+` is a concatenation and `|` a union, and both leave a SET a
+            # set — but only where one side is one, and a list-plus-set is a
+            # CPython `TypeError` whose refusal is
+            # `container_union_refusal`'s answer rather than this one's.
+            return (self._expr_is_set_like(e.left)
+                    or self._expr_is_set_like(e.right))
+        return False
+
+
+    def _expr_is_tuple_like(self, e) -> bool:
+        """True when `e` is a tuple literal, a tuple comprehension, or a NAME
+        this function has bound to one.
+
+        The flow-sensitive half of `model.is_tuple_expr`, beside `_set_vars` and
+        for the same reason: a name gets its kind from the assignment it is
+        bound by, and a tuple is the SAME blob as a list here, so nothing but
+        this table can tell `t = (1, 2, 3)` from `a = [1, 2, 3]`.  It has one
+        consumer — `model.container_store_refusal`, at the subscript STORE — and
+        that is why it is this narrow: nothing else in the value model needs to
+        know, because a tuple reads and walks and concatenates exactly as a list
+        does and CPython agrees on every one of those.
+        """
+        if M.is_tuple_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._tuple_vars
+        if isinstance(e, F.BinaryOp) and e.op == "+":
+            # `+` between two tuples is a tuple, so a tuple survives a
+            # concatenation; anything else about `+` is another operator's
+            # question.
+            return (self._expr_is_tuple_like(e.left)
+                    and self._expr_is_tuple_like(e.right))
+        if isinstance(e, F.SliceExpr):
+            return self._expr_is_tuple_like(e.obj)
+        return False
+
+    def _refuse_tuple_store(self, target) -> None:
+        """Raise when `target`'s base is a TUPLE — a write CPython forbids.
+
+        The emitter half of `model.container_store_refusal`, which holds the
+        message and the measurement; asked from this one site on both
+        architectures so a subscript store gets the same answer from each.  A
+        dict subscript is not a tuple and is not refused, which is why this is
+        asked before the dict/sequence split rather than inside the sequence arm
+        — the question is about the BASE, and the base is what carries the kind.
+        """
+        base = getattr(target, "obj", None)
+        reason = M.container_store_refusal(
+            M.spelled(base), self._expr_is_tuple_like(base),
+            M.spelled(getattr(target, "index", None)))
+        if reason is not None:
+            raise CodegenError(reason)
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a blob pointer rather than an
