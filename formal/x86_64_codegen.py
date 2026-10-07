@@ -730,6 +730,11 @@ class X86_64Codegen:
         # the arm64 backend's `_sub_width`, and the decision is
         # `model.subscript_base_lowering` so the two cannot drift.
         self._sub_width = 8
+        # Whether that width is SIGNED, for the load that follows. Only a
+        # declared POINTER pointee has a signedness; a container element and a
+        # string byte are unsigned, and `_emit_subscript_addr` resets this on
+        # every path — same rule and same reason as arm64's `_sub_signed`.
+        self._sub_signed = False
         self._while_counter = 0
         self._var_regs = {}
         self._var_spills = {}
@@ -4261,6 +4266,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
+    def _printf_arg_container_kind(self, arg):
+        """The operand's own KIND, or None — the evidence `printf_container_
+        conversion_refusal` reads.
+
+        The fourth hook of `model.printf_format_refusal`, and the one fact it
+        needs that the model cannot derive: this function's `ValueKinds`. A
+        container's kind is what says its one word is a blob's ADDRESS, so the
+        decision about which conversions may not read it as a number is the
+        model's, and this method is the same two lines arm64 and x86-64 both
+        write. None when there is no `ValueKinds` to ask, which is the
+        permissive direction the other hooks take and never refuses.
+        """
+        return None if self._vkinds is None else self._vkinds.kind_of(arg)
+
     def _refuse_word_position_kind_mismatch(self, name, e) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -4328,7 +4347,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class)
+            self._printf_arg_conversion_class,
+            self._printf_arg_container_kind)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -5830,6 +5850,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_scalar_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
+        self._sub_signed = False
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
             # has no parent, so `M.multi_index_refusal_for` cannot tell a
@@ -5931,6 +5952,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # `base + 8 + 8*count`.  See
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count.
             self._sub_width = width
+            self._sub_signed = signed
             if width != 1:
                 # The scale is emitted rather than assumed: `base + i` is right
                 # for a one-byte element and is the SECOND element for any
@@ -6022,16 +6044,58 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                    e.index.step)
             return
         self._emit_subscript_addr(e)
-        # The address is in RAX; the element has to be LOADED before any
-        # extension — MOVZX of the address itself would yield the low byte of a
-        # pointer.
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
+        self._emit_subscript_load_at(Reg.RAX)
+
+    def _emit_subscript_load_at(self, base: Reg) -> None:
+        """Load the element at `base` into RAX, at `_sub_width`.
+
+        The address is in `base` and the element has to be LOADED before any
+        extension — MOVZX of the address itself would yield the low byte of a
+        pointer. The width is `_sub_width` and the sign is `_sub_signed`, both
+        from the one `model.subscript_base_lowering` answer, and they are the
+        same four pairs `_emit_dereference` emits for `p.value()`.
+
+        **The sub-word widths are load-bearing and were missing**: this used to
+        be a full 64-bit load plus a `movzx` only for width 1, so a
+        `Pointer[Int32]` subscript read the NEXT element into the high half —
+        `q[0] = 10; q[1] = 21; printf("%d", q[0])` printed `90194313226`
+        (0x15_0000000A) where the source says 10, on BOTH architectures. The
+        augmented assignment's own read calls this too, so `q[0] += 5` and
+        `q[0] = q[0] + 5` read the same number of bytes.
+        """
         if self._sub_width == 1:
-            # Unsigned: a `UInt8` element is a byte, and a formal value is one
-            # 64-bit word holding an integer, so `200` has to read back as 200.
-            # The signed form is the same two-instruction pair with a different
-            # mnemonic, chosen from the pointee the model established.
-            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+            self.asm.emit((encode_movsx_r64_rm8 if self._sub_signed
+                           else encode_movzx_r64_rm8)(base, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit((encode_movsx_r64_rm16 if self._sub_signed
+                           else encode_movzx_r64_rm16)(base, base, 0))
+        elif self._sub_width == 4:
+            if self._sub_signed:
+                self.asm.emit(encode_movsx_r64_rm32(base, base, 0))
+            else:
+                # A 32-bit load zero-extends to 64 on x86-64.
+                self.asm.emit(encode_mov_r32_rm32(base, base, 0))
+        else:
+            self.asm.emit(encode_mov_r64_rm64(base, base, 0))
+
+    def _emit_subscript_store_at(self, base: Reg, src: Reg) -> None:
+        """Store `src` through `base`, at `_sub_width`.
+
+        The store half of `_emit_subscript`'s load, and one place for the same
+        reason: the plain store and the augmented assignment both write through
+        the address `_emit_subscript_addr` returned, and a width chosen in one
+        of them is how `q[0] = 10` and `q[0] += 5` come to write different
+        numbers of bytes into a `Pointer[Int32]`. Signedness does not reach a
+        store — the low `width` bytes are the same either way.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_mov_rm8_r8(base, 0, src))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_mov_rm16_r16(base, 0, src))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_mov_rm32_r32(base, 0, src))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(base, 0, src))
 
     def _blob_est(self, e, exact: bool = False) -> int:
         """Static upper bound on a blob expression's element count.
@@ -8278,20 +8342,12 @@ preference.
             return
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
-        if self._sub_width == 1:
-            # A BYTE store, and this used to be a full 64-bit store into a
-            # one-byte element: both branches of the old `if` were the same
-            # instruction, so `p[0] = 65` on a `Pointer[UInt8]` overwrote the
-            # seven bytes after it. It was unreachable over a POINTER (the
-            # subscript took the blob path and exited 1 first) and reachable
-            # over a `char *` in a string literal, which is a read-only
-            # __TEXT page, so nothing noticed. Widening `_sub_width` to the
-            # pointee made it reachable over a `malloc`'d buffer, where the
-            # overwrite is a silent corruption rather than a fault, so the two
-            # branches have to differ.
-            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
-        else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+        # The width is `_sub_width`, and it is the pointee's for a declared
+        # pointer. A one-byte element used to be a full 64-bit store (`p[0] = 65`
+        # on a `Pointer[UInt8]` overwrote the seven bytes after it), and the
+        # sub-word widths were the same defect for a `Pointer[Int32]`: the store
+        # wrote eight bytes where the source names four.
+        self._emit_subscript_store_at(Reg.RAX, Reg.R11)
 
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
@@ -8336,10 +8392,15 @@ preference.
             raise CodegenError(reason)
         target = stmt.target
         self._emit_subscript_addr(target)             # RAX = address
+        # The element's width belongs to the TARGET, and the RHS below can
+        # itself be a subscript (`q[0] += r[1]`) whose address computation
+        # overwrites `_sub_width`. The store at the end would then write at the
+        # RHS's width — eight bytes into a `Pointer[Int32]` — so it is captured
+        # here, after the target's address is decided and before anything else
+        # can run, and restored before the store.
+        width = self._sub_width
         self._push_slot(Reg.RAX)                      # [rsp] = address
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # old element
-        if self._sub_width == 1:
-            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+        self._emit_subscript_load_at(Reg.RAX)         # old element, at its width
         self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
         self._emit_expr(stmt.value)                   # RAX = value
         self._pop_slot(Reg.R11)                       # R11 = old
@@ -8373,10 +8434,8 @@ preference.
         # happens, the function returns, and the damage only shows up as a
         # number that is a pointer. arm64's twin uses X9 for the same reason.
         self._pop_slot(Reg.R10)                       # R10 = address
-        if self._sub_width == 1:
-            self.asm.emit(encode_mov_rm8_r8(Reg.R10, 0, Reg.RAX))
-        else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 0, Reg.RAX))
+        self._sub_width = width                       # the TARGET's, not the RHS's
+        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
         # The same construct arm64 lowers as a SAME-LENGTH in-place replace,

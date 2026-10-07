@@ -930,6 +930,14 @@ dylib_exports: list = None, globals_base: int = None,
         # disagree. Defaulted here because a stale value from a previous
         # subscript in the same function would silently pick a width.
         self._sub_width = 8
+        # Whether that width is SIGNED, for the load that follows. Only a
+        # declared POINTER pointee has a signedness (`Pointer[Int32]` vs
+        # `Pointer[UInt32]`); a container element and a string byte are a word
+        # and a byte and are unsigned, and `_emit_subscript_addr` resets this on
+        # every path for the same reason it resets `_sub_width` — a stale
+        # `True` from a previous pointer subscript would sign-extend the next
+        # container element.
+        self._sub_signed = False
         # {function name: model.ValueKinds}, for the whole module. `_functions`
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
@@ -5324,16 +5332,53 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         ONE place, because the read, the store's own read-modify and the
         augmented assignment each used to spell this choice separately and the
-        pointer route made a third width possible. A one-byte element is
-        zero-extended by `LDRB`, which is what a `UInt8` read is; anything
-        wider is the full 64-bit load, and the sub-word widths the pointee
-        table can return (2 and 4) are the same two instructions
-        `_emit_dereference` uses for them.
+        pointer route made a third width possible. The four widths are the same
+        four instructions `_emit_dereference` uses for them, chosen from the
+        SAME `model.subscript_base_lowering` answer, so `p[i]` and `p.value()`
+        cannot disagree about what a `Pointer[Int32]` holds.
+
+        **The sub-word widths are load-bearing and were missing**: this used to
+        be `width == 1 ? LDRB : LDR`, so a `Pointer[Int32]` subscript did a full
+        64-bit load and read the NEXT element into the high half — `q[0] = 10;
+        q[1] = 21; printf("%d", q[0])` printed `90194313226` (0x15_0000000A)
+        where the source says 10, on BOTH architectures. A one-byte element is
+        zero-extended by `LDRB` (a `UInt8` read), and a signed pointee is
+        sign-extended by `LDRSB`/`LDRSH`/`LDRSW` exactly as `_emit_dereference`
+        does.
         """
         if self._sub_width == 1:
-            self.asm.emit(encode_ldrb_wd_wn(reg, base, 0))
+            self.asm.emit(encode_ldrsb_xt_xn_imm(reg, base, 0)
+                          if self._sub_signed
+                          else encode_ldrb_wd_wn(reg, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_ldrsh_xt_xn_imm(reg, base, 0)
+                          if self._sub_signed
+                          else encode_ldrh_wt_wn_imm(reg, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_ldrsw_xt_xn_imm(reg, base, 0)
+                          if self._sub_signed
+                          else encode_ldr_wt_wn_imm(reg, base, 0))
         else:
             self.asm.emit(encode_ldr_xt_xn_imm(reg, base, 0))
+
+    def _emit_subscript_store_at(self, reg: int, base: int) -> None:
+        """Store X{reg} through X{base}, at `_sub_width`.
+
+        The store half of `_emit_subscript_load`, and one place for the same
+        reason: the plain store and the augmented assignment both write through
+        the address `_emit_subscript_addr` returned, and a width chosen in one
+        of them is how `q[0] = 10` and `q[0] += 5` come to write different
+        numbers of bytes into a `Pointer[Int32]`. Signedness does not reach a
+        store — the low `width` bytes are the same either way.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_strb_wd_wn(reg, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_strh_wt_wn_imm(reg, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_str_wt_wn_imm(reg, base, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(reg, base, 0))
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """Stack-allocate a dict pair-blob: [count_pairs][k0][v0][k1][v1]…
@@ -5855,6 +5900,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # default here is the word because it is the answer for the two that
         # reach their own branch and set it before returning.
         self._sub_width = 8
+        self._sub_signed = False
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -5933,7 +5979,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # is its first FIELD, so `w.d[0]` read `w.d` as a container and
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
-        shape, width, _signed, sub_why = M.subscript_base_lowering(
+        shape, width, signed, sub_why = M.subscript_base_lowering(
             self._cur_fn, e.obj, self._structs, self._functions, self._structs)
         if shape is None:
             raise CodegenError(sub_why)
@@ -5949,6 +5995,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count and
             # `model.subscript_base_lowering`, which owns the decision.
             self._sub_width = width
+            self._sub_signed = signed
             self._emit_expr(e.obj)                    # X0 = the address
             self.asm.emit(encode_stp_sp_pre(0, 2))    # save it
             self._emit_expr_to(e.index, "X1")         # X1 = index
@@ -6095,10 +6142,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # nothing is emitted between the load and the store. The value is at
         # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(5, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self._emit_subscript_store_at(5, 9)
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop addr
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
@@ -6135,6 +6179,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
         self._emit_subscript_addr(target)
+        # The element's width and sign belong to the TARGET, and the RHS below
+        # can itself be a subscript (`q[0] += r[1]`) whose address computation
+        # overwrites `_sub_width`/`_sub_signed`. The store at the end would then
+        # write at the RHS's width — eight bytes into a `Pointer[Int32]` — so the
+        # two are captured here, after the target's address is decided and
+        # before anything else can run, and restored before the store.
+        width = self._sub_width
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
         self._emit_subscript_load(0, 9)           # X0 = old, at the element's width
@@ -6151,10 +6202,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(0, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
+        self._sub_width = width                   # the TARGET's, not the RHS's
+        self._emit_subscript_store_at(0, 9)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
@@ -6447,6 +6496,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
+    def _printf_arg_container_kind(self, arg):
+        """The operand's own KIND, or None — the evidence `printf_container_
+        conversion_refusal` reads.
+
+        The fourth hook of `model.printf_format_refusal`, and the one fact it
+        needs that the model cannot derive: this function's `ValueKinds`. A
+        container's kind is what says its one word is a blob's ADDRESS, so the
+        decision about which conversions may not read it as a number is the
+        model's, and this method is the same two lines arm64 and x86-64 both
+        write. None when there is no `ValueKinds` to ask, which is the
+        permissive direction the other hooks take and never refuses.
+        """
+        return None if self._vkinds is None else self._vkinds.kind_of(arg)
+
     def _refuse_word_position_kind_mismatch(self, name, e: F.CallExpr) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -6542,7 +6605,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class)
+            self._printf_arg_conversion_class,
+            self._printf_arg_container_kind)
         if reason is not None:
             raise CodegenError(reason)
 
