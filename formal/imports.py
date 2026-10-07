@@ -1638,7 +1638,7 @@ def imported_modules(stmts) -> list:
     return out
 
 
-def import_bindings(stmts) -> dict:
+def imported_bindings(stmts) -> dict:
     """`{local name: (module as spelled, defining name)}` for this file.
 
     THE missing half of `imported_modules`. That function answers "which
@@ -1647,7 +1647,15 @@ def import_bindings(stmts) -> dict:
     answer for `from m import f` and `from m import f as g`. This one answers
     "which name in THIS file means which export of which module", which is the
     question a call site asks, and the two are different questions about the
-    same statements.
+    same statements. The names are parallel on purpose: one is which MODULES,
+    this is which NAMES.
+
+    NOT `model.import_bindings`, which is the per-STATEMENT reader this one
+    folds — `(bound, module, defined)` triples for one `import` line, a list
+    rather than a table, and a function of one statement rather than of a
+    file's. They were the same name for a while, which is one letter apart and
+    two different return shapes, and a reader inside this very body could have
+    swapped them without the type checker saying anything.
 
     It exists because the answer was being reconstructed at the call site, from
     a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare
@@ -3075,7 +3083,7 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
 
     The alias is filtered by the SAME three rules as the original, applied to
     the alias's own spelling: a name this module defines wins over any import
-    (the precedence `imported_bound_names` and `import_bindings` both state), a
+    (the precedence `imported_bound_names` and `imported_bindings` both state), a
     private alias is not published, and an inert one is not either. The
     original name's own filters are unchanged, so a private definition brought
     in under a public alias stays out of the manifest exactly as before rather
@@ -3250,7 +3258,7 @@ def library_free_edges(importer_path: str, stmts: list,
         # BOTH spellings, and the reason is an ALIAS: `from x import f as g`
         # binds `g` here and the symbol the link line has to carry is `x`'s
         # `f`, because the export table is keyed by the DEFINING name
-        # (`reexported_names`' third element, and `import_bindings`' "defining
+        # (`reexported_names`' third element, and `imported_bindings`' "defining
         # name"). Judging the edge by the local spelling alone would exempt an
         # edge that binds `f` under another name — and the consumer that calls it
         # under either spelling then has no library to bind, which is measured:

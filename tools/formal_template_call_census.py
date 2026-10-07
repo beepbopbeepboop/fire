@@ -112,7 +112,7 @@ import checked_run                                           # noqa: E402
 import elaborate                                             # noqa: E402
 import fire_compiler as F                                    # noqa: E402
 from formal.build import parse_module                        # noqa: E402
-from formal.imports import (import_bindings,                 # noqa: E402
+from formal.imports import (imported_bindings,               # noqa: E402
                             resolve_module_path)
 import formal.model as M                                     # noqa: E402
 import formal.monomorph as MM                                # noqa: E402
@@ -975,7 +975,7 @@ def collect(paths):
         except Exception:                                  # noqa: BLE001
             continue
         n_files += 1
-        bindings = import_bindings(stmts)
+        bindings = imported_bindings(stmts)
         if not bindings:
             continue
         # `(name, argc) -> [(call, scope)]`, so a call is classified against the

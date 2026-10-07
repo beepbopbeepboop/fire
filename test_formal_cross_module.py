@@ -347,7 +347,7 @@ def test_a_library_that_CALLS_its_own_import_alias_binds_the_defining_name(
     calls it has to bind the DEFINING name — and that module is a LIBRARY.
 
     The case above is the other direction: the alias is written by the program,
-    whose emitters have always been handed `import_bindings`. This one is
+    whose emitters have always been handed `imported_bindings`. This one is
     written by a module that is itself compiled as a dylib, and
     `compile_formal_dylib` did not hand its emitters that table — so the call
     bound `aliased` itself and the library's own bind audit refused the image

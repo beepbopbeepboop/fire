@@ -629,11 +629,14 @@ def blake2b_hex(data, n: int, digest_size: int) -> str:
     """`hashlib.blake2b(data, digest_size=digest_size).hexdigest()`.
 
     `digest_size` is CPython's parameter and defaults to 64 there; it is
-    REQUIRED here because a default argument does not survive a dylib
-    boundary — the caller has no signature to materialize it from, so the
-    argument register is whatever the caller last left in it, measured
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). 1 to 64,
-    as in CPython.
+    spelled REQUIRED here because a default argument used not to survive a dylib
+    boundary — the caller had no signature to materialize it from, so the
+    argument register was whatever the caller last left in it. That is fixed
+    (`formal/imports.py`'s `external_declarations`, which hands the emitter the
+    callee's own declaration) and the default is left off on purpose rather
+    than because it has to be: see
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`.
+    1 to 64, as in CPython.
 
     The truncated output is CPython's: BLAKE2b's `digest_length` is part of
     the initial state, so `digest_size=20` is a DIFFERENT HASH and not the

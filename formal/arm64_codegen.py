@@ -4917,7 +4917,10 @@ ctor_field_value=self._ctor_field_value_for(name),
                                       self._dylib_by_module,
                                       self._dylib_forwarded,
                                       self._import_aliases, name),
-                self._extern_decl_for(name),
+                M.callee_declaration(
+                    {}, self._dylib_by_name, self._dylib_by_module,
+                    self._dylib_forwarded, self._import_aliases,
+                    self._extern_decls, name),
                 int_names=TYPE_NAMES, string_names=STRING_TYPE_NAMES)
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
@@ -9110,44 +9113,23 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         self.asm.label(end_label)
 
-    def _extern_decl_for(self, name: str):
-        """The declaration of an IMPORTED callee `name`, or None.
-
-        Keyed by the SYMBOL the call binds, and the entry is found by
-        `model.dylib_callee_export` — the one resolution, in the same order as
-        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
-        always the one whose parameter list the call is actually being checked
-        against. Asking by bare name instead would be a way to hand a call the
-        signature of a same-named function in a different library.
-
-        The `forwarded` table reaches this through that shared resolution, and
-        that is load-bearing rather than tidiness: a re-exported callee
-        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
-        published by the PACKAGE's manifest and nowhere else, so a lookup that
-        left it out found no declaration, and a call with no declaration is a
-        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
-        the third and `pkg.f(1)` read the second out of an uninitialized
-        register, printing two different numbers on the two architectures. It
-        is the same defect `test_formal_cross_module.py` pins for the bare
-        spelling, reached by the dotted one.
-        """
-        entry = M.dylib_callee_export(self._dylib_by_name,
-                                      self._dylib_by_module,
-                                      self._dylib_forwarded,
-                                      self._import_aliases, name)
-        if entry is None:
-            return None
-        return self._extern_decls.get(entry.get("symbol"))
-
     def _callee_decl(self, name: str):
         """The FunctionDef a callee `name` was declared by, or None.
 
         This module's own functions first — a local definition always wins —
         and then the linked libraries', read from their own source. None means
         the callee is not a function this image can see a declaration for, and
-        the caller falls back to passing the arguments as written."""
-        fn = self._functions.get(name)
-        return fn if fn is not None else self._extern_decl_for(name)
+        the caller falls back to passing the arguments as written.
+
+        The DECISION is `model.callee_declaration`, which the x86-64 backend
+        reads too, so the two cannot disagree about which declaration a call is
+        bound against. What is left here is the binding of this emitter's own
+        state to it, and nothing else."""
+        return M.callee_declaration(self._functions, self._dylib_by_name,
+                                    self._dylib_by_module,
+                                    self._dylib_forwarded,
+                                    self._import_aliases, self._extern_decls,
+                                    name)
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.

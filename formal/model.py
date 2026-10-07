@@ -24667,6 +24667,55 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     return dylib_export_lookup(by_name, by_module, callee, forwarded)
 
 
+def callee_declaration(functions: dict, by_name: dict, by_module: dict,
+                       forwarded: dict, aliases: dict, extern_decls: dict,
+                       callee: str):
+    """The `FunctionDef` that declares the callee `callee`, or None.
+
+    THE one implementation of "whose parameter list is this call bound
+    against", for both backends. It is here for the same reason
+    `bind_call_arguments` is: the two emitters each want the same answer from
+    their own state, and two copies of the answer are two chances for them to
+    disagree about a call that is on the boundary this backend exists to make
+    sound. It existed twice — `_extern_decl_for` plus `_callee_decl`, verbatim,
+    in `arm64_codegen.py` and in `x86_64_codegen.py` — where the drift would
+    have been invisible, because both copies were correct on the day they were
+    written and nothing in the type system can tell that a caller reads a
+    different one.
+
+    Three places, in this order, and the order is the answer rather than an
+    implementation detail:
+
+      1. **`functions`**, this image's own definitions. A local definition
+         always wins over an import of the same name, which is the same
+         precedence `imported_bindings` gives a local definition in the
+         importing file.
+      2. **`dylib_callee_export`**, which is the SAME two steps in the SAME
+         order `_extern_symbol` takes to decide what SYMBOL a call binds — the
+         import alias first, then the plain export lookup, the latter reaching a
+         re-exported name through `forwarded`. That shared resolution is what
+         makes the two agree by construction: the declaration handed to
+         `bind_call_arguments` is reached through the export the call actually
+         binds, so a call can never be checked against the signature of a
+         different library's same-named function, and a name a package
+         RE-EXPORTS is found even though the package's own table is empty.
+      3. **`extern_decls`**, `{export symbol: FunctionDef}`, keyed by that
+         symbol rather than by the name as spelled (`formal/imports.py`'s
+         `external_declarations`).
+
+    None means this image can see no declaration for the callee, and the caller
+    falls back to passing the arguments as written — which is the honest answer
+    for a library with no source behind its manifest, and the right one for a
+    raw C symbol whose only declaration is a header."""
+    fn = (functions or {}).get(callee)
+    if fn is not None:
+        return fn
+    entry = dylib_callee_export(by_name, by_module, forwarded, aliases, callee)
+    if entry is None:
+        return None
+    return (extern_decls or {}).get(entry.get("symbol"))
+
+
 def export_call_contract(fn) -> dict:
     """The argument-COUNT contract a library publishes for one of its exports.
 
@@ -25354,9 +25403,9 @@ def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
                          aliases: dict, forwarded: dict = None):
     """The export a bare callee reaches THROUGH an import alias, or None.
 
-    `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
-    (module as spelled, defining name)}`, so `from os.path import exists as
-    pe` is `{"pe": ("os.path", "exists")}`.
+    `aliases` is `formal/imports.py`'s `imported_bindings` table, keyed by the
+    local name and valued by `(module as spelled, defining name)`, so
+    `from os.path import exists as pe` is `{"pe": ("os.path", "exists")}`.
 
     Three questions, and they are asked in this order because each is weaker
     than the one before it — the last one cannot say WHICH module answered:
@@ -41549,6 +41598,11 @@ def import_bindings(stmt) -> list:
     `n.f` and reaches `f` of the module, which is `dylib_export_lookup`'s
     question and not this one's. `import a.b` binds `a`, which is why the
     bound name is the FIRST dotted component.
+
+    One STATEMENT, and a list. `formal/imports.py`'s `imported_bindings` is the
+    per-FILE table built by folding this over a module's top level, and the two
+    are named apart because a reader inside that one calls this one and the
+    return shapes are a list of triples and a dict of pairs.
     """
     kind = type(stmt).__name__
     if kind == "ImportStmt":

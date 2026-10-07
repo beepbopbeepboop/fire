@@ -451,16 +451,22 @@ def pack_into(fmt: String, buf, off: Int, v0=0, v1=0, v2=0) -> int:
 
     THE VALUE SLOTS ARE DEFAULTED, and that is what makes them safe to leave
     off. A slot beyond `_nvalues(fmt)` is never read, so a caller that packs a
-    two-value format has nothing to say about `v2` — but across a dylib
-    boundary a caller cannot leave a parameter out at all: the callee gives it
-    a register home whether or not the caller mentions it, and a register
-    nothing wrote is whatever the caller last put there
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
-    arity half of the same change). `pack_into(fmt, buf, 4, a, b)` is the shape
-    `test_struct_formal.py`'s offset case and the corpus's `patch` sites use,
-    and it is a `TypeError` against three REQUIRED value parameters. Zero is the
-    right fill for a slot that is not read, and declaring it is what turns the
-    call from an unbindable one into the CPython answer.
+    two-value format has nothing to say about `v2`, and
+    `pack_into(fmt, buf, 4, a, b)` is the shape `test_struct_formal.py`'s
+    offset case and the corpus's `patch` sites use. Zero is the right fill for
+    a slot that is not read.
+
+    They USED to be required, and the reason is worth keeping because it is the
+    shape every other module in this directory still has to be checked against:
+    across a dylib boundary the callee gives a parameter a register home
+    whether or not the caller mentions it, so a register nothing wrote held
+    whatever the caller last put there — a silently wrong ARGUMENT rather than a
+    missing feature. `formal/imports.py`'s `external_declarations` now hands
+    the emitter the callee's own declaration, so the omitted register is filled
+    from the default, and the arity half of the same change refuses a count
+    outside the declared overloads instead of dropping the words past it. Both
+    were `FORMAL_default_argument_not_applied_across_a_dylib`; both docs are
+    deleted, as a fixed bug's is.
     """
     n = _nvalues(fmt)
     if n == 0 or n > 3:

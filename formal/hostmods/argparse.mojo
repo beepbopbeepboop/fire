@@ -304,9 +304,14 @@ MAX_HELP_POSITION = 24
 # `out` and `err` are written by index on this path, and a subscripted STORE is
 # bounds-checked against the blob's count field, which a `malloc`'d buffer does
 # not have. So every write is a `memmove`/`memset` at an offset and every buffer
-# needs a bound both ends of the call can agree on: a module constant is the
-# only one, since a default argument is not applied to a call from another
-# image (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+# needs a bound both ends of the call can agree on. A module constant is the
+# only such bound: a default argument is a bound only the callee's own file
+# knows, and a caller in another image has to be able to READ the bound to
+# agree on it — which is what `BUF_CAP` being spelled here, and the same value
+# on both sides of the call, buys. A default argument used not to be applied
+# across the boundary at all (`FORMAL_default_argument_not_applied_across_a_dylib`,
+# fixed; its doc is deleted, as a fixed bug's is), but the reason to keep the
+# constant is that both ends must AGREE, not that one of them can guess.
 
 BUF_CAP = 8192
 
