@@ -4,12 +4,26 @@
 (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`, both emitters'
 `_emit_stack_floor_guard`, `formal/model.py::call_graph_depth`).
 
-**NOT MINE.** Filed by `work/formal33-metamorphic-r2`, whose claim is
+**Status 2026-10-07 (`work/x86-bugs-codegen`): option 3 below is LANDED and the
+asymmetry is now stated where a reader meets it and pinned by a test.** The
+guard's behaviour is UNCHANGED — the budget is still bytes and the two edges are
+still 59 / 471 — because options 1 and 2 are the recursion-stack project's
+policy call and neither is a light-worker change. What landed is the third
+option this doc itself names: `call_graph_depth`'s "Every formal frame is at
+least 128 KiB … 59 on arm64" was the last place that stated the arm64 figure
+without its architecture, and it now gives both (`(BUDGET - frame) // frame` is
+59 on arm64 and 479 on x86-64 before a function's own spills, which is why the
+measured x86-64 edge is 471). The budget docstring and `stack_trap_message`
+already said this; `check_stack_floor_decision` in `test_formal_run.py` now
+pins the arithmetic for both budgets, so a change that moved one number without
+the others fails a test rather than waiting for the next sweep.
+
+**Originally NOT MINE.** Filed by `work/formal33-metamorphic-r2`, whose claim is
 `project33:metamorphic`. This is the recursion-depth area: `project33:recursion-stack`
-is a live claim, and `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
-(claimed by `formal25-5-r2`) is the doc that owns the guard and the budget. Recorded
-here rather than acted on because the owner is a better place for it than this
-branch is — and because the number below is worth having measured in a second place.
+was a live claim, and `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+is the doc that owns the guard and the budget. Recorded here rather than acted on
+because the owner is a better place for it than that branch was — and because the
+number below is worth having measured in a second place.
 
 ## What was run
 
