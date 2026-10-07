@@ -48253,11 +48253,17 @@ def struct_is_context_manager(struct_def) -> bool:
         the one-word value model and it is stated rather than hidden: CPython's
         own `TemporaryDirectory` and `nullcontext` both keep more than one
         attribute, so the honest mirror of either is representable.
-      * neither dunder takes an argument other than the receiver, and `__enter__`
-        RETURNS a value.  `__exit__`'s three exception arguments are a question
-        about the unwinder this path does not have (see
+      * `__enter__` takes no argument other than the receiver and RETURNS a
+        value.  `__exit__` takes either the receiver alone or CPython's own
+        `(self, exc_type, exc_val, tb)` — and the four-parameter spelling is
+        accepted ONLY when the method never reads its last three words
+        (`context_exit_ignores_its_exception_words`).  Those three words are a
+        question about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
-        `__exit__` that wanted them could not act on them anyway.
+        `__exit__` that acted on them could not act on a value this path
+        invented.  A `__exit__` that IGNORES them is the cleanup-only shape every
+        temporary-directory and redirect class writes, and it lowers with the
+        receiver plus three words it never looks at.
       * `__exit__` does not RETURN a value CPython would read as SUPPRESSING the
         exception (`context_exit_returns_truthy`).  The same missing unwinder,
         seen from the other side: a `raise` in the body exits the process, so a
@@ -48269,11 +48275,24 @@ def struct_is_context_manager(struct_def) -> bool:
     if struct_def is None or not struct_is_framed(struct_def):
         return False
     methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
-    for name in (CONTEXT_ENTER, CONTEXT_EXIT):
-        m = methods.get(name)
-        if m is None or _dunder_receiver_params(m) != 1:
-            return False
-    return not context_exit_returns_truthy(methods[CONTEXT_EXIT])
+    enter = methods.get(CONTEXT_ENTER)
+    if enter is None or _dunder_receiver_params(enter) != 1:
+        return False
+    exit_ = methods.get(CONTEXT_EXIT)
+    if exit_ is None:
+        return False
+    params = _dunder_receiver_params(exit_)
+    # `__exit__` may take CPython's own three exception words — but only when it
+    # does not READ them.  The words have nowhere to come from (there is no
+    # unwinder), so passing a made-up value to a method that looks at it would be
+    # a lie; a method that ignores them is the cleanup-only shape and lowers
+    # with the receiver alone plus three words it never looks at.  See
+    # `context_exit_ignores_its_exception_words`.
+    if params not in (1, 4):
+        return False
+    if params == 4 and not context_exit_ignores_its_exception_words(exit_):
+        return False
+    return not context_exit_returns_truthy(exit_)
 
 
 def context_exit_returns_truthy(method) -> bool:
@@ -48337,6 +48356,75 @@ def _dunder_receiver_params(method) -> int:
     if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
         return -1
     return len(params)
+
+
+def _param_names(params) -> list:
+    """The NAME of each parameter, in order — `(name, annotation)` tuples on
+    this front end, with `getattr(p, "name", p)` as the fallback for a node
+    shape that carries the name itself.  `None` for an entry nothing names."""
+    out = []
+    for p in (params or ()):
+        if isinstance(p, (list, tuple)):
+            out.append(p[0] if p and isinstance(p[0], str) else None)
+        else:
+            name = getattr(p, "name", None)
+            out.append(name if isinstance(name, str) else None)
+    return out
+
+
+def context_exit_ignores_its_exception_words(method) -> bool:
+    """True when a FOUR-parameter `__exit__` never reads its last three words.
+
+    CPython's own signature is `__exit__(self, exc_type, exc_val, tb)`, and the
+    backend has no unwinder to supply them — but the common cleanup-only manager
+    (every temporary-directory and redirect class in the wild) ignores them
+    entirely, and for that shape the signature is not a question about the
+    unwinder at all.  This is the predicate that tells the two apart.
+
+    **Non-use, and not "returns falsy".**  `context_exit_returns_truthy` decides
+    the return half, which is a suppression this path cannot perform; this
+    decides the ARGUMENT half, which is whether the values this path would pass
+    are ever looked at.  A method that ignores them cannot be acted on by them,
+    so passing the receiver plus three zeros is faithful; a method that reads any
+    one of them would be acting on a lie and stays refused.  The three names are
+    read from the method's own parameters, so a manager that spells them
+    `(self, kind, value, backtrace)` is accepted on exactly the same evidence.
+
+    The check is over the whole method body through `iter_nodes`, so a read in a
+    nested `def`, in a closure, or through `getattr`-free attribute access
+    (`exc_type.__name__`) is an occurrence of the name and refuses.  A name that
+    appears only as an assignment TARGET is also an occurrence, which is the
+    conservative direction: it is not a read, and refusing it costs a shape no
+    real context manager writes.
+    """
+    params = list(getattr(method, "params", None) or ())
+    if len(params) != 4 or getattr(method, "vararg", None) or \
+            getattr(method, "kwarg", None):
+        return False
+    names = set(_param_names(params[1:]))
+    if len(names) != 3 or None in names:
+        return False
+    for node in iter_nodes(getattr(method, "body", None) or ()):
+        if isinstance(node, F.IdentExpr) and getattr(node, "name", None) in names:
+            return False
+    return True
+
+
+def context_exit_arity(struct_def) -> int:
+    """How many arguments `__exit__` takes, receiver included: 1 or 4.
+
+    The ONE reader of "what does the exit call pass", for the lowering that
+    builds the call (`formal/build.py::_one_with_item`).  It answers from the
+    same `_dunder_receiver_params` the gate does, so the call and the gate cannot
+    disagree; a receiver-only `__exit__` is 1 and CPython's own three-word
+    spelling is 4.  A struct that is not a context manager this path lowers gets
+    the receiver-only answer, which is the shape the resource arm
+    (`open`) uses and the only one its `close` builtin takes.
+    """
+    for m in struct_methods(struct_def):
+        if getattr(m, "name", None) == CONTEXT_EXIT:
+            return 4 if _dunder_receiver_params(m) > 1 else 1
+    return 1
 
 
 def with_alias_bare_name(item):
@@ -48499,6 +48587,24 @@ def with_context_manager_defect(struct_def) -> str:
                     f"(`*args`/`**kwargs`), which cannot be counted from the "
                     f"tree — so this path refuses it rather than assume it "
                     f"takes the receiver and nothing else")
+        if name == CONTEXT_EXIT and params == 4:
+            # CPython's own signature, and it is refused ONLY because the method
+            # READS one of the three words.  The gate accepts this arity when the
+            # words are ignored (`context_exit_ignores_its_exception_words`), so
+            # reaching here means at least one of them is used — and a value this
+            # path invented for it would be a lie, which is the whole reason the
+            # three words are a question about the missing unwinder rather than a
+            # parameter-count rule.
+            return (
+                f"it declares both dunders, but its `{CONTEXT_EXIT}` takes "
+                f"CPython's three exception words and READS them. Those three "
+                f"words are a question about an UNWINDER this backend does not "
+                f"have: there is no exception value, no traceback and no type "
+                f"word to pass, so any value this path supplied would be a lie "
+                f"the method then acted on. Drop the reads (or the parameters): a "
+                f"`{CONTEXT_EXIT}` that IGNORES them is the cleanup-only shape, "
+                f"it is what `formal/hostmods/tempfile.mojo`'s "
+                f"`TemporaryDirectory` declares, and it lowers")
         if name == CONTEXT_EXIT:
             return (
                 f"it declares both dunders, but its `{CONTEXT_EXIT}` takes "

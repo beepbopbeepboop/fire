@@ -19714,6 +19714,15 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
                        args=[F.IdentExpr(tmp)], kwargs=[]),
             fn)
     tmp = fresh_name()
+    # `__exit__` takes the receiver alone, or CPython's own three exception
+    # words.  The four-word shape is accepted only when the method never reads
+    # them (`model.context_exit_ignores_its_exception_words`), so the three
+    # zeros below are the `None, None, None` CPython passes on a normal exit —
+    # spelled as the only value this word-based model has for "nothing" — and
+    # nothing in the callee looks at them.
+    exit_args = [F.IdentExpr(tmp)]
+    if M.context_exit_arity(struct) == 4:
+        exit_args += [F.IntLiteral(value=0, line=0, col=0, raw="")] * 3
     return _with_protocol(
         item, body,
         F.VarDecl(tmp, None, item.expr),
@@ -19724,7 +19733,7 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
         F.CallExpr(
             func=F.IdentExpr(M.method_function_name(struct.name,
                                                    M.CONTEXT_EXIT)),
-            args=[F.IdentExpr(tmp)], kwargs=[]),
+            args=exit_args, kwargs=[]),
         fn)
 
 
