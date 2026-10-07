@@ -356,6 +356,35 @@ CASES = [
         "    print(None == None)",
         "    print(None == [1])",
         "    return 0")),
+    # A MODULE GLOBAL is read out of `_root_globals` into an int64_t temp, so
+    # by C type both operands of `A == B` look like two words and, absent the
+    # compiler's recorded container kind, compared as two heap addresses --
+    # False forever for equal containers (round8's 64e402a0). Order
+    # independence for sets and dicts, order SENSITIVITY for lists, and the
+    # negatives (int/int, container/scalar, set/list) that must stay plain.
+    ("module-global", _p(
+        "A = {1, 2, 3}",
+        "B = {3, 2, 1}",
+        "L1 = [1, 2]",
+        "L2 = [1, 2]",
+        "L3 = [2, 1]",
+        "D1 = {'a': 1, 'b': 2}",
+        "D2 = {'b': 2, 'a': 1}",
+        "T1 = (1, 2)",
+        "T2 = (1, 2)",
+        "N = 5",
+        "M = 5",
+        "def main() -> Int:",
+        "    print(A == B)",
+        "    print(A != B)",
+        "    print(L1 == L2)",
+        "    print(L1 == L3)",
+        "    print(D1 == D2)",
+        "    print(T1 == T2)",
+        "    print(N == M)",
+        "    print(A == N)",
+        "    print(A == L1)",
+        "    return 0")),
     # A chained comparison goes through the same per-link lowering, so
     # `a == b == [1]` must not read as "compare the first two only".
     ("chained", _p(
