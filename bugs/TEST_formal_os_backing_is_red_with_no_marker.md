@@ -92,9 +92,9 @@ an `expect=` marker would be checked against.
   model owns. **This worker did not edit it** — rule 5 — and files the exact
   location instead.
 * **Shape #2 has no live claim**; `grep` over `tools/control.py claims` finds
-  nothing for `stat`/`os_backing`, and the old
-  `bugs/FORMAL_stat_out_parameter_is_unreadable.md` is gone (its fix,
-  `fd79ee2a`, is what ADDED `stat_null`).
+  nothing for `stat`/`os_backing`. The `stat(2)` out-parameter was once
+  unreadable (`isfile` could not be exact); that bug was fixed and its doc
+  deleted with the fix, `fd79ee2a`, which is the commit that ADDED `stat_null`.
 
 ## The exact next step
 
