@@ -8076,23 +8076,6 @@ def gen_module_impl(self, stmts):
     # `_scalar_obs`' set) and applied by the struct contract below.
     _struct_obs: dict[str, dict[str, set]] = {}
 
-
-    # ...and the METHOD half of the same contract. The walk above only
-    # recognises a callee spelled as a bare `IdentExpr`, so every
-    # `self.q.backward(gq, n)` / `obj.method(xs)` call site was invisible:
-    # a container passed into a METHOD kept no element type, and the
-    # callee read it with mojo_list_get_int whatever the caller stored.
-    # For a list of doubles that returns the raw IEEE-754 bit pattern,
-    # which then flows through arithmetic as a perfectly ordinary-looking
-    # int64_t — a SILENT wrong answer, exit 0 (real: a hand-written
-    # neural-net's `g[i]` incoming-gradient read in a Linear.backward,
-    # where `gi == 0.0` then compared a bit pattern against zero and never
-    # matched, so every gradient silently went the wrong way).
-    #
-    # Receiver resolution mirrors `_collect_method_scalar_obs` exactly
-    # (self.<field> via the caller's own struct, a local via
-    # _inferred_var_types), because it answers the same question: which
-    # struct owns this method call.
     def _static_arg_elems(a, elem, nested):
         """(element, nested-element) C types provable for one argument
         expression, or (None, None). IdentExpr defers to the caller's
@@ -8344,6 +8327,23 @@ def gen_module_impl(self, stmts):
                 _ctor_init_by_struct[_as_str(_cs.name)] = _cm
                 break
 
+    # ...and the METHOD half of the same contract. The walk above only
+    # recognises a callee spelled as a bare `IdentExpr`, so every
+    # `self.q.backward(gq, n)` / `obj.method(xs)` call site was invisible:
+    # a container passed into a METHOD kept no element type, and the
+    # callee read it with mojo_list_get_int whatever the caller stored.
+    # For a list of doubles that returns the raw IEEE-754 bit pattern,
+    # which then flows through arithmetic as a perfectly ordinary-looking
+    # int64_t — a SILENT wrong answer, exit 0 (real: a hand-written
+    # neural-net's `g[i]` incoming-gradient read in a Linear.backward,
+    # where `gi == 0.0` then compared a bit pattern against zero and never
+    # matched, so every gradient silently went the wrong way).
+    #
+    # Receiver resolution mirrors `_collect_method_scalar_obs` exactly
+    # (self.<field> via the caller's own struct, a local via
+    # _inferred_var_types), because it answers the same question: which
+    # struct owns this method call. The element evidence itself is read through
+    # the same `_static_arg_elems` helper the positional walk uses.
     for caller_name, caller_struct, cbody in _method_caller_bodies:
         _melem, _mnested, _mdval = self._scan_container_elems(cbody)
         _mcalls = []
