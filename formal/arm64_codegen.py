@@ -716,11 +716,14 @@ dylib_exports: list = None, globals_base: int = None,
         self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
-        # The ADDRESSES of the `BL fflush` this backend emits inside its own
-        # bounded stops, published as `info["compiler_traps"]` and subtracted by
+        # The ADDRESSES of the calls THIS BACKEND emits for itself, published as
+        # `info["compiler_traps"]` and subtracted by
         # `formal/arm64_proof_gen.py::_program_extern_calls` from the program's
-        # own extern calls. See `_emit_exit` for why the subtraction is the
-        # difference between a proof and a `lean-rejected` row.
+        # own extern calls. Two of them: the `BL fflush` inside every bounded
+        # stop (`_emit_trap_flush`), and the `getrlimit` the stack-floor guard
+        # reads `RLIMIT_STACK` with in every guarded prologue
+        # (`_emit_trap_extern_call`). See `_emit_exit` for why the subtraction is
+        # the difference between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
         self._if_counter = 0
         self._while_counter = 0
@@ -1959,7 +1962,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_mov_zr_xn(14, 0))
         self.asm.emit(encode_mov_zr_xn(0, 15))
         self.asm.emit(encode_mov_zr_xn(1, 16))
-        self._emit_extern_call("getrlimit")
+        self._emit_trap_extern_call("getrlimit")
         # `rlim_cur` is the FIRST word of the struct on both targets this path
         # emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
         # `unsigned long`), and `rlim_max` — which the kernel will not let an
@@ -3097,8 +3100,7 @@ dylib_exports: list = None, globals_base: int = None,
         """
         if status is None:
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
-                                   args=[F.IntLiteral(0)]))
+        self._emit_trap_flush()
         if status is None:
             self.asm.emit(encode_ldp_sp_post(0, 31))
             # `exit(3)`'s low BYTE, so a computed value out of byte range is the
@@ -3109,6 +3111,65 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
+
+    def _record_trap_addresses(self, symbol: str, before: int) -> None:
+        """Record every `BL` to `symbol` the emitter appended since `before`.
+
+        The recording is the point of the two wrappers below, and it cannot be
+        done by taking the assembler's position before the call: `_emit_call`
+        emits the ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl
+        fflush`), so that position is short of the `BL`. Reading the addresses
+        the call actually appended to `asm.extern_refs` is therefore the only way
+        to name the instruction, and naming it is what `info["compiler_traps"]`
+        is for — `formal/arm64_proof_gen.py::_program_extern_calls` subtracts
+        these addresses from the program's own extern calls, so a program whose
+        only unbound call is one of the compiler's gets its run tests back.
+
+        Filtered by SYMBOL as well as `kind` because a wrapper's evaluation can
+        reach a nested call of its own, and a nested program call is not a
+        compiler trap.
+        """
+        self._compiler_trap_addrs.update(
+            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
+            if kind == "bl" and sym == symbol)
+
+    def _emit_trap_flush(self) -> None:
+        """`fflush(NULL)`, and RECORD where the call landed.
+
+        The recording is the whole reason this is a method: `_emit_call` emits
+        the ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`),
+        so the assembler's position before the call is twelve bytes short of the
+        instruction, and an address that is in no `extern_calls` entry subtracts
+        nothing while publishing a list that claims otherwise. Measured on
+        `formal/examples/mod_by_var.mojo`: without this the example is a
+        `lean-rejected` row whose first diagnostic is a false
+        `run_pc_reached … = true`, and with it the example's ordinary run test
+        (`run_result_exit … = mojo 10`) is emitted and is true.
+        """
+        before = len(self.asm.extern_refs)
+        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                   args=[F.IntLiteral(0)]))
+        self._record_trap_addresses("fflush", before)
+
+    def _emit_trap_extern_call(self, symbol: str, total: int = 0) -> None:
+        """`_emit_extern_call(symbol)`, and RECORD where the call landed.
+
+        The arm64 STACK-FLOOR guard reads `RLIMIT_STACK` with `getrlimit` in
+        every guarded prologue, so that call is the COMPILER's, on no path the
+        program wrote. It is in `extern_calls` (a real `BL` to a stub, so the
+        link line needs it), and both `_program_extern_calls` and the universal
+        walk need to tell it from a program call, so it is recorded beside the
+        exit flush.
+
+        x86-64 emits the same `getrlimit` but in a STARTUP STUB below the entry,
+        where `_program_externs` subtracts it by address against `func_offset`
+        and no trap list is involved. arm64 emits the guard in the PROLOGUE,
+        above the entry and inside the walk's range, so the trap list is the only
+        mechanism that reaches it.
+        """
+        before = len(self.asm.extern_refs)
+        self._emit_extern_call(symbol, total)
+        self._record_trap_addresses(symbol, before)
 
     def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.

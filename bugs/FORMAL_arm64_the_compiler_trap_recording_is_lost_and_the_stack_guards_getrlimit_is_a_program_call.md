@@ -6,18 +6,40 @@
 walk's `_unfollowable_calls`), and
 `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall`.
 
-**Status: OPEN, measured 2026-10-07 on master (`8df5b273`), NOT FIXED.** Two
-independent defects, both arm64-only, both in the "the COMPILER's own call is
-being read as the PROGRAM's" family, and together they make arm64 proof
-GENERATION refuse outright for most of `formal/examples` and reduce the rest to a
-reachability of the compiler's own `getrlimit`. **None of it is visible to the
-gate**: every test that would see it lives in the `proofs` bucket (or is the
+**Status: PARTIALLY FIXED 2026-10-07 (`work/formal115-docs`) — the EMITTER half
+is landed, the WALK half is open.** Two independent defects, both arm64-only,
+both in the "the COMPILER's own call is being read as the PROGRAM's" family, and
+together they make arm64 proof GENERATION refuse outright for most of
+`formal/examples` and reduce the rest to a reachability of the compiler's own
+`getrlimit`. **None of it is visible to the gate**: every test that would see it
+lives in the `proofs` bucket (or is the
 `TestTheZeroDivisorGuardAgainstLean` class that skips without a built library),
-and `make gate` does not run `proofs`. Filed rather than fixed because the
-proof-walk half is `formal108`'s
-(`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`)
-and the stack-guard half is `formal114`'s, and a light worker may not run the
-Lean-checking suites that would verify an emitter change.
+and `make gate` does not run `proofs`.
+
+* **Landed**: `formal/arm64_codegen.py` records both compiler calls again —
+  `_emit_trap_flush` (the `38880520` code this doc's §1 shows a merge dropped)
+  and `_emit_trap_extern_call("getrlimit")` — through one
+  `_record_trap_addresses`, so `info["compiler_traps"]` is filled and
+  `_program_extern_calls` subtracts the compiler's own calls on the concrete
+  path. `test_formal_call_proof_gen.py` gains
+  `test_arm64_records_its_own_calls_and_that_needs_no_proof` (a `prove=False`
+  build, green on its own), `test_arm64_needs_no_trap_list_and_keeps_its_run_tests`
+  is corrected in place (its old "plain's `extern_calls` is empty" premise
+  stopped being true when `bfeec991` put `getrlimit` in every prologue; the name
+  is kept because the stack-floor `svc` still needs no trap entry), and
+  `test_arm64_publishes_its_exit_flush_as_a_compiler_trap` allows `getrlimit`
+  beside `fflush`. Verified with a full
+  `python3 test_formal_call_proof_gen.py -v` before/after: **no test regressed**,
+  the two changed rows went red→green, and the counts otherwise match under load
+  (baseline `84 ok / 37 FAIL / 12 ERROR / 4 skipped`; after
+  `86 ok / 35 FAIL / 12 ERROR / 4 skipped`).
+* **Open — the reason most of §3 stays red**: the universal walk still counts
+  the two `BL`s from the raw bytes, so `divisor`/`count`/`sum`/`fact` refuse at
+  generation. That is `formal108`'s
+  (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`),
+  and the emitter half is its precondition rather than its substitute: three rows
+  of `TestCompilerTrapIsNotAProgramCall` stay red until the walk keeps a terminal
+  for a call it cannot follow. The stack-guard half is `formal114`'s.
 
 ## 1. `_emit_trap_flush` from `38880520` is not in HEAD — a merge dropped it
 
@@ -158,23 +180,17 @@ written:
 
 1. **Restore the recording** (`git show 38880520 -- formal/arm64_codegen.py`) and
    **record the guard's `getrlimit`** beside the exit flush. Both are the
-   emitter half, both arm64-only, and neither should move any emitted byte of
-   code (the calls are already emitted; this only records their addresses). The
-   test is `info["compiler_traps"]` containing the `fflush` — and, once the
-   guard's `getrlimit` is recorded, the `test_arm64_publishes_its_exit_flush_as_a_compiler_trap`
-   assertion that "every published trap is an `fflush`" must be widened, because
-   `getrlimit` is a second compiler call.
+   emitter half, both arm64-only, and neither moves any emitted byte of code —
+   the calls are already emitted; this only records their addresses. **DONE on
+   `work/formal115-docs`** (see Status above): `_emit_trap_flush`,
+   `_emit_trap_extern_call`, and `_record_trap_addresses`, with the three test
+   rows updated or added.
 2. **Then the walk half**, which is `formal108`'s: `_unfollowable_calls` must not
    count a compiler trap as a program call, and the universal theorem must still
    have a terminal for it. Until that lands, (1) restores only the contiguous
    run tests and the `divisor` fixture still refuses.
-3. Update `test_arm64_needs_no_trap_list_and_keeps_its_run_tests` — it asserts
-   `plain`'s `extern_calls` is empty, which stopped being true when `bfeec991`
-   put `getrlimit` in every prologue; it should assert the `getrlimit` is
-   published as a compiler trap instead.
-4. Re-run `test_formal_call_proof_gen.py` (generation only, no Lean) and the
-   `proofs` bucket's `formal`/`formal-call-proofgen` once the emitter and walk
-   halves are both in.
+3. Re-run `test_formal_call_proof_gen.py` (generation only, no Lean) and the
+   `proofs` bucket's `formal`/`formal-call-proofgen` once the walk half is in.
 
 **Anti-rot:** the `formal/examples` generation census is the check. `count`,
 `sum` and `fact` generated a proof before `bfeec991` and do not now; a fix is
