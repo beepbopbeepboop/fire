@@ -8648,6 +8648,37 @@ BOTH_ARCH_CASES = [
      "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
      "    return 0\n", 0,
      "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
+    # ── A NESTED for-TARGET, ON BOTH MACHINES ──────────────────────────────
+    #
+    # x86-64's `_emit_for_list` / `_emit_compr_gen` read a tuple target through
+    # `_lbn_target_names`, which FLATTENS the groups, while the `_emit_for_unpack`
+    # they hand it expects the nesting: `for a, (b, c) in [(1, (2, 3))]` checked
+    # the element blob's count of 2 against the flattened arity of 3 and
+    # exited(1) with nothing printed, where arm64 and CPython both answer. The
+    # fix is one shared shape reader (`formal/model.py::for_target_tree`) both
+    # backends now use, which is why this row is in this group rather than in
+    # `CASES`: the subject is that the two machines agree.
+    #
+    # 49 = 21 (flat pair) + 6 (nested pair) + 10 (nested pair in a nested pair)
+    # + 6 (comprehension over a nested target) + 6 (a nested tuple TARGET on
+    # the left of `=`). Each shape contributes a distinct amount, so a lowering
+    # that silently skips one cannot land on the same total.
+    ("both_arch_a_nested_for_target_unpacks_like_arm64_and_cpython",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, b in [(1, 20)]:\n"
+     "        s = s + a + b\n"
+     "    for a, (b, c) in [(1, (2, 3))]:\n"
+     "        s = s + a + b + c\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    t = [a + b + c for a, (b, c) in [(1, (2, 3))]]\n"
+     "    for v in t:\n"
+     "        s = s + v\n"
+     "    a, (b, c) = 1, (2, 3)\n"
+     "    s = s + a + b + c\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "49"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -23893,6 +23924,28 @@ def check_stack_floor_decision(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: depth/{name}")
+    # The budget is BYTES and the frames are not, so the depth it affords is
+    # PER ARCHITECTURE — the asymmetry the budget docstring, `stack_trap_message`
+    # and `call_graph_depth` all record — pinned here as arithmetic rather than
+    # re-derived by running two deep recursions.
+    # 7.5 MiB against a 128 KiB arm64 frame is 59 levels; against a 16 KiB
+    # x86-64 frame it is 479 before the function's own spills, which is why the
+    # measured x86-64 edge is 471. Both numbers are in `call_graph_depth`'s
+    # docstring and the budget docstring, so a change that moved one without the
+    # others is caught here.
+    arm_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.ARM64_CONTAINER_BUDGET)
+                 // M.ARM64_CONTAINER_BUDGET)
+    x86_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.X86_64_CONTAINER_BUDGET)
+                 // M.X86_64_CONTAINER_BUDGET)
+    if (arm_depth, x86_depth) != (59, 479):
+        failures.append(
+            f"budget/depth: arm64 {arm_depth} x86-64 {x86_depth} "
+            f"(want 59, 479)")
+    else:
+        passed += 1
+        if verbose:
+            print("  PASS  stack-floor-decision: budget/depth arm64=59 "
+                  "x86-64=479")
     return passed, failures
 
 

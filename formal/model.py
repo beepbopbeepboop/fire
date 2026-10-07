@@ -26534,6 +26534,51 @@ def _target_names(target):
     return _lbn_target_names(target) if isinstance(target, str) else []
 
 
+def for_target_tree(target):
+    """Parse a for/comprehension target string into a leaf name or nested list.
+
+    `'i'` -> `'i'`; `'(a, b)'` -> `['a', 'b']`; `'a, b'` (the comprehension
+    `Generator.target` spelling, no surrounding parens) -> `['a', 'b']`;
+    `'(a, (b, c))'` -> `['a', ['b', 'c']]`. Returns None when a leaf is not a
+    plain identifier (a `*name` star leaf stays, as `'*name'`, because the
+    binding rules for it are the unpacker's and not this reader's).
+
+    This is the recursive SHAPE reader — `fire_compiler.for_target_names` is the
+    recursive FLATTENING of the same text, and a lowering that needs to unpack a
+    nested group has to have the nesting, or it unpacks the inner group's names
+    against the OUTER element and its arity check fires. That was one bug on
+    x86-64 (`a, (b, c)` checked a two-element tuple against a three-name
+    target) and this is the one reader both backends now share.
+
+    Uses the parser's own top-level split (`fire_compiler.target_slots`, which
+    drops the empty slot a 1-tuple target's trailing comma leaves) and its own
+    group peel, so `'d[a, b]'` — a SUBSCRIPT target, one name whose brackets
+    contain a comma — is not torn into two.
+    """
+    if not isinstance(target, str):
+        return None
+    t = target.strip()
+    inner = F._target_group_inner(t)
+    if inner is not None:
+        parts = F.target_slots(inner)
+    else:
+        parts = F.target_slots(t)
+        # `'(a)'` normalizes in the parser to `'a'`, so a group-less text with
+        # no top-level comma is a single leaf and not a one-element tree.
+        if len(parts) <= 1:
+            if t.startswith("*"):
+                rest = t[1:].strip()
+                return "*" + rest if rest.isidentifier() else None
+            return t if t.isidentifier() else None
+    tree = []
+    for p in parts:
+        child = for_target_tree(p)
+        if child is None:
+            return None
+        tree.append(child)
+    return tree if tree else None
+
+
 def _comprehension_target_names(target) -> list:
     """The names ONE generator target binds, in source order.
 
@@ -45208,9 +45253,19 @@ def call_graph_depth(edges: dict) -> int:
     The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
-    sixty levels deep spends the same stack as a recursion sixty deep. Every
-    formal frame is at least 128 KiB, so the depth that matters is
-    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+    sixty levels deep spends the same stack as a recursion sixty deep.
+
+    **The depth the budget affords is PER ARCHITECTURE, because the budget is
+    bytes and the frame is not.** `STACK_FLOOR_BUDGET_BYTES` is one 7.5 MiB
+    constant on both machines, but `(BUDGET - frame) // frame` — what
+    `stack_floor_charge` measures — is 59 on arm64 against a 128 KiB frame
+    (`ARM64_CONTAINER_BUDGET`) and 479 on x86-64 against a 16 KiB one
+    (`X86_64_CONTAINER_BUDGET`) before the function's own spills, which is why
+    the measured x86-64 edge is 471 and not 479 (`tools/formal_recursion_depth.py`,
+    measured, not estimated). So the same recursion is refused at a different
+    depth on each machine by design: 59 is the ARM64 figure, and a reader on
+    x86-64 must not take it as a fact about x86-64. The budget docstring above
+    and `stack_trap_message` say the same thing where an operator meets it.
 
     **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
     The exact figure is the longest SIMPLE path, which is NP-hard in general, so
