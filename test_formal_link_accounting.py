@@ -647,6 +647,19 @@ HOST_SET_ADDED_TIERS = {
     "genericpath": "modelled",
     "ntpath": "modelled",
     "nturl2path": "modelled",
+    # ── and the five CPython `find_spec` decides of the unclassified set, added
+    # 2026-10-07 by the worker holding `FORMAL_stdlib_module_names_are_not_
+    # classified.md`.  Same measurement, same rule and the same direction as the
+    # four above: `find_spec` returns NO SPEC for each on this host, so the
+    # object (the gdbm library, Tcl/Tk, and the Windows overlapped-I/O, Win32 API
+    # and WMI objects) is missing from the target rather than the module being
+    # unwritten.  §0.5 named these as the entries with a measurement behind them;
+    # all five are private, so the public count is unchanged.
+    "_gdbm": "unreachable",
+    "_overlapped": "unreachable",
+    "_tkinter": "unreachable",
+    "_winapi": "unreachable",
+    "_wmi": "unreachable",
 }
 
 

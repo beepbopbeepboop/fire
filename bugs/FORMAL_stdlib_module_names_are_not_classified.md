@@ -10,6 +10,19 @@ is ZERO. §0.4 closes the LAST of §0.3's list: `not-code` is an eighth VERDICT,
 the tier's fourth answer no longer shares a string with the typo answer, and the
 two RED tests on master that measured the consequence are green (2026-10-05).**
 
+**Status 2026-10-07 (`work/formal114-docs`): §0.5's named next step is TAKEN
+for the five names `find_spec` decides.** `_gdbm`, `_overlapped`, `_tkinter`,
+`_winapi` and `_wmi` are now in `HOST_UNREACHABLE` — `importlib.util.find_spec`
+returns NO SPEC for each on this host, so the object (the gdbm library, Tcl/Tk,
+and the Windows overlapped-I/O, Win32 API and WMI objects) is missing from the
+target, which is the rule at the top of `formal/imports.py` applied. They are
+carried in `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS` with their
+tier, and pinned by
+`test_formal_imports.py::test_the_find_spec_decided_names_are_unreachable`.
+All five are private, so the PUBLIC unclassified count is unchanged; the
+`unclassified` count falls 205 → **200**. The other 200 are still §0.1's
+per-name judgements with no corpus exposure, and this does not change that.
+
 **Status 2026-10-05 (`work/formal54-docs`): §0.1's measurement RE-CONFIRMED on a
 corpus 20% larger, the per-verdict census REFRESHED (this document's stated
 counts were stale), and `find_spec` measured as the oracle it is claimed to be —
