@@ -392,15 +392,15 @@ which is the check most likely to be repeated.
 
 ### The same shape, already paid for, in the other direction
 
-`6ad8efd5` (master, 2026-09-29) deleted `bugs/FORMAL_toplevel_statements_dropped.md`
-— correctly, the bug is fixed — and left **seven** citations to a file that no
-longer exists: `formal/build.py:105,663`, `formal/model.py:9182`,
-`bugs/FORMAL_module_state_no_storage.md:146`,
-`bugs/FORMAL_read_before_store_returns_a_register.md:4`,
-`test_formal_toplevel.py:4`, `test_formal_imports.py:590`. Same rule, same
-cost, opposite direction from the nine above: a deleted doc rather than a
-renamed module. Recorded here rather than fixed in place because `formal/` is
-another worker's claimed area this session; it is four words per site.
+`6ad8efd5` (master, 2026-09-29) deleted the doc for the dropped-top-level-
+statements bug -- correctly, the bug is fixed -- and left citations to a file
+that no longer exists (in `formal/build.py`, `formal/model.py`, two other
+bug docs, `test_formal_toplevel.py` and `test_formal_imports.py`). Same rule,
+same cost, opposite direction from the nine above: a deleted doc rather than
+a renamed module. Those sites still name the deleted doc by its
+bare slug; they are formal-area edits (four words per site) and are left to
+that area's owner, while `doc-refs`'s ratchet keeps the path-form count from
+growing.
 
 ---
 
