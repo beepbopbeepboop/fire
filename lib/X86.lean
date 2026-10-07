@@ -1,6 +1,9 @@
 import ProofLib
+import IEEE754
 
 set_option autoImplicit false
+
+open IEEE754
 
 /-!
 # x86.lean — the x86-64 machine model
@@ -1264,6 +1267,117 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
       let k := (modrm.toNat >>> 3) &&& 7
       let r := (modrm.toNat &&& 7) + x86_rex_b rex
       some { x86_set_xmm s k (x86_get_reg s r) with rip := rip + 5 }
+  else if code (rip + 2) = 0x0f && code (rip + 3) = 0x7e && w then
+    -- `66 REX.W 0F 7E /r` — `movq r64, xmm`, the SSE-to-GPR move, the reverse
+    -- of the arm above.  `formal/x86_64.py::encode_movq_r64_xmm` emits it, and
+    -- the codegen's own contract makes it mandatory rather than optional: an
+    -- expression leaves its value in a GPR, so a `double`-valued expression
+    -- ends with this.  A run whose model cannot take this step stops at it, and
+    -- a stopped run reads as result 0 (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`).
+    --
+    -- The ModRM halves are the OPPOSITE of `0F 6E`'s and that is the instruction,
+    -- not a naming preference: `0F 7E` is `MOVQ r/m64, xmm` — the XMM is the
+    -- `reg` field (raw, no REX.R; there is no XMM8 in SysV) and the GPR is `rm`
+    -- (REX.B extends it), which is exactly the encoder's `_modrm(3, xmm, gpr)`.
+    let modrm := code (rip + 4)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let k := (modrm.toNat >>> 3) &&& 7
+      let r := (modrm.toNat &&& 7) + x86_rex_b rex
+      some { x86_set_reg s r (x86_get_xmm s k) with rip := rip + 5 }
+  else if code (rip + 1) = 0x0f && code (rip + 2) = 0x57 then
+    -- `66 0F 57 /r` — `xorpd xmm, xmm`, the constant `0.0` in one instruction
+    -- (`encode_xorpd_xmm`).  Bitwise, so XOR of a pattern with itself is zero
+    -- for EVERY pattern including NaN, which is why the encoder uses it rather
+    -- than a subtract.  Only the low 64 bits are modelled, which is what the
+    -- fuzz harness dumps and what a scalar `double` value occupies; the high
+    -- half of the XMM is not part of `X86State`.
+    --
+    -- NO REX byte: `encode_xorpd_xmm` emits `66 0F 57 /r`, so the opcode is at
+    -- `rip + 1` and the ModRM at `rip + 3` — one byte earlier than the `0F 6E`
+    -- arm above, which carries a REX.W.  Reading `code (rip + 4)` here put the
+    -- ModRM on the byte AFTER the instruction and declined every encoding.
+    let modrm := code (rip + 3)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let dst := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      some { x86_set_xmm s dst (x86_get_xmm s dst ^^^ x86_get_xmm s src)
+               with rip := rip + 4 }
+  else if code (rip + 1) = 0x0f && code (rip + 2) = 0x2e then
+    -- `66 0F 2E /r` — `ucomisd dst, src`, the flag-setting `double` compare
+    -- (`encode_ucomisd_xmm`).  Flags only, like the integer `CMP`.
+    --
+    -- **The unordered case is the whole reason this arm is written from the
+    -- IEEE functions and not as an integer compare.**  An ordered compare sets
+    -- `ZF = (dst = src)` and `CF = (dst < src)`; an UNORDERED one (either
+    -- operand a NaN) sets `ZF = CF = 1` so that neither `<`, `<=`, `>` nor `>=`
+    -- reads TRUE off it.  `lib/IEEE754.lean`'s `eqBits`/`ltBits`/`unordered`
+    -- are the definitions, and they are pure `UInt64` functions, so a model arm
+    -- built on them is decidable under `native_decide` where a raw `Float`
+    -- comparison would not be.  SF and OF are cleared by `UCOMISD`.
+    --
+    -- `X86State` has no `PF` field, so `PF` is not modelled; the four flags a
+    -- state DOES carry are set here, and both `x86_cond` (10/11) and the fuzz
+    -- comparison treat parity as out of scope (`X86State`'s own note).
+    let modrm := code (rip + 3)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let dst := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      let a := x86_get_xmm s dst
+      let b := x86_get_xmm s src
+      let u := unordered a b
+      some { s with rip := rip + 4, zf := eqBits a b || u,
+                    cf := ltBits a b || u, sf := false, of_ := false }
+  else none
+
+/-- The `F2`-prefixed scalar-double SSE2 forms `formal/x86_64.py` emits.
+
+`F2` is a SIMD prefix and not a REX byte, so `x86_step` routes it to the plain
+decoder; the REX that follows it on `cvtsi2sd` is read HERE, because it sits
+between the prefix and the `0F` escape and a caller that passed the opcode in
+would have to know that.  The five forms:
+
+  * `F2 0F 58/5C/59/5E /r` — `addsd`/`subsd`/`mulsd`/`divsd dst, src`, both XMM
+    operands, `dst` in ModRM.reg and `src` in ModRM.rm, no REX;
+  * `F2 REX.W 0F 2A /r` — `cvtsi2sd xmm, r64`, the int-to-double conversion.
+
+`xorpd` is `66`-prefixed and lives in `x86_step_op66`; the reverse conversion
+`cvttsd2si` is deliberately NOT here yet — see the coverage doc's Status. -/
+def x86_step_f2 (s : X86State) (code : Nat → UInt8) : Option X86State :=
+  let rip := s.rip
+  let rex := code (rip + 1)
+  let hasRex := x86_is_rex rex
+  let p := if hasRex then rip + 2 else rip + 1
+  let w := hasRex && x86_rex_w rex
+  if code p = 0x0f then
+    let op2 := code (p + 1)
+    let modrm := code (p + 2)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let reg := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      if op2 = 0x58 then
+        some { x86_set_xmm s reg (faddBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x5c then
+        some { x86_set_xmm s reg (fsubBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x59 then
+        some { x86_set_xmm s reg (fmulBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x5e then
+        some { x86_set_xmm s reg (fdivBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x2a && w then
+        -- `cvtsi2sd xmm, r/m64`: the signed 64-bit GPR as a double,
+        -- round-to-nearest-even (`fromIntBits`), which is what CPython's
+        -- `float()` answers.  The GPR is the `rm` field with REX.B.
+        let r := src + x86_rex_b rex
+        some { x86_set_xmm s reg
+                 (fromIntBits (x86_signed (x86_get_reg s r))) with rip := p + 3 }
+      else none
   else none
 
 /-- Instruction forms with no REX prefix, and the `0x66` operand-size
@@ -1411,6 +1525,12 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
                with rip := endAddr }
       | none => none
     else none
+  else if b0 = 0xf2 then
+    -- The `F2` SIMD prefix: `addsd`/`subsd`/`mulsd`/`divsd`/`cvtsi2sd`.  Like
+    -- `0x66` it is not a REX byte, so the plain decoder sees it, and the
+    -- optional REX that `cvtsi2sd` carries is read by `x86_step_f2` rather
+    -- than by a prefix dispatcher here — one place that knows the length.
+    x86_step_f2 s code
   else if b0 = 0x66 then
     -- The `0x66` OPERAND-SIZE prefix, and the only instruction behind it that
     -- this backend emits: `66 REX.W 0F 6E /r`, `movq xmm, r/m64`.

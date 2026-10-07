@@ -310,6 +310,35 @@ def samples():
     for reg in (R.RAX, R.R11):
         add("call_r64", "call %s" % reg.name, X.encode_call_r64(reg))
     add("jmp_rm64", "jmp [rip-x]", X.encode_jmp_rm64(-0x30))
+
+    # ── the SSE2 scalar binary64 forms
+    #
+    # `formal/x86_64_codegen.py` emits all of these, and until now `samples()`
+    # named NONE of them, so `x86_step` was never asked the one question this
+    # list exists to ask — `tools/formal_isa_census.py`'s LEAN column for x86-64
+    # IS this list, and it read `no` for each.  See
+    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+    #
+    # A HIGH XMM index is not available (SysV AMD64 names only XMM0-XMM7, and
+    # every encoder asserts it), so unlike the GPR rows there is no r8-r15 pair
+    # to exercise a REX bit.  What the rows DO vary is which field each operand
+    # occupies — `reg` versus `rm` — because that is the half a wrong decoder
+    # gets backwards while every byte still decodes.
+    for name, enc in (("addsd", X.encode_addsd_xmm), ("subsd", X.encode_subsd_xmm),
+                      ("mulsd", X.encode_mulsd_xmm), ("divsd", X.encode_divsd_xmm)):
+        for dst, src in ((0, 1), (7, 2)):
+            add("sse_fp:%s" % name, "%s xmm%d, xmm%d" % (name, dst, src),
+                enc(dst, src))
+    for dst, src in ((0, 1), (3, 5)):
+        add("ucomisd_xmm", "ucomisd xmm%d, xmm%d" % (dst, src),
+            X.encode_ucomisd_xmm(dst, src))
+        add("xorpd_xmm", "xorpd xmm%d, xmm%d" % (dst, src),
+            X.encode_xorpd_xmm(dst, src))
+    for xmm, gpr in ((0, R.RAX), (3, R.R12)):
+        add("movq_r64_xmm", "movq %s, xmm%d" % (gpr.name, xmm),
+            X.encode_movq_r64_xmm(gpr, xmm))
+        add("cvtsi2sd_xmm_r64", "cvtsi2sd xmm%d, %s" % (xmm, gpr.name),
+            X.encode_cvtsi2sd_xmm_r64(xmm, gpr))
     return out
 
 

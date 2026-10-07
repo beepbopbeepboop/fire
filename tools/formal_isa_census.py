@@ -576,10 +576,15 @@ BACKLOG = {
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: the forms the harness cannot even NAME ───────────────────
-    "encode_imul_r64_r64_imm": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`69 /r id`: no decoder arm (only `0F AF` is decoded) and no pool or "
-        "coverage entry"),
+    #
+    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
+    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
+    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
+    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
+    # a pool entry since `4a680153`. The previous pass recorded that and left it
+    # here on purpose because the tool was "another claim's write set"; the
+    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
+    # it is removed now rather than reported once more.
     "encode_call_r64": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`FF /2` with mod=11, the call through a function VALUE; the decoder "
@@ -591,29 +596,24 @@ BACKLOG = {
     "encode_or_r8_r8": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "as `encode_and_r8_r8`"),
-    "encode_addsd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                         "SSE2 scalar binary64: nine encoders the emitter "
-                         "calls, with no decoder arm, no model sample and no "
-                         "pool entry"),
-    "encode_subsd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                         "as `encode_addsd_xmm`"),
-    "encode_mulsd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                         "as `encode_addsd_xmm`"),
-    "encode_divsd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                         "as `encode_addsd_xmm`"),
-    "encode_ucomisd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                           "as `encode_addsd_xmm`; the compare whose unordered "
-                           "case has its own flags"),
-    "encode_xorpd_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                         "as `encode_addsd_xmm`"),
-    "encode_movq_r64_xmm": ("bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-                            "as `encode_addsd_xmm`"),
-    "encode_cvtsi2sd_xmm_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_addsd_xmm`"),
+    # **Eight of shape 1's nine SSE2 rows came out of this dict on 2026-10-06
+    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
+    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`
+    # and `cvtsi2sd` each gained a decoder arm, a model arm, a `samples()` row
+    # and a fuzz-pool entry, and the census reads `yes yes yes` for every one.
+    # `encode_imul_r64_r64_imm` above is OVER-COVERED and still listed here —
+    # it was left by the previous pass on purpose ("another claim's write set")
+    # and is a separate stale entry this removal does NOT touch.
+    #
+    # `cvttsd2si_r64_xmm` stays: its LEAN and FUZZ columns are still `no`. The
+    # double-to-int conversion needs a truncate-toward-zero function that is
+    # total over all 2^64 patterns (out of range is the hardware's integer
+    # indefinite), which is a real piece of work and is the doc's next step —
+    # see `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
     "encode_cvttsd2si_r64_xmm": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_addsd_xmm`"),
+        "the double-to-int conversion: no decoder arm, no model sample and no "
+        "pool entry; `ToIntBits` is a `Prop` and not a total function"),
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
