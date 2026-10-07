@@ -3555,6 +3555,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
+    def _materialize_compr_element(self, element, res_offset: int, cap: int,
+                                   before: int) -> None:
+        """Give the element its OWN container per iteration, or refuse.
+
+        The x86-64 twin of arm64's method over the same shared predicate
+        (`M.comprehension_element_is_flat_container`) and the same message, so
+        the two architectures cannot materialise — or refuse — an element
+        differently. RAX on entry holds the element's blob and on exit the
+        per-iteration copy `_compr_append_elem` appends.
+
+        `i` is the result blob's count word (elements appended so far), the
+        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
+        which returns the destination in RAX for free. `before` is the ledger
+        position as the element's emission began, so `bytes_` is the element's
+        own footprint, measured BEFORE the array below steps the same ledger.
+        """
+        bytes_ = self._list_cursor - before
+        if not bytes_ or cap <= 1:
+            return
+        if not M.comprehension_element_is_flat_container(element):
+            raise CodegenError(M.comprehension_element_blob_refusal(
+                f"a comprehension in {self.func_name or '<module>'}", element,
+                cap, bytes_))
+        array_off = self._reserve_blob(cap * bytes_,
+                                       "comprehension element array")
+        # count = result element count so far (= this iteration's ordinal).
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # dest = array_base + count * bytes_
+        self._emit_blob_base(array_off, Reg.R11)
+        self._emit_mov_imm(Reg.RDI, bytes_)
+        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
+        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
+        self._emit_mov_imm(Reg.RDX, bytes_)
+        self._emit_extern_call("memcpy")            # returns dest in RAX
+
     # ── how many times the code being emitted runs ────────────────────
     #
     # A blob's reservation is made ONCE per site, so a site inside a loop has
@@ -9097,8 +9136,8 @@ preference.
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
+                self._materialize_compr_element(
+                    expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
             return
 
