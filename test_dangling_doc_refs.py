@@ -2,8 +2,9 @@
 """Tests for `tools/dangling_doc_refs.py --stale-verdicts`.
 
 The checker reports a `bugs/` doc whose per-stem verdict-table row claims
-something a fresh run does not produce (see
-`bugs/FORMAL_a_surviving_citation_is_not_checked.md`'s instrument-gap half).
+something a fresh run does not produce (the instrument gap
+`--stale-verdicts` closes: a verdict row that was never re-measured against a
+fresh run).
 
 The test's real job is the NEGATIVE CONTROL: a table with a deliberately
 wrong row must be flagged, and a matching row must not, or the checker can

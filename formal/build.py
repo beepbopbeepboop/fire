@@ -4081,10 +4081,10 @@ def _widen_printf_integer_conversions(functions: list) -> int:
     word is what `print` already renders as `4294967295` and what `a < 0`
     already answers `no` for, so widening `%d` makes the two agree instead of
     leaving one rendering that contradicts the rest of the model. The residual
-    defect is upstream and is filed as
-    `bugs/FORMAL_a_bare_c_int_return_with_no_prototype_row_is_not_sign_extended.md`;
-    its exposure on this corpus is zero, measured over every real libc bare
-    callee in 423 `.mojo` files.
+    defect is upstream and is now FIXED (`778ee7ab`: a bare C `int`-returning
+    callee with no `BARE_C_RETURN_KINDS` row is sign-extended, so its word is no
+    longer zero-extended); its exposure on this corpus was zero, measured over
+    every real libc bare callee in 423 `.mojo` files.
 
     **What it does not reach, and it is a real limit rather than an oversight:**
     a format held in a NAME (`fmt = "%d"; printf(fmt, x)`) is not a literal,

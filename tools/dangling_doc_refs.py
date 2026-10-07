@@ -490,8 +490,8 @@ def stale_baseline_entries(by_file, baseline=None):
     reads it here.
 
     **A file that has NO citations left is reported too, which is the case this
-    function could not see before 2026-10-05 and is the whole of
-    `bugs/FORMAL_a_surviving_citation_is_not_checked.md`'s instrument half.**
+    function could not see before 2026-10-05 and the gap this function now
+    closes.**
     Reading `ledger_verdicts` alone — which is a join over `by_file`, i.e. over
     the files that still HAVE citations — means a file whose citations were all
     fixed is not in the join at any number, so its entry is not merely
@@ -773,8 +773,8 @@ def main() -> int:
         for path, lineno, stem, claimed, observed in rows:
             print(f'  {os.path.relpath(path, ROOT)}:{lineno}: `{stem}` '
                   f'claims {claimed}, observed {observed} — re-measure and '
-                  f'replace the row with the fact (see '
-                  f'bugs/FORMAL_a_surviving_citation_is_not_checked.md)')
+                  f'replace the row with the fact (see `stale_verdict_rows` '
+                  f'above for the mechanism)')
         return 0
 
     _have, by_doc, by_file = find(skip=set(args.skip))

@@ -5395,8 +5395,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # not report it at any number — not here, not in the ratchet, not in
     # `sanctioned`. Measured on this tree: the ledger carried
     # `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1` for a citation
-    # that had since been rewritten, and nothing could see it
-    # (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`).
+    # that had since been rewritten, and nothing could see it — the gap
+    # `stale_baseline_entries` closes.
     check('dangling refs: an entry for a file that cites NOTHING is stale too, '
           'which the corpus join cannot see',
           dangling_doc_refs.stale_baseline_entries(synth, led).get('c.py')

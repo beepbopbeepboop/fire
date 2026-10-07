@@ -111,10 +111,9 @@ concrete case: `match` now means one thing on the formal path (a decision tree
 of compares and branches, with a capture, a guard, and six constructs refused by
 name) and a subtly different thing on the gimple path, for the same source
 text. Nothing in the tree can see that today — `test_runtime_diff.py` compares
-the two ENGINES and both are the interpreter here, and
-`bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_function.md`
-is about the other direction (a construct one backend answers and the other
-refuses) rather than this one (a construct both answer, differently).
+the two ENGINES and both are the interpreter here, and the other direction
+(a construct one backend answers and the other refuses) is a different bug
+rather than this one (a construct both answer, differently).
 
 **A regression test for the gimple half** belongs beside the existing gimple
 statement tests: one program per row of the table above, built and RUN through

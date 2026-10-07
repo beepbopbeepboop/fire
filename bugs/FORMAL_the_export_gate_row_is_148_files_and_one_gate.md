@@ -14,8 +14,8 @@ branch's to close.** Measured 2026-10-05 on `master` 80cea3bd, claim
 Found by taking the export-gate row — `a call to a name the defining module does
 not export`, the largest codegen cause in the corpus for a fifth round running
 — after `formal41-exports-and-strings` took the `module exports no public
-functions` row out from under it and the `b14` round map
-(`bugs/FORMAL_sweep_work_map_2026-10-05_b14.md` §4) recorded it as claimed by
+functions` row out from under it and the `b14` round of
+`bugs/FORMAL_sweep_work_map.md` (§4) recorded it as claimed by
 work whose own subject is a different row.
 
 ## 0. What this document is, and what it is not
@@ -185,7 +185,7 @@ build: ThinAllocation_1_T_1_T.write_to: `FormatStruct` is called, …
 ```
 
 **Zero files move and zero verdicts change**, which is the honest ledger and is
-the same shape `FORMAL_sweep_work_map_2026-10-05_b14.md` §5.5 reported for its
+the same shape `FORMAL_sweep_work_map.md`'s `b14` round (§5.5) reported for its
 own `max`/`min` fix: a diagnostic is not a coverage change. Measured by
 re-sweeping all 148 files with the fix in and diffing against the `master`
 sweep above:

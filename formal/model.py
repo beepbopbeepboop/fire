@@ -9858,10 +9858,9 @@ def printf_widened_format(fmt_text) -> str | None:
     which is the property that lets a program swap one for the other; narrowing
     instead would preserve an accident and keep the two disagreeing.
 
-    The residual defect is upstream of `printf` and is filed as
-    `bugs/FORMAL_a_bare_c_int_return_with_no_prototype_row_is_not_sign_extended.md`:
-    `BARE_C_RETURN_KINDS` should not be missing a libc `int` return. **Its
-    exposure here is ZERO**, measured: every real libc bare callee reachable
+    The residual defect is upstream of `printf` and is now FIXED (`778ee7ab`:
+    `BARE_C_RETURN_KINDS` no longer misses a libc `int` return, so it is
+    sign-extended). **Its exposure here was ZERO**, measured: every real libc bare callee reachable
     from this repository's 423 `.mojo` files and the stdlib has a row, and none
     of the 18 `printf` varargs over them is a bare call without one. So this
     rewrite changes no answer on this corpus, and the one program that could
