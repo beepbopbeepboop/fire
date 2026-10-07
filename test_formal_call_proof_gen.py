@@ -5640,6 +5640,274 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
                 shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestExternCallTheRunDoesNotReach(unittest.TestCase):
+    """`_gen_extern_test` where the concrete run never GETS to the extern call.
+
+    **The failure this class exists for was a FALSE THEOREM, not a missing
+    one.**  `_gen_extern_test` splits the modelled run at every extern call site
+    and, for each, emitted (a) `{name}_pre_reaches_{i}` — the run reaches the
+    call — and (b) `{name}_post_extern_given_callee_returns`, continuing from
+    `{name}_pre_{i}` with `pc` set past the `BL`.  Both are about a state that
+    exists only if the run got there, and `pre_i`'s `none` arm fell back to
+    `Arm64State.init 0 <base>` — an unrelated state — so on a program whose
+    call is NOT on the concrete run's path all three obligations were FALSE and
+    `native_decide` said so in the generated file's own words.
+
+    `formal/examples/mod_by_var.mojo` is the measured case (`n % d`, whose only
+    `fflush` is on the divide-by-zero guard's error arm, which `d = 4` never
+    takes).  Before the fix, three diagnostics:
+
+        run_pc_reached { (Arm64State.init 10 4294968256) with
+                         x30 := UInt64.ofNat 4294968476 }
+                       mod_by_var_code 4294968440 200000 = true        is false
+        run_result_exit { mod_by_var_pre_0 with pc := 4294968444 }
+                        mod_by_var_code 4294968476 200000 = mojo 10    is false
+        mod_by_var_pre_0.pc = 4294968440                               is false
+
+    **The fix is two shapes, and both are facts rather than premises.**
+    `pre_i`'s `none` arm is now the state BEFORE the call with `pc` pinned to
+    the call, which makes `pre_i.pc = <call>` true in both arms (it is what the
+    `BL` step theorem needs, and `arm64_step`'s `BL` arm reads nothing but the
+    word at `s.pc` and `pc` itself, so the step equality is true there too).
+    And the post-call theorem is a `match` on the call's OWN reachability: the
+    `some` arm is the statement it always was, the `none` arm is the run's own
+    answer from the state before the call — which is what this generator states
+    for a program with no extern call at all.  Both arms are decided by
+    `native_decide`, so nothing is left for a reader to take on trust.
+
+    **BOTH branches are pinned, because the reachable one is the one that was
+    already working** and a change that only fixed the unreachable case would
+    look identical from the text.  `modvar`'s call is the div0 guard's error
+    arm; `print1`'s `printf` is on the path.
+    """
+
+    # name, source, the extern symbol its image calls, whether the concrete run
+    # gets to the call (MEASURED — see the class docstring).
+    PROBES = (
+        ("modvar", "def modvar(n):\n    d = 4\n    return n % d\n",
+         "fflush", False),
+        ("print1", 'def print1(n):\n    printf("hi")\n    return n\n',
+         "printf", True),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-extcall-")
+        cls.proofs = {}
+        cls.calls = {}
+        for name, source, sym, _reached in cls.PROBES:
+            src = os.path.join(cls.tmp, name + ".mojo")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write(source)
+            r = _compile(src, os.path.join(cls.tmp, name + ".aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                cls.proofs[name] = f.read()
+            cls.calls[name] = r["info"]["extern_calls"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_each_probe_reaches_the_extern_test_at_all(self):
+        """The premise: both images carry exactly one extern call, and it is the
+        one this class is about.  Without this a change that stopped emitting
+        `fflush` for the div0 guard, or stopped emitting a `printf` call, would
+        make every assertion below pass by there being nothing to look at.
+        """
+        for name, _source, sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                self.assertEqual([c["sym"] for c in self.calls[name]], [sym],
+                                 f"{name}: the image's extern calls changed, so "
+                                 f"this class is no longer about the shape it "
+                                 f"was written for: {self.calls[name]}")
+
+    def test_no_reachability_obligation_is_emitted(self):
+        """`…_pre_reaches_{i}` is GONE, and it is the absence that matters.
+
+        It was not merely unproved: it asserted the run reaches the call, which
+        is FALSE for every program whose call is not on the concrete run's
+        path.  A theorem cannot be the reason a fact holds, and where the run
+        does not reach the call there is nothing to assume — the post-call
+        theorem's `none` arm says the run's own answer instead.
+        """
+        for name, _source, _sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                self.assertNotRegex(
+                    self.proofs[name], r"theorem \w+_pre_reaches_\d+",
+                    f"{name}: the run's reaching the call is being asserted "
+                    f"again, and it is false wherever the call is not on the "
+                    f"concrete run's path")
+                self.assertIn(f"theorem {name}_pre_pc_is_0",
+                              self.proofs[name],
+                              f"{name}: the pre-state's pc fact is what the BL "
+                              f"step theorem needs, and it is true in both arms "
+                              f"of the match — it is the replacement")
+
+    def test_the_pre_states_fallback_is_the_pre_call_state_with_pc_pinned(self):
+        """The `none` arm, which is the whole of the fix in one line.
+
+        It used to be `Arm64State.init 0 <base>`, which shares nothing with the
+        run: every fact the file stated about the call was false whenever that
+        arm was the live one.  Pinning `pc` makes it the state the run was in
+        before the call, at the call — so `pre_i.pc = <call>` and the `BL` step
+        equality hold whatever the run did.
+        """
+        for name, _source, _sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                text = self.proofs[name]
+                self.assertNotIn("none => Arm64State.init", text,
+                                 f"{name}: the pre-state still falls back to a "
+                                 f"fresh state, so every claim about the call "
+                                 f"is false when the run does not reach it")
+                # Matched against the WHITESPACE-COLLAPSED text: the emitted
+                # declaration is wrapped across lines for width, and a test that
+                # pins the wrapping would fail on a reformat for no reason —
+                # which is the opposite of what a shape pin is for.
+                flat = re.sub(r"\s+", " ", text)
+                self.assertRegex(
+                    flat,
+                    r"def " + name + r"_pre_0 : Arm64State := match "
+                    r"arm64_exec_go_exit .*? with \| some s => s \| none => "
+                    r"\{ .*? with pc := (\d+) \}",
+                    f"{name}: the `none` arm must be the pre-call state with "
+                    f"`pc` pinned to the call")
+
+    def test_the_post_call_theorem_is_a_match_on_the_calls_reachability(self):
+        """Both arms, and the `none` arm's starting state is the point.
+
+        Continuing a run that never got to the call from the state AFTER the
+        call is the fiction: it is how `mod_by_var`'s `post_extern` came to
+        assert `= mojo 10` of a state the machine never reaches.  The `none` arm
+        starts from the state BEFORE it, which is the run's own answer.
+        """
+        for name, _source, _sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                # Whitespace-collapsed for the same reason as the row above,
+                # and so that the `none` arm's starting state can be compared
+                # with the scrutinee's by a BACK-REFERENCE: that is the whole
+                # assertion, and comparing the two texts by hand is how a
+                # `none` arm that starts one state later would pass.
+                flat = re.sub(r"\s+", " ", self.proofs[name])
+                m = re.search(
+                    r"theorem " + name + r"_post_extern_given_callee_returns : "
+                    r"\(match arm64_exec_go_exit (.*?) " + name +
+                    r"_code (\d+) 200000 with "
+                    r"\| some s => run_result_exit \{ s with pc := (\d+) \} "
+                    r"" + name + r"_code \d+ 200000 "
+                    r"\| none => run_result_exit \1 " + name +
+                    r"_code \d+ 200000\) = (.*?) := by",
+                    flat)
+                self.assertIsNotNone(
+                    m, f"{name}: the post-call theorem is not a match on the "
+                       f"call's reachability any more, so the unreachable case "
+                       f"is being stated about a state the machine never "
+                       f"reaches:\n{self.proofs[name][-1500:]}")
+                before, bl, after, want = m.groups()
+                self.assertEqual(after, str(int(bl) + 4),
+                                 f"{name}: the `some` arm must continue from "
+                                 f"just past the `BL`")
+                self.assertNotIn("pre_0", before,
+                                 f"{name}: the `none` arm continues from "
+                                 f"`pre_0`, which is the state AT or PAST the "
+                                 f"call — the fiction this row exists to catch")
+                self.assertIn(want.strip(), ("mojo 10",),
+                              f"{name}: the right-hand side changed: {want!r}")
+
+    def test_the_bl_step_theorem_takes_its_pc_from_the_pre_pc_fact(self):
+        """The step theorem's `hpc` used to be `by native_decide` against the
+        fallback state, which is false there; it is now the pre-state's pc
+        fact.  This is the assertion that the two shapes above are WIRED
+        together rather than merely both present.
+        """
+        for name, _source, _sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                addr = self.calls[name][0]["addr"]
+                self.assertIn(f"have hpc : ({name}_pre_0).pc = {addr}",
+                              self.proofs[name],
+                              f"{name}: the BL step theorem's `hpc` is not the "
+                              f"pre-state's pc fact")
+                # The index of the call in the CODE LIST, not an address the
+                # test guesses: `_gen_extern_test` picks the step-RESULT lemma
+                # by `(bl - base) // 4`, and the row that matters is that it
+                # still picks a per-instruction lemma at all — equality of two
+                # `Arm64State`s has no `Decidable` instance, so `native_decide`
+                # cannot close it and a version that tried would fail to
+                # elaborate rather than silently pass.
+                self.assertRegex(
+                    self.proofs[name],
+                    r"have hpc : \(" + name + r"_pre_0\)\.pc = \d+ :?= "
+                    + name + r"_pre_pc_is_0\n"
+                    r"  simpa \[hpc\] using " + name + r"_sr_\d+ ",
+                    f"{name}: the BL step theorem's `hpc` must be the "
+                    f"pre-state's pc FACT and must still be discharged by the "
+                    f"per-instruction step RESULT lemma — equality of two "
+                    f"`Arm64State`s has no `Decidable` instance, so "
+                    f"`native_decide` cannot close that goal")
+
+    def test_lean_accepts_both_probes_with_no_sorries(self):
+        """The kernel, and the half that is not a reading of the text.
+
+        Both probes, because they are the two arms of the match above: `modvar`
+        exercises the `none` arm (the div0 guard's `fflush` is never reached)
+        and `print1` the `some` arm.  Zero sorries, because "the obligation
+        became admissible" is the failure a fix like this can hide.
+        """
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no Lean / no lib/ProofLib.olean: the defect was "
+                          "three KERNEL REJECTIONS and only the kernel sees it")
+        from formal.lean import check_proof_cached
+        for name, _source, _sym, _reached in self.PROBES:
+            with self.subTest(probe=name):
+                src = os.path.join(self.tmp, name + ".mojo")
+                import formal.build as fb
+                r = fb.compile_formal(src, arch="arm64",
+                                      output=os.path.join(self.tmp, "lean."
+                                                          + name + ".aout"),
+                                      prove=True, check=False)
+                ok, detail, _cached, sorries = check_proof_cached(
+                    r["proof_path"], repo_root=HERE)
+                self.assertTrue(
+                    ok, f"{name} does not typecheck:\n"
+                    + "\n".join(l for l in detail.splitlines()
+                                 if "error" in l or "\u22a2" in l)[:2000])
+                self.assertEqual(sorries, 0,
+                                 f"{name}: typechecks with {sorries} sorry(s): "
+                                 f"the match must make the obligation TRUE, "
+                                 f"not admit it")
+
+    def test_the_corpus_example_that_was_false_is_proved(self):
+        """`formal/examples/mod_by_var.mojo`, the measured case, and the row
+        `test_formal.py`'s `EXPECTED_FAILURES` carried until 2026-10-05.
+
+        It is in the corpus rather than written out here because the defect was
+        FOUND through this example and the example is what a reader will re-run:
+        a probe written in the test would be a second copy of the shape, and
+        two copies of a shape is how they drift.
+        """
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        from formal.lean import check_proof_cached
+        tmp = tempfile.mkdtemp(prefix="a2-extcall-example-")
+        try:
+            src = os.path.join(HERE, "formal", "examples", "mod_by_var.mojo")
+            import formal.build as fb
+            r = fb.compile_formal(src, arch="arm64",
+                                  output=os.path.join(tmp, "mod.aout"),
+                                  prove=True, check=False)
+            ok, detail, _cached, sorries = check_proof_cached(
+                r["proof_path"], repo_root=HERE)
+            self.assertTrue(
+                ok, "mod_by_var does not typecheck:\n"
+                + "\n".join(l for l in detail.splitlines()
+                             if "error" in l or "\u22a2" in l)[:2000])
+            self.assertEqual(sorries, 0,
+                             f"mod_by_var typechecks with {sorries} sorry(s)")
+        finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _generate_dir(tmp, src_path, name, out):
     """`compile_formal` on an existing `.mojo`, with NO Lean check.
 

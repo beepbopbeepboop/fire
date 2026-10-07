@@ -129,6 +129,52 @@ Every case below is `NOSTEP`: `arm64_step` answered `none`, the CPU ran the
 instruction, and the two disagreed in the only way a step function can disagree
 with a machine that has an instruction.
 
+## RE-MEASURED 2026-10-05 (`work/formal42-2`): the build wall is CONFIRMED at
+## the tree's own `-j 4`, and it is `ProofLib` and nothing else
+
+The paragraph above measured the `ProofLib.olean` build at `-j 1`. **The default
+is `-j 4`** (`formal/lean.py`'s `LEAN_THREADS`, which is what `ensure_library`
+passes), so the measurement that decides whether a bounded worker can land any
+arm here is the `-j 4` one. Measured on this tree at `5e547907`, with a
+comment-only change to a COPY of `lib/ProofLib.lean` under `.tmp/libcopy/` (so
+`lib/` itself was never touched and the CAS key was a genuine miss):
+
+```
+$ python3 tools/memslot.py --gb 8 --label prooflib -- python3 .tmp/buildlib_probe.py
+memcap: prooflib -- ceiling 8.0 GB across the process tree
+memcap: BREACH  8.0 GB > 8.0 GB ceiling (100%), 3 procs -- killing prooflib
+memcap: peak observed before the kill: 8.0 GB
+```
+
+**Same wall, so this file's blocker is not a `-j` choice and not the worker
+policy: `lib/ProofLib.lean` alone costs more than a light worker has.**  The
+control is what makes that a fact about the MODULE rather than about the build:
+
+```
+$ … the same probe against lib/Refine.lean (comment-only change, same tree)
+built in 2.8 s
+  Refine.olean  1.2 MB
+memcap: done, peak 1.2 GB across up to 2 procs (ceiling 8.0 GB)
+```
+
+1.2 GB against 8.0, from the same `ensure_library` on the same box in the same
+minute. **So the dividing line is per-module, and it is worth knowing which
+side of it a piece of work is on before anyone prices it:** a hypothesis or a
+peel in `lib/Refine.lean` is affordable to a bounded worker and something in
+`lib/ProofLib.lean` is not — every arm in this file, and every row of
+`FORMAL_arm64_smulh_has_no_model_arm.md`, `FORMAL_arm64_ieee754_has_no_step_
+arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
+`ProofLib`.  `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_
+false_claim.md` and `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` are
+on the cheap side of the line and are gated on a design decision rather than on
+memory.
+
+The probe is verified to be a real elaboration and not a cache replay: the same
+script with `this_is_not_a_definition : Nonexistent.Nope := 1` added to the
+copied `Refine.lean` raises
+`Refine.lean:3:0: error: unexpected identifier; expected command`.
+
 ## 1. What was run, and what it printed
 
 ```

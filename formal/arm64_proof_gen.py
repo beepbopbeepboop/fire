@@ -9577,6 +9577,32 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     (`…_given_callee_returns`) and says so in its docstring.  It used to be
     named `…_post_extern` with no mention of a premise, which read as though
     the model had followed the call.
+
+    **A CALL THE CONCRETE RUN NEVER REACHES, which is most of them, and the
+    whole of what this function emits is now shaped around it.**  A `BL` is
+    recorded wherever the EMITTER wrote one -- and the emitter writes one on
+    every `_emit_exit` (the `fflush` before the trap) and on every divide's
+    zero-guard error arm -- so an image's extern call sites include calls on
+    paths the concrete run does not take.  `formal/examples/mod_by_var.mojo`
+    (`n % d`) has exactly one, and it is the div-by-zero arm's `fflush`, which
+    `d = 4` never reaches.  This function used to assert the run gets there
+    (`…_pre_reaches_{i}`) and to continue the post-call run from
+    `{pre with pc := bl+4}` regardless, with `pre`'s unreachable case falling
+    back to a FRESH state -- so all three obligations were FALSE, and
+    `native_decide` said so in the generated file's own words (three
+    diagnostics, all about the fallback and none about the machine).
+
+    So the unreachable case is now stated rather than papered over, in the two
+    places it was doing damage: `pre_{i}`'s `none` arm is the state BEFORE the
+    call with `pc` pinned to the call (which is what makes the `BL` step
+    theorem true in both arms -- the `BL` arm of `arm64_step` reads nothing but
+    the word at `s.pc`), and the post-call theorem is a `match` on the call's
+    own reachability whose `none` arm is the run's own answer from before the
+    call.  Both arms are `native_decide`, so every obligation here is a
+    statement about the machine rather than an assumption.
+    `test_formal_call_proof_gen.py::TestExternCallTheRunDoesNotReach` pins both
+    arms of that match, on a program that reaches its call and one that does
+    not, plus `mod_by_var` itself through Lean's kernel.
     """
     exit_addr = base + len(code)
     # The entry function's ARGUMENT words as the startup stub materialized
@@ -9590,20 +9616,55 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     blocks = []
     step_blocks = []
     prev = init
-    fallback = f"Arm64State.init 0 {base}"
+    # The state the run is in BEFORE the call being split at, and the one the
+    # `none` arm of the post-call theorem below continues from. It is not the
+    # same as `prev` after the loop body, which is the state PAST the call —
+    # continuing a run that never got to the call from the state after it is
+    # the fiction this fix removes.
+    before_call = init
     for i, call in enumerate(extern_calls):
         bl = call["addr"]
         sym = call["sym"]
         returns = ret_type_of.get(sym, "int") not in ("none", "")
+        before_call = prev
         blocks.append(
             f"def {name}_pre_{i} : Arm64State :=\n"
             f"  match arm64_exec_go_exit {prev} {name}_code {bl} 200000 with\n"
             f"  | some s => s\n"
-            f"  | none => {fallback}"
+            # **The `none` arm pins `pc` to the call rather than falling back to
+            # a fresh state, and that is the whole of this fix.** It used to be
+            # `Arm64State.init 0 {base}` — an unrelated state, so every claim
+            # the file made about the call was FALSE whenever the run did not
+            # get there. Measured on `formal/examples/mod_by_var.mojo`
+            # (`n % d`, whose divide-by-zero guard's error arm is the only
+            # `fflush` in the image, and the concrete run never takes it): three
+            # diagnostics in the generated file's own words —
+            # `run_pc_reached … 4294968440 = true is false`,
+            # `run_result_exit {mod_by_var_pre_0 with pc := 4294968444} … =
+            # mojo 10 is false`, and `mod_by_var_pre_0.pc = 4294968440 is false`
+            # — every one of them from the fallback, and none of them about the
+            # machine. Pinning `pc` makes the third TRUE (`arm64_exec_go_exit`
+            # halts only at its target pc) and, because the `BL` arm of
+            # `arm64_step` reads nothing but the instruction word at `s.pc` and
+            # the pc itself, it makes the `extern_*_step` equality TRUE as well:
+            # so the step theorem below needs no premise and no branch.
+            f"  | none => {{ {prev} with pc := {bl} }}"
         )
         blocks.append(
-            f"theorem {name}_pre_reaches_{i} :\n"
-            f"  run_pc_reached {prev} {name}_code {bl} 200000 = true := by\n"
+            f"/-- The call at `{bl:#x}` IS at `pc = {bl}` in `{name}_pre_{i}`.\n"
+            f"   This REPLACES a `…_pre_reaches_{i}` theorem, which asserted the\n"
+            f"   run reaches the call and was FALSE for every program whose call\n"
+            f"   is not on the concrete run's path — a claim about the machine\n"
+            f"   that the machine contradicts, decided by `native_decide` in the\n"
+            f"   generated file's own words. The run reaching the call is not\n"
+            f"   something a theorem can be the reason for: whether it does is\n"
+            f"   decided by the program's own control flow, and where it does not,\n"
+            f"   the post-call theorem below says the run's OWN answer instead of\n"
+            f"   continuing from a state that does not exist. What the `extern_*\n"
+            f"   _step` theorem below needs is exactly this fact, so this is what\n"
+            f"   is emitted — TRUE in both branches of the match above. -/\n"
+            f"theorem {name}_pre_pc_is_{i} :\n"
+            f"  ({name}_pre_{i}).pc = {bl} := by\n"
             f"  native_decide"
         )
         call_ast = _find_extern_call(fn, sym)
@@ -9690,12 +9751,11 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
             # Decidable".  What decides it is the per-instruction step lemma
             # the file already emits for this very instruction
             # (`{name}_sr_{idx}`), applied at the concrete pre-call state.
-            f"  have hpc : ({name}_pre_{i}).pc = {bl} := by native_decide\n"
+            f"  have hpc : ({name}_pre_{i}).pc = {bl} := {name}_pre_pc_is_{i}\n"
             f"  simpa [hpc] using {name}_sr_{(bl - base) // 4} "
             f"{name}_pre_{i} hpc"
         )
         prev = f"{{ {name}_pre_{i} with pc := {bl + 4} }}"
-        fallback = f"{name}_pre_{i}"
     if extern_calls:
         last = extern_calls[-1]
         if ret_type_of.get(last["sym"], "int") not in ("none", ""):
@@ -9708,12 +9768,32 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                 f"   ASSUMPTION: the callee is outside the image, so the state\n"
                 f"   below is not one the machine reaches.  A callee that\n"
                 f"   clobbered a register would need a different theorem here,\n"
-                f"   which is why the name says what this one is for. -/\n"
+                f"   which is why the name says what this one is for.\n"
+                f"\n"
+                f"   **A `match` ON THE CALL'S OWN REACHABILITY, and that is\n"
+                f"   the fix.**\n"
+                f"   It used to continue from the last `{name}_pre_` state with\n"
+                f"   `pc` set past the `BL`, unconditionally — so for a program\n"
+                f"   whose extern call is not on the concrete run's path it\n"
+                f"   continued from a state the machine never reaches and\n"
+                f"   asserted the model's answer of it, which is FALSE\n"
+                f"   (`mod_by_var`, measured: `run_result_exit … = mojo 10 is\n"
+                f"   false`). In the `some` arm the run really did get to the call,\n"
+                f"   so this arm is the statement it always was. In the `none` arm\n"
+                f"   there was no call to assume anything about, and the honest\n"
+                f"   statement is the run's OWN answer from the state before it —\n"
+                f"   the same fact this generator states for a program with no\n"
+                f"   extern call at all. Both arms are decided by `native_decide`,\n"
+                f"   so this is a theorem about the machine in either case rather\n"
+                f"   than an obligation nobody can discharge. -/\n"
                 f"theorem {name}_post_extern_given_callee_returns :\n"
-                f"  run_result_exit {{ {name}_pre_{len(extern_calls) - 1} "
-                f"with pc := {last_bl + 4} }} "
-                f"{name}_code {exit_addr} 200000 = "
-                f"{_apply_args('mojo', vals)} := by\n"
+                f"  (match arm64_exec_go_exit {before_call}\n"
+                f"     {name}_code {last_bl} 200000 with\n"
+                f"   | some s => run_result_exit {{ s with pc := {last_bl + 4} }} "
+                f"{name}_code {exit_addr} 200000\n"
+                f"   | none => run_result_exit {before_call} {name}_code "
+                f"{exit_addr} 200000)\n"
+                f"    = {_apply_args('mojo', vals)} := by\n"
                 f"{_decide_or_admit(admitted_model)}"
             )
             if admitted_model:

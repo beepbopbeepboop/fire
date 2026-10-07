@@ -1,5 +1,14 @@
 # FORMAL_arm64_ieee754_has_no_step_arms: ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm
 
+**Blocked on the build, measured 2026-10-05: step 1 below changes
+`Arm64State`, which lives in `lib/ProofLib.lean`, and that module's `.olean`
+does not fit a bounded worker** — `memcap: BREACH 8.0 GB > 8.0 GB ceiling
+(100%)` at the tree's own `-j 4`, against `lib/Refine.lean`'s 1.2 GB from the
+same call in the same minute (measurement, method and control in
+`FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §"the build wall is
+CONFIRMED"). Nothing else in this file is blocked and §"The exact next step"
+below is unchanged; it needs a worker who can afford the build.
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census: `formal/arm64_codegen.py` emits ten scalar IEEE-754 binary64
 instructions, every one of them has a byte-exact `as` differential in

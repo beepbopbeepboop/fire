@@ -391,19 +391,19 @@ EXPECTED_FAILURES = {
                   "IMAGE computes it -- both backends and CPython answer 19 -- "
                   "and `floordiv`/`udivmod` are refused outright for the same "
                   "division's helper call",
-    "mod_by_var": "`n % d` with a VARIABLE divisor calls the run-time division "
-                  "helper, which is outside the image, so the modelled run "
-                  "stops there and never reaches the exit the generated "
-                  "`mod_by_var_pre_reaches_0` asserts it reaches -- an "
-                  "obligation FALSE about the machine, in the generated file's "
-                  "own words (`bugs/FORMAL_arm64_an_extern_call_makes_the_run_"
-                  "never_reach_the_exit.md`). `floordiv`/`udivmod`, with two "
-                  "such calls, are refused instead",
     # `unary_ops` was in this table until 2026-10-05 and is not any more: unary
     # `+` was modelled as a LOGICAL NEGATION (a false model, which the run test
     # caught), and both the model and the AST bridge now spell it as the
     # identity. It is the corpus's proof that a false model is caught rather
     # than banked.
+    # `mod_by_var` was in this table until 2026-10-05 too, and for the worse
+    # reason: `_gen_extern_test` emitted a `mod_by_var_pre_reaches_0` that was
+    # FALSE about the machine (`n % d`'s only `fflush` is on the
+    # divide-by-zero guard's error arm, which the concrete run never takes).
+    # The generator now splits at the call only where the run REACHES it and
+    # states the run's own answer where it does not, so the example is proved
+    # with no sorries -- see
+    # `test_formal_call_proof_gen.py::TestExternCallTheRunDoesNotReach`.
 
     # `(n // 7) + (n % 7)` and `(n / 7) + (n % 7)`: the floor- and
     # truncating-division examples.  **Neither is a division fact, and NEITHER

@@ -1,5 +1,16 @@
 # FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it
 
+**A SECOND blocker, measured 2026-10-05, and it is the one that decides who can
+take this: step 1 below is a `lib/ProofLib.lean` change and that module's
+`.olean` does not fit a bounded worker** — `memcap: BREACH 8.0 GB > 8.0 GB
+ceiling (100%)` at the tree's own `-j 4`, against `lib/Refine.lean`'s 1.2 GB
+from the same call in the same minute (measurement, method and control in
+`FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §"the build wall is
+CONFIRMED"). So the two blockers compose and neither is the interesting one:
+the certificate (`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`,
+another claim) is what makes the row worth landing, and the build is what stops
+a bounded worker landing it. Both have to be gone.
+
 **Status, 2026-10-03 (`work/formal16-2`): the REGRESSION is fixed and pinned; the
 MODEL ROW is not, and the measurement says the order of the remaining work is the
 opposite of what §4 assumed.**
