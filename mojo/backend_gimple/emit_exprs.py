@@ -6278,7 +6278,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # its own merge.
     if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
-            kind=node.kind, element=node.element, key=node.key,
+            kind=node.kind, element=node.element, value=node.value,
             generators=list(node.generators[1:]))
     else:
         gen._compr_pending_inner = None

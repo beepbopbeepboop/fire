@@ -23417,14 +23417,11 @@ class ValueKinds:
             # scopes` below); the loss was here, on the way out.
             scopes = self.comprehension_generator_scopes(e)
             if e.kind == "dict":
-                # `e.element` is the dict comprehension's VALUE (`e.key` is the
-                # key), so this is the same arm as the `DictExpr` above and not
+                # `e.element` is the dict comprehension's KEY (`e.value` is the
+                # value), so this is the same arm as the `DictExpr` above and not
                 # the key/value unification a LIST comprehension does below.
                 return list_kind(self.kind_of(e.element, scopes))
-            ek = self.kind_of(e.element, scopes)
-            if e.key is not None:
-                ek = _unify(ek, self.kind_of(e.key, scopes))
-            return list_kind(ek)
+            return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and

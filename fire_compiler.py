@@ -562,7 +562,7 @@ class Module:
 class Comprehension:
     kind: str     # list / set / dict
     element: object
-    key: object = None     # dict key
+    value: object = None     # dict VALUE (element holds the dict key)
     generators: list = field(default_factory=list)
     line: int = 0
     col: int = 0
@@ -2907,7 +2907,7 @@ def _collect_free_names(node, bound: set, out: list):
             _target_names(gen.target, nested_bound)
         if node.kind == 'dict':
             _collect_free_names(node.element, nested_bound, out)
-            _collect_free_names(node.key, nested_bound, out)
+            _collect_free_names(node.value, nested_bound, out)
         else:
             _collect_free_names(node.element, nested_bound, out)
         for gen in node.generators:
@@ -3018,7 +3018,7 @@ class _GenexpDesugarer:
         free: list = []
         if node.kind == 'dict':
             _collect_free_names(node.element, bound, free)
-            _collect_free_names(node.key, bound, free)
+            _collect_free_names(node.value, bound, free)
         else:
             _collect_free_names(node.element, bound, free)
         for i, gen in enumerate(gens):
@@ -3041,7 +3041,7 @@ class _GenexpDesugarer:
         receivers: set = set()
         if node.kind == 'dict':
             _collect_receiver_names(node.element, receivers)
-            _collect_receiver_names(node.key, receivers)
+            _collect_receiver_names(node.value, receivers)
         else:
             _collect_receiver_names(node.element, receivers)
         for i, gen in enumerate(gens):
@@ -5943,7 +5943,7 @@ class Parser:
             if self._is_kw("for"):
                 gens = self._parse_generators()
                 self._expect("RBRACE")
-                return Comprehension(kind="dict", element=first, key=val, generators=gens)
+                return Comprehension(kind="dict", element=first, value=val, generators=gens)
             pairs = [(first, val)]
             while self._peek().kind == "COMMA":
                 self._advance()
@@ -8270,7 +8270,7 @@ def emit(node, indent: int = 0) -> str:
         gens = " ".join(f"for {g.target} in {emit(g.iterable)}" + "".join(f" if {emit(c)}" for c in g.conditions) for g in node.generators)
         if node.kind == "list": return f"[{emit(node.element)} {gens}]"
         if node.kind == "set":  return "{" + f"{emit(node.element)} {gens}" + "}"
-        if node.kind == "dict": return "{" + f"{emit(node.element)}: {emit(node.key)} {gens}" + "}"
+        if node.kind == "dict": return "{" + f"{emit(node.element)}: {emit(node.value)} {gens}" + "}"
         return f"({emit(node.element)} {gens})"
     if isinstance(node,ExprStmt): return f"{pad}{emit(node.value, 0)}"
     if isinstance(node,AssignStmt): return f"{pad}{emit(node.target)} = {emit(node.value, 0)}"

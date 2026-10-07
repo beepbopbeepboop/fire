@@ -377,8 +377,8 @@ def _collect_var_names(f: F.FunctionDef) -> list:
                 for c in g.conditions or []:
                     walk_compr_temps(c, depth + n, acc)
             walk_compr_temps(node.element, depth + n, acc)
-            if node.key is not None:
-                walk_compr_temps(node.key, depth + n, acc)
+            if node.value is not None:
+                walk_compr_temps(node.value, depth + n, acc)
             return
         if hasattr(node, "__dataclass_fields__"):
             for fname in node.__dataclass_fields__:
@@ -10969,7 +10969,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         Result layout matches `_emit_list` / `_emit_dict`. Generator loops
         use `_ci{d}`/`_cb{d}` temps (allocated by `_collect_var_names`).
         `kind == 'generator'` lowers like a list (same as the interpreter).
-        Dict comps store KEY in `.element` and VALUE in `.key` (parser swap)."""
+        Dict comps store KEY in `.element` and VALUE in `.value`."""
         kind = expr.kind
         is_dict = (kind == "dict")
         gens = expr.generators or []
@@ -11049,7 +11049,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # stale value — `{i: 100 + i for i in range(3)}` had the right
                 # keys and len, and a wrong value behind each one.
                 self.asm.emit(encode_stp_sp_pre(0, 31))
-                self._emit_expr(expr.key)      # VALUE -> X0
+                self._emit_expr(expr.value)      # VALUE -> X0
                 self.asm.emit(encode_mov_zr_xn(1, 0))   # X1 = value
                 self.asm.emit(encode_ldp_sp_post(0, 31))  # X0 = key
                 self._compr_append_pair(res_offset, cap)

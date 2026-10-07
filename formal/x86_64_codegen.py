@@ -353,7 +353,7 @@ def _collect_var_names(f: F.FunctionDef) -> list:
                 for c in g.conditions or []:
                     walk_compr(c, depth + n, acc)
             walk_compr(node.element, depth + n, acc)
-            walk_compr(node.key, depth + n, acc)
+            walk_compr(node.value, depth + n, acc)
             return
         if hasattr(node, "__dataclass_fields__"):
             for fname in node.__dataclass_fields__:
@@ -8841,7 +8841,7 @@ preference.
         reverse) cannot alias a loop's.
 
         A dict comprehension stores its KEY in `.element` and its VALUE in
-        `.key` — the parser's swap, which the arm64 backend also relies on."""
+        `.value` — the parser's swap, which the arm64 backend also relies on."""
         is_dict = (getattr(expr, "kind", "list") == "dict")
         gens = expr.generators or []
         elem_size = 16 if is_dict else 8
@@ -8904,7 +8904,7 @@ preference.
             if is_dict:
                 self._emit_expr(expr.element)          # KEY
                 self._push_slot(Reg.RAX)
-                self._emit_expr(expr.key)              # VALUE
+                self._emit_expr(expr.value)              # VALUE
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)

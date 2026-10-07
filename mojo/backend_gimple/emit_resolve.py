@@ -3663,7 +3663,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # dispatch (float, `None`, bool, struct), `_kw`-twin key handling and
         # callable-return note are the shared ones rather than this site's
         # third copy of each.
-        gex._emit_dict_pair_store(gen, res, node.element, node.key)
+        gex._emit_dict_pair_store(gen, res, node.element, node.value)
 
 
 
