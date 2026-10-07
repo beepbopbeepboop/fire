@@ -898,6 +898,48 @@ def test_the_quoted_census_is_the_live_census():
                   f'the text says {got}; `runtime_abi()` says {live[key]}')
 
 
+def test_call_arity_families_are_whole():
+    """Every `mojo_*_call_N` the header declares has a `_KNOWN_SIGS` row.
+
+    The dispatch helpers come in FAMILIES — `mojo_bound_method_call_0..8`,
+    `mojo_fnptr_call_0..8`, `mojo_fnptr_call_kw_0..8`,
+    `mojo_maybe_bound_call_0..8`, `mojo_maybe_bound_call_kw_0..8` — and they
+    were widened from arity 4 to 8 in one commit. `_KNOWN_SIGS` is what
+    `_emit_call` reads to coerce an argument to the callee's declared type,
+    so a family that is one row short is one arity where a caller that does
+    NOT pre-widen gets no coercion at all: `param_types` falls back to
+    `[]`, and `ptype` becomes `atype`, silently.
+
+    It happened. The widening commit added 5..8 for four of the five
+    families and left `mojo_bound_method_call_5..8` behind, so this check is
+    written as a FAMILY test rather than as four more pinned names: a pinned
+    name cannot notice a sixth family, and the cost of noticing this one was
+    a diff between this dict and this header done by reading.
+
+    `mojo_vararg_call_N` is deliberately excluded: those take the callable
+    VALUE plus a MojoList, not N positional arguments, so their arity is not
+    the same axis and the family is checked by its own rows above.
+    """
+    import re
+    import gimple_codegen
+    hdr = open(os.path.join(RUNTIME, 'fire_runtime.h')).read()
+    declared = set(re.findall(r'\b(mojo_\w*call(?:_kw)?_\d+)\s*\(', hdr))
+    vararg = {d for d in declared if d.startswith('mojo_vararg_call_')}
+    declared -= vararg
+    sigs = gimple_codegen.GimpleGen._KNOWN_SIGS
+    missing = sorted(d for d in declared if d not in sigs)
+    check(not missing,
+          'every declared mojo_*_call_N / _call_kw_N arity has a _KNOWN_SIGS row',
+          f'missing {missing}')
+    # ...and the converse: a row for a name the header no longer declares is
+    # just as stale, and just as invisible, in the other direction.
+    stale = sorted(d for d in sigs
+                   if re.fullmatch(r'mojo_\w*call(?:_kw)?_\d+', d)
+                   and d not in declared and d not in vararg)
+    check(not stale, 'no _KNOWN_SIGS row names an arity the header dropped',
+          f'stale {stale}')
+
+
 def main():
     if '--fix' in sys.argv:
         n = rewrite_quoted_figures()
@@ -909,6 +951,7 @@ def main():
     test_non_exports_stay_excluded()
     test_the_fixer_touches_only_the_figures()
     test_the_quoted_census_is_the_live_census()
+    test_call_arity_families_are_whole()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")

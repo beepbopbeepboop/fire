@@ -5796,6 +5796,73 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     return gen._stub_result('int', '0', f'TODO: bytes.{method}')
 
 
+def _memoryview_attr_value(gen, mv: str, method: str):
+    """`(ctype, cexpr)` for a `MojoMemoryView *` ATTRIBUTE -- the answer for
+    `mv.<method>` -- or None when `method` is not one of the attributes that
+    has a real lowering here.
+
+    ONE table for a question with TWO spellings. `mv.shape` (an attribute
+    read, emit_exprs.py) and `mv.shape()` (a method call,
+    `_lower_memoryview_method` below) are the same question, and each site
+    used to carry its own copy of the member -> runtime-entry-point mapping.
+    Both copies even carried the same comment claiming the rule lives in
+    "ONE place", which was true of the runtime and false of these two
+    tables -- so a fix to one was invisible to the other. The method form is
+    a superset of the attribute form (`tolist`, `release`, the context
+    manager, `__len__`, `cast`, ... have no attribute spelling here), so the
+    extra names stay at their call site and this answers the shared subset.
+
+    The contiguity triple really is constant-foldable -- a 1-D byte window
+    over contiguous memory is C-contiguous by construction -- but it is
+    ASKED of the runtime rather than folded, so the rule has one home
+    instead of one per spelling of the question.
+    """
+    if method in ('nbytes', 'itemsize'):
+        fn = ('mojo_memoryview_nbytes' if method == 'nbytes'
+              else 'mojo_memoryview_itemsize')
+        return 'int64_t', gen._call_expr('int64_t', fn,
+                                         [('MojoMemoryView *', mv)])
+    if method == 'format':
+        return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
+                                        [('MojoMemoryView *', mv), ('char *', '"B"')])
+    if method == 'obj':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
+                                             [('MojoMemoryView *', mv)])
+    if method in ('shape', 'strides', 'suboffsets'):
+        # The tuple-valued descriptors. Neither spelling had a case, so each
+        # fell to the generic unknown-member path and printed its own heap
+        # ADDRESS as a decimal: `mv.shape` printed 4341225952 where CPython
+        # prints `(4,)`. The runtime returns the spelling string, which is
+        # exact for this always-1-D representation -- and `suboffsets` is the
+        # one descriptor the runtime takes no receiver for.
+        if method == 'suboffsets':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_suboffsets_str', [])
+        return 'char *', gen._call_expr(
+            'char *', 'mojo_memoryview_' + method + '_str',
+            [('MojoMemoryView *', mv)])
+    if method == 'ndim':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                         [('MojoMemoryView *', mv)])
+    if method == 'readonly':
+        # A real query, not a constant fold: the answer is the MUTABILITY of
+        # the object the view was taken over, which the view records from
+        # its source (see MojoMemoryView's `readonly` field in
+        # fire_runtime.h) -- True over a bytes, False over a bytearray,
+        # exactly as CPython. Folding it to a constant answered
+        # `memoryview(b'abcd').readonly` False: the fold's own reasoning
+        # ("this representation is always a writable window") is a true
+        # statement about the WINDOW and an irrelevant one about the ANSWER.
+        t = gen._call_expr('int', 'mojo_memoryview_readonly',
+                           [('MojoMemoryView *', mv)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
+        t = gen._call_expr('int', 'mojo_memoryview_' + method,
+                           [('MojoMemoryView *', mv)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    return None
+
+
 def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower `MojoMemoryView *` method calls (1-D byte view)."""
     arg_pairs = [gen.lower_expr(a) for a in args]
@@ -5817,54 +5884,12 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
             fmt = arg_pairs[0][1]
         return 'MojoMemoryView *', gen._call_expr('MojoMemoryView *', 'mojo_memoryview_cast',
                                                   [('MojoMemoryView *', ov), ('char *', fmt)])
-    if method == 'nbytes':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_nbytes',
-                                         [('MojoMemoryView *', ov)])
-    if method == 'itemsize':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_itemsize',
-                                         [('MojoMemoryView *', ov)])
-    if method == 'format':
-        return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
-                                        [('MojoMemoryView *', ov), ('char *', '"B"')])
-    if method == 'obj':
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
-                                             [('MojoMemoryView *', ov)])
-    if method == 'readonly':
-        # A real query, not a fold: the answer is the mutability of the
-        # object the view was taken over, which MojoMemoryView records from
-        # its source (`readonly` field, see fire_runtime.h). It used to be
-        # constant-folded to `0` on the grounds that "this representation is
-        # always a writable 1-D byte window" — true of the WINDOW, wrong for
-        # the ANSWER, and it made `memoryview(b'abcd').readonly` False where
-        # CPython (correctly) says True, because the view is over an
-        # immutable object.
-        t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
-    if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
-        # A 1-D byte window over contiguous memory is C-contiguous by
-        # construction, and `f_contiguous`/`contiguous` are the same fact
-        # under this representation. Asked of the runtime rather than
-        # folded here, so all three come from ONE place (the other memoryview
-        # attributes are queries) instead of this call site being the only
-        # one that knows the rule.
-        fn = 'mojo_memoryview_' + method
-        t = gen._call_expr('int', fn, [('MojoMemoryView *', ov)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
-    if method in ('shape', 'strides', 'suboffsets'):
-        # Tuple-valued descriptors. They have no lowering at all, so each
-        # fell to the unknown-member stub and printed its own heap ADDRESS as
-        # a decimal: `mv.shape` printed 4340423136 where CPython prints
-        # `(4,)`. The runtime returns the spelling string, which is exact for
-        # this always-1-D representation.
-        if method == 'suboffsets':
-            return 'char *', gen._call_expr(
-                'char *', 'mojo_memoryview_suboffsets_str', [])
-        t = gen._call_expr('char *', 'mojo_memoryview_' + method + '_str',
-                           [('MojoMemoryView *', ov)])
-        return 'char *', t
-    if method == 'ndim':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
-                                         [('MojoMemoryView *', ov)])
+    # Everything below is the shared attribute set -- `mv.<m>` and `mv.<m>()`
+    # ask the same question, so they are answered by one table rather than
+    # one table each. See `_memoryview_attr_value`.
+    _shared = _memoryview_attr_value(gen, ov, method)
+    if _shared is not None:
+        return _shared
     if method == 'tolist':
         # The view's elements as a real list of ints; this answered a raw
         # int 0 from the unknown-member stub.

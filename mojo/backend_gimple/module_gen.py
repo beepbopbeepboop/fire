@@ -8285,15 +8285,28 @@ def gen_module_impl(self, stmts):
             # Keyword arguments name the parameter directly, so the element
             # contract reads them the same way — `show(data=[1.5, 2.5])` is
             # the same call as `show([1.5, 2.5])` and used to inherit exactly
-            # as little. The dict-value contract reads them the same way for
-            # the same reason; the scalar and struct-pointer observations
-            # above are a separate pre-existing contract with its own
-            # coverage, and widening those is not this change's business.
+            # as little. Mirror the POSITIONAL walk above (`_static_arg_elems`
+            # + `_record_param_elem`) rather than the literal-only
+            # `_note_literal_arg_elems`: a kwarg's value can be a bare
+            # IDENTIFIER (`show(data=fs)`), not just a literal, and the
+            # caller's own scanned local map already holds `fs`'s element
+            # type. Routing it through the literal-only helper left
+            # `show(data=fs)` with an untyped loop target, so every element
+            # read back through the int accessor — a list of doubles printed
+            # their raw IEEE-754 bit patterns (measured:
+            # `gimple_for_over_list_param_from_keyword_identifier`, which
+            # prints 1.5 / 2.5 under CPython). The dict-value contract reads
+            # them the same way for the same reason; the scalar and
+            # struct-pointer observations above are a separate pre-existing
+            # contract with its own coverage, and widening those is not this
+            # change's business.
             for _kw in (getattr(call, 'kwargs', None) or []):
                 _kwn = _as_str(_kw[0])
                 for _ki in range(len(pnames)):
                     if pnames[_ki] == _kwn:
-                        _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        _kwfe, _kwfne = _static_arg_elems(_kw[1], elem, nested)
+                        if _kwfe is not None:
+                            _record_param_elem(callee, _kwn, _kwfe, _kwfne)
                         _kwdv = _static_arg_dict_val(_kw[1], dval, caller_name)
                         if _kwdv is not None:
                             _record_param_dict_val(callee, _kwn, _kwdv)

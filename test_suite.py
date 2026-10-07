@@ -4442,6 +4442,15 @@ UNREGISTERED = {
     'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
         'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
         '§3: a green exit that reports a failure in its own text.',
+    'test_closure_capture_shadows_function.py': 'The scoping rule behind a '
+        'closure capture: a free name the ENCLOSING function also binds is a '
+        'capture even when another module of the same compile defines a '
+        'function of that name — the rule, plus the four cases that must keep '
+        'behaving (a statement-level local, an enclosing parameter, a genuine '
+        'global that must NOT be captured, and an inner-declared name). Pure '
+        'AST analysis through Parser + discover_closures, no compile and no '
+        'gcc, so it costs about a tenth of a second; it wants a `check`-bucket '
+        'entry with `extra` naming this file.',
     'test_async_execution.py': 'Interpreter async/await execution, milestone '
         '3b. The compiled half of async is the `coro` bucket; this is the half '
         'that decides what the compiled half should agree with.',

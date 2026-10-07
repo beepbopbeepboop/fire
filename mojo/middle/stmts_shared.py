@@ -51,16 +51,27 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     information and must not overwrite a real answer.
 
     This is the ONE place the `List[String]`-shaped annotation is turned
-    into an element ctype. It used to be written out inline, identically,
-    at each of the two statement paths that see an annotated declaration
-    with an initializer — and a THIRD path, the owned-local stack
-    allocation that swallows such a statement whole, had no copy at all.
-    That omission is a silent wrong value: `kept: List[String] = []` filled
-    only from a callee came back as ints, because the element type of a
-    list is otherwise recorded by the `append` sites, and a caller that
-    only sees the list through a call has none
-    (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
-    closed and removed when this helper landed).
+    into an element ctype, and there are FOUR paths that can consume a
+    binding statement, so all four go through it:
+
+    * `_gen_stmt_VarDecl` with an initializer,
+    * `_gen_stmt_VarDecl` with a bracketed declaration and NO initializer
+      (real Mojo's "must assign before use" form, bound by a later
+      statement),
+    * `_gen_stmt_AssignStmt` (the bare annotated spelling the `parts:
+      List[String]` rewriter produces),
+    * `maybe_stack_alloc_owned_ctor` in `mojo/backend_gimple/emit_infra.py`,
+      which swallows a binding statement WHOLE — `kept: List[String] = []`
+      takes this path, because `[]` is an empty constructor and the local
+      is an ownership candidate — and so runs none of the other three.
+
+    The first three each had the rule written out inline; the fourth had
+    no copy at all, and that omission is a silent wrong value: a
+    `List[String]` filled only from a callee came back as ints, because
+    the element type of a list is otherwise recorded by the `append` sites,
+    and a caller that only sees the list through a call has none. The
+    inline copies had also drifted — the no-initializer one tested
+    `ctype == 'MojoList *'` and so answered for a list but not a set.
     """
     if ctype not in ('MojoList *', 'MojoSet *'):
         return None

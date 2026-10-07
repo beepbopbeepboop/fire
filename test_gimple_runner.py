@@ -1451,6 +1451,38 @@ def main():
 main()
 """)
 
+    # The SAME question -- "the function `f` as a bare C value" -- has two
+    # spellings in this codegen: a direct binding (`f = g`) and a callable-
+    # valued parameter DEFAULT (`def apply(*, g=v): ...`). They were two
+    # separate implementations, and this shape is the one input on which they
+    # disagreed: the default path had no variadic handling, so a `*args`
+    # callee reached `mojo_fnptr_call_N` as a bare `_funcptr_`, was called
+    # with loose scalars, and dereferenced the integer 1. Measured on the
+    # merged tree before the consolidation: this program exited -11 with no
+    # output and no diagnostic, where the direct-binding spelling one screen
+    # up printed its answer correctly and CPython printed 16.
+    test_gimple_stdout("gimple_variadic_callable_valued_default", """\
+def g(*a):
+    return sum(a)
+
+def apply_it(x, *, f=g):
+    return f(1, 2, 3) + x
+
+print(apply_it(10))
+""", "16\n")
+
+    # Same root cause, `**kwargs` half, and with the default actually
+    # consulted rather than shadowed by an argument.
+    test_gimple_stdout("gimple_variadic_kwargs_callable_valued_default", """\
+def g(**k):
+    return len(k)
+
+def apply_it(x, *, f=g):
+    return f(a=1, b=2) + x
+
+print(apply_it(10))
+""", "12\n")
+
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),
@@ -5284,6 +5316,46 @@ def main():
 main()
 """, "3\ncde\nTrue\ncde\n3\n8\ncde\n")
 
+    # The same annotation→element-type rule on the THIRD path that can
+    # consume a binding statement: a bracketed declaration with NO
+    # initializer (`var s: List[String]`, real Mojo's "must assign before
+    # use" form, which this codegen deliberately does not auto-allocate --
+    # see the VarDecl path's own note) that a later statement then binds.
+    # That copy was a third hand-written twin of the same computation and
+    # had drifted: it tested `ctype == 'MojoList *'`, so a `Set[T]`
+    # declared the same way got no element type at all, where the other
+    # two paths answer for both kinds. It is now the shared helper
+    # (`_annotation_container_elem_type`, the function whose own docstring
+    # says it is the ONE place this rule lives), so all three cannot
+    # disagree again. Every value here is already right -- the set literal
+    # and the list literal each record their own element types on the way
+    # in -- so this pins the CONSOLIDATION, not a fix, and the set is the
+    # half the drift would have lost.
+    test_gimple_stdout("gimple_annotated_container_elem_type_noinit_decl", """\
+def main():
+    var s: List[String]
+    s = ["abc", "de"]
+    print(s[0])
+    print(len(s[0]))
+    for k in s:
+        print(k)
+        print(len(k))
+    var t: Set[String]
+    t = {"abc", "de"}
+    print(len(t))
+    for k in t:
+        print(k)
+        print(len(k))
+    var u: List[Int]
+    u = [7, 8]
+    print(u[0] + 1)
+    var d: Dict[String, Int]
+    d = {"a": 1}
+    print(d["a"] + 1)
+
+main()
+""", "abc\n3\nabc\n3\nde\n2\n2\nabc\n3\nde\n2\n8\n2\n")
+
     # A dynamically-set attribute whose value is a STRING, read back through
     # every spelling. The struct declared no such field, so the field-scan
     # pass minted a phantom one — and minted it `int`, because that is the
@@ -6785,6 +6857,33 @@ fn main():
     print(isinstance((1, 2), (list, str)))
 """, "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
      "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
+
+    # The SAME question as `gimple_tuple_type_preserved_by_ops` above, but
+    # asked through a value the codegen cannot type statically: a tuple
+    # literal lowers to the very `MojoList` a list literal does, so the
+    # tuple MARKER is the only thing telling them apart, and the boxed path
+    # (an untyped parameter, which is `int64_t`) delegates to the runtime
+    # `mojo_isinstance` rather than to the codegen's pointer-typed lowering.
+    # `mojo_isinstance`'s `type_id == 5` arm used to answer `list` for a
+    # marked list, so every tuple reaching it through an untyped binding
+    # reported itself a list — the silently-wrong direction. The codegen
+    # path already excluded the marker; the two are the same question and
+    # had to stop disagreeing. `str.partition`'s unmarked result is still a
+    # list (its own filed bug:
+    # bugs/RUNTIME_str_partition_does_not_mark_its_result_as_a_tuple.md),
+    # while the `bytes` half, which sets the marker, is a tuple.
+    test_gimple_stdout("gimple_isinstance_list_excludes_tuple_on_the_boxed_path", """\
+def probe(x):
+    if isinstance(x, list):
+        print("list")
+    else:
+        print("not list")
+
+probe([1, 2])
+probe((1, 2))
+probe(b'a=b'.partition(b'='))
+probe('a=b'.partition('='))
+""", "list\nnot list\nnot list\nlist\n")
 
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
@@ -9939,6 +10038,25 @@ def show(data):
 
 def main():
     show(data=[1.5, 2.5])
+""", "1.5\n2.5\n")
+
+    # The KEYWORD IDENTIFIER spelling of the same call: a kwarg names the
+    # parameter directly, so `show(data=fs)` is the same call as `show(fs)`
+    # and the caller's own scanned local map already says `fs` is a list of
+    # doubles. Every other case in this group passes something the walk can
+    # read on the spot; this is the only one whose argument is a bare
+    # identifier reached by NAME. Fed only from a literal, the walk left the
+    # callee's loop target untyped and every element read back through
+    # `mojo_list_get_int`, so a list of doubles printed their raw IEEE-754
+    # bit patterns with exit 0.
+    test_gimple_stdout("gimple_for_over_list_param_from_keyword_identifier", """\
+def show(data):
+    for r in data:
+        print(r)
+
+def main():
+    fs = [1.5, 2.5]
+    show(data=fs)
 """, "1.5\n2.5\n")
 
     # A string list is the case where the int64_t default is most visibly
