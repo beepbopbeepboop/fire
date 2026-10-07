@@ -61,13 +61,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stack_floor_guard_still_segfaults_at_the_budget_frame_count.md` | `formal97-docs` | the stack-floor guard still dies of SIGSEGV at exactly the budget's frame count under a reduced `ulimit -s` |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | **unclaimed** | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 
-### `formal/arm64_proof_gen` — 18 documents, 17 claimed
+### `formal/arm64_proof_gen` — 17 documents, 16 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | `formal101-docs` | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
 | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | `formal101-docs` | `bv_decide` reports a counterexample for a flag the spill hid |
-| `FORMAL_a_one_field_mutator_has_no_method_contract.md` | `formal90-docs` | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal90-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `formal91-docs` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `formal91-docs` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
@@ -238,6 +237,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_x86_64_instruction_coverage_backlog.md` | `formal98-docs` | the x86-64 half of the ISA census, form by form |
 | `FORMAL_x86_64_model_fuzz_hardware_anomalies.md` | `formal99-docs` | (untitled) |
+
+### `formal/x86_64_proof_gen` — 1 document, 1 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
+| `FORMAL_a_one_field_mutator_has_no_method_contract.md` | `formal90-docs` | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 
 ### `unclassified` — 2 documents, 2 claimed
 

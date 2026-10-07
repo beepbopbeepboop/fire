@@ -1,10 +1,11 @@
 # A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say
 
-**Status: OPEN, and deliberately not fixed here.** The receiver convention it
-depends on landed on `work/formal15-mutator-return-abi` (commit `11558f0d`); this
-doc is the part of that work which is a project rather than a patch, written down
-so the next reader does not have to re-derive it. Everything here is measured on
-arm64; the x86-64 backend has no analogue of the machinery at all (see §4).
+**Status: OPEN, re-measured 2026-10-05, still not fixed.** §4.1 records what
+the re-measurement added — the smallest program that fires the exclusion, the
+confirmed absence of any x86-64 counterpart, and the fact that the mutator is
+UNREACHABLE from the corpus because a struct construction has no model (a
+different document's subject). Everything here is measured on arm64; the x86-64
+backend has no analogue of the machinery at all (see §4).
 
 **Re-read 2026-10-03 (`work/formal18-1`): §5's step 1 names a function that no
 longer exists under that name, and the part that remains is step 2 — which §3
@@ -130,6 +131,66 @@ returns nothing. So on x86-64 a one-field mutator has no contract for the same
 reason it never had one, and this convention change is invisible to it. Whoever
 picks (1)–(3) up will be writing the arm64 half first and the x86-64 half after,
 and the second is not a port.
+
+## 4.1 Re-measured 2026-10-05: every claim above still holds, and one thing
+##      is now measurable that was not before
+
+This round was given the doc and could not land items (1)–(3) — they are a
+`lib/ProofLib.lean` theorem plus a model change, and the brief forbids both a
+`make gate` and a Lean run beyond the one test covering a change. **So this is
+the doc with its measurements refreshed, not a fix**, and the honest thing to
+record is what a re-measurement adds rather than to restate §1 as if it were
+new. It adds three facts.
+
+**The exclusion fires on the smallest possible program, and the receiver really
+is a cell.** Asking the pass directly (no build, no Lean — the shape §5 step 3
+gives), with `_owner_struct` attached the way `formal/build.py` publishes it:
+
+```
+wide_recv (TWO fields)   one_field=False  methods=['set_x', 'get_x', 'get_y']
+  set_x   params=['self', 'v']  writeback=None
+Box (ONE field)          one_field=True   methods=['set_v', 'get_v']
+  set_v   params=['self', 'x']  writeback='self'
+  get_v   params=['self']       writeback=None
+```
+
+`receiver_writeback_name` is non-None for the one-field MUTATOR and None for
+every other method — so §1's premise is exactly right, and the exclusion in
+`_frame_methods` is keyed on `struct_is_one_field`, which is the question §0 says
+it is.
+
+**The x86-64 half still has NO frame-receiver machinery**, so §4 stands as
+written. `rg -n "frame_methods|_self_accesses|Frame\." formal/x86_64_proof_gen.py`
+returns nothing, and the only two occurrences of the word "frame" in that file
+are prose in a refusal message about `X86State.init` having no frame. Whatever
+answers (1)–(3) on arm64 is a port, not a second implementation.
+
+**The mutator is UNREACHABLE from the corpus, for a reason that is not this
+document's.** A one-field struct with a mutating method does not reach
+`_frame_methods` at all on this tree: the program is refused earlier, by the
+model's missing domain for a struct CONSTRUCTION —
+
+```
+model: call to `Box` has no model in this image (an extern, or a function this
+generator emits no `_go` for); refusing rather than inventing its return value
+```
+
+which is `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` /
+`FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`'s subject and not
+this one's. **So (1)–(3) cannot be verified end-to-end on this tree even after
+they are written**: there is no program that both constructs a one-field struct
+and gets far enough to want its mutator's contract. That is worth knowing before
+starting, because it means (1)'s "unit test in `test_formal_call_proof_gen.py`"
+has to be a test of `_frame_slot_accesses` on a HAND-BUILT word list rather than
+of a generated proof — the same shape `TestBottomTestedRangeLoop` uses to read
+the emitter's own block partition when the proof is not available.
+
+**Not attempted, and why not simplifiable**: (1) alone is what §0 already
+warns about — "step 1 and the single-statement restriction have to be lifted
+together", because a mutator that mutates AND returns is a multi-statement body
+and `_frame_methods` only classifies single-statement bodies — and (2) has no
+answer, which §3 says at length. Landing (1) alone would change a slot map for
+a contract nothing consumes.
 
 ## 5. What to do next, in order
 

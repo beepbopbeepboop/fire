@@ -2,8 +2,10 @@
 
 **Area:** FORMAL, both backends — `formal/specs.py`, `lib/Specs.lean`, and the
 `main_refines_spec` theorem an `@refines(…)` annotation emits. **Status: open,
-and deliberately so; this is the limit of the layer as landed, not a defect in
-it.** Found 2026-10-05 while landing `work/formal36-spec-refinement`.
+re-measured 2026-10-05, and deliberately so; this is the limit of the layer as
+landed, not a defect in it.** Found 2026-10-05 while landing
+`work/formal36-spec-refinement`. §"Re-measured" names the single library fact the
+all-inputs statement is waiting on.
 
 ## What is landed, in one paragraph
 
@@ -85,6 +87,52 @@ here, because an induction that has to be right for eleven different model
 shapes is exactly the kind of thing that should land with its own negative
 control (a deliberately wrong specification must make the induction fail, not
 merely the finite check).
+
+## Re-measured 2026-10-05: the limit is where it was, and the ONE missing
+##      library fact is named exactly
+
+This round was given the doc and could not close it — the generator half is a
+per-example induction and the library half is a `lib/ProofLib.lean` theorem, and
+the brief allows no Lean run beyond the one test covering a change. **So this
+section is a measurement, not a fix**, and what it adds over the original is a
+sharpened statement of the blocker.
+
+**The gap is not "the range is finite".** It is that the ALL-INPUTS statement
+needs a `UInt64` MULTIPLICATION lemma and there is no multiplication analogue of
+the two that exist:
+
+```
+$ grep -n 'u64_ofNat_add\|u64_ofNat_sub\|u64_ofNat_mul' lib/ProofLib.lean
+741:theorem u64_ofNat_add (a b : Nat) : UInt64.ofNat a + UInt64.ofNat b = ...
+748:theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) : ...
+(no `u64_ofNat_mul`)
+```
+
+That is the whole of why a `fact`-shaped induction cannot be written today: its
+arithmetic goal is `UInt64.ofNat (k+1) * fact_go k` against a specification in
+`Nat`, and — as `u64_ofNat_add` shows — the way this library discharges that
+class of goal is `apply UInt64.toNat.inj` and reduce to a `Nat` statement about
+`% 2^64`. **A multiplication lemma is a DIFFERENT proof, not another `Nat`
+rewrite**, because the residue of a product is not the product of the residues.
+That is the concrete thing to establish first, and it is why the generator half
+cannot land ahead of it the way the range-loop fix's refusal could.
+
+**`lib/Specs.lean` already has the no-wrap region** — `fitsWord`, `wordLimit`,
+`wordMax`, `small_lt_wordLimit`, `ofNat_toNat` (`lib/Specs.lean:59-101`) — so the
+*statement* an all-inputs theorem needs is expressible; what is missing is the
+per-example induction and, under it, the multiplication fact. The doc's §"Why it
+is worth closing" is therefore accurate as written and the region is not the
+missing piece.
+
+**The layer itself is unchanged and green**: `python3 test_formal_specs.py` is
+8/8, including the negative control (`a wrong specification is rejected`), so
+the finite-range claim is still EVALUATED rather than believed — which is the
+property that makes the missing induction a coverage gap rather than a soundness
+one.
+
+**The x86-64 half is as described**: `refines_section(..., machine_half=False)`
+emits the model half only, and `test_formal_specs.py`'s
+`the_x86_64_backend_gets_the_model_half_only` pins it.
 
 ## What is NOT the problem
 

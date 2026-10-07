@@ -13258,45 +13258,39 @@ def _lower_builtin_extremum(functions: list, module_names) -> int:
     `for i in range(max(rank - 2, 0))`, and a name beside a number is what a
     clamp is spelled as.
 
-    **AND THE MODULE BODY IS NOT REWRITTEN, which is a measured wrong answer
-    rather than a caution — and whose REASON was measured again on 2026-10-05,
-    because the sentence this paragraph used to carry was FALSE about the
-    source.** It said a module-level store of a `TernaryExpr` "drops the word to
-    zero rather than refusing it", on the strength of `TOP = 9 if 1 else 3`
-    answering 0. Measured on this tree with the store read back from a FUNCTION
-    (`def show(): return TOP; print(show())`), so the answer cannot depend on
-    which function the image chose as its entry, the store is CORRECT: 9 for
-    `9 if 1 else 3` and 3 for `9 if 0 else 3`, on both architectures, agreeing
-    with CPython. Nothing is dropped.
+    **AND THE MODULE BODY IS REWRITTEN LIKE ANY OTHER FUNCTION BODY, which
+    corrects a fence that was standing on a measurement that never happened.**
+    This pass used to skip `M.module_body_functions(functions)`, on the recorded
+    ground that "a store of a `TernaryExpr` at module level answers 0". It does
+    not, on either architecture, and the recording was wrong at its root: the
+    repro ran the image and read `$?` — the process exit status — against
+    `python3 -c 'print(9 if 1 else 3)'`, which is a DIFFERENT program from the one
+    built. A module whose body stores a name and never calls anything exits 0 in
+    CPython too, so that measurement could not have distinguished the two
+    behaviours it was cited for. Reading the value observably instead (bind it to
+    an annotated local, because `print(TOP)` of a module global is refused for
+    wanting to know its type) gives 9 on arm64 and 9 on x86-64, agreeing with
+    CPython, for a `TernaryExpr` at module level and for every other store shape
+    measured beside it — `(9 if 1 else 3) + 1`, `7 // 2`, `7 % 3`, `-6`, `~6`,
+    `2 ** 3`, `5 > 3`, a store inside an `if`, a store inside a `for`, a rebind,
+    and a value produced by a call.
 
-    **What the 0 actually was is the ENTRY POINT.** `collect_module_symbols`
-    runs at 17105 and this rewrite at 17291, so the module-level table is
-    already built when this pass makes a `TernaryExpr` out of a `max`; a name the
-    table could not fold is `rebound`, `module_body`'s `_is_folded_constant`
-    therefore KEEPS its store as a top-level statement, and a non-empty module
-    body is the image's entry (`entry_function` rule 1) — so `main` is displaced
-    and a program written as `def main(): return TOP` answers the body's own
-    trailing `return 0`. Measured with this fence removed, both architectures:
+    The store path is right because a module-level store is an ordinary store:
+    the module body is compiled as a function (`_module_body_function`), a name
+    the body writes gets the module's `__DATA` slot (`module_body_store_names`),
+    and both emitters' `AssignStmt` arm lowers whatever expression it is handed.
+    Nothing about that path treats a `TernaryExpr` specially, which is why there
+    was no defect here to fence against.
 
-        TOP = max(3, 9)      ->  0   (the constant is 9)
-        TOP = 3 + 9          -> 12   (it folds, so `main` is the entry)
-        TOP = 9 if 1 else 3  ->  9   (it folds since `fold_module_select_expr`)
-
-    So the fence still prevents a wrong answer, and it is still the right
-    control to use — but what it prevents is the rewrite reaching a store whose
-    value the table has ALREADY been asked about and could not decide, not a
-    store that cannot hold a `TernaryExpr`. The fix for the class itself is in
-    the folder (`model.fold_module_select_expr`, which decides these values);
-    what is left for `max` at module level is only the ORDERING — this pass runs
-    after the table, so a `TernaryExpr` it invents is invisible to it. Moving
-    this pass above `collect_module_symbols` would close that, and is not worth
-    doing for a population this tree's own sources do not contain (six files,
-    measured, and none of them an extremum at module level).
-
-    `M.module_body_functions` is the one reader of "this wrapper is a module's
-    top level", and the rewrite asks it rather than matching
-    `MODULE_BODY_NAME` — a library is compiled from SEVERAL sources and each may
-    have a body, so a name match would find one of N.
+    So the fence was a REFUSAL of correct programs, not a prevention: with it,
+    `TOP = max(3, 9)` at file level — which CPython answers 9, and which this
+    rewrite lowers correctly everywhere else, including inside a `def` — was
+    refused by name on both architectures. Removing it is what makes the rewrite
+    mean one thing at every position it can be written, which is the same
+    "one rule, not two" argument `module_slot_for` is shared for. The guards
+    above are unaffected by position and still refuse what they must: two
+    containers still hit the integer-literal guard, and a container beside a
+    literal is still refused by the relational comparison.
 
     **Two or more POSITIONAL arguments and no keyword**, which is the rest of
     the shape question. One argument is `max(xs)` — a fold over a run-time
@@ -13313,16 +13307,10 @@ def _lower_builtin_extremum(functions: list, module_names) -> int:
     """
     at_module = set(module_names or ())
     compiled = {f.name for f in functions}
-    # The module BODY is not a `def` and is not skipped: `MODULE_BODY_TAG` is the
-    # one reader of "this wrapper is a module's top level", and a library is
-    # compiled from SEVERAL sources each of which may have one, so matching the
-    # NAME would find one of N. See the next paragraph for why it is excluded
-    # from the rewrite.
-    bodies = set(id(f) for f in M.module_body_functions(functions))
     done = 0
     for fn in functions:
         body = getattr(fn, "body", None)
-        if not isinstance(body, list) or id(fn) in bodies:
+        if not isinstance(body, list):
             continue
         count = [0]
         _rewrite_dialect_in(

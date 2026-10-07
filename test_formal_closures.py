@@ -383,6 +383,44 @@ CASES = [
      "    print(g(3))\n"
      "    return 0\n"),
 
+    # ── a nested `def` capturing a `for` TARGET ──
+    #
+    # CPython answers 3: `get()` is called inside the iteration that defined it,
+    # so it reads the current `i`. This row was a REFUSAL ("main_get: 'i' has no
+    # home") until 2026-10-05, and the refusal named the REGISTER ALLOCATOR for
+    # what is a fact about the closure pass — `mojo/middle/closures.py`'s
+    # `enriched_scope`, the map every inferred capture is filtered against, had
+    # arms for an `AssignStmt` target and a `VarDecl` and neither for a
+    # `ForStmt` target, so `i` was not in it, `i` was free in the nested body,
+    # and the filter dropped it.
+    #
+    # It is ANSWERED rather than merely un-refused because the by-value capture
+    # ABI has to produce CPython's NUMBER here, and it does: 3 on both
+    # architectures, diffed against CPython by the harness.
+    ("a_nested_def_capturing_a_for_target",
+     "def main():\n"
+     "    s = 0\n"
+     "    for i in range(3):\n"
+     "        def get():\n"
+     "            return i\n"
+     "        s = s + get()\n"
+     "    print(s)\n"
+     "    return 0\n"),
+    # THE HAZARD, and the reason the row above is not simply "capture by value".
+    # CPython answers 2 2 2 here, not 0 1 2: the closures outlive the iteration,
+    # so all three read the FINAL `i`. A by-value capture answers 0 1 2, which
+    # is a silently wrong number rather than a refusal, so this shape must stay
+    # refused — and it is, by a refusal about a DIFFERENT construct (the `def`
+    # stored into a container, `a_nested_def_stored_in_a_list_and_called` in
+    # `REFUSALS`), because the by-value ABI cannot express one cell and three
+    # closures at all. This row is what would catch that refusal disappearing.
+    #
+    # The two CONTROL rows for the row above are in `REFUSALS`
+    # (`a_loop_target_closure_stored_past_its_iteration_is_still_refused` and
+    # `a_comprehension_target_is_not_a_capture`) rather than beside it here,
+    # because a row in this table asserts an ANSWER and both of those assert a
+    # refusal. They are the controls for this fix and they read next to it.
+
     # The three shapes in which a `NOT_LOWERED_BUILTINS` NAME is not the
     # builtin, which is the half of the pre-pass that decides whether it is a
     # refusal at all — and the half no corpus row can reach, because every
@@ -604,6 +642,45 @@ REFUSALS = [
     # `a_lambda_closing_over_a_loop_variable_binds_late`. So this ABI answers
     # the shape it can and refuses the one it cannot, which is the honest
     # division: it cannot express a shared CELL at all.
+    #
+    # These two are what say the fix stopped where it should. Both are refusals,
+    # and both are about a DIFFERENT construct from the capture — so their
+    # needles are deliberately not about `i`, which is the point: a by-value
+    # capture that reached either of these would be a silently wrong NUMBER
+    # rather than a refusal.
+    #
+    # The first is the late-binding hazard the bug doc names. CPython answers
+    # 2 2 2 — the closures outlive the iteration, so all three read the final
+    # `i` — where a by-value capture answers 0 1 2. The by-value ABI cannot
+    # express one cell and three closures at all, so this shape is correct to
+    # keep refusing; what is pinned is that it is STILL refused after the
+    # capture change, which is a different property from the one it had before.
+    ("a_loop_target_closure_stored_past_its_iteration_is_still_refused",
+     "def main():\n"
+     "    fs = []\n"
+     "    for i in range(3):\n"
+     "        def g():\n"
+     "            return i\n"
+     "        fs.append(g)\n"
+     "    print(fs[0](), fs[1](), fs[2]())\n"
+     "    return 0\n",
+     ["'g'", "main_g"]),
+    # The second is the scope boundary. A COMPREHENSION target is a separate
+    # scope whose names are NOT locals of the enclosing function, so `q` must
+    # still be refused — capturing it would shadow the comprehension's own
+    # binding, and `_apply_module_constant_sites`'s docstring says so at
+    # length. The `ForStmt` arm does not reach a comprehension, which is what
+    # this row checks rather than the reader inferring it.
+    ("a_comprehension_target_is_not_a_capture",
+     "def outer(n):\n"
+     "    ys = [q for q in range(3)]\n"
+     "    def get():\n"
+     "        return q\n"
+     "    return ys\n"
+     "def main():\n"
+     "    print(outer(3))\n"
+     "    return 0\n",
+     ["'q'", "outer_get"]),
 
     # ── a callable stored in a container and read back ──
     # The result is BOUND before it is printed, and that is not incidental:

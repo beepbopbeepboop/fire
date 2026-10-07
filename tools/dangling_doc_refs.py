@@ -393,10 +393,41 @@ def stale_baseline_entries(by_file, baseline=None):
     indistinguishable from one that is still needed. This is that distinction, and
     a caller that wants the ledger to describe the corpus rather than bound it
     reads it here.
+
+    **A file that has NO citations left is reported too, which is the case this
+    function could not see before 2026-10-05 and is the whole of
+    `bugs/FORMAL_a_surviving_citation_is_not_checked.md`'s instrument half.**
+    Reading `ledger_verdicts` alone — which is a join over `by_file`, i.e. over
+    the files that still HAVE citations — means a file whose citations were all
+    fixed is not in the join at any number, so its entry is not merely
+    unreported-as-stale, it is invisible to every reader of this module: not the
+    ratchet (a ceiling above zero is never a gain), not `sanctioned` (the file is
+    not in the join), and not here. A `find()` drops a file with no citations
+    (`by_file` only gets a key once something is added to it), so "the worker
+    fixed every citation in this file" and "the ledger never mentioned this file"
+    were the same observation.
+
+    That is not hypothetical, and the entry it hid is this tree's
+    `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
+    by `--write-baseline` for a citation that was since rewritten to name the
+    symptom instead of the doc. It has been dead weight in the ledger since, and
+    it inflated the corpus by one citation for every reader counting the baseline.
+
+    So the join is over the LEDGER, not over the corpus: every entry is looked up
+    with an observed count that is 0 when the file cites nothing. That direction
+    is the conservative one for the only consumer that acts on this — a stale
+    entry is a request to DELETE a line, and a file that genuinely still has
+    citations cannot be reported here, because its observed count comes from
+    `by_file` and is then above its ceiling or equal to it.
     """
-    return {rel: (observed, ceiling) for rel, (observed, ceiling)
-            in ledger_verdicts(by_file, baseline).items()
-            if observed < ceiling}
+    if baseline is None:
+        baseline = load_baseline()
+    out = {}
+    for rel, ceiling in baseline.items():
+        observed = len(by_file.get(rel, ()))
+        if observed < ceiling:
+            out[rel] = (observed, ceiling)
+    return out
 
 
 def ratchet_regressions(by_file, baseline=None):
@@ -640,7 +671,22 @@ def main() -> int:
 
     if args.ratchet:
         regressions = ratchet_regressions(by_file)
+        stale = stale_baseline_entries(by_file)
         total = sum(len(v) for v in by_file.values())
+        # A stale entry is REPORTED and never FAILS. The two are different
+        # directions: a gain is a citation somebody added and the fix is a prose
+        # rewrite, while a stale entry is a citation somebody already fixed and
+        # the fix is deleting a line from the ledger — so failing on it would
+        # make `--ratchet` red for work that is already done, and a check that
+        # punishes a fix is a check that gets disabled. It is printed on the
+        # GREEN path too, which is where it belongs: the corpus is shrinking and
+        # this is the number of lines the ledger may now drop.
+        if stale:
+            print(f'ledger: {len(stale)} entry(ies) the corpus has outgrown — '
+                  f'the citation(s) were fixed, so the ceiling may be dropped:')
+            for rel, (observed, allowed) in sorted(stale.items()):
+                print(f'  {rel}: {observed} (baseline {allowed}) — entry is '
+                      f'stale; delete it, or re-run --write-baseline')
         if not regressions:
             print(f'ratchet: no file gained a citation of a deleted doc '
                   f'({total} citations remain across {len(by_file)} files, '

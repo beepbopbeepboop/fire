@@ -5,10 +5,12 @@
 `_gen_universal_e2e_cfg` pair that consumes it. **NOT** the flag lemmas
 (`lib/ProofLib.lean::arm64_flag_*_s` are correct and are what the rewrite
 actually uses), and **NOT** the codegen: the emitted image is right on both
-architectures and agrees with CPython. **Status: OPEN, re-measured 2026-10-05
-on `work/merge-formal40` at `208c81ff`. Diagnosis contributed by
-`work/formal-proofs-health-r2-r2` (`4584c49a`, `9cb83fd6`); its fix half could
-not land and the reason is below.**
+architectures and agrees with CPython. **Status: PARTIALLY FIXED 2026-10-05. THE FALSE STATEMENT IS GONE — the
+generator now DECLINES the contract instead of emitting it — and the library
+half (`arm64_slt_iff_lt`, plus the signed variant of `while_lt_exit_contract`)
+is still not landed, so `sum_range` is a refusal rather than a proof. §"What
+landed" has the measurement; §"The next step" is unchanged and is now the
+ONLY thing left.**
 
 `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §"What is left" already
 names this as `sum_range`'s second hole ("`sum_range`'s `loop_cond_flag` states
@@ -107,7 +109,73 @@ it, so adding a theorem there is not a bounded worker's edit — it is the same
 names as out of reach for a bounded worker, and it needs the Lean run to
 confirm the lemma's statement before the generator half is worth landing.
 
+## What landed (2026-10-05): the false statement is GONE, and it became a refusal
+
+**The generator no longer emits the obligation.** `_gen_range_loop` now reads
+the loop's own condition code before it writes the contract and DECLINES when
+the code is one of the SIGNED four, because the contract it is about to state is
+stated in the unsigned order. Before the change `sum_range`'s arm64 proof
+carried the `sorry` at line 3249; after it there is **no proof file for
+`sum_range` at all**, and the build says why:
+
+```
+build: unsupported cbz taken continuation to 0x100000330: its loop test is the
+SIGNED condition code 11 (`CSET` + `CMP`, rewritten by `arm64_flag_lt_s`), and
+this contract is stated in the UNSIGNED order — `while_lt_exit_contract_bottom`
+takes `arm64_reg r st < arm64_reg b st` (`UInt64`'s `<`) and a fuel of
+`(b.toNat - r.toNat)`, so the obligation it would emit is `sign-flipped <` ↔ `<`,
+which is FALSE for any bound at or above 2^63. …
+```
+
+**The refusal NAMES THE CAUSE, which the generic message did not.** The walk's
+only message for an unapplied loop contract was "unsupported cbz taken
+continuation" — a fact about the BLOCK LAYOUT, and one that reads identically
+for a loop whose shape this walk does not recognise. Those two have nothing in
+common as next steps (an emitter change versus a library change), so the reason
+is computed where the contract is declined and carried on the contract slot to
+the refusal. This was worth doing on its own: before it, the only way to tell
+the two apart was to read the generator.
+
+**The population is ONE example, measured.** Every `formal/examples/*.mojo` was
+regenerated and the proof scanned for a signed flag rewrite: three rewrite with
+a signed lemma, and they are three DIFFERENT things:
+
+| example | verdict |
+|---|---|
+| `sum_range` | — the range-loop contract. **This document.** |
+| `countdown`, `wge` | NOT this. Their obligation's right-hand side is `s.x19 = 0`, not an order, and the mismatch is the `pred_iff` non-negative-counter MODEL assumption this document explicitly excludes. |
+
+So the cost of the refusal is one example's arm64 proof, and what it buys is that
+the tree no longer contains a theorem that is false about the machine.
+
+**The condition code is now read in ONE place.** `_cond_flag_lines` was
+computing `words[cbz_pc] & 0xf` inline while the new guard needed the same
+question, so both go through `loop_test_condition_code`. A guard that spelled
+"10 ≤ cc ≤ 13" instead would have had to be kept in step with `_COND_LEMMA` by
+hand — and the first version of this change did exactly that, matching on a
+lemma name ending in `_s]` that no lemma in the table has, so the guard was
+silently inert until a run caught it.
+
+Pinned by `test_formal_call_proof_gen.py`: `TestBottomTestedRangeLoop` (three
+rows — the refusal with its three actionable facts, the ABSENCE of a proof, and
+the loop shape read off the IMAGE with the same reader the guard uses, so a
+refusal for the wrong reason and one for the right one cannot be confused);
+`TestTheRecursionFamiliesStillGenerate` (`sum_range` moved from the GENERATE
+census to `REFUSED` with three needles and a named owning doc, which also makes
+that class's "is `REFUSED` empty" census non-vacuous for the first time); and
+`test_formal.py`'s `EXPECTED_FAILURES`, where `sum_range` is now a recorded
+KNOWN-GAP rather than an undeclared red.
+
+**What did NOT change**: the emitted image, on either architecture — `sum_range`
+builds, runs and answers correctly with `--no-prove`, and both orders agree for a
+non-negative bound. The hole was never in the program.
+
 ## The next step, precisely
+
+**Everything below is still open.** Step 1 is still the blocker and step 2 is
+still not landable without it; the refusal above makes step 2 SAFE to land
+(there is no longer a false theorem for it to convert into a named `sorry`),
+which is the one thing that changed about this list.
 
 1. **Add `arm64_slt_iff_lt` to `lib/ProofLib.lean`** — the reusable piece, and
    the reason this is not a patch:
@@ -158,5 +226,13 @@ confirm the lemma's statement before the generator half is worth landing.
   other document) and does not go through a flag lemma.
 - **Not the flag lemmas.** `arm64_flag_*_s` are correct; they are what makes the
   mismatch visible.
-- **Not a new refusal.** The obligation is emitted, elaborated and admitted.
-  Nothing is refused and no example changed status.
+- **Not a new refusal — NO LONGER TRUE, and §"What landed" is the
+  correction.** This section was written when the obligation was emitted,
+  elaborated and admitted with a `sorry`, and nothing was refused. That was the
+  defect: a FALSE statement that elaborates is worse than a refusal, so the
+  generator now declines the contract and `sum_range` is refused by name. The
+  line is kept rather than deleted because the reason it was written — "the fix
+  is not to refuse it" — is still right about the FINAL state, which is a proof.
+  What was wrong was the interim: a theorem that says something untrue, with the
+  admission carrying a name that reads like a to-do item rather than a
+  contradiction.
