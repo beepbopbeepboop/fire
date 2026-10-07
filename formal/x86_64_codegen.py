@@ -9091,7 +9091,7 @@ preference.
             if is_dict:
                 self._emit_expr(expr.element)          # KEY
                 self._push_slot(Reg.RAX)
-                self._emit_expr(expr.key)              # VALUE
+                self._emit_expr(expr.value)            # VALUE
                 self._refuse_an_element_blob(expr.element, cap,
                                              self._list_cursor - _before)
                 self._compr_append_pair(res_offset, cap)

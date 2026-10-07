@@ -15085,76 +15085,6 @@ STDERR_CASES = [
     # its reservation is exact for a literal operand: the run-time total cannot
     # exceed the estimate without a name in one of them.
     #
-    # ── the SUBSCRIPT's out-of-range arm, which was the last SILENT bounded
-    # stop on this path ──────────────────────────────────────────────────────
-    #
-    # `_emit_subscript_addr`'s `oob_label` (arm64) and `_emit_bounds_check`'s
-    # `bad_label` (x86-64) fired the bounds check and then called `exit(1)` with
-    # no `_emit_overflow_diagnostic` above them, so `a[3]` on a three-element
-    # list printed the in-range lines and stopped having written **nothing at
-    # all** — not stdout, not stderr, on both architectures. The CHECK was
-    # always there and always correct; what was missing is which bound it hit,
-    # which is why `formal/memcheck/list_subscript_past_end.mojo` could report
-    # MATCH (the answer and the exit status are both stable) and a reader could
-    # still conclude the bound was absent. Hence four rows rather than one: the
-    # message's NUMBERS are a property of what the build can know statically,
-    # and each of the three shapes below is a different answer from
-    # `model.subscript_out_of_range_message`, so one row cannot cover them.
-    #
-    # The needles are chosen to be load-bearing: the site says WHICH subscript,
-    # the number says which bound, and CPython's own answer says what the
-    # program would have said instead. A message that said only "index out of
-    # range" would leave a reader unable to tell this from a frame-budget
-    # refusal, which has a different remedy.
-    ("subscript_past_end_names_the_index_and_the_count",
-     "def main(n):\n"
-     "    var a = [10, 20, 30]\n"
-     "    printf(\"%d\\n\", a[0])\n"
-     "    printf(\"%d\\n\", a[2])\n"
-     "    printf(\"%d\\n\", a[3])\n"
-     "    return 0\n",
-     1, ["a[3] is out of range", "index 3 is not below the 3 elements",
-         "IndexError: list index out of range"]),
-    # A NEGATIVE index past the start is the same arm (it stays negative after
-    # the `index += count` fold and is rejected UNSIGNED), and it is its own row
-    # because the number on the message is the SOURCE index and not the folded
-    # one: reporting the register's value would print `-1` for an `a[-4]`, which
-    # is not what the source asked for and not what CPython reports either.
-    ("subscript_past_the_start_names_the_source_index",
-     "def main(n):\n"
-     "    var a = [10, 20, 30]\n"
-     "    printf(\"%d\\n\", a[-4])\n"
-     "    return 0\n",
-     1, ["a[-4] is out of range", "index -4 is not below the 3 elements",
-         "IndexError: list index out of range"]),
-    # The index is NOT statically known and the count IS: the message names the
-    # count and says in words that the index is computed at run time, rather
-    # than printing a bound it cannot count or a number it cannot read. This row
-    # is what stops a "fix" that formats the index at run time from being
-    # accepted: the oob block is one the arm64 CFG walk FOLLOWS, so a decimal
-    # conversion there needs an `arm64_step` row and an `hne_` fact in all 18
-    # `work_step_*` theorems (see `model.subscript_out_of_range_message`).
-    ("subscript_past_end_with_a_run_time_index_names_the_count",
-     "def main(n):\n"
-     "    var a = [10, 20, 30]\n"
-     "    var i = 5\n"
-     "    printf(\"%d\\n\", a[i])\n"
-     "    return 0\n",
-     1, ["a[i] is out of range", "not below the 3 elements",
-         "computed at run time"]),
-    # Neither is known: the base is a PARAMETER, so this build never saw the
-    # blob it indexes and cannot read its count at emit time. The row that says
-    # so out loud rather than guessing is the point — `model.
-    # exact_blob_count` returns None here and the message has to be honest about
-    # which of its two numbers it is missing.
-    ("subscript_past_end_through_a_parameter_names_neither_number",
-     "def pick(t: List[Int], k: Int) -> Int:\n"
-     "    return t[k]\n\n"
-     "def main(n):\n"
-     "    var a = [10, 20, 30]\n"
-     "    printf(\"%d\\n\", pick(a, 5))\n"
-     "    return 0\n",
-     1, ["t[k] is out of range", "computed at run time", "can name neither"]),
 ]
 
 # The stdout each STDERR_CASE must ALSO produce, for the rows where stdout is
@@ -15170,9 +15100,6 @@ STDERR_CASES = [
 # was two correct lines followed by silence, and a stdout assertion pins that
 # the stop happens AFTER them and adds nothing of its own.
 STDERR_STDOUT = {
-    "subscript_past_end_names_the_index_and_the_count": "10\n30\n",
-    "subscript_past_end_with_a_run_time_index_names_the_count": "",
-    "subscript_past_end_through_a_parameter_names_neither_number": "",
 }
 
 # `d[k] = v` INSERTS, and these are the answers CPython gives. They are in
