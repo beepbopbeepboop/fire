@@ -119,7 +119,7 @@ HEX_DIGITS = "0123456789abcdef"
 #    index against it — so on a `malloc`'d buffer, whose first word `malloc`
 #    zeroed, `p[0]` is a silent `exit(1)` with no message, and on a string
 #    literal it is a plausible wrong number assembled from adjacent
-#    characters. `bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md`
+#    characters. `FORMAL_subscript_of_a_pointer_reads_a_blob_count`
 #    has the disassembly.
 #  * `q.value()` on a pointer with a DECLARED pointee IS a correct one-byte
 #    load, which is what `byte_at` below uses. The declaration has to belong
@@ -158,7 +158,7 @@ def word_get(buf: Pointer[UInt8], at: int) -> int:
     pointer on this path, and a wrong word here is a wrong digest with nothing
     to say so. The shift is by a VARIABLE amount on purpose: the immediate
     form `x << 8*k` is wrong for every amount above 8 on arm64, which is
-    `bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`.
+    `FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8`.
     """
     var v = 0
     var k = 0
@@ -314,7 +314,7 @@ def rotr64(x: int, n: int) -> int:
     every amount above 8 on arm64: `1 << 12` returns `16`. That is a
     one-constant defect in `formal/arm64.py`'s `encode_lsl_xd_xn_imm`, it is
     not this file's to fix, and it is measured against clang's own assembler
-    in `bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`.
+    in `FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8`.
 
     BLAKE2b needs rotations by 16, 24, 32 and 63, every one of them in the
     broken range, so writing this with the immediate form would have produced
@@ -427,7 +427,7 @@ def put4(sg: Pointer[UInt8], at: int, a0: int, a1: int, a2: int,
     backends' terms, and SIX is the smaller of the two: arm64 passes eight
     integer argument registers (X0-X7) and x86-64 passes six (RDI/RSI/RDX/RCX/
     R8/R9), so a module both backends compile has to fit six
-    (`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md` for what the
+    (`FORMAL_arm64_ninth_argument_is_silently_dropped` for what the
     seventh and beyond used to do on arm64 — silently dropped and read as
     zero, with no diagnostic at either end, which produced a BLAKE2b digest
     that was plausible and incorrect). A sixteen-way `put16` is the obvious
@@ -588,7 +588,7 @@ def b2_compress(h: Pointer[UInt8], block: Pointer[UInt8], t: int,
     # The high half of the 128-bit counter `t` is `t >> 64` in RFC 7693, and
     # this path CANNOT COMPUTE IT: a shift of 64 or more wraps to the amount
     # modulo 64
-    # (bugs/FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md), so
+    # (FORMAL_shift_by_64_or_more_wraps_instead_of_saturating), so
     # `t >> 64` would XOR the WHOLE counter back in and change the digest. It
     # is 0 for every message this target can hash, and that is arithmetic
     # rather than a guess: `t` counts BYTES of one buffer, a 64-bit address
@@ -629,11 +629,14 @@ def blake2b_hex(data, n: int, digest_size: int) -> str:
     """`hashlib.blake2b(data, digest_size=digest_size).hexdigest()`.
 
     `digest_size` is CPython's parameter and defaults to 64 there; it is
-    REQUIRED here because a default argument does not survive a dylib
-    boundary — the caller has no signature to materialize it from, so the
-    argument register is whatever the caller last left in it, measured
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). 1 to 64,
-    as in CPython.
+    spelled REQUIRED here because a default argument used not to survive a dylib
+    boundary — the caller had no signature to materialize it from, so the
+    argument register was whatever the caller last left in it. That is fixed
+    (`formal/imports.py`'s `external_declarations`, which hands the emitter the
+    callee's own declaration) and the default is left off on purpose rather
+    than because it has to be: see
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`.
+    1 to 64, as in CPython.
 
     The truncated output is CPython's: BLAKE2b's `digest_length` is part of
     the initial state, so `digest_size=20` is a DIFFERENT HASH and not the

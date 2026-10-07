@@ -60,7 +60,7 @@ The state is a fixed-size LITERAL, and that is measured on both architectures
 where a list grown in a loop is not: `[0] * 624` at module level builds and then
 **prints nothing at all** (measured, both architectures, exit 0), while the
 624-word literal reads back correctly at every size tried (4, 65, 66, 128, 624).
-`bugs/FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements.md`
+`FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements`
 records the same wall from the other side. A literal is also what makes the
 state CONSTANT, which is what `_twist` mutating in place needs to be the only
 writer.

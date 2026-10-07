@@ -304,9 +304,14 @@ MAX_HELP_POSITION = 24
 # `out` and `err` are written by index on this path, and a subscripted STORE is
 # bounds-checked against the blob's count field, which a `malloc`'d buffer does
 # not have. So every write is a `memmove`/`memset` at an offset and every buffer
-# needs a bound both ends of the call can agree on: a module constant is the
-# only one, since a default argument is not applied to a call from another
-# image (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+# needs a bound both ends of the call can agree on. A module constant is the
+# only such bound: a default argument is a bound only the callee's own file
+# knows, and a caller in another image has to be able to READ the bound to
+# agree on it — which is what `BUF_CAP` being spelled here, and the same value
+# on both sides of the call, buys. A default argument used not to be applied
+# across the boundary at all (`FORMAL_default_argument_not_applied_across_a_dylib`,
+# fixed; its doc is deleted, as a fixed bug's is), but the reason to keep the
+# constant is that both ends must AGREE, not that one of them can guess.
 
 BUF_CAP = 8192
 
@@ -323,7 +328,7 @@ BUF_CAP = 8192
 # a literal IS decoded, inside a module as well as inside a program, on both
 # architectures. The idiom below is kept because it is correct and because these
 # separators are written at a computed offset anyway;
-# `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" is what
+# `FORMAL_sys_mojos_escape_note_is_stale` §"what remains" is what
 # simplifying the rest of the tree's corpora would take.
 
 # A BYTE WRITTEN WITH `memset` IS SPELLED INLINE unless the module already has
@@ -569,7 +574,7 @@ def _haschar(s, chars):
     than `== 1`. This is the "somewhere in there" form of the same test, and a
     hand-written byte comparison is not an option: a subscript on a `char *`
     reads a blob count rather than a byte
-    (`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` — `byteat("ab")`
+    (`FORMAL_subscript_of_a_pointer_reads_a_blob_count` — `byteat("ab")`
     returned -1879048144).
     """
     i = 0
@@ -2268,7 +2273,7 @@ def _entry(err, u, inv, h, helppos):
     the invocation and nothing else.
 
     **And the help text is WRAPPED**, which is the part that used to be missing
-    (`bugs/FORMAL_argparse_help_wrapping_not_implemented.md`). The help column is
+    (`FORMAL_argparse_help_wrapping_not_implemented`). The help column is
     `help_width = max(self._width - help_position, 11)` — the floor is CPython's
     — the first line starts where the header left it, and every line after it is
     indented to the help column.

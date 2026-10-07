@@ -992,7 +992,7 @@ def _make_codegen(arch: str, fmt: str, test_input,
     what says whether a call's result is a string). See
     `model.dylib_export_lookup`.
 
-    `import_aliases` is `formal/imports.py`'s `import_bindings` table: the
+    `import_aliases` is `formal/imports.py`'s `imported_bindings` table: the
     local name `from m import f as g` binds, and where it came from. Without
     it the emitters can only look a bare callee up by its DEFINING name, so `g`
     found nothing and the image bound a symbol no library defines. See
@@ -1400,7 +1400,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     point, so the second pass has to be emitted for the offset the *same*
     dylib list implies.
 
-    `import_aliases` is `formal/imports.py`'s `import_bindings` table, passed
+    `import_aliases` is `formal/imports.py`'s `imported_bindings` table, passed
     straight through to the codegen: a call site spells the name AS WRITTEN, so
     `from m import f as g` has to reach `f`'s export rather than miss the flat
     map and bind `g`.
@@ -1613,9 +1613,9 @@ def _import_aliases(stmts: list) -> dict:
     emitters — a call site spells the name AS WRITTEN, so `from m import f as g`
     needs the mapping from `g` back to `m`'s `f` and no amount of looking up the
     bare name in the libraries' export tables can produce it. See
-    `formal/imports.py`'s `import_bindings`."""
-    from formal.imports import import_bindings
-    return import_bindings(stmts)
+    `formal/imports.py`'s `imported_bindings`."""
+    from formal.imports import imported_bindings
+    return imported_bindings(stmts)
 
 
 def _external_declarations(linked: list) -> dict:
@@ -2662,11 +2662,11 @@ def _admitted_calls(source_path: str, admitted: list) -> dict:
       * `import subprocess as sp` … `sp.run(…)`     → key `sp.run`
       * `from subprocess import run` … `run(…)`     → key `run`
 
-    All three come out of `formal/imports.py`'s `import_bindings`, which is the
+    All three come out of `formal/imports.py`'s `imported_bindings`, which is the
     reader the BUILD already uses to bind a call to a callee's declaration, so
     this cannot bind a name to a different contract than the one the call
     actually calls.  The qualified spelling is added as a key as well, because
-    `import_bindings` reports `sp -> ('subprocess','subprocess')` — the module,
+    `imported_bindings` reports `sp -> ('subprocess','subprocess')` — the module,
     not the member — for `import subprocess as sp`, and the member is only known
     from the call site.
 
@@ -2690,7 +2690,7 @@ def _admitted_calls(source_path: str, admitted: list) -> dict:
         from formal.build import parse_module as _parse
         with open(source_path) as f:
             stmts = _parse(f.read(), filename=source_path)
-        for local, (module, defining) in _imports.import_bindings(stmts).items():
+        for local, (module, defining) in _imports.imported_bindings(stmts).items():
             for key in (f"{module}.{defining}", defining):
                 if key in out:
                     out[local] = out[key]
@@ -14613,7 +14613,7 @@ def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
     two places `forwarded` is populated are a package that re-exports and a
     package that re-exports under an ALIAS.
 
-    `aliases` is `formal/imports.py`'s `import_bindings`, the same table the
+    `aliases` is `formal/imports.py`'s `imported_bindings`, the same table the
     codegen is handed, and it is needed because the flat map cannot say which
     module owns a name at all. Asking the same function the emitter asks is the
     whole of the safety here: a second and narrower reading of the manifests is a
@@ -22152,7 +22152,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # …and the IMPORT ALIASES of every file this library compiles, for the same
     # reason and as the same kind of fact: a call site spells the name as
     # written, so `from leaf import base as aliased` binds `aliased` here and
-    # only `import_bindings` knows it stands for `leaf`'s `base`. The
+    # only `imported_bindings` knows it stands for `leaf`'s `base`. The
     # executable path has always handed that table to its emitters
     # (`compile_formal`, `_import_aliases(stmts)`) and the LIBRARY path did not,
     # so a module that CALLED an aliased import could not be built at all — the

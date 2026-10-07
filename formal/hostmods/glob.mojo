@@ -554,8 +554,9 @@ def _glob_in_dir(dirname, basename, mode, dironly, include_hidden) -> Pointer[In
 
     CPython picks a function object (`glob_in_dir = _glob2` / `_glob1` /
     `_glob0`) and a value on this path is one 64-bit word, so there is no word
-    that denotes a function to put in it (`bugs/FORMAL_a_type_cannot_be_
-    constructed_or_cloned_at_run_time.md`). The choice is therefore an integer,
+    that denotes a function to put in it
+    (`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`). The
+    choice is therefore an integer,
     and it is the same choice at the same point in the same order.
     """
     if mode == 0:

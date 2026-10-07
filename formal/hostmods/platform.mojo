@@ -105,12 +105,12 @@ THE TWO SPELLING RULES EVERY FUNCTION HERE FOLLOWS
     annotation is what puts `char *` in the module dylib's manifest signature,
     and without it a call result is a word of unknown provenance and `f() == g()`
     on two of those is an ADDRESS comparison
-    (`bugs/FORMAL_string_equality_of_two_unclassified_words.md`).
+    (`FORMAL_string_equality_of_two_unclassified_words`).
   * NO DEFAULT ARGUMENT ANYWHERE. `system_alias` is the only function here that
     takes arguments and CPython's own signature for it has none to default, so
     there was never a spelling to drop; the measurement that a default is not
     applied across a dylib boundary at all is
-    `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
+    `FORMAL_default_argument_not_applied_across_a_dylib`, and the
     functions CPython DOES give defaults to (`platform(aliased, terse)`,
     `architecture(executable, bits, linkage)`, `mac_ver(release, versioninfo,
     machine)`) are absent here or take their argument, so the question does not
@@ -662,7 +662,7 @@ def architecture_bits(exe) -> str:
     `architecture(executable, bits='', linkage='')` and a caller may pass
     `bits='32bit'` to be told `('32bit', …)` for a file it cannot read; a
     default argument is not applied across a dylib boundary
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), so there is
+    (`FORMAL_default_argument_not_applied_across_a_dylib`), so there is
     no spelling of "the default, or this" here, and a caller that needs one
     has to compare the two answers itself.
     """
@@ -722,7 +722,7 @@ def architecture_linkage(exe) -> str:
 # missing argument, because `filter(len, args)` is what makes an empty part
 # disappear and it tests the length of the part BEFORE the strip. Six is also
 # the widest signature `formal/hostmods/re.mojo` uses, which
-# `test_formal_re_formal.py`'s ABI group still checks every signature against.
+# `test_re_formal.py`'s ABI group still checks every signature against.
 #
 # Nothing is lost by fixing the arity and the two shapes a caller actually
 # needs are covered: a terse call passes two parts and four empties, and a full
@@ -823,7 +823,7 @@ def platform(exe, aliased, terse) -> str:
     PARAMETER, exactly as it already is for `architecture_bits(exe)` and
     `architecture_linkage(exe)` above, and the two flags have NO DEFAULTS
     because a default argument is not applied across a dylib boundary
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`): a caller
+    (`FORMAL_default_argument_not_applied_across_a_dylib`): a caller
     writes `platform(exe, 0, 0)` where CPython would write `platform()`.
 
     The flags are 1/0 like every flag on this path.

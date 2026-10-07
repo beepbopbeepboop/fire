@@ -44,7 +44,7 @@ CPython's `escape(s, quote=True)` has a default, and this is `escape(s, quote)`
 for the reason every hostmod that has one has it: a call from another image does
 not materialize a callee's default arguments — the caller has no signature to
 read them from — so a defaulted parameter arrives as a stack address
-(`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). CPython's
+(`FORMAL_default_argument_not_applied_across_a_dylib`). CPython's
 default is `quote=True`, so a caller that wants CPython's default passes 1.
 
 WHAT IS NOT HERE, AND WHY
@@ -108,7 +108,7 @@ def escape(s, quote) -> str:
     parameter's type is checked, because there is no `isinstance` on this path
     and CPython would raise `TypeError` for a non-bool, which is the shape
     `os.path`'s predicates already answer as an `int`
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+    (`FORMAL_default_argument_not_applied_across_a_dylib`).
 
     Returns a fresh buffer the caller owns, like every function here.
     """

@@ -46,7 +46,7 @@ CPython's own over a corpus that includes the modes no real file has.
   * NO FUNCTION HERE NEEDS MORE THAN ONE PARAMETER, which is why this module
     builds on x86-64 as well as arm64: SysV x86-64 passes six integer
     arguments in registers, and a seventh is refused rather than spilled
-    (`bugs/FORMAL_x86_64_argument_registers.md`, which is what keeps
+    (`FORMAL_x86_64_argument_registers`, which is what keeps
     `fnmatch.mojo` in `test_formal_hostmods_census.py`'s known-red list).
 
   * A MODE IS SIXTEEN BITS, AND A MODE OUTSIDE THAT IS -1, NOT A MASKED
@@ -593,7 +593,7 @@ def _filemode_cls(mode, cls) -> str:
 
     TWO PARAMETERS AND NOT SEVEN, which is deliberate rather than tidiness:
     SysV x86-64 passes six integer arguments in registers and refuses a
-    seventh (`bugs/FORMAL_x86_64_argument_registers.md`, the filing that keeps
+    seventh (`FORMAL_x86_64_argument_registers`, the filing that keeps
     `fnmatch.mojo` out of the x86-64 half of
     `test_formal_hostmods_census.py`). Passing the six masks as arguments would
     have made this module arm64-only for no gain.

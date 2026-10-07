@@ -62,7 +62,7 @@ FOUR LIMITS THIS FILE IS WRITTEN AROUND — all measured
    not the whole-function `ValueKinds` that already answers `str` for it.
    Measured: `f(s: String): return s[0]` returns a text-section address where
    65 is correct. Filed as
-   `bugs/CODEGEN_string_parameter_subscript_reads_count_field.md`.
+   `CODEGEN_string_parameter_subscript_reads_count_field`.
    Consequence here: the format is recognised by `==` against literals, never
    by indexing it.
 
@@ -231,14 +231,14 @@ def calcsize(fmt: String) -> int:
     CPython raises `struct.error`; see the docstring's ERRORS.
 
     **THIS IS A PARSER AND NOT THE TABLE, and that changed because CPython's own
-    `test_struct.py` has `calcsize('iii')`, `calcsize('b')`, `calcsize('l')`,
+    `test_struct` has `calcsize('iii')`, `calcsize('b')`, `calcsize('l')`,
     `calcsize('n')` and `calcsize('P')` and every one of them used to answer 0.**
     A size question with an answer, refused, because `_nvalues` below is a table
     of the seventeen exact format strings this repository's own callers use and
     nothing else. That table is the right shape for `pack` and `unpack_from`,
     which need a BYTE ORDER this file deliberately does not implement; it is
     the wrong shape for a size, which is a property of the grammar rather than
-    of the corpus. The cases came from generating `test_struct.py` rather than
+    of the corpus. The cases came from generating `test_struct` rather than
     reading it — see `test_formal_hostmods_conformance.py`.
 
     THE GRAMMAR, IN FULL, because a size is not a byte order:
@@ -451,16 +451,22 @@ def pack_into(fmt: String, buf, off: Int, v0=0, v1=0, v2=0) -> int:
 
     THE VALUE SLOTS ARE DEFAULTED, and that is what makes them safe to leave
     off. A slot beyond `_nvalues(fmt)` is never read, so a caller that packs a
-    two-value format has nothing to say about `v2` — but across a dylib
-    boundary a caller cannot leave a parameter out at all: the callee gives it
-    a register home whether or not the caller mentions it, and a register
-    nothing wrote is whatever the caller last put there
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
-    arity half of the same change). `pack_into(fmt, buf, 4, a, b)` is the shape
-    `test_struct_formal.py`'s offset case and the corpus's `patch` sites use,
-    and it is a `TypeError` against three REQUIRED value parameters. Zero is the
-    right fill for a slot that is not read, and declaring it is what turns the
-    call from an unbindable one into the CPython answer.
+    two-value format has nothing to say about `v2`, and
+    `pack_into(fmt, buf, 4, a, b)` is the shape `test_struct_formal.py`'s
+    offset case and the corpus's `patch` sites use. Zero is the right fill for
+    a slot that is not read.
+
+    They USED to be required, and the reason is worth keeping because it is the
+    shape every other module in this directory still has to be checked against:
+    across a dylib boundary the callee gives a parameter a register home
+    whether or not the caller mentions it, so a register nothing wrote held
+    whatever the caller last put there — a silently wrong ARGUMENT rather than a
+    missing feature. `formal/imports.py`'s `external_declarations` now hands
+    the emitter the callee's own declaration, so the omitted register is filled
+    from the default, and the arity half of the same change refuses a count
+    outside the declared overloads instead of dropping the words past it. Both
+    were `FORMAL_default_argument_not_applied_across_a_dylib`; both docs are
+    deleted, as a fixed bug's is.
     """
     n = _nvalues(fmt)
     if n == 0 or n > 3:

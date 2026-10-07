@@ -22988,6 +22988,20 @@ TYPE_VALUE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return Int(DType.float8_e7m0fnu)\n",
      "refuse:DType.float8_e7m0fnu names a type", None),
+    # A SUBSCRIPT BASE in a value position, which is the one place this
+    # construct and the type-APPLICATION construct (`List[Int]()`, answered by
+    # `model.subscript_callee_names`, which is gated on CALL position) meet.
+    # `var v = List[Int]` reads a subscript whose base is not a call target, so
+    # nothing exempts the base and the tag must not answer for it either:
+    # `build.py`'s `subscript_bases` set is what holds it, and with that set
+    # removed the program BUILDS and runs, holding the tag of the type `List` as
+    # if a subscript were a value — silently, and on every such program. So the
+    # refusal is the name walk's, and it names the base.
+    ("a_subscript_base_in_a_value_position_is_not_a_type_value",
+     "def main(n: Int) -> Int:\n"
+     "    var v = List[Int]\n"
+     "    return 0\n",
+     "refuse:'List' has no home", None),
     # `len()` of a type.  This was a GUARD against making a type a VALUE turning
     # `len()` of one into a count, and the guard held; what it also pinned was the
     # imprecision: "the source does not say what this operand holds … Annotate it

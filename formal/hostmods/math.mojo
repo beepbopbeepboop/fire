@@ -66,7 +66,7 @@ WHAT IS HERE, AND WHAT EACH ONE ANSWERS
     number and the whole of this module's design is to not produce those.
   * `prodn(vals, n, start)` — `math.prod` with the start spelled as a
     parameter, because a default argument is not applied across a dylib
-    boundary (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+    boundary (`FORMAL_default_argument_not_applied_across_a_dylib`).
   * `pi_bits()`, `e_bits()`, `tau_bits()`, `inf_bits()`, `nan_bits()` — the
     IEEE-754 BIT PATTERNS of the five constants, which is this path's
     representation of a double and the same one `time.mojo` uses.
@@ -538,7 +538,7 @@ def prodn(vals, n, start) -> int:
     `formal/hostmods/time.mojo` states: a call into another image does not
     materialize the callee's defaults, so a default here would read whatever
     the caller last left in the register
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). CPython's
+    (`FORMAL_default_argument_not_applied_across_a_dylib`). CPython's
     default is 1, so a caller who wants it passes 1.
 
     `prodn(vals, 0, s)` is `s`, which is the identity of the product and is

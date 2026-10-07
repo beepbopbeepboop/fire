@@ -48,6 +48,7 @@ fire on a sound image (an audit that fires on everything is an audit people
 learn to ignore).
 """
 import os
+import re
 import sys
 import tempfile
 
@@ -64,6 +65,19 @@ import formal.imports as I
 import formal.model as M
 
 RESULTS = []
+
+# The shapes a `formal/hostmods/` docstring uses to point at ANOTHER FILE: a
+# `bugs/` writeup, a `test_*.py`, a `formal/` or `tools/` source path, a
+# `doc/` file, and a bare top-level `.md`. The trailing `(?![\w])` on every
+# alternative is load-bearing rather than decoration — without it
+# `hashlib.md5(data)` matches the `.md` shape and this becomes an assertion
+# about a hash function. `(?<![\w/.-])` stops a match inside a longer path, so
+# `os/path/__init__.mojo` is read as one relative path and not as a bare
+# `__init__.mojo`.
+_CROSS_REF_RE = re.compile(
+    r'(?<![\w/.-])((?:bugs/[\w./-]+\.md)|(?:test_[\w]+\.py)'
+    r'|(?:formal/[\w./-]+\.(?:mojo|py))|(?:tools/[\w./-]+\.py)'
+    r'|(?:doc/[\w./-]+\.(?:md|html))|(?:[\w-]+\.md))(?![\w])')
 
 
 def check(ok, what, detail=''):
@@ -1292,6 +1306,56 @@ def test_hostmods_are_invisible_to_every_other_resolver():
                   f'it resolved to {_short_repr(got)}')
 
 
+# And the negative direction, which is the one a new module gets wrong:
+def test_hostmod_cross_references():
+    """Every file a host module's prose NAMES exists.
+
+    The other two halves of this file ask whether the thing a module is claimed
+    to be is really there — a source, a test. This asks the same question about
+    the module's own sentences, and it is here because four of them were not.
+
+    `bugs/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
+    and `test_formal_io.py` / `test_formal_typing.py` were cited by the two
+    modules whose real test is `test_formal_small_hosts.py` — four readers sent
+    to a file that is not there. That is the `coro` failure mode CLAUDE.md
+    records: a claim with no evidence behind it reads as coverage, and nobody
+    notices until someone goes looking for the evidence.
+
+    Asserted over EVERY `.mojo` under `formal/hostmods/`, so the next module
+    written is covered by this loop rather than by a later session noticing.
+    """
+    hostmods = os.path.join(REPO, 'formal', 'hostmods')
+    mods = []
+    for dirpath, dirnames, filenames in os.walk(hostmods):
+        dirnames[:] = [d for d in dirnames if d != '__pycache__']
+        mods += [os.path.join(dirpath, f) for f in sorted(filenames)
+                 if f.endswith('.mojo')]
+    check(len(mods) >= 8, 'the walk found the host modules at all',
+          f'found {len(mods)} under {hostmods}')
+    dangling = []
+    scanned = 0
+    for path in mods:
+        rel = os.path.relpath(path, REPO)
+        with open(path, errors='replace') as fh:
+            for lineno, line in enumerate(fh, 1):
+                for ref in _CROSS_REF_RE.findall(line):
+                    scanned += 1
+                    # Repo root first, then the module's own directory, so a
+                    # reference to a sibling (`_syscalls.mojo`) resolves the
+                    # way a reader standing in that directory would resolve it.
+                    if not (os.path.exists(os.path.join(REPO, ref))
+                            or os.path.exists(os.path.join(
+                                os.path.dirname(path), ref))):
+                        dangling.append(f'{rel}:{lineno} -> {ref}')
+    check(scanned >= 100, 'the walk actually read cross-references',
+          f'{scanned} references in {len(mods)} modules; a regex that '
+          f'matched nothing would pass vacuously')
+    check(not dangling,
+          'every file a host module names exists: a docstring pointing at a '
+          'test or a bug doc that is not there is a claim with nothing '
+          'behind it', '; '.join(dangling[:8]))
+
+
 def main():
     test_relative_imports()
     test_host_tiers()
@@ -1300,6 +1364,7 @@ def main():
     test_audit_fires_on_a_real_build()
     test_sorry_note()
     test_hostmods_are_invisible_to_every_other_resolver()
+    test_hostmod_cross_references()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")

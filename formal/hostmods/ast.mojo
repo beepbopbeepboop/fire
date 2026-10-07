@@ -148,7 +148,7 @@ algorithm CPython uses rather than a second implementation of it.
   * a character test is `strspn(s + i, SET) > 0` against a SET, never a byte
     load: a subscript on a `String`-annotated parameter is a silent wrong
     answer here (it reads the blob's count field —
-    `bugs/CODEGEN_string_parameter_subscript_reads_count_field.md`), and every
+    `CODEGEN_string_parameter_subscript_reads_count_field`), and every
     string in this module is a parameter;
   * the sets that need a byte which cannot be written in a source literal (a
     tab, a form feed, a CR, the 128 bytes >= 0x80) are BUILT with `str_alloc`
@@ -163,11 +163,11 @@ algorithm CPython uses rather than a second implementation of it.
     string literal on this path is interned VERBATIM and its escapes are not
     unescaped" — was false from that commit onwards. Every set here is pinned
     byte for byte by `test_ast_formal.py`, so the change is mechanical when
-    someone wants it; `bugs/FORMAL_sys_mojos_escape_note_is_stale.md`
+    someone wants it; `FORMAL_sys_mojos_escape_note_is_stale`
     §"what remains" is the list. A separate cost is real and unchanged: because
     the compiler's LEXER honours an escape while finding a literal's end, a
     literal holding a backslash before a quote can swallow the rest of the file
-    (`bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md`),
+    (`CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file`),
     which is why `test_ast_formal.py` does not embed its corpus as literals.
   * the string primitives are `os/_syscalls.mojo`'s, imported rather than
     written again: `str_alloc`, `str_build`, `str_len`. That is a real
@@ -349,7 +349,7 @@ BRACKET_CAP = 64
 # pinned by `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`).
 # The idiom stays because each set is assembled once at RUN time, byte by byte,
 # and the sets are pinned byte for byte by `test_ast_formal.py`.
-# bugs/FORMAL_sys_mojos_escape_note_is_stale.md §"what remains".
+# FORMAL_sys_mojos_escape_note_is_stale §"what remains".
 
 SP = " "                  # 0x20
 BSLASH = "\\"             # 0x5C
@@ -1080,7 +1080,7 @@ def _put(out, slot: int, kind: int) -> int:
     emitter). It is left as it is because `out[0] = K` is not the only thing
     that was refused, and the other half is still open: a module-level constant
     read inside an `elif` arm. Both measured, on five-line reproducers, and both
-    in `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`, whose
+    in `CODEGEN_elif_arm_reading_a_module_constant_has_no_home`, whose
     Status now says which is which. Passing the code as an ARGUMENT sidesteps
     both at once, which is why it is written this way; the numbers are written
     once, here and at the constants.
@@ -1128,7 +1128,7 @@ def _pack_name(src: str, p: int, n: int, m: int, quotes: str, out) -> int:
     it") and always was, because an `elif` is lowered as a branch on a SAVED
     condition value and that place has no folded-constant case. So the arms are
     sequential `if`s with an early return and never an `elif`; see
-    `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`, whose
+    `CODEGEN_elif_arm_reading_a_module_constant_has_no_home`, whose
     Status section records this as the half that is still open. (The other half
     that file reported — a constant as an assignment's right-hand side — was
     fixed on 2026-09-30 and no longer constrains this module.)

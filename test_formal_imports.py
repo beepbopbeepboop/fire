@@ -3214,7 +3214,7 @@ def test_a_relative_import_keeps_private_declarations_out_of_the_trie(
 def test_a_name_the_module_defines_wins_over_its_own_import(tmpdir, _shared):
     """`from leaf import base as g` beside a local `def g` calls the LOCAL one.
 
-    The precedence `imported_bound_names` and `import_bindings` both state, and
+    The precedence `imported_bound_names` and `imported_bindings` both state, and
     the one case where recording an alias could have changed it: a name this
     module DEFINES is its definition, so a consumer binding `g` must get that
     body and not `base`'s. The two are given different answers on purpose

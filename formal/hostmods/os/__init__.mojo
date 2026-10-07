@@ -32,7 +32,7 @@ because it is not a matter of taste:
     `readdir(3)`/`stat(2)`, whose `struct dirent`/`struct stat` is a different
     layout. That table is `model.target_libc_symbol`'s, and what it cost before
     it was there is
-    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`.
+    `FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`.
     (A host with no x86-64 support at all still skips the x86-64 half of the
     suites, with the reason printed.)
 
@@ -72,7 +72,7 @@ because it is not a matter of taste:
     whether the value it got back is a string. Without it a call result is a
     word of unknown provenance, and `f() == g()` on two of those was an
     ADDRESS comparison — two equal strings compared unequal, silently, on both
-    backends (bugs/FORMAL_string_equality_of_two_unclassified_words.md). The
+    backends (FORMAL_string_equality_of_two_unclassified_words). The
     four functions in `os.path` that return a TUPLE carry no annotation, for
     the reason that file gives.
 
@@ -103,13 +103,13 @@ because it is not a matter of taste:
     `KeyError` and there is no unwinder to raise into, so `[]` is `get` and
     answers 0.
 
-  * **NO FUNCTION HERE HAS A DEFAULT ARGUMENT.** This one is a backend
-    defect rather than a property of the target, it is measured, and it is
-    filed as `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`.
-    A call to a function in ANOTHER image does not materialize the callee's
-    defaults: the caller has no signature to read them from, so the argument
-    register is whatever the caller last left in it. Measured, same source
-    either way:
+  * **NO FUNCTION HERE HAS A DEFAULT ARGUMENT.** That USED to be forced by a
+    backend defect rather than a property of the target, and it is worth
+    keeping the shape because the same reasoning applies to every module in
+    this directory. A call to a function in ANOTHER image used not to
+    materialize the callee's defaults: the caller had no signature to read
+    them from, so the argument register was whatever the caller last left in
+    it. Measured, same source either way:
 
         # dmod.mojo          def need_two(a, b=511): return b
         # in ONE file:       need_two(1)            ->  511
@@ -117,10 +117,16 @@ because it is not a matter of taste:
 
     A default that arrives as a stack address is worse than no default,
     because `mkdir(path, mode)` with a garbage mode SUCCEEDS and leaves a
-    directory nobody can enter. So the parameters that CPython gives defaults
-    are REQUIRED here: `mkdir(path, mode)`, `makedirs(path, mode)` and
-    `relpath(path, start)` are all spelled with every argument, and the one
-    place a default is genuinely wanted — `getenv`'s — is a SECOND function,
+    directory nobody can enter. `formal/imports.py`'s `external_declarations`
+    now hands the emitter the callee's own declaration, so the register is
+    filled from the default and the measurement above no longer reproduces
+    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
+    deleted, as a fixed bug's is). Every parameter CPython gives a default is
+    still spelled REQUIRED here — that is a choice now, not a limit, and
+    restoring the defaults is written down as its own step in
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
+    because it wants a sweep to confirm it, not a comment to assert it. The one
+    place a default was always wanted — `getenv`'s — is a SECOND function,
     `getenv_or(name, default)`, so the two-argument form has a name of its own
     rather than a signature that silently does nothing.
 """
@@ -185,7 +191,7 @@ def linesep() -> str:
     rule (`ast.mojo`'s character sets, `re.mojo`'s `nl`), so it is the one place
     that must not keep asserting a limitation that is gone. Their corpora keep
     the `str_alloc` + `memset` idiom for now — it is correct, and
-    `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" says what
+    `FORMAL_sys_mojos_escape_note_is_stale` §"what remains" says what
     simplifying them would take.
     """
     return "\n"

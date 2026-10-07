@@ -2533,7 +2533,7 @@ def _go_defs_for(prog, fn, tc: dict) -> list:
                     if n in set(_reachable(fns, fn.name if fn else ""))})
     # The admitted contracts, keyed by the SPELLING a call site uses.  Read off
     # `prog` because `formal/build.py` already resolved them through
-    # `formal/imports.py`'s `import_bindings` — the same binding the emitted call
+    # `formal/imports.py`'s `imported_bindings` — the same binding the emitted call
     # uses, so the model cannot substitute one contract for the callee the code
     # actually calls.
     scope.admitted = dict(getattr(prog, "admitted_calls", None) or {})
