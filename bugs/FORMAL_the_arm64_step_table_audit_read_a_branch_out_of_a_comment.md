@@ -10,6 +10,26 @@ of the four signatures now carrying the obligation that fails, named from the
 generated file rather than from a truncated tail. Filed 2026-10-03 on
 `work/formal16-2`, refreshed 2026-10-04.
 
+**Update 2026-10-06 (`work/formal42-4`): the PIN class below went red again for
+a reason that is not the audit, and half of it is fixed.** The generator's
+`_reached_without_a_condition` returned False on meeting ANY reachable source
+conditional rather than on the halt address's own path crossing one, which
+refused ten of the twelve examples this doc's pin names as generating
+(`count`/`pow2`/`sqsum`/… — their halt is the prologue guard's call while the
+`if n == 0` test sits at the other end of the function). **Fixed**: the walk now
+carries `(block, crossed)` and answers True only for a block that CONTAINS the
+halt with no source conditional crossed, pinned in both directions by
+`test_formal_call_proof_gen.py::TestTheReachedWalkIsPerPath`. So the class is
+one row from green: `wdiff` refuses in the loop contract because the stack-floor
+guard's `getrlimit` (`bfeec991`, every arm64 prologue) is counted as a program
+call and becomes the theorem's halt boundary, and because the arm64 half of
+`38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
+by a merge. Both are filed as
+`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
+"all twelve generate" below is true of the ten recursive examples and false of
+`wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
+row).
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
 here:
