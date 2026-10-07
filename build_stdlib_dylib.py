@@ -177,22 +177,29 @@ def _driver_targets(driver: str, arch: str) -> tuple:
     result = (False, 'not probed')
     try:
         wd = tempfile.mkdtemp(prefix='mojo_archprobe_')
-        src = os.path.join(wd, 'probe.c')
-        out = os.path.join(wd, 'probe.o')
-        with open(src, 'w') as f:
-            f.write(_PROBE_SRC)
-        proc = subprocess.run([driver, *arch_flags(arch), '-c', '-o', out, src],
-                              capture_output=True, text=True)
-        if proc.returncode == 0 and os.path.exists(out):
-            made = arches_of(out)
-            if arch in made:
-                result = (True, '')
+        # The probe directory holds a one-line C file and its object; the object
+        # is read and then nothing needs the directory, so it is removed here or
+        # it leaks one dir per probed (driver, arch) — the same class of leak
+        # `runtime_dylib` had, in the same file.
+        try:
+            src = os.path.join(wd, 'probe.c')
+            out = os.path.join(wd, 'probe.o')
+            with open(src, 'w') as f:
+                f.write(_PROBE_SRC)
+            proc = subprocess.run([driver, *arch_flags(arch), '-c', '-o', out, src],
+                                  capture_output=True, text=True)
+            if proc.returncode == 0 and os.path.exists(out):
+                made = arches_of(out)
+                if arch in made:
+                    result = (True, '')
+                else:
+                    result = (False, f"emits {'/'.join(sorted(made)) or 'an object of unknown arch'}"
+                                     f" for -arch {arch}")
             else:
-                result = (False, f"emits {'/'.join(sorted(made)) or 'an object of unknown arch'}"
-                                 f" for -arch {arch}")
-        else:
-            detail = (proc.stderr or proc.stdout or '').strip().splitlines()
-            result = (False, detail[-1] if detail else f'exit {proc.returncode}')
+                detail = (proc.stderr or proc.stdout or '').strip().splitlines()
+                result = (False, detail[-1] if detail else f'exit {proc.returncode}')
+        finally:
+            shutil.rmtree(wd, ignore_errors=True)
     except Exception as e:
         result = (False, str(e))
     _driver_probe[key] = result
@@ -1383,50 +1390,63 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
     wd = tempfile.mkdtemp(prefix='mojo_rt_')
-    objs = []
-    for src, lang, unit_flags in units:
-        stem = os.path.splitext(os.path.basename(src))[0]
-        o = os.path.join(wd, stem + '.o')
-        driver = cxx if lang == 'c++' else cc
-        subprocess.run([driver, *unit_flags, '-c', '-o', o, src], check=True)
-        _arch_or_die(o, arch, f'object for {os.path.basename(src)}')
-        objs.append(o)
-    # The reflection table over the runtime's own public surface, filtered to
-    # the symbols this dylib really defines (see runtime_export_entries).
-    # The report is PRINTED inside runtime_export_entries, not here: iterating
-    # a local that a tuple-unpack bound is a shape the self-hosted backend
-    # mis-types, and this module is in mojoc's own compile closure. See that
-    # function's `for line in report:` for the measurement.
-    entries, report = runtime_export_entries(cc, objs)
-    reflect_src = reflect.emit_table_c(entries)
-    rc = os.path.join(wd, '_mojo_reflect.c')
-    ro = os.path.join(wd, '_mojo_reflect.o')
-    with open(rc, 'w') as f:
-        f.write(reflect_src)
-    # -fno-builtin for the same reason build()'s own table compile needs it:
-    # the table redeclares every advertised symbol unprototyped to take its
-    # address, and some of those names are C builtins.
-    subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
-                    '-c', '-o', ro, rc], check=True)
-    objs.append(ro)
-    # Linked into the work directory and moved into place, because a dylib's
-    # install name is derived from its output path: linking straight to `out`
-    # and renaming would leave the artifact disagreeing with the load command
-    # baked into everything that links it. `_dylink` is given the final
-    # install name explicitly, so the two cannot drift, and the name is
-    # content-addressed, so `os.replace` onto it is atomic and idempotent.
-    # `arch` on the LINK is not redundant with it on every object, and this is
-    # not a hypothetical: with it omitted, `ld` took the host architecture,
-    # printed "warning: ignoring file ...: found architecture 'x86_64',
-    # required architecture 'arm64'" for EVERY object, exited 0, and wrote an
-    # empty arm64 dylib. A link driver that cannot target an architecture
-    # ignores its flag exactly as quietly as a compiler does.
-    staged = os.path.join(wd, name)
-    subprocess.run(_dylink(cc, staged, objs, undefined=False, link_driver=cxx,
-                           install_name='@rpath/' + name, arch=arch), check=True)
-    _arch_or_die(staged, arch, 'linked runtime dylib')
-    os.replace(staged, out)
-    return out
+    # The work directory holds the runtime objects, the generated reflection C
+    # and its object, and the staged dylib — and `os.replace` below moves only
+    # the dylib out, so nothing else removes `wd` unless this does. It is per
+    # COLD CAS (a cache hit returned above), and this tree has many callers with
+    # a fresh `GMOJO_HOME` per test, so the leak measured ~500 kB per cold build
+    # (34 leaked dirs, ~17 MB, in twelve minutes of one corpus run). The
+    # `finally` is the model `formal/build.py::_publish_signed_image` uses:
+    # stage, publish, and remove the staging DIRECTORY so a killed build leaves
+    # no debris for a later glob to mistake for a library. `ignore_errors=True`
+    # because the failure worth raising is the build's, not the cleanup's.
+    try:
+        objs = []
+        for src, lang, unit_flags in units:
+            stem = os.path.splitext(os.path.basename(src))[0]
+            o = os.path.join(wd, stem + '.o')
+            driver = cxx if lang == 'c++' else cc
+            subprocess.run([driver, *unit_flags, '-c', '-o', o, src], check=True)
+            _arch_or_die(o, arch, f'object for {os.path.basename(src)}')
+            objs.append(o)
+        # The reflection table over the runtime's own public surface, filtered to
+        # the symbols this dylib really defines (see runtime_export_entries).
+        # The report is PRINTED inside runtime_export_entries, not here: iterating
+        # a local that a tuple-unpack bound is a shape the self-hosted backend
+        # mis-types, and this module is in mojoc's own compile closure. See that
+        # function's `for line in report:` for the measurement.
+        entries, report = runtime_export_entries(cc, objs)
+        reflect_src = reflect.emit_table_c(entries)
+        rc = os.path.join(wd, '_mojo_reflect.c')
+        ro = os.path.join(wd, '_mojo_reflect.o')
+        with open(rc, 'w') as f:
+            f.write(reflect_src)
+        # -fno-builtin for the same reason build()'s own table compile needs it:
+        # the table redeclares every advertised symbol unprototyped to take its
+        # address, and some of those names are C builtins.
+        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                        '-c', '-o', ro, rc], check=True)
+        objs.append(ro)
+        # Linked into the work directory and moved into place, because a dylib's
+        # install name is derived from its output path: linking straight to `out`
+        # and renaming would leave the artifact disagreeing with the load command
+        # baked into everything that links it. `_dylink` is given the final
+        # install name explicitly, so the two cannot drift, and the name is
+        # content-addressed, so `os.replace` onto it is atomic and idempotent.
+        # `arch` on the LINK is not redundant with it on every object, and this is
+        # not a hypothetical: with it omitted, `ld` took the host architecture,
+        # printed "warning: ignoring file ...: found architecture 'x86_64',
+        # required architecture 'arm64'" for EVERY object, exited 0, and wrote an
+        # empty arm64 dylib. A link driver that cannot target an architecture
+        # ignores its flag exactly as quietly as a compiler does.
+        staged = os.path.join(wd, name)
+        subprocess.run(_dylink(cc, staged, objs, undefined=False, link_driver=cxx,
+                               install_name='@rpath/' + name, arch=arch), check=True)
+        _arch_or_die(staged, arch, 'linked runtime dylib')
+        os.replace(staged, out)
+        return out
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
 
 
 # The headers that declare the runtime's public C surface, in the order they

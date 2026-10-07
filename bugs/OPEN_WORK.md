@@ -118,7 +118,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_module_global_holding_a_function_reads_back_as_zero.md` | **unclaimed** | A module `global` holding a FUNCTION reads back as 0, and a direct call through it does not link |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | `FORMAL_generic_local_binding_has_no_home.md` | **unclaimed** | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
-| `FORMAL_the_runtime_dylib_leaves_its_staging_directory.md` | **unclaimed** | 520 kB per cold CAS, never removed |
 | `TEST_the_formal_doc_truth_census_is_in_no_bucket.md` | **unclaimed** | `FORMAL.md`'s numbers are 8 rows stale and the file that measures them runs in no gate |
 
 ### `formal/contracts` — 1 document, 0 claimed

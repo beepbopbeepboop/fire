@@ -770,6 +770,66 @@ print(json.dumps({'out': path, 'lookups': seen['lookups'], 'hits': seen['hits']}
 '''
 
 
+def test_runtime_dylib_leaves_no_staging_directory():
+    """A COLD `runtime_dylib()` build stages its objects, its generated
+    reflection C and the dylib in one temp directory and `os.replace`s only the
+    dylib out — so nothing removed the directory, one leak per cold CAS. The
+    leak was measured at ~500 kB and this tree has many callers with a fresh
+    `GMOJO_HOME` per test, so it accumulated.
+
+    Pinned by spying on `tempfile.mkdtemp` and requiring every directory it
+    hands out to be gone when the call returns. A nonce flag makes the CAS key
+    cold, so the build actually runs rather than returning a cached path before
+    the staging directory exists."""
+    made = []
+    real = tempfile.mkdtemp
+
+    def spy(prefix='tmp', *a, **k):
+        d = real(prefix, *a, **k)
+        made.append(d)
+        return d
+
+    tempfile.mkdtemp = spy
+    try:
+        flags = (f'-DFORMAL_RT_LEAK_NONCE={os.getpid()}_{time.time_ns()}',)
+        out = bsd.runtime_dylib(flags=flags)
+    finally:
+        tempfile.mkdtemp = real
+    check(bool(made), 'a cold runtime_dylib build made a staging directory to test')
+    leftovers = [d for d in made if os.path.isdir(d)]
+    check(not leftovers,
+          'the runtime dylib staging directory is removed after the build',
+          str(leftovers))
+    check(os.path.exists(out), 'and the built dylib itself is still in place', out)
+
+
+def test_arch_probe_leaves_no_directory():
+    """`_driver_targets` compiles a one-line probe in a temp directory per
+    (driver, arch); it is cached per process, so it leaked at most two dirs per
+    run and the leak was easy to miss — the same class as the runtime dylib's,
+    in the same file. Pinned the same way: every `mkdtemp` directory is gone
+    when the probe returns."""
+    made = []
+    real = tempfile.mkdtemp
+
+    def spy(prefix='tmp', *a, **k):
+        d = real(prefix, *a, **k)
+        made.append(d)
+        return d
+
+    bsd._driver_probe.clear()
+    tempfile.mkdtemp = spy
+    try:
+        bsd._driver_targets(bsd.find_gcc() or 'gcc', bsd.normalize_arch())
+    finally:
+        tempfile.mkdtemp = real
+    check(bool(made), 'the driver probe made a temp directory to test')
+    leftovers = [d for d in made if os.path.isdir(d)]
+    check(not leftovers,
+          'the driver-probe temp directory is removed after the probe',
+          str(leftovers))
+
+
 def test_concurrent_builds_of_one_output_path_do_not_collide():
     """Six processes, one output path, one cold key: every one of them must
     succeed, and at most one of them may actually build.
@@ -968,6 +1028,8 @@ def main():
     test_clang_can_compile_the_runtime_for_both_architectures()
     test_stdlib_dylib_default_output_carries_the_arch()
     test_dylib_link_key_includes_the_arch()
+    test_runtime_dylib_leaves_no_staging_directory()
+    test_arch_probe_leaves_no_directory()
     test_concurrent_builds_of_one_output_path_do_not_collide()
     test_derived_namespaces_cover_exactly_their_own_symbols()
     test_unit_namespaces_are_disjoint()
