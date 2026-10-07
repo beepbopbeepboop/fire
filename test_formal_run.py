@@ -23909,6 +23909,28 @@ def check_stack_floor_decision(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: depth/{name}")
+    # The budget is BYTES and the frames are not, so the depth it affords is
+    # PER ARCHITECTURE — the asymmetry the budget docstring, `stack_trap_message`
+    # and `call_graph_depth` all record — pinned here as arithmetic rather than
+    # re-derived by running two deep recursions.
+    # 7.5 MiB against a 128 KiB arm64 frame is 59 levels; against a 16 KiB
+    # x86-64 frame it is 479 before the function's own spills, which is why the
+    # measured x86-64 edge is 471. Both numbers are in `call_graph_depth`'s
+    # docstring and the budget docstring, so a change that moved one without the
+    # others is caught here.
+    arm_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.ARM64_CONTAINER_BUDGET)
+                 // M.ARM64_CONTAINER_BUDGET)
+    x86_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.X86_64_CONTAINER_BUDGET)
+                 // M.X86_64_CONTAINER_BUDGET)
+    if (arm_depth, x86_depth) != (59, 479):
+        failures.append(
+            f"budget/depth: arm64 {arm_depth} x86-64 {x86_depth} "
+            f"(want 59, 479)")
+    else:
+        passed += 1
+        if verbose:
+            print("  PASS  stack-floor-decision: budget/depth arm64=59 "
+                  "x86-64=479")
     return passed, failures
 
 
