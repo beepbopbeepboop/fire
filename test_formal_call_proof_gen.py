@@ -1429,6 +1429,241 @@ class TestBitTestBranches(unittest.TestCase):
                     f"{pc + delta}, not {G._branch_target(words, pc)}")
 
 
+class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
+    """`_written_expr` reads the value a step writes to a register, for EVERY
+    spelling `_step_rhs` emits — and refuses rather than guesses on the rest.
+
+    **The defect this pins was a false step, in the one instruction per
+    function whose value the frame facts are about.** A step's result is not
+    one shape. It is `some EXPR` where `EXPR` is an `arm64_set_reg`
+    application OR an `Arm64State` record update, and every instruction that
+    writes registers AND writes `sp` puts the register write INSIDE the
+    update:
+
+        some { (arm64_set_reg 30 (arm64_set_reg 29 s …) …) with sp := … }
+
+    The reader matched only the top-level `arm64_set_reg r s ` spelling, so
+    it answered None for all of those — and its one caller
+    (`_emit_reg_chain`) reads None as "this instruction leaves the register
+    alone", emitting `arm64_reg r (qT_k st) = arm64_reg r (qS_k st)` for an
+    instruction that had just overwritten `r`. Nothing in the emitter has an
+    oracle, so nothing failed at emission; the claim surfaced much later as an
+    unproved goal inside a generated proof, in the block whose epilogue
+    (`ldp x29, x30, [sp], #16`) makes it false.
+
+    Measured, arm64, `formal/examples/bitops.mojo` block 4 (30 instructions),
+    register 30: `_emit_reg_chain` concluded `arm64_reg 30 ST` — "x30 is
+    untouched by this block" — while instruction 28 of that block is exactly
+    the `LDP` that reloads `x30` from the saved frame. With the reader fixed
+    it concludes the load's own expression. That is
+    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`'s
+    "decompose the value flow into per-block facts": the per-block chain
+    cannot be built for the block that contains the epilogue while the reader
+    is blind to that block's writes.
+
+    Lean-free and image-free — this asks the reader about SHAPES, and the last
+    row asks the real emitter's own words, so it is the corpus that decides
+    whether any shape is still unreadable rather than this file's list.
+    """
+
+    #: `(rhs, register, expected)` — the expected value is None where the
+    #: reader must REFUSE. The refusals are half the rows: a reader that
+    #: answered everything would be answering `s` for `RET`, and
+    #: `_emit_reg_chain`'s two branches are "takes this value" and "unchanged".
+    ROWS = (
+        # the spelling the reader always read
+        ("some (arm64_set_reg 0 s (arm64_add (arm64_reg 1 s) (UInt64.ofNat 1)))",
+         0, "(arm64_add (arm64_reg 1 s) (UInt64.ofNat 1))"),
+        ("some (arm64_set_reg 19 s (UInt64.ofNat 4294968180))",
+         19, "(UInt64.ofNat 4294968180)"),
+        # THE DEFECT: a register write wrapped in an `sp` update — the shape
+        # every LDP/STP with writeback has, and the epilogue's is this one.
+        ("some { (arm64_set_reg 30 (arm64_set_reg 29 s (mem_read_u64 s.mem "
+         "s.sp.toNat)) (mem_read_u64 s.mem (s.sp + 8).toNat)) with sp := "
+         "s.sp + UInt64.ofNat 16 }",
+         30, "(mem_read_u64 s.mem (s.sp + 8).toNat)"),
+        # …and the OTHER destination of the same pair load, which is the inner
+        # one: a write to a different register leaves this one alone, so the
+        # answer is whatever the state it was applied to already had.
+        ("some { (arm64_set_reg 29 (arm64_set_reg 30 s a) b) with sp := "
+         "s.sp + UInt64.ofNat 16 }",
+         29, "b"),
+        ("some { (arm64_set_reg 2 (arm64_set_reg 0 s (arm64_reg 19 s)) "
+         "(arm64_reg 1 s)) with sp := s.sp + UInt64.ofNat 16 }",
+         0, "(arm64_reg 19 s)"),
+        # a store pair's second destination, and a value that is the SP itself
+        ("some { (arm64_set_reg 20 (arm64_set_reg 19 s (arm64_add "
+         "(arm64_reg 19 s) (arm64_reg 21 s))) s.sp) with sp := s.sp - "
+         "UInt64.ofNat 16 }",
+         20, "s.sp"),
+        # `BL` writes x30 as a RECORD FIELD, which is a third spelling and not
+        # an `arm64_set_reg` at all
+        ("some { s with x30 := UInt64.ofNat (s.pc + 4), pc := "
+         "(UInt64.ofNat s.pc + 4).toNat }",
+         30, "UInt64.ofNat (s.pc + 4)"),
+        # SP (register 31 to `_regs_written`) is read from the `sp :=` field
+        ("some { s with sp := s.sp - UInt64.ofNat 16 }",
+         31, "s.sp - UInt64.ofNat 16"),
+        ("some { (arm64_set_reg 2 s x) with sp := (s.sp + UInt64.ofNat 16) }",
+         31, "(s.sp + UInt64.ofNat 16)"),
+        # three-deep nesting, one level of which the previous case covers
+        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
+         2, "a"),
+        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
+         1, "b"),
+        ("some (arm64_set_reg 0 (arm64_set_reg 1 (arm64_set_reg 2 s a) b) c)",
+         0, "c"),
+        # THE REFUSALS. A `pc`/`nzcv`/`mem` update leaves every register alone,
+        # so there is nothing to read; `arm64_set_reg 31 _ _ = _` in
+        # `lib/ProofLib.lean` is not a write at all; a conditional branch's
+        # value is an `if` this reader does not evaluate.
+        ("some { s with pc := 4294968060 }", 30, None),
+        ("some { s with mem := mem_write_u64 s.mem 8 v }", 5, None),
+        ("some { s with sp := a, mem := mem_write_u64 s.mem 8 v }", 0, None),
+        ("some { (arm64_set_reg 31 s (UInt64.ofNat 16)) with pc := 4 }",
+         31, None),
+        ("some (if arm64_matches_condition 0 s.nzcv = true then "
+         "({ s with pc := 1 } : Arm64State) else "
+         "({ s with pc := 2 } : Arm64State))", 0, None),
+    )
+
+    def test_every_spelling_the_step_result_uses_is_read(self):
+        import formal.arm64_proof_gen as G
+        for rhs, r, want in self.ROWS:
+            with self.subTest(f"r={r} {rhs[:48]}"):
+                self.assertEqual(
+                    G._written_expr(rhs, r), want,
+                    f"_written_expr({rhs!r}, {r}) is not {want!r}. A None here "
+                    f"that should be a value makes `_emit_reg_chain` claim the "
+                    f"register is UNCHANGED across an instruction that wrote "
+                    f"it, which is a false step that only surfaces as an "
+                    f"unproved goal in a generated proof")
+
+    def test_the_reader_is_total_over_the_corpus_of_step_right_hand_sides(self):
+        """Every word the emitter produces, for every register it writes.
+
+        The rows above are the shapes; this is whether the corpus has found
+        another one. A shape this file has not heard of would answer None and
+        `_emit_reg_chain` would read that as "unchanged", so the check is
+        over REAL words rather than over the list — and it says which words
+        are still unreadable rather than counting them.
+        """
+        import formal.arm64_proof_gen as G
+        words = _arm64_words("def f(n):\n"
+                             "    t = n + 1\n"
+                             "    u = t * 3\n"
+                             "    if u > 10:\n"
+                             "        u = u - 1\n"
+                             "    return u\n")
+        unreadable = []
+        for w in words:
+            idx = G._step_branch_index(w)
+            rhs = G._step_rhs(w, idx)
+            if rhs is None:
+                continue
+            for r in sorted(G._regs_written(w, idx) or ()):
+                got = G._written_expr(rhs, r)
+                # `r == 31` on a shape that writes no SP is a `None` the
+                # caller never asks about; the check is on the registers the
+                # instruction claims to write.
+                if got is None:
+                    unreadable.append((hex(w), idx, r, rhs[:70]))
+        self.assertEqual(
+            unreadable, [],
+            "these (word, step index, register) triples are written by the "
+            "instruction and unreadable by `_written_expr`, so "
+            "`_emit_reg_chain` emits a false 'unchanged' step for each: %r"
+            % (unreadable[:6],))
+
+    #: `formal/examples/bitops.mojo`, whose block 4 is the RET block: 30
+    #: instructions ending in the epilogue, and instruction 28 of it is the
+    #: `ldp x29, x30, [sp], #16` that reloads `x30`. That is the block whose
+    #: value flow `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_`
+    #: theorem.md` wants restated one block at a time, and the one instruction
+    #: per function the reader could not read.
+    EPILOGUE_PROGRAM = os.path.join(HERE, "formal", "examples", "bitops.mojo")
+
+    def test_the_epilogue_blocks_own_chain_states_what_it_wrote(self):
+        """LEAN, on the block whose epilogue is the reader's blind spot.
+
+        The unit rows above can only say the reader answers; this says the
+        answer is a PROOF, by taking `_emit_reg_chain`'s own output for
+        `bitops`'s RET block, register `x30`, as a `have` in a file that is
+        the generated one up to that block's certificate — and asking Lean.
+        Skipped loudly without `lib/ProofLib.olean`, like every Lean assertion
+        in this file.
+
+        Measured, arm64, this tree: before the reader read the field-update
+        wrapping, the chain concluded `arm64_reg 30 ST` — "x30 is untouched by
+        this block", for the block whose last load IS an x30 write — and Lean
+        reported `unsolved goals` on the `hT28` step, which is the false step
+        the reader's `None` produced. With it, the chain concludes the load's
+        own expression and the file checks with 0 `sorry`.
+        """
+        import formal.arm64_proof_gen as G
+        lean = _lean()
+        if not lean or not os.path.isfile(os.path.join(HERE, "lib",
+                                                       "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping the typecheck of "
+                "the epilogue block's register chain")
+        if not os.path.isfile(self.EPILOGUE_PROGRAM):
+            raise unittest.SkipTest(
+                f"{self.EPILOGUE_PROGRAM} is not in this checkout, so there "
+                f"is no generated proof to take the chain out of")
+        tmp = tempfile.mkdtemp(prefix="a2-epilogue-")
+        try:
+            proof = _generate_dir(tmp, self.EPILOGUE_PROGRAM, "bitops",
+                                  os.path.join(tmp, "bitops.aout"))["proof_path"]
+            text = open(proof).read()
+            lines = text.split("\n")
+            cut = next((i for i, l in enumerate(lines)
+                        if l.startswith("theorem bitops_b4_runs")), None)
+            hdr = re.search(
+                r"/-- Block 4: start=(0x[0-9a-f]+) kind=\w+ "
+                r"\((\d+) instructions", text)
+            self.assertIsNotNone(cut and hdr,
+                                 "the generated proof no longer has block 4's "
+                                 "certificate or its header, so this row is "
+                                 "not measuring the block it names")
+            start, count = int(hdr.group(1), 16), int(hdr.group(2))
+            res = _compile(self.EPILOGUE_PROGRAM,
+                           os.path.join(tmp, "code.aout"), "arm64")
+            base = res["info"]["base_addr"]
+            raw = res["code"]
+            words = {base + i: int.from_bytes(raw[i:i + 4], "little")
+                     for i in range(0, len(raw) - len(raw) % 4, 4)}
+            # the PREFIX run: block 4's certificate is about `qS{m-1}`, whose
+            # last write to x30 is the epilogue's `ldp`
+            chain, final = G._emit_reg_chain(
+                "bitops", words, "b4", [start + 4 * i for i in range(count - 1)],
+                30, st="ST", hname="hchain")
+            body = ["\n".join(lines[:cut]),
+                    "theorem block_chain (ST : Arm64State) : True := by"]
+            body += ["  " + l for l in chain] + ["  trivial"]
+            path = os.path.join(tmp, "chain.lean")
+            with open(path, "w") as fh:
+                fh.write("\n".join(body))
+            got = _check_proof(path)
+            self.assertIsNotNone(got, "Lean is available but the check "
+                                     "returned nothing")
+            ok, detail, n_sorries = got
+            self.assertTrue(
+                ok, f"the epilogue block's own x30 chain does not check, so "
+                   f"the reader's answer for the `ldp` is not a proof: "
+                   f"{detail}\nchain concludes: {final}")
+            self.assertEqual(n_sorries, 0,
+                             "the chain was admitted rather than proved")
+            self.assertIn(
+                "mem_read_u64", final,
+                "the chain over the block containing the epilogue concludes "
+                f"{final!r}, so it is not following the `ldp` that writes x30 "
+                "— the blind spot is back, in the one block per function that "
+                "has one")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestNestedConditionFactSharing(unittest.TestCase):
     """The `hprior_*` value-flow facts are emitted ONCE per (path, block).
 

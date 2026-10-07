@@ -4700,13 +4700,171 @@ def _regs_written(w: int, idx: int):
     return None
 
 
-def _written_expr(rhs: str, r: int):
-    """Extract the value expression written to register `r` from a `_step_rhs`."""
-    pref = f"some (arm64_set_reg {r} s "
-    if rhs.startswith(pref) and rhs.endswith(")"):
-        return rhs[len(pref):-1]
-    if r == 31 and rhs.startswith("some { s with sp := ") and rhs.endswith(" }"):
-        return rhs[len("some { s with sp := "):-2]
+def _lean_paren_end(s: str, i: int) -> int:
+    """Index just past the `)` matching the `(` at `s[i]`, or -1 if unbalanced."""
+    depth = 0
+    while i < len(s):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _lean_term_end(s: str, i: int) -> int:
+    """Index just past the Lean term starting at `s[i]` (one paren group or atom)."""
+    while i < len(s) and s[i] == " ":
+        i += 1
+    if i < len(s) and s[i] == "(":
+        end = _lean_paren_end(s, i)
+        return len(s) if end < 0 else end
+    j = i
+    while j < len(s) and s[j] not in " )":
+        j += 1
+    return j
+
+
+# `with` fields of an `Arm64State` record update that `_step_rhs` emits and
+# that are NOT a register.  `sp` is excluded because it IS one, to register
+# 31; a wrapper that sets one of these leaves every register alone, which is
+# what makes peeling past it sound.  `x0`..`x30` are read as the write they
+# are rather than peeled.
+_NON_REGISTER_FIELDS = ("pc", "nzcv", "mem")
+
+
+def _split_field_update(body: str):
+    """`('BASE', {field: value})` for an `Arm64State` record update, else None.
+
+    `{ BASE with f₁ := v₁, f₂ := v₂ }`. The split is at the paren depth where
+    the record's braces sit, not by regex over the whole string: a value may
+    itself contain `, f :=` inside its own parentheses (`BL`'s `pc :=` term
+    mentions `s.pc`, and `mem_write_u64`'s arguments are full of them), so a
+    greedy pattern takes the LAST `with` and reads a field that is not there.
+    """
+    if not (body.startswith("{ ") and body.endswith(" }")):
+        return None
+    inner = body[2:-2]
+    depth = 0
+    i = 0
+    base_end = -1
+    while i < len(inner):
+        c = inner[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif depth == 0 and inner.startswith(" with ", i):
+            base_end = i
+            break
+        i += 1
+    if base_end < 0:
+        return None
+    fields = {}
+    rest = inner[base_end + len(" with "):]
+    depth = 0
+    start = 0
+    parts = []
+    for i, c in enumerate(rest):
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(rest[start:i])
+            start = i + 1
+    parts.append(rest[start:])
+    for part in parts:
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*) := (.*)$", part.strip(), re.S)
+        if not m:
+            return None
+        fields[m.group(1)] = m.group(2).strip()
+    return inner[:base_end].strip(), fields
+
+
+def _strip_outer_parens(body: str) -> str:
+    """`body` without the paren group that wraps all of it, repeatedly.
+
+    A state expression reaches this reader in three wrappings — the `some
+    (...)` application's own parens, the `{ … with … }` body's parens, and
+    the parens of the state an outer `arm64_set_reg` was applied to — and a
+    reader that stops at the first one reads a term it has to re-parse.
+    """
+    while (body.startswith("(")
+           and _lean_paren_end(body, 0) == len(body)):
+        body = body[1:-1]
+    return body
+
+
+def _written_expr(rhs: str, r: int, _depth: int = 8):
+    """The value expression a `_step_rhs` writes to register `r`, or None.
+
+    None means "this reader cannot tell", and every caller must treat it as
+    a refusal rather than as "unchanged" — see `_emit_reg_chain`, whose two
+    branches are "the register takes this value" and "the register is the
+    same", and which has no third. So the shapes it cannot read are worth
+    naming: an instruction writing no register this reader knows (`RET`,
+    `CMP`, the flag-setting forms), and one whose result mentions the
+    register only inside an expression it is not a definition of.
+
+    **A step's result is not one shape.** It is `some EXPR` where `EXPR` is
+    an `arm64_set_reg` application OR an `Arm64State` record update, and for
+    every instruction that writes registers AND writes `sp` the register
+    write is INSIDE the record update:
+
+        some { (arm64_set_reg 30 (arm64_set_reg 29 s …) …) with sp := … }
+
+    which is every `LDP`/`STP` with writeback — including the epilogue's
+    `ldp x29, x30, [sp], #16`, the one instruction whose `x30` the frame
+    facts are about. A reader that only matched the top-level `arm64_set_reg
+    r s ` spelling returned None for those, and its one caller reads None as
+    "this instruction does not change the register", so it emitted
+    `arm64_reg r (qT_k st) = arm64_reg r (qS_k st)` for an instruction that
+    had just overwritten `r`. Nothing here has an oracle, so that false step
+    did not fail at emission; it failed much later as an unproved goal
+    inside a generated proof, in the one block per function whose epilogue
+    makes the claim false.
+
+    So both wrappings are read, and `BL` — which writes `x30` as a record
+    FIELD rather than through `arm64_set_reg` — is the third spelling.
+    """
+    if _depth <= 0 or not rhs.startswith("some "):
+        return None
+    body = _strip_outer_parens(rhs[len("some "):].strip()).strip()
+    upd = _split_field_update(body)
+    if upd:
+        base, fields = upd
+        if f"x{r}" in fields:
+            return fields[f"x{r}"] or None
+        if r == 31 and "sp" in fields:
+            return fields["sp"] or None
+        # This wrapper does not define `r`, so the answer is whatever the
+        # state it updates already had.
+        return _written_expr("some " + base, r, _depth - 1)
+    pref = f"arm64_set_reg {r} "
+    if body.startswith(pref):
+        if r == 31:
+            # `arm64_set_reg 31 _ _ = _` in `lib/ProofLib.lean` -- register 31
+            # is not a register there, so this spelling writes nothing and the
+            # answer is the state it was handed. `_step_rhs` does not emit it
+            # (every `rd == 31` arm spells `sp :=`), and reading it as a write
+            # would be a claim the library refutes.
+            rest = body[len(pref):]
+            inner = _strip_outer_parens(rest[:_lean_term_end(rest, 0)]).strip()
+            return _written_expr("some " + inner, r, _depth - 1)
+        rest = body[len(pref):]
+        return rest[_lean_term_end(rest, 0):].strip() or None
+    other = re.match(r"^arm64_set_reg (\d+) ", body)
+    if other and int(other.group(1)) != r:
+        # A write to a DIFFERENT register leaves `r` alone, so the answer for
+        # `r` is whatever that register's state already had — which is how a
+        # pair load (`arm64_set_reg 2 (arm64_set_reg 0 s …) …`) answers for
+        # `x0` as well as for `x2`.
+        rest = body[other.end():]
+        inner = _strip_outer_parens(rest[:_lean_term_end(rest, 0)]).strip()
+        return _written_expr("some " + inner, r, _depth - 1)
     return None
 
 

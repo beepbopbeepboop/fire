@@ -10,6 +10,13 @@ is ZERO. §0.4 closes the LAST of §0.3's list: `not-code` is an eighth VERDICT,
 the tier's fourth answer no longer shares a string with the typo answer, and the
 two RED tests on master that measured the consequence are green (2026-10-05).**
 
+**Status 2026-10-05 (`work/formal54-docs`): §0.1's measurement RE-CONFIRMED on a
+corpus 20% larger, the per-verdict census REFRESHED (this document's stated
+counts were stale), and `find_spec` measured as the oracle it is claimed to be —
+it decides FIVE of the 205.** All three are in §0.5; none of them moves a file,
+and §0.1's reason for the remaining 200 is unchanged and is re-measured here
+rather than asserted.
+
 Found while fixing that one name, 2026-10-02, on `work/formal8-10`.
 
 ## 0.4 `not-code`: the fourth tier's answer stopped sharing a string with the
@@ -95,6 +102,93 @@ answer plus the correctness of an instrument, not a moved row. The 102 public
 names still in no tier are still in no tier, and §0.1's reason is unchanged: with
 nothing importing them there is no measurement to tell a right entry from a
 plausible one.
+
+## 0.5 Re-measured 2026-10-05 (`work/formal54-docs`): the corpus question still
+## answers ZERO on 443 files, this document's census was stale, and `find_spec`
+## decides five names
+
+Three measurements, all through `formal/imports.py`'s own accessors, and none of
+them moves a build. They are here because the census this document states in
+three places had drifted, and because §"The next step" offers `find_spec` as
+"the oracle" for the remaining names and that claim had never been measured.
+
+**1. §0.1's number is a FLOOR and it still holds, on 20% more corpus.** §0.1
+measured `223 names in no tier / 370 .mojo files scanned / 0 of the 223 imported
+by ANY of them`. Re-measured with `host_module_verdict` + `parse_module_for_closure`
++ `imported_modules` over every `.mojo` in this repository **and**
+`../new-modular/Mojo/stdlib/std`:
+
+```
+unclassified names: 205
+mojo files scanned: 443
+files importing one: 0
+```
+
+443 files against the 370 the doc measured, and still zero — so the tripwire
+`test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`
+has not fired, and §0.1's conclusion ("the classification is worth nothing for
+coverage, and that is the finding that decides what to do with the 222") is
+re-confirmed rather than inherited.
+
+**2. The census, which is a fact about the TABLE and so is checkable, was stale.**
+§0.3's table reads `unclassified 216 / written 29 / modelled 29 / unreachable 18 /
+admitted 4 / front-end 1` over "the 303 names CPython ships on this tree", and
+§0.1 reads `223 … (120 public, 103 private)`. Neither matches:
+
+| verdict | this doc (§0.3) | 2026-10-05 |
+|---|---:|---:|
+| `unclassified` | 216 | **205** |
+| `modelled` | 29 | **32** |
+| `written` | 29 | **30** |
+| `unreachable` | 18 | **22** |
+| `admitted` | 4 | 4 |
+| `not-code` | (not yet an answer) | **3** |
+| `front-end` | 1 | 1 |
+| **total (`sys.stdlib_module_names`)** | 303 | **297** |
+
+and of the 205, **102 are public** (the doc says 120). The totals fell because
+CPython's own list is version-dependent (303 -> 297 on this interpreter), which is
+the reason §0.3 already said the count "is printed by the accessor rather than
+inferred by a reader" — so the numbers above are printed here **with the accessor
+that computes them**, and a reader who wants them should ask it:
+
+```console
+$ python3 -c "
+import sys, collections, formal.imports as I
+print(collections.Counter(I.host_module_verdict(n)[0]
+                           for n in sys.stdlib_module_names))"
+```
+
+**3. `find_spec` decides FIVE of the 205, and §"The next step" overstates it.**
+§0.3's last paragraph offers the oracle for the rest — "a name whose spec CPython
+cannot find here is `unreachable` by the rule, and a name whose spec it can is
+`modelled` unless the content is not code" — and calls the result "103
+per-name judgements with an oracle rather than a judgement". Measured, the oracle
+splits 205 into **5 and 200**:
+
+```
+CPython CANNOT find_spec here: 5  ->  _gdbm, _overlapped, _tkinter, _winapi, _wmi
+CPython CAN   find_spec here: 200
+```
+
+All five are Windows-only private modules, and the reading is right for them: the
+object (the Windows extension modules, the WMI bindings) is missing from the
+target, which is the rule at the top of `formal/imports.py`. **The other half of
+the sentence is FALSE as a rule, and the doc's own §0.3 table is what says so:**
+`multiprocessing`, `pdb`, `venv`, `curses`, `sqlite3` all have a spec on this
+host and all are `unreachable` for a reason `find_spec` cannot see — a second
+process, a terminal, a library outside libSystem. So a spec existing is evidence
+that the name is not a typo, and nothing else; the remaining **200** are 200
+per-name judgements against the rule, which is exactly what §0.1 says there is no
+measurement for and exactly what §"Why the 222 are filed and not fixed here"
+warns against doing by category.
+
+**What this section does NOT do, and it is the whole of what is left:** it
+classifies nothing. The five `find_spec`-decided names are the first entries a
+worker could add with a measurement behind each, and they are **private**, so
+adding them moves the public count by zero; §0.1's reason for the rest — nothing
+imports them, so no measurement can tell a right entry from a plausible one — is
+what this section re-measured and left standing.
 
 ## 0. What landed, 2026-10-03 (`work/formal10-4`)
 
