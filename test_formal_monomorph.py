@@ -1735,6 +1735,99 @@ def main():
 """
 
 
+# The `comptime` CLASS ATTRIBUTE read through the TEMPLATE's name. The library
+# is `SELF_BRACKET_LIB`'s library with the read promoted out of a method and into
+# the class body, which is the difference the subject is about: a method's read
+# is inside the body that monomorphisation substitutes, so it was already
+# answered; this one is in the CONSUMER, and the consumer's struct table holds
+# the mangled instantiation while the read names the template.
+ATTR_LIB = """\
+struct Sized[T: AnyType, values: List[T]]:
+    comptime size = len(Self.values)
+    var tag: Int
+
+    def get(self) -> Int:
+        return self.tag
+"""
+
+ATTR_PROG = """\
+from sizelib import Sized
+
+def main():
+    var a = Sized[Int, [1, 2, 3, 4]]()
+    a.tag = 7
+    print(Sized.size)
+    print(a.get())
+"""
+
+ATTR_CPYTHON = """\
+def main():
+    a_tag = 7
+    a_values = [1, 2, 3, 4]
+    print(len(a_values))
+    print(a_tag)
+"""
+
+# The same read at the OTHER length. Two cases rather than one program with two
+# instantiations, and the reason is the rule rather than the test: `Sized.size`
+# names the TEMPLATE, so with `Sized` applied at two lengths it is a question
+# with two answers and this build has no table that answers it (see
+# `ATTR_TWO_PROG` below, which is the refusal that says so).
+ATTR_SHORT_PROG = """\
+from sizelib import Sized
+
+def main():
+    var a = Sized[Int, [9]]()
+    a.tag = 5
+    print(Sized.size)
+    print(a.get())
+"""
+
+ATTR_SHORT_CPYTHON = """\
+def main():
+    a_tag = 5
+    a_values = [9]
+    print(len(a_values))
+    print(a_tag)
+"""
+
+# The guard. Two instantiations of ONE template and a read that names the
+# template: refused, and refused with the sentence that is true of the SOURCE
+# rather than with a number from whichever instantiation sorted first.
+ATTR_TWO_PROG = """\
+from sizelib import Sized
+
+def main():
+    var a = Sized[Int, [1, 2, 3, 4]]()
+    var b = Sized[Int, [9]]()
+    a.tag = 7
+    b.tag = 5
+    print(Sized.size)
+"""
+
+# The ONE-FILE shape of the same read, so `formal/imports.py`'s
+# `_own_instantiations` is exercised rather than only the imported half: the
+# demap entry comes from the module's OWN demand set there, and that is a
+# different call site building it.
+ATTR_ONE_FILE = """\
+struct Sized[T: AnyType, values: List[T]]:
+    comptime size = len(Self.values)
+    var tag: Int
+
+def main():
+    var a = Sized[Int, [1, 2, 3, 4]]()
+    a.tag = 7
+    print(Sized.size)
+"""
+
+ATTR_ONE_FILE_CPYTHON = """\
+def main():
+    a_tag = 7
+    a_values = [1, 2, 3, 4]
+    print(len(a_values))
+"""
+
+
 def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
     """`len(Self.values)` in a generic STRUCT builds, runs, and answers CPython.
 
@@ -1842,6 +1935,86 @@ def test_the_same_read_works_in_one_file(tmpdir):
         check(got == "4\n",
               f"[{arch}] printed {got!r} for one file declaring and applying "
               f"Sized[Int, [1, 2, 3, 4]]")
+
+
+def test_a_comptime_class_attribute_read_through_the_template_name(tmpdir):
+    """`Sized.size` — a `comptime` class attribute whose value reads a bracket
+    parameter, read through the TEMPLATE's name — builds, runs and answers
+    CPython, and the two lengths are two CASES.
+
+    The refusal it replaces was true of the template and false of the read: the
+    class attribute's value `len(Self.values)` is only computable once the
+    parameter has been bound, and a value read through the TEMPLATE finds the
+    template's own unsubstituted copy. The instantiated body the library already
+    publishes says `comptime size = len([1, 2, 3, 4])`, which folds — so
+    nothing about the VALUE was missing, only the consumer's read naming the
+    template instead of the instantiation.
+
+    Two lengths in two cases rather than one program with two instantiations,
+    because `Sized.size` names the template and a template applied at two
+    lengths has no single `size`: that is `test_two_instantiations_leave_the_
+    template_read_refused` below, and splitting them here is what makes that
+    refusal a decision rather than an omission.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_attr", ATTR_LIB, ATTR_PROG,
+                            ATTR_CPYTHON, libname="sizelib.mojo")
+        check(got == "4\n7\n",
+              f"[{arch}] printed {got!r} for `Sized.size` at [1, 2, 3, 4] "
+              f"where CPython printed 4 then the field 7")
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_attr_short", ATTR_LIB,
+                            ATTR_SHORT_PROG, ATTR_SHORT_CPYTHON,
+                            libname="sizelib.mojo")
+        check(got == "1\n5\n",
+              f"[{arch}] printed {got!r} for `Sized.size` at [9] where CPython "
+              f"printed 1 then the field 5 — 4 is the OTHER program's answer, "
+              f"which is what a lowering that kept one instantiation's value "
+              f"would print")
+
+
+def test_two_instantiations_leave_the_template_read_refused(tmpdir):
+    """The other direction, and it is the rule rather than a leftover.
+
+    `Sized` applied at two lengths and `Sized.size` read once is a question with
+    two answers, and `demap` — which is keyed by the arguments the consumer
+    WROTE — has both of them. Answering would mean picking one, and the number
+    picked would be a plausible wrong one; so the read keeps the template's
+    spelling and is refused.
+
+    The refusal asserted here is the VALUE-MODEL one the read already met, and
+    that is the point: it is a sentence about the class body reading a parameter
+    nothing supplied, which is true of the template the source still names.
+    """
+    for arch in ARCHES:
+        text = run_pair_case(tmpdir, arch, "mm_attr_two", ATTR_LIB,
+                             ATTR_TWO_PROG, "", expect_ok=False,
+                             libname="sizelib.mojo")
+        check("excessive memory consumption" not in text
+              and "Traceback" not in text
+              and "is read at line" not in text,
+              f"[{arch}] did not refuse cleanly: {text.strip()[-400:]}")
+        check("Sized.size" in text and "reads a `comptime` class attribute"
+              in text,
+              f"[{arch}] refused with {text.strip()[-400:]!r}, and the read "
+              f"must be refused as the `comptime` class attribute read it is")
+
+
+def test_the_template_attribute_read_works_in_one_file(tmpdir):
+    """The same read with no dylib, which is a different demand set.
+
+    `formal/imports.py::_own_instantiations` builds the demap from the module's
+    OWN `own_demands`, and it also appends the instantiated statements to the
+    executable's list — so the mangled declaration this rewrite names is in this
+    image by a different route than it is in the library case, and a fix that
+    only answered the imported half would leave this one refused.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_attr_onefile", None,
+                            ATTR_ONE_FILE, ATTR_ONE_FILE_CPYTHON)
+        check(got == "4\n",
+              f"[{arch}] printed {got!r} for one file declaring and applying "
+              f"Sized[Int, [1, 2, 3, 4]] and reading `Sized.size`")
 
 
 def test_a_function_templates_body_is_still_compiled(_tmpdir):
@@ -2715,6 +2888,12 @@ TESTS = [
      test_a_class_attribute_read_names_the_instantiation),
     ("a class-attribute read of two instantiations is refused",
      test_a_class_attribute_read_of_two_instantiations_is_refused),
+    ("a comptime class attribute read through the template's name",
+     test_a_comptime_class_attribute_read_through_the_template_name),
+    ("two instantiations leave the template read refused",
+     test_two_instantiations_leave_the_template_read_refused),
+    ("the template attribute read works in one file",
+     test_the_template_attribute_read_works_in_one_file),
     ("the same read works in one file",
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",

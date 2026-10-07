@@ -8207,17 +8207,26 @@ BOTH_ARCH_CASES = [
     # comprehension reached from a container position lowered its own `+` as a
     # list CONCAT and copied an integer as a blob base (SIGSEGV on x86-64,
     # `movq (%rsi), %r8` with rsi = 10). The row below is that half on its own.
+    #
+    # It was FOUR shapes and is three. The dict comprehension whose VALUES are
+    # comprehensions is the one shape here whose ELEMENT opens a container, and
+    # that is now refused — `model.comprehension_element_blob_refusal`, and the
+    # refusal rows `COMPREHENSION_ELEMENT_REFUSALS` carry the shape with a
+    # stronger assertion than this row's would have given it. The other three
+    # are the subject of this row (the `_ci{d}`/`_cb{d}` DEPTH agreement for a
+    # comprehension reached through a generator's ITERABLE) and all three
+    # survive: a nest in an ITERABLE allocates in the iterable, not in the
+    # element, which is the distinction the refusal is drawn on.
     ("nested_comprehension_in_a_generator_iterable",
      "def main() -> Int:\n"
      "    var a = [y for y in [x + 1 for x in [10, 20]]]\n"
      "    var b = [q for p in [1, 2] for q in [r * 2 for r in [5, 6]]]\n"
      "    var c = [z for z in [y for y in [x for x in [7, 8]]]]\n"
-     "    var d = {k: [v for v in [1, 2, 3]] for k in [1, 2]}\n"
      "    printf(\"%d %d %d %d\", len(a), a[0], len(b), b[3])\n"
-     "    printf(\" %d %d %d %d\", len(c), len(d), c[0],\n"
+     "    printf(\" %d %d %d\", len(c), c[0],\n"
      "           len([v for v in [1, 2, 3]]))\n"
      "    return 0\n",
-     0, "2 11 4 12 2 2 7 3"),
+     0, "2 11 4 12 2 7 3"),
 
     # ── a comprehension's BODY is not a container position ──
     #
@@ -17078,6 +17087,75 @@ REPEAT_REFUSALS = [
      "refuse:multiplies two containers", None),
 ]
 
+COMPREHENSION_ELEMENT_REFUSALS = [
+    # A comprehension ELEMENT that opens a container. Before this it built, and
+    # the image's elements were all ONE object: the element site reserves
+    # through the single frame ledger (`_reserve_blob` against `_list_cursor`)
+    # ONCE at compile time, and the comprehension runs that same site once per
+    # iteration, so every iteration overwrote the last one's contents. Measured
+    # on both architectures against CPython 3.14:
+    #
+    #     [[y, y + 1] for y in [10, 20, 30]]       CPython 11 21 31   here 31 31 31
+    #     [[x + y for x in [1, 2]] for y in [10, 20, 30]], sum of v[0]
+    #                                              CPython 63          here 93, exit 1
+    #
+    # The second is the worse shape: the count word the third iteration writes
+    # lands one word past a blob sized for one element, so it is a wrong answer
+    # AND an exit 1. `model.comprehension_element_blob_refusal` has the rest,
+    # and the needles below are clauses only this message carries.
+    #
+    # The needle is the CONSTRUCT and not the remedy, so a refusal about
+    # anything else fails the case.
+    ("a_comprehension_element_that_is_a_list_literal_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[y, y + 1] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][1], r[2][1])\n"
+     "    return 0\n",
+     "refuse:the element `[y, y + 1]` opens a container", None),
+    # …and the NESTED one, which is the reproducer and the case the refusal
+    # names as exiting 1 rather than merely answering wrongly.
+    ("a_nested_comprehension_as_the_element_is_refused",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:the element `[…] for …` opens a container", None),
+    # The DICT half: the VALUE opens the container, and it is the shape the
+    # `nested_comprehension_in_a_generator_iterable` row used to carry as its
+    # fourth case — so this row is that coverage, strengthened from "builds and
+    # answers CPython" to "is refused", which is what it is now.
+    ("a_dict_comprehension_whose_value_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var d = {k: [v for v in [1, 2, 3]] for k in [1, 2]}\n"
+     "    printf(\"%d\", len(d))\n"
+     "    return 0\n",
+     "refuse:opens a container", None),
+    # A SET literal in the element, which is the third allocating literal and
+    # the one a list-only reading of the rule would miss.
+    ("a_comprehension_element_that_is_a_set_literal_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
+     "    printf(\"%d\", len(r))\n"
+     "    return 0\n",
+     "refuse:the element `{y, y + 1}` opens a container", None),
+    # ONE iteration, and this row is the other side of the rule rather than
+    # tidiness: `_compr_cap` is an UPPER BOUND on the iteration count, so
+    # `cap == 1` means the body runs at most once and one shared blob is then
+    # shared by nothing. `[[x + y for x in [1, 2]] for y in [10]]` answers 11
+    # and must keep answering it — this is the regression guard for the case
+    # that was never broken, and it is the row that says so.
+    ("a_one_iteration_comprehension_element_container_still_builds",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [[x + y for x in [1, 2]] for y in [10]]:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "11"),
+]
+
 
 REPEAT_CASES = [
     # The reproducer, verbatim. Counting is the one read that cannot be a
@@ -24380,7 +24458,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
-                  + REPEAT_REFUSALS
+                  + REPEAT_REFUSALS + COMPREHENSION_ELEMENT_REFUSALS
                   + SOLE_FIELD_CTOR_STORE_CASES
                   + SPREAD_CONSTRUCTION_CASES + SPREAD_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS

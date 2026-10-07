@@ -907,6 +907,17 @@ _REFUSAL_FAMILIES = (
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
+    # A comprehension ELEMENT that opens a container, which is its own family
+    # because the comprehension is otherwise LOWERED — a file refused here is
+    # not a file this backend cannot build, it is a file where one compile-time
+    # reservation for an element site that runs N times would hand every
+    # iteration the same object. Both messages' spellings are here (the list /
+    # dict / set literal and the nested comprehension) so the family does not
+    # split by which container the element opened, and neither marker can be
+    # shadowed by the container-operation rows above: this one names the
+    # COMPREHENSION and those name the container.
+    ("opens a container", "comprehension element that opens a container"),
+    ("has one frame blob for it", "comprehension element that opens a container"),
     # COMPOSITION: the missing BUFFER, in the two wordings the model emits it
     # in. Named rather than left in "other refusal" because it is 114 files on
     # the 2026-10-04 b11 sweep — the largest family in the corpus by a wide

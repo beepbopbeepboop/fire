@@ -603,6 +603,27 @@ CAUSES = (
     # lands in the unclassified bucket.
     ("a repetition whose count this path cannot read",
      (("is a REPETITION",),)),
+    # A comprehension whose ELEMENT opens a container. Its own row because the
+    # construct is one this backend LOWERS — the comprehension is built, run and
+    # correct whenever its element is a single word — and the one thing it will
+    # not do is hand every iteration the same object, which is what one
+    # compile-time frame reservation for a site that runs N times would do.
+    # Measured on both architectures: `[[y, y + 1] for y in [10, 20, 30]]`
+    # printed `31 31 31` where CPython prints `11 21 31`, and the nested
+    # comprehension printed `93` and exited 1 where CPython prints `63`. So a
+    # file refused here is refused by a decision with a stated remedy (build the
+    # containers in an explicit loop, whose `append` allocates per iteration),
+    # not by a missing feature — which is the distinction `other refusal`
+    # cannot express and the reason this row exists.
+    #
+    # TWO markers, and the reason is the same one the `a printed value that is
+    # not a value` row above gives: the FACT and the CONSTRUCT are in two
+    # clauses of `formal/model.py::comprehension_element_blob_refusal`'s own
+    # f-string, and `test_refusal_taxonomy.py`'s samples are cut from there, so
+    # a reword fails a test instead of emptying this row into `other refusal`.
+    ("a comprehension element that opens a container",
+     (("has one frame blob for it",),
+      ("opens a container",))),
     ("len() of a value that has no length",
      (("is len() of a value classified as",),)),
     # A `with` whose CONTEXT this build cannot type. `formal/model.py`'s

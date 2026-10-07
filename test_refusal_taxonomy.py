@@ -952,6 +952,22 @@ CAUSE_SAMPLES = [
     ("a repetition whose count this path cannot read",
      "[FloatLiteral] * m * k is a REPETITION, and this path can only lower "
      "one whose count it can read while emitting"),
+    # A comprehension ELEMENT that opens a container — the one shape where this
+    # backend LOWERs the comprehension and still cannot give each iteration its
+    # own container, because the frame is one sequential ledger and the element
+    # site reserves through it once at compile time. Two samples because
+    # `formal/model.py::comprehension_element_blob_refusal`'s element spelling
+    # goes through `expr_spelling`, and a nested comprehension is spelled
+    # `[…] for …` rather than as the AST type name; one sample would leave half
+    # the family's messages unclassified.
+    ("a comprehension element that opens a container",
+     "a comprehension in main: the element `[y, y + 1]` opens a container, and "
+     "this path has one frame blob for it — 24 bytes reserved once, at the "
+     "element's own site — while the comprehension body runs up to 3 times"),
+    ("a comprehension element that opens a container",
+     "a comprehension in main: the element `[…] for …` opens a container, and "
+     "this path has one frame blob for it — 48 bytes reserved once, at the "
+     "element's own site — while the comprehension body runs up to 3 times"),
     ("len() of a value that has no length",
      "len(s) is len() of a value classified as 'int', and an integer has no "
      "length"),

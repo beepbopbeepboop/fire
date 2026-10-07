@@ -29209,6 +29209,67 @@ def struct_parameter_not_bound_refusal(struct_name: str, spelling: str,
             f"the instantiation site, not by editing the expression")
 
 
+def comprehension_element_blob_refusal(spelling: str, element, cap: int,
+                                       bytes_: int) -> str:
+    """The diagnostic for a comprehension ELEMENT that opens a container.
+
+    **A silent wrong answer, and the reason this is a refusal rather than an
+    allocation scheme.** A container on this path is a blob in the frame, and the
+    frame is ONE sequential ledger: `_reserve_blob` steps `_list_cursor` along
+    `_blob_cap`, so a site's reservation happens ONCE at compile time. A
+    comprehension's element is one site that runs `cap` times, so the blob is one
+    allocation shared by every iteration and each iteration overwrites the last
+    one's contents. Measured on both architectures, CPython 3.14 against the
+    same source:
+
+        [[y, y + 1] for y in [10, 20, 30]]     CPython: 11 21 31
+                                              this path: 31 31 31
+        [[x + y for x in [1, 2]] for y in [10, 20, 30]] and then v[0] summed
+                                              CPython: 63   this path: 93
+
+    The second is worse than a wrong number: it exits 1 as well, because the
+    count the third iteration writes lands one word past a blob sized for one
+    element. And the first is silent in the way this repository's rules call out
+    — a caller that appends to element 0 gets element 1's list too, which no
+    assertion in the program can notice.
+
+    **`bytes_` is the ELEMENT's own footprint, measured by the ledger.** The
+    emitters ask for the delta across the element's own emission and refuse when
+    it is not zero, so the set of constructs that allocate is whatever the
+    emitters allocate rather than a list kept in step with them by hand — a list
+    here would be a second copy of `_reserve_blob`'s callers, and the defect it
+    is here to prevent (a construct nobody remembered) is exactly the defect a
+    hand-kept list grows.
+
+    The remedy is stated in the source's own terms because there are two, and
+    only one of them is a workaround: build the containers in an explicit loop
+    over a list the program owns (`out = []` … `out.append(...)`), which is the
+    same program with a per-iteration allocation this path HAS — `append`
+    grows one blob and there is one append site per iteration of an ordinary
+    loop. The other, a comprehension whose element is a single word, has no
+    container in it and is not affected.
+
+    **`cap > 1` is the callers' condition to ask this at all**, and it is
+    soundness rather than politeness in the other direction: `_compr_cap` is an
+    UPPER BOUND on the iteration count, so `cap == 1` means the body runs at
+    most once and one shared blob is then not shared by anything — `[[y] for y
+    in [10]]` answers CPython today and must keep answering it.
+    """
+    spelled = expr_spelling(element) if element is not None else "nothing"
+    return (f"{spelling}: the element `{spelled}` opens a container, and this "
+            f"path has one frame blob for it — {bytes_} bytes reserved once, at "
+            f"the element's own site — while the comprehension body runs up to "
+            f"{cap} times. Every iteration would therefore append the SAME "
+            f"object and the last one's contents would be in all of them, and "
+            f"on a nested comprehension the count word runs past the blob and "
+            f"the append guard exits 1. Refused rather than emitted, because a "
+            f"list whose elements are all one object is a wrong answer in a "
+            f"shape nothing in the program can observe. Build the containers in "
+            f"an explicit loop over a list the program owns (`out = []`, then "
+            f"`out.append(…)` inside a `for`), which allocates per iteration "
+            f"because each iteration runs its own append")
+
+
 def struct_field_names(struct_def) -> list:
     """Every INSTANCE field name this struct has, in a stable order.
 
@@ -46520,6 +46581,15 @@ def expr_spelling(node) -> str:
         return repr(node.value)
     if isinstance(node, F.DictExpr):
         return "{…}"
+    if isinstance(node, F.Comprehension):
+        # `[<element> for …]` / `{<k>: <v> for …}`, because a comprehension is
+        # the ELEMENT of a comprehension often enough to matter — the nested
+        # case is what `comprehension_element_blob_refusal` fires on, and a
+        # diagnostic that quoted `Comprehension` there named the AST rather
+        # than the line the reader has open.
+        kind = {"dict": "{…}", "set": "{…}"}.get(getattr(node, "kind", None),
+                                                 "[…]")
+        return f"{kind} for …"
     for attr in ("value", "name"):
         v = getattr(node, attr, None)
         if isinstance(v, (str, int, float, bool)):
