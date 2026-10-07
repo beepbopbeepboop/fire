@@ -9229,7 +9229,7 @@ def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
             _park_frame_return(fn, message)
 
 
-def _constructor_bindings(fn, framed, functions=()) -> dict:
+def _constructor_bindings(fn, framed, functions=(), own_scope: bool = False) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
     A LIST per name, and that is the fix for a miscompile rather than a
@@ -9273,9 +9273,30 @@ def _constructor_bindings(fn, framed, functions=()) -> dict:
     for the one case where a name is both a function and a struct: the emitters
     skip the type-constructor interception for a name they compiled, so the call
     IS a construction there, and a pass that disagreed on that would refuse a
-    program that builds."""
+    program that builds.
+
+    **`own_scope` is the binding's SCOPE, and it is off by default so every
+    caller that existed before 2026-10-05 keeps the whole subtree.**  With it,
+    the walk does not descend into a nested `def`'s body — a binding made in
+    `inner` is not a binding of `outer`'s `m`, and the two are different scopes
+    even where the name is shared.  The reason it had to be asked at all:
+    `_rewrite_with_statements` rewrites a `with` per FUNCTION (it never crosses
+    a nested `def`, which is `_SKIP_DESCEND_FIELDS` doing the same job for
+    `_rewrite_stmt_lists`), so the table it reads has to be the enclosing
+    function's own bindings — and with the default it would answer `m` for a
+    `with m as v:` written in `outer` on the strength of a construction that
+    only happens inside `inner`, entering and exiting whatever word `outer`'s
+    unrelated `m` happened to hold.
+
+    What a CAPTURE costs — a name an enclosing function reads because a nested
+    `def` bound it — is not decided here and deliberately not answered by
+    flipping this flag on: that is `_flatten_closures`' question, and the answer
+    this gives with `own_scope=False` (a capture reads as the nested binding)
+    is the status quo every other consumer of this table already lives with.
+    """
     out = {}
-    for node in M.iter_nodes(fn.body):
+    for node in M.iter_nodes(fn.body,
+                             skip=_SKIP_DESCEND_FIELDS if own_scope else None):
         target = value = None
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
@@ -11133,7 +11154,7 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
 
 
 def _bound_receiver_structs(fn, framed, functions=(), owner=None,
-                           one_field=None) -> dict:
+                           one_field=None, own_scope: bool = False) -> dict:
     """`{name: struct}` for a local whose construction bindings all AGREE.
 
     **The same evidence `_one_word_field_map` reads, without the one-word
@@ -11179,17 +11200,24 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     meanings would disagree — the same precedence `_seed_one_word_bindings`
     states when a name appears in both of its tables.
 
-    `_one_word_field_map` is not merged into this, and the reason is that its
+`_one_word_field_map` is not merged into this, and the reason is that its
     one-word filter and this table's agreement test answer different questions:
     a one-word struct cannot be on a frame table at all
     (`_one_word_constructor_bindings`' docstring says so), so a name this table
     drops for two layouts is still a name that table records, and folding them
     together would make the older table's verdict depend on this one's
     conservatism.
+
+    `own_scope` is threaded to `_constructor_bindings` and means what that
+    function's docstring says: a caller that must not see a NESTED `def`'s
+    bindings asks for this function's own.  There is exactly one such caller —
+    `_rewrite_with_statements`, whose table decides which `__enter__` a `with`
+    enters, and where a binding from another scope is not a small mistake but a
+    protocol call on an unrelated word.
     """
     out = {name: cands[0]
            for name, cands in _constructor_bindings(
-               fn, framed, functions).items()
+               fn, framed, functions, own_scope=own_scope).items()
            if len(cands) == 1}
     # The owner's OWN entry in the same table, not a fresh `struct_is_framed`
     # ask: `owner` comes from `method_owners`, which is built from the `structs`
@@ -17921,7 +17949,25 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # form is a `try`/`finally`, which the handler-arm refusal above has
         # already cleared for this module: a `with` that lowered to a `try` with
         # a handler would be refused for the wrong reason.
-        _rewrite_with_statements(fn, structs_by_name)
+        #
+        # The thunk is `own_scope=True`'s table, asked only if this function has
+        # a `with` in it — which is what `mgr = Ctx()` then `with mgr as v:`
+        # needs to enter the RIGHT struct, and what a binding made inside a
+        # nested `def` must not be able to answer for.  `st` is read here
+        # rather than at its own line below because a method's receiver is the
+        # owner this table carries; it is a dict lookup, and hoisting it is
+        # cheaper than two of them.  `fn=fn, st=st` on the lambda because it is
+        # called inside this iteration and does not need the guard — but a
+        # closure over a loop variable that outlives the iteration is the kind
+        # of thing a reader has to go looking for, and binding it costs
+        # nothing.
+        st = method_owners.get(fn.name)
+        _rewrite_with_statements(
+            fn, structs_by_name,
+            lambda fn=fn, st=st: _bound_receiver_structs(
+                fn, framed, _image_function_names, st, one_field,
+                own_scope=True),
+            functions=_functions_by_name, owner=st)
         # A one-field struct's mutator that rebinds its receiver to a name of its
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
@@ -17958,6 +18004,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # single word, and it is what makes a SUBSCRIPT receiver liftable
         # (`model.list_element_structs`). One walk of the bindings each, neither
         # recomputed by a consumer.
+        #
+        # `st` is the value the `with` rewrite above already read.  The second
+        # read is left in rather than tidied away so this comment stays attached
+        # to the derivation it explains; a dict lookup is not worth a reader
+        # having to wonder whether the two could differ.
         st = method_owners.get(fn.name)
         # A method's `self` IS the field; a local initialised from a one-word
         # constructor holds that struct's sole field directly.  The table holds
@@ -19291,7 +19342,9 @@ def _fn_spelled_names(fn) -> set:
     return names
 
 
-def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
+def _rewrite_with_statements(fn, structs_by_name: dict,
+                             bound_receiver_structs=None,
+                             functions=None, owner=None) -> None:
     """Every `with` in `fn` becomes the protocol, or is refused by name.
 
     What it emits, for one item, is CPython's own order:
@@ -19325,6 +19378,20 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
     Multiple items nest: CPython enters left to right and exits right to left,
     and nesting the rewrites inside one another produces exactly that.
 
+    **`bound_receiver_structs` is a THUNK, and it is asked at most once per
+    function and only for a function that actually contains a `with`.**  It
+    answers "which locals of THIS function hold a framed struct", which is the
+    table the NAME arm of `model.with_expr_struct` reads — so `mgr = Ctx()` then
+    `with mgr as v:` is the protocol rather than a refusal.  A thunk rather
+    than a table because the table is a walk of every binding in the function
+    and almost no function in this repository has a `with`: computing it
+    eagerly would put that walk on the whole image to serve the few functions
+    that read it, which is the same cost argument
+    `bugs/FORMAL_build_cost_2026-10-03.md` measures.  It is called with
+    `own_scope=True`, because a binding made inside a nested `def` is not a
+    binding of this function's name and entering the wrong frame address is a
+    protocol call, not a field-slot slip.
+
     `async with` is the same rewrite.  This path has no event loop, so there is
     no suspension point for the protocol to resume across; the `is_async` flag
     has no other meaning here, and the emitters already said so where they used
@@ -19332,6 +19399,8 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
     """
     used = _fn_spelled_names(fn)
     counter = [0]
+    # One entry, memoised: the first `with` in this function asks, the rest read.
+    asked = []
 
     def fresh_name():
         while True:
@@ -19340,6 +19409,24 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
             if name not in used:
                 used.add(name)
                 return name
+
+    def receiver_evidence():
+        """`{bound, functions, owner}`, memoised, and the `bound` half lazy.
+
+        `bound` is the expensive member — a walk of every binding in the
+        function — so it is what the thunk produces and what is only asked for
+        when a `with` actually turns up.  The other two are a dict and an
+        attribute read on a value already in hand.
+        """
+        if not asked:
+            asked.append({
+                "bound": bound_receiver_structs()
+                         if bound_receiver_structs is not None else {},
+                "functions": functions,
+                "owner": owner,
+                "fn": fn,
+            })
+        return asked[0]
 
     def visit(stmt):
         if not isinstance(stmt, F.WithStmt):
@@ -19354,26 +19441,38 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
         result = list(stmt.body or [])
         for item in reversed(items):
             result = _one_with_item(fn, item, result, structs_by_name,
-                                    fresh_name)
+                                    fresh_name, receiver_evidence())
         return result
 
     fn.body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
 
 
-def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name):
+def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
+                   evidence: dict):
     """One `with` item, wrapped around `body`. Raises CodegenError if it cannot.
 
-    Two protocols and one order.  CPython's is `__enter__` binds the name and
+    Three protocols and one order.  CPython's is `__enter__` binds the name and
     `__exit__` runs on the way out; a struct this image compiles gets its own
-    two methods, which is the arm below.  A call to a RESOURCE builtin
+    two methods, which is the first arm below.  A call to a RESOURCE builtin
     (`model.resource_context_manager_exit`, i.e. `open`) gets the same two
     positions filled by the facts that builtin's value model already states:
     `__enter__` IS the value, and `__exit__` is the builtin in that table.  The
-    third arm is the refusal, and it is unchanged — a `with` whose context is a
-    name, a field read, or a call to a function this image cannot resolve still
-    has no type, and `refuse_unlowerable_with` still says so by name.
+    third arm is the refusal, and it is a `with` whose context nothing names a
+    struct for — a callee in another module, a name bound to two layouts, a
+    binding made in a nested `def`.
+
+    `evidence` is this function's caller evidence as one dict — `bound`,
+    `functions`, `owner` — handed to `model.with_expr_struct`, which is the
+    SINGLE reader of "what struct does this expression name".  One dict rather
+    than four parameters because the thunk that builds `bound` is the only
+    expensive member and it must stay the thing that is asked at most once; see
+    `_rewrite_with_statements`.
     """
-    struct = M.with_expr_struct(item.expr, structs_by_name)
+    struct = M.with_expr_struct(item.expr, structs_by_name,
+                                functions=evidence.get("functions"),
+                                bound=evidence.get("bound"),
+                                fn=evidence.get("fn"),
+                                owner=evidence.get("owner"))
     resource_exit = M.resource_context_manager_exit(item.expr)
     if struct is None or not M.struct_is_context_manager(struct):
         if resource_exit is None:
@@ -19425,12 +19524,17 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
     # explicitly: `alias.name` on the string raises, and in the compiled path
     # that raise silently truncated the enclosing function. Both spellings are
     # accepted here for the same reason, and neither is normalised anywhere else.
-    alias = item.alias
-    alias_name = (alias if isinstance(alias, str)
-                  else getattr(alias, "name", None))
-    if isinstance(alias_name, str):
+    #
+    # …and why the question is asked of `model.with_alias_bare_name` rather than
+    # of `isinstance(alias, str)`.  This front end spells EVERY alias target as a
+    # string, so `as (a, b)` / `as obj.attr` / `as holder[0]` all arrived here as
+    # strings and were bound to `VarDecl` names literally called `(a, b)`:
+    # three shapes that built, ran the body and exited 0 with nothing bound,
+    # which is the `refuse_unlowerable_with_alias` refusal below being dead code.
+    alias_name = M.with_alias_bare_name(item)
+    if alias_name is not None:
         opened = F.VarDecl(alias_name, None, enter)
-    elif alias is None:
+    elif item.alias is None:
         opened = F.ExprStmt(enter)
     else:
         # `with EXPR as (a, b)` and `with EXPR as obj.attr` are two shapes this
