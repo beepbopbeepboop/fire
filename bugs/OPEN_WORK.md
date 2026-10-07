@@ -199,7 +199,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | **unclaimed** | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_known_limits.md` | **unclaimed** | the sweep residue, audited — which refusals are true |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
-| `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` | **unclaimed** | `interpolated_literal_segments` assumes a ONE-character prefix, so every `rf"…"` f-string is refused with a sentence that is false about the source |
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |
 | `FORMAL_type_name_as_a_value.md` | **unclaimed** | a bare TYPE name in a value position is refused as a name with no register |
 

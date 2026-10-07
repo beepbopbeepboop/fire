@@ -23274,6 +23274,15 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # A prefix is a SET OF SPELLING FLAGS, not one character: these are the
+        # two-letter raw f-strings the reader used to refuse with a sentence
+        # false about the source ("the character after the prefix is not a
+        # quote" about `rf"…"`, whose next character IS a quote).
+        'rf"a={n}b"',
+        'fr"a={n}b"',
+        'Rf"{x}"',
+        'fR"pre{x}post"',
+        'rf"{{lit}}"',          # a raw f-string still honours the brace escape
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23335,13 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # A prefix test that widened the reader's acceptance
+                          # must not turn "unterminated is a refusal" into text
+                          # read as a body: a raw f-string with no closing quote
+                          # still refuses on the DELIMITER test.
+                          ('rf"a={n}', "does not end with"),
+                          ('nof"quote', "not a quote")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:

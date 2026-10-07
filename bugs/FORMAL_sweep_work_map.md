@@ -963,10 +963,15 @@ measured it three rounds ago. The exceptions are named:
 * `FORMAL_known_limits.md` — the audit of which refusals in the residue are
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
-* `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
-  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
-  own document for the reason above: the measurement is here (§1.11) and the fix
-  has a question to answer first that belongs with the fix.
+* the `rf"…"` prefix reader — `b14` §1.11's row, filed by that round and **now
+  FIXED**: `interpolated_literal_segments` asks a shared
+  `interpolated_literal_delimiters` boundary instead of assuming a one-character
+  prefix, so a two-letter `rf`/`fr` spelling is read rather than refused with the
+  sentence "the character after the prefix is not a quote" (false about a token
+  whose next character IS one). Pinned by the `rf`/`fr` rows in
+  `test_formal_run.py`'s `check_interpolated_segments_against_cpython`, which is
+  the CPython oracle; the measurement is §1.11 and the document is deleted with
+  the fix as `CLAUDE.md` requires.
 
 **The per-slice rounds also fixed things and recorded the pins**, and so did
 `b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the
