@@ -1451,6 +1451,38 @@ def main():
 main()
 """)
 
+    # The SAME question -- "the function `f` as a bare C value" -- has two
+    # spellings in this codegen: a direct binding (`f = g`) and a callable-
+    # valued parameter DEFAULT (`def apply(*, g=v): ...`). They were two
+    # separate implementations, and this shape is the one input on which they
+    # disagreed: the default path had no variadic handling, so a `*args`
+    # callee reached `mojo_fnptr_call_N` as a bare `_funcptr_`, was called
+    # with loose scalars, and dereferenced the integer 1. Measured on the
+    # merged tree before the consolidation: this program exited -11 with no
+    # output and no diagnostic, where the direct-binding spelling one screen
+    # up printed its answer correctly and CPython printed 16.
+    test_gimple_stdout("gimple_variadic_callable_valued_default", """\
+def g(*a):
+    return sum(a)
+
+def apply_it(x, *, f=g):
+    return f(1, 2, 3) + x
+
+print(apply_it(10))
+""", "16\n")
+
+    # Same root cause, `**kwargs` half, and with the default actually
+    # consulted rather than shadowed by an argument.
+    test_gimple_stdout("gimple_variadic_kwargs_callable_valued_default", """\
+def g(**k):
+    return len(k)
+
+def apply_it(x, *, f=g):
+    return f(a=1, b=2) + x
+
+print(apply_it(10))
+""", "12\n")
+
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),

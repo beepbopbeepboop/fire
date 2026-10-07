@@ -86,6 +86,19 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     name is NOT a function reference (Python scoping decides that first),
     so those return None and the caller keeps its own behaviour.
 
+    The VARIADIC case is answered here too, and it has to be: a `def f(*a)`
+    has a packed C signature (`MojoList *` / `MojoDict *`) that the arity-based
+    `mojo_fnptr_call_N` convention cannot express, so a bare `_funcptr_f`
+    handed to a dispatcher is called with loose scalars and the callee
+    dereferences the integer 1 — a SIGSEGV with no diagnostic. Both spellings
+    of "the function f as a value" hit it: `f = f; f(1, 2, 3)` and
+    `def apply(x, *, g=f): return g(1, 2, 3)`. `_lower_IdentExpr` grew the
+    `MojoVarargFn` materialization for the first one and this function grew
+    the `_funcptr_` answer for the second, and nothing kept them agreeing:
+    measured on the merge, the first printed 6 and the second exited -11.
+    One answer, one place, is what keeps the next spelling of the same
+    question from inheriting one arm of a two-armed answer.
+
     `cxx` selects the textual form only. Under `-fgimple` a bare function
     name is not a legal rvalue, so the value goes through the pre-declared
     `static void * _funcptr_<sym>` this codegen already uses for every
@@ -123,15 +136,33 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     if _fname in gen._c_names:
         _c_name = gen._c_names[_fname]
     _c_name = _as_str(_c_name)
+    # gen_module's `_funcptr_target` rule, reused rather than restated: a
+    # supported compiled generator has NO ordinary C definition under its
+    # bare csym (only `<base>_start/_resume/_value/_destroy`), so the
+    # address that means "call this to get the generator object" is
+    # `<base>_start`.
+    _target = _c_name
+    if _is_gen:
+        _target = f"{_gen_api[_fname]['base']}_start"
+    # A VARIADIC callee gets the same `MojoVarargFn` a variadic LAMBDA gets
+    # (see `_lower_LambdaExpr` and runtime/fire_runtime.h's "Variadic
+    # callables"), so the runtime dispatcher packs the arguments instead of
+    # the call site passing them positionally. A direct call by name is
+    # untouched; only the value form changes. The shape is looked up under
+    # BOTH the C symbol and the source name, because a mangled `*args`
+    # method is registered under the mangled symbol and a plain top-level
+    # function under its own name.
+    _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
+    _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
+    if _vshape is not None:
+        _fnv = gen._new_val('void *', f'(void *){_target}')
+        _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                             [('void *', _fnv), ('void *', '0'),
+                              ('int64_t', f'({_vshape[0]})'),
+                              ('int64_t', f'({_vshape[1]})'),
+                              ('int64_t', '(0)')])
+        return 'void *', gen._new_val('void *', f'(void *){_vf}')
     if cxx:
-        # gen_module's `_funcptr_target` rule, reused rather than
-        # restated: a supported compiled generator has NO ordinary C
-        # definition under its bare csym (only `<base>_start/_resume/
-        # _value/_destroy`), so the address that means "call this to get
-        # the generator object" is `<base>_start`.
-        _target = _c_name
-        if _is_gen:
-            _target = f"{_gen_api[_fname]['base']}_start"
         return ('void *', f'(void *){_target}')
     gen._funcptr_builtins_needed.add(_c_name)
     return ('void *', f'_funcptr_{_c_name}')

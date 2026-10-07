@@ -361,15 +361,42 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                          | inner_assign_targets):
                 if _as_str(_idv) not in _inner_nonlocals:
                     inner_declared.add(_as_str(_idv))
-            outer_params: set = set()
-            for _op in outer_scope.keys():
-                outer_params.add(_as_str(_op))
-            free_globals: set = set()
-            for _fg in ctx.func_return_types.keys():
-                _fg = _as_str(_fg)
-                if _fg not in outer_params:
-                    free_globals.add(_fg)
-            free         = used - inner_declared - free_globals
+            # `used - inner_declared` is the whole free-variable set, and
+            # `v in enriched_scope` below is the whole scoping decision: a
+            # name the ENCLOSING function binds is a capture, full stop.
+            #
+            # This used to subtract a `free_globals` set (every name in
+            # `ctx.func_return_types`) first, on the theory that a
+            # module-level function name can never be a capture, guarded by
+            # "unless an enclosing PARAMETER shadows it". The theory only
+            # holds for a name the enclosing scope does not ALSO bind, and
+            # the `v in enriched_scope` test already says exactly that, so
+            # subtracting first only ever deleted captures whose name the
+            # enclosing function had bound to something else — a collision,
+            # not a global reference. (And the guard did not even mean
+            # "parameter": `outer_params` came from `outer_scope.keys()`,
+            # which holds the enclosing function's parameters AND the names
+            # its body binds at STATEMENT level. What fell through was the
+            # shape that actually occurs here — the binding nested one
+            # block down, which `outer_scope` does not walk but
+            # `enriched_scope` does.)
+            #
+            # The capture then vanished from the env struct, the nested body
+            # re-resolved the name as the function, and
+            # `param_names[real_idx]` in ownership_destruct.py's
+            # `_arg_is_safe` (a local bound inside an `if` arm, read by a
+            # nested def, colliding with `mojo/middle/comptime.py`'s
+            # function of the same name) became pointer arithmetic on a
+            # function address: `_mojo_at_void (_funcptr_mojo_middle_
+            # comptime_param_names_9f63a2, _t19)`, gcc's "invalid
+            # argument to gimple call", and the self-host build broken
+            # (mojoc, selfhost, bootstrap-stage2-cc). The same read had
+            # also degraded `len(param_names)` to a literal 0, so it was
+            # answering wrong before gcc noticed the syntax.
+            #
+            # `test_closure_capture_shadows_function.py` covers the rule
+            # and the four cases that must keep behaving.
+            free         = used - inner_declared
             # An EXPLICIT capture list on the inner def is authoritative and
             # replaces the inference above. `def handler(...) {mut got_sum}:`
             # says exactly what the body borrows from this scope and under
