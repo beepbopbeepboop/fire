@@ -5915,6 +5915,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
         self.asm.label(oob_label)
+        self._emit_overflow_diagnostic(
+            M.subscript_out_of_range_message(M.spelled(e.obj)))
         self._emit_exit(1)
         self.asm.label(end_label)
 

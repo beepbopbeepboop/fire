@@ -14917,6 +14917,17 @@ STDERR_CASES = [
      "    return 0\n",
      1, ["a list concatenation overflowed its reservation", "reserved room for",
          "ESTIMATE"]),
+    # An out-of-range subscript stopped the program with exit 1 and NOTHING
+    # on either stream — the bounds check fired but nobody said so. The row
+    # above's sibling in silence. Needles carry the container name and the
+    # CPython answer, so a message that said only "subscript error" could not
+    # pass.
+    ("sub_out_of_range_is_loud",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 7\n"
+     "    return a[i]\n",
+     1, ["a subscript into 'a' is out of range", "IndexError: list index"]),
     # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
     # limitation worth stating rather than a gap. `run_stderr_case` requires the
     # program to build on BOTH architectures, and x86-64 refuses `a | b` by name

@@ -22,7 +22,12 @@
 # not.  CPython answers the same program with `IndexError: list index out of
 # range`, on stderr.
 #
-# Filed as `bugs/FORMAL_an_out_of_range_subscript_exits_1_with_no_message.md`.
+# FIXED 2026-10-06: the stop now writes
+# `_emit_overflow_diagnostic`'s message naming the container and the bound,
+# then exits 1.  This comment is the record of the old silence.
+#
+# Filed as `bugs/FORMAL_an_out_of_range_subscript_exits_1_with_no_message.md`
+# (deleted with the fix).
 # The row stays because a memcheck sweep reports it MATCH -- the answer and the
 # exit status are both stable -- and a reader who takes the old comment at its
 # word will go looking for a check that is already there.

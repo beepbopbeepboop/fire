@@ -11883,6 +11883,25 @@ def dict_store_overflow_message(name: str, capacity: int) -> str:
             f"function of their own so the capacity each one sees is its own.")
 
 
+def subscript_out_of_range_message(name: str) -> str:
+    """The ONE text an out-of-range `obj[index]` writes to fd 2 before exit 1.
+
+    Beside `dict_store_overflow_message` for the same reason: two backends
+    printing two different sentences for one limit is how a reader ends up
+    looking for a construct one of them invented. The count and the index
+    live in registers at the stop, but `_emit_overflow_diagnostic` takes a
+    constant — no `printf` on this path — so the text names the container
+    (what the source spelled) and says what the bound was in general terms,
+    the same bargain `list_append_overflow_message` already made.
+    """
+    return (f"formal: a subscript into {name!r} is out of range: the index "
+            f"does not fit the container's own element count (negative "
+            f"indices already wrapped, Python-style), so there is no element "
+            f"to read. CPython answers this program with "
+            f"`IndexError: list index out of range`; the program stops here "
+            f"instead.")
+
+
 def dict_store_no_room_message(name: str, key: str) -> str:
     """Why a `d[k] = v` on a blob this build cannot size stopped.
 

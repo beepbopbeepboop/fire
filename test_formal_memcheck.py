@@ -313,8 +313,10 @@ def test_heap():
             "NONDETERMINISTIC, and that is how it was found"),
         "list_subscript_past_end.mojo": (
             "MATCH",
-            "`a[3]` on a three-element list is an out-of-range read with no "
-            "bound to check; it is deterministic on both architectures today, "
+            "`a[3]` on a three-element list is caught by the blob bounds "
+            "check, which then stops the program: exit 1, and since "
+            "2026-10-06 a message on stderr naming the container and the "
+            "bound; it is deterministic on both architectures today, "
             "so the row pins THAT and any change to it is a change to the "
             "lowering"),
         "stack_deep_recursion.mojo": (

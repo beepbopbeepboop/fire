@@ -5877,7 +5877,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))    # count
-        self._emit_bounds_check(Reg.RAX, Reg.R11)
+        self._emit_bounds_check(Reg.RAX, Reg.R11,
+                                M.subscript_out_of_range_message(
+                                    M.spelled(e.obj)))
         # The blob's OWN element stride, and `_sub_width` from the same number:
         # a byte blob steps one byte per element and loads a byte, and a
         # right address with a word load would read seven bytes of whatever
@@ -5889,7 +5891,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                              header=M.BLOB_HEADER_BYTES,
                              scale=M.walk_shift(False, stride))
 
-    def _emit_bounds_check(self, index_reg: Reg, count_reg):
+    def _emit_bounds_check(self, index_reg: Reg, count_reg,
+                           message: str = None):
         """Exit(1) unless `index_reg` is a valid element index.
 
         A negative index counts from the end, Python-style: it is negated and
@@ -5900,7 +5903,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         `count_reg` None means a string, which has no count header: its
         elements run to a NUL, so there is nothing to check the index against
-        and the read stops at the terminator."""
+        and the read stops at the terminator.
+
+        `message` is written to fd 2 before the exit — the subscript's own
+        bound, so a run that stops for it says WHY rather than stopping
+        silently, like every other bounded stop on this path."""
         self._if_counter += 1
         bid = self._if_counter
         fn = self.func_name
@@ -5922,6 +5929,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc(COND_AE, bad_label)     # index >= count
         self._emit_jmp(ok_label)
         self.asm.label(bad_label)
+        if message is not None:
+            self._emit_overflow_diagnostic(message)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
 
