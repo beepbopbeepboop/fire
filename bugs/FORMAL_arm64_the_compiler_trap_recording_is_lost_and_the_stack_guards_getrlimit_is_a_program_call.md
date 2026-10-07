@@ -114,6 +114,20 @@ it refuses in §3; the third asserts `plain`'s `extern_calls` is `[]` and it is
 now `['getrlimit']`. `test_formal_call_proof_gen.py` is registered as
 `formal-call-proofgen` in the `proofs` bucket, so none of this reaches `gate`.
 
+**And the same regression has made `test_formal.py`'s expectations stale.**
+`test_formal.py` is also `[proofs]`-only, and its `EXPECTED_FAILURES` table
+attributes the "2 calls this walk cannot follow" refusal of `floordiv`/`udivmod`
+to "`//` and `%` each lower to a call to the SAME divide-and-correct helper"
+(quoting addresses `0x10000046c`/`0x1000004d8`, which are not the addresses on
+this tree). The two calls the walk actually cannot follow for a division are
+`0x10000041c` (the guard's `getrlimit`) and `0x100000518` (the arm's `fflush`) —
+the compiler's own two, not the program's. Worse, `sum` and `fact` are not in
+`EXPECTED_FAILURES` at all and now REFUSE at generation (§3), and `count`'s entry
+says "tree recursion whose return frame reads x30 back", which is a Lean-time
+reason for a stem that no longer reaches Lean. So a `proofs` run over the corpus
+would be red on `sum`/`fact` and mis-reasoned on `count`/`floordiv`/`udivmod`
+until this is fixed.
+
 ## 5. Why the fix is the recording AND the walk, and in that order
 
 Restoring `_emit_trap_flush` (fflush recorded) is necessary and **not
