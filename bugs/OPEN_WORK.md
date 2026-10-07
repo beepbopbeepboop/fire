@@ -70,8 +70,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` | `formal93-docs` | arm64: an extern call emitted from the startup stub lands its `bl` past the end of `__TEXT` |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal93-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_stack_floor_guard_still_segfaults_at_the_budget_frame_count.md` | `formal97-docs` | the stack-floor guard still dies of SIGSEGV at exactly the budget's frame count under a reduced `ulimit -s` |
-| `FORMAL_a_return_inside_a_finally_emits_two_epilogues_on_arm64.md` | **unclaimed** | A `return` inside a `finally` emits the epilogue twice, and arm64 SIGBUSes |
-| `FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md` | **unclaimed** | A `try`'s `finally` runs on the FIRST exit path out of its body and on no other |
 | `FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md` | **unclaimed** | An arm64 conditional whose immediate is on the LEFT never elaborates |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | **unclaimed** | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 | `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | **unclaimed** | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |

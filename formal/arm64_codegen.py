@@ -804,6 +804,19 @@ dylib_exports: list = None, globals_base: int = None,
         # Enclosing try-finally bodies, outermost first. Flushed before
         # return/break/continue so finally runs on those paths.
         self._pending_finally = []
+        # The `fin` lists currently being emitted by a flush. A `return` inside
+        # such a body must not re-enter the same body — the old truncation of
+        # `_pending_finally` bought that by DESTROYING the frames, which is what
+        # dropped the cleanup on every later exit site of the same `try`
+        # (the second-exit-path bug fixed here; pinned by
+        # `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        # Identity, not an index: `_emit_try` pops frames as it unwinds, so an
+        # index-based marker shifts under a nested `try` and an id does not.
+        self._emitting_finally = set()
+        # Frames already emitted for the exit path being unwound, so a nested
+        # flush (a `return` inside a `finally`) does not emit an inner body the
+        # outer flush already ran.
+        self._finished_finally = set()
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -1378,6 +1391,8 @@ dylib_exports: list = None, globals_base: int = None,
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # Blocks for CONTAINERS this function RECEIVES from a callee that returns
         # one, and the COPY after each such call that fills them.  The third kind
         # of block in the same reserved region as the constructor frames and the
@@ -2526,8 +2541,8 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-            self._flush_pending_finally()
-            self._emit_epilogue()
+            if not self._flush_pending_finally():
+                self._emit_epilogue()
             return
 
         if isinstance(stmt, F.IfStmt):
@@ -2995,23 +3010,71 @@ dylib_exports: list = None, globals_base: int = None,
             f"unsupported statement {type(stmt).__name__} on the formal "
             f"arm64 path")
 
-    def _flush_pending_finally(self, depth: int = 0) -> None:
+    def _flush_pending_finally(self, depth: int = 0) -> bool:
         """Emit pending try-finally frames with index >= depth (innermost
         first), X0 saved across them.
 
         `depth` is 0 for return (run every enclosing finally) and the
         loop's entry `fin_depth` for break/continue (only frames opened
-        inside that loop). The list is truncated first so a return inside
-        a finally does not re-enter the same body."""
-        if len(self._pending_finally) <= depth:
-            return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
-        self.asm.emit(encode_stp_sp_pre(0, 31))
+        inside that loop).
+
+        Returns whether the flushed bodies ENDED the path (an unconditional
+        `return` inside one of them), so the caller knows not to emit a second
+        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
+        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+
+        **The frames are KEPT, and that is the fix.** This used to
+        `del self._pending_finally[depth:]` first, to stop a `return` inside a
+        `finally` from re-entering the same body; but the truncation removed the
+        frame for every LATER exit site in the same `try` too, so the second
+        `return` reached here with an empty list and emitted no cleanup at all
+        (pinned by
+        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        Re-entrancy is an identity question — is THIS body already being
+        emitted — and `_emitting_finally`/`_finished_finally` answer it without
+        destroying anything.
+        """
+        # A flush started from a statement (not from inside a finally) unwinds
+        # a fresh exit path; a nested one (a return/raise inside a finally) is
+        # part of the same unwinding and must remember what already ran.
+        if not self._emitting_finally:
+            self._finished_finally = set()
+        fins = [f for f in self._pending_finally[depth:]
+                if id(f) not in self._emitting_finally
+                and id(f) not in self._finished_finally]
+        if not fins:
+            return False
+        # An unconditional `return` inside a body transfers control out of the
+        # image, so every frame OUTER to it is dead code and this path needs no
+        # epilogue from the caller. `run` is therefore the frames that actually
+        # execute, innermost first, and `terminated` says one of them ends the
+        # path.
+        run = []
+        terminated = False
         for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
-        self.asm.emit(encode_ldp_sp_post(0, 31))
+            run.append(fin)
+            if _always_returns(fin):
+                terminated = True
+                break
+        # **X0 is saved only when the path FALLS THROUGH.** A body that returns
+        # supplies its own value, and the `stp`/`ldp` pair would leave SP 16
+        # bytes low when that body's `_emit_epilogue` does its own
+        # `add sp, #_SCRATCH` — the second half of the arm64 double-epilogue
+        # SIGBUS (`test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+        saved = not terminated
+        if saved:
+            self.asm.emit(encode_stp_sp_pre(0, 31))
+        for fin in run:
+            self._emitting_finally.add(id(fin))
+            try:
+                for s in fin:
+                    self._emit_stmt(s)
+            finally:
+                self._emitting_finally.discard(id(fin))
+            self._finished_finally.add(id(fin))
+        if saved:
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+        return terminated
 
     def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
@@ -3258,8 +3321,8 @@ dylib_exports: list = None, globals_base: int = None,
         the process after flushing finallys). `else` runs on the success
         path (always, without EH). On fall-through the finally emits
         here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it and truncated the stack — so the pop below is
-        stack bookkeeping and nothing else.
+        already ran it — the frame stays on `_pending_finally` (the flush
+        no longer truncates), so the pop below removes it exactly once.
 
         **The fall-through copy is emitted even when an exit edge inside
         the body already flushed this frame**, and that is a fix rather than

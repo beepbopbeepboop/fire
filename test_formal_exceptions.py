@@ -946,7 +946,62 @@ CASES = [
      "    finally:\n"
      "        print('outerfin')\n"
      "    return 0\n", 3),
-    # ── a `try` with no raising body ────────────────────────────────────────
+    # ── a `return` INSIDE a `finally` ───────────────────────────────────────
+    # CPython warns about it (`SyntaxWarning`) and then obeys it: the in-flight
+    # `return 1` is discarded, the `finally` body runs, and the `return 2` in it
+    # WINS. These rows are the measured pair for the arm64 double-epilogue
+    # SIGBUS that `_flush_pending_finally` used to cause: it emitted a second
+    # epilogue on top of the one the nested `return` already emitted, tearing
+    # the frame down twice. The first row is the single-level case (was `Bus
+    # error`, exit 138); the second pins that an outer `finally` still runs on
+    # the nested return's way out, and that it runs
+    # exactly once.
+    ("a_return_inside_a_finally_wins",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n", 3),
+    ("a_return_inside_an_inner_finally_still_runs_the_outer_one",
+     "def h():\n"
+     "    try:\n"
+     "        try:\n"
+     "            return 1\n"
+     "        finally:\n"
+     "            return 3\n"
+     "    finally:\n"
+     "        print('outer')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n",
+     "def h():\n"
+     "    try:\n"
+     "        try:\n"
+     "            return 1\n"
+     "        finally:\n"
+     "            return 3\n"
+     "    finally:\n"
+     "        print('outer')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n", 3),
     # The `except: pass` shape, which is the commonest in the corpus and must
     # keep building: the arm has no effect to drop, so nothing is lost by
     # leaving it out, and this row is what would notice a repair that started
