@@ -2487,7 +2487,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # condition did not fold, and this backend then emits the ordinary
             # runtime branch — the same degradation the gimple path makes, so
             # all three agree on the observable behaviour.
-            which = comptime_eval.resolve_if(stmt, self._comptime_vals)
+            which = comptime_eval.resolve_if(
+                stmt, self._comptime_vals, call_hook=self._comptime_hook)
             if which == "then":
                 for s in stmt.then_body:
                     self._emit_stmt(s)
@@ -2570,9 +2571,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         one that named a shape the author never wrote. Sharing the resolver
         removes the drift by construction rather than by keeping the two
         wordings in step by hand.
+
+        **The `call_hook` is part of sharing it, and omitting it was the same
+        drift one argument in.** arm64 passed `self._comptime_hook`; x86-64 did
+        not, so `comptime var a = square(6)` folded on arm64 and was refused here
+        — and the same omission was in `resolve_if` and `_comptime_iterable`.
+        All three now pass it. `test_formal_x86_64_parity.py`'s
+        `comptime_binding_initialized_by_a_call` is the row.
         """
         name = stmt.target
-        resolved = comptime_eval.resolve_var(stmt, self._comptime_vals)
+        resolved = comptime_eval.resolve_var(
+            stmt, self._comptime_vals, self._comptime_hook)
         if resolved is None:
             raise CodegenError(M.comptime_fold_refusal(name))
         kind, val = resolved
@@ -2607,7 +2616,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         at compile time, else None (→ emit the ordinary runtime loop)."""
         return comptime_eval.resolve_for_iterable(
             iterable, self._comptime_vals, self._comptime_list_asts,
-            self.COMPTIME_UNROLL_CAP)
+            self.COMPTIME_UNROLL_CAP, self._comptime_hook)
 
     def _emit_comptime_target(self, target, value) -> None:
         """Bind a `comptime for` target for one iteration, as an ordinary local
