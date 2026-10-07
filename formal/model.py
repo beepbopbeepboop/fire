@@ -13947,6 +13947,19 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     if not (container_operand_is_blob(left_kind)
             or container_operand_is_blob(right_kind)):
         return None
+    if bare in ("==", "!="):
+        # `==`/`!=` against a NON-blob is a program CPython answers: a blob is
+        # never equal to a number or a string, so `[] == 0` is False and
+        # `[] != 0` is True whatever the container holds.  The word this path
+        # carries for the blob is its block ADDRESS, which is nonzero and not
+        # that other value either, so the address comparison gives the same
+        # answer — the wrong-answer case the gate exists for is two BLOBS
+        # (element-by-element and then a length check), not one.  The ordering
+        # operators keep the one-blob rule: `[] < 0` is a `TypeError` in
+        # CPython, so there is no correct program on the far side.
+        if not (container_operand_is_blob(left_kind)
+                and container_operand_is_blob(right_kind)):
+            return None
     shown = spelled_op or bare
     on_left = container_operand_is_blob(left_kind)
     which = ("the left operand" if on_left else
