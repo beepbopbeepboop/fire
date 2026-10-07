@@ -8648,6 +8648,37 @@ BOTH_ARCH_CASES = [
      "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
      "    return 0\n", 0,
      "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
+    # ── A NESTED for-TARGET, ON BOTH MACHINES ──────────────────────────────
+    #
+    # x86-64's `_emit_for_list` / `_emit_compr_gen` read a tuple target through
+    # `_lbn_target_names`, which FLATTENS the groups, while the `_emit_for_unpack`
+    # they hand it expects the nesting: `for a, (b, c) in [(1, (2, 3))]` checked
+    # the element blob's count of 2 against the flattened arity of 3 and
+    # exited(1) with nothing printed, where arm64 and CPython both answer. The
+    # fix is one shared shape reader (`formal/model.py::for_target_tree`) both
+    # backends now use, which is why this row is in this group rather than in
+    # `CASES`: the subject is that the two machines agree.
+    #
+    # 49 = 21 (flat pair) + 6 (nested pair) + 10 (nested pair in a nested pair)
+    # + 6 (comprehension over a nested target) + 6 (a nested tuple TARGET on
+    # the left of `=`). Each shape contributes a distinct amount, so a lowering
+    # that silently skips one cannot land on the same total.
+    ("both_arch_a_nested_for_target_unpacks_like_arm64_and_cpython",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, b in [(1, 20)]:\n"
+     "        s = s + a + b\n"
+     "    for a, (b, c) in [(1, (2, 3))]:\n"
+     "        s = s + a + b + c\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    t = [a + b + c for a, (b, c) in [(1, (2, 3))]]\n"
+     "    for v in t:\n"
+     "        s = s + v\n"
+     "    a, (b, c) = 1, (2, 3)\n"
+     "    s = s + a + b + c\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "49"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before

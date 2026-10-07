@@ -581,6 +581,22 @@ def _binds_name(target, name: str) -> bool:
     return False
 
 
+def _for_tree_leaves(tree) -> list:
+    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
+
+    A star leaf keeps its `*`, so the caller's identifier check refuses it —
+    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
+    the reason the for-loop's target validation is a leaf walk rather than
+    `_lbn_target_names` (which strips the star and would pass a `*rest`
+    through to a store under a name nothing allocated)."""
+    if isinstance(tree, list):
+        out = []
+        for child in tree:
+            out.extend(_for_tree_leaves(child))
+        return out
+    return [tree]
+
+
 def _dotted(func) -> str:
     """`recv.method` as written, for a diagnostic that quotes the source."""
     name = _callee_symbol(func)
@@ -6481,10 +6497,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_frame_slot_element("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
-            from mojo.middle.boundnames import _lbn_target_names
-            tnames = _lbn_target_names(stmt.target) \
-                if isinstance(stmt.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
+            # The SHAPE, not the flattened names: a nested group is itself a
+            # blob, and `_emit_for_unpack` has to unpack it as one. Passing
+            # `_lbn_target_names` (leaves flattened) checked the OUTER blob's
+            # count against the flattened arity, so `for a, (b, c) in [(1, (2,
+            # 3))]` compared an element count of 2 against a target count of 3
+            # and exited(1) with nothing printed, where arm64 and CPython both
+            # answer. arm64 reads the same tree through the same `M` reader.
+            ttree = M.for_target_tree(stmt.target) \
+                if isinstance(stmt.target, str) else None
+            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -6554,10 +6577,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if len(tnames) == 1:
-                    self._store_var(tnames[0], Reg.RAX)
+                if isinstance(ttree, str):
+                    self._store_var(ttree, Reg.RAX)
                 else:
-                    self._emit_for_unpack(tnames, Reg.RAX,
+                    self._emit_for_unpack(ttree, Reg.RAX,
                                           f"{fn}_flt{wid}")
 
                 for s in stmt.body:
@@ -9150,17 +9173,20 @@ preference.
                                      self._is_dict_subscript(gen.iterable)))
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
 
-            from mojo.middle.boundnames import _lbn_target_names
-            tnames = _lbn_target_names(gen.target) \
-                if isinstance(gen.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
+            # The SHAPE, not the flattened names, for the same reason the
+            # for-loop asks for it — arm64's `_emit_compr_gen` reads the same
+            # `M.for_target_tree`.
+            ttree = M.for_target_tree(gen.target) \
+                if isinstance(gen.target, str) else None
+            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if len(tnames) == 1:
-                self._store_var(tnames[0], Reg.RAX)
+            if isinstance(ttree, str):
+                self._store_var(ttree, Reg.RAX)
             else:
-                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
+                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next

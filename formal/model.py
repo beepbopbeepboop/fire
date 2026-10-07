@@ -26505,6 +26505,51 @@ def _target_names(target):
     return _lbn_target_names(target) if isinstance(target, str) else []
 
 
+def for_target_tree(target):
+    """Parse a for/comprehension target string into a leaf name or nested list.
+
+    `'i'` -> `'i'`; `'(a, b)'` -> `['a', 'b']`; `'a, b'` (the comprehension
+    `Generator.target` spelling, no surrounding parens) -> `['a', 'b']`;
+    `'(a, (b, c))'` -> `['a', ['b', 'c']]`. Returns None when a leaf is not a
+    plain identifier (a `*name` star leaf stays, as `'*name'`, because the
+    binding rules for it are the unpacker's and not this reader's).
+
+    This is the recursive SHAPE reader — `fire_compiler.for_target_names` is the
+    recursive FLATTENING of the same text, and a lowering that needs to unpack a
+    nested group has to have the nesting, or it unpacks the inner group's names
+    against the OUTER element and its arity check fires. That was one bug on
+    x86-64 (`a, (b, c)` checked a two-element tuple against a three-name
+    target) and this is the one reader both backends now share.
+
+    Uses the parser's own top-level split (`fire_compiler.target_slots`, which
+    drops the empty slot a 1-tuple target's trailing comma leaves) and its own
+    group peel, so `'d[a, b]'` — a SUBSCRIPT target, one name whose brackets
+    contain a comma — is not torn into two.
+    """
+    if not isinstance(target, str):
+        return None
+    t = target.strip()
+    inner = F._target_group_inner(t)
+    if inner is not None:
+        parts = F.target_slots(inner)
+    else:
+        parts = F.target_slots(t)
+        # `'(a)'` normalizes in the parser to `'a'`, so a group-less text with
+        # no top-level comma is a single leaf and not a one-element tree.
+        if len(parts) <= 1:
+            if t.startswith("*"):
+                rest = t[1:].strip()
+                return "*" + rest if rest.isidentifier() else None
+            return t if t.isidentifier() else None
+    tree = []
+    for p in parts:
+        child = for_target_tree(p)
+        if child is None:
+            return None
+        tree.append(child)
+    return tree if tree else None
+
+
 def _comprehension_target_names(target) -> list:
     """The names ONE generator target binds, in source order.
 
