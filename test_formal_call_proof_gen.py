@@ -1653,12 +1653,14 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
             "`_emit_reg_chain` emits a false 'unchanged' step for each: %r"
             % (unreadable[:6],))
 
-    #: `formal/examples/bitops.mojo`, whose block 4 is the RET block: 30
-    #: instructions ending in the epilogue, and instruction 28 of it is the
-    #: `ldp x29, x30, [sp], #16` that reloads `x30`. That is the block whose
-    #: value flow `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_`
-    #: theorem.md` wants restated one block at a time, and the one instruction
-    #: per function the reader could not read.
+    #: `formal/examples/bitops.mojo`, whose RET block ends in the epilogue and
+    #: contains the `ldp x29, x30, [sp], #16` that reloads `x30`. That is the
+    #: block whose value flow
+    #: `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    #: wants restated one block at a time, and the one instruction per function
+    #: the reader could not read. The block is found by KIND in the test rather
+    #: than by a hard-coded number: the prologue's guard decides how many
+    #: blocks precede it.
     EPILOGUE_PROGRAM = os.path.join(HERE, "formal", "examples", "bitops.mojo")
 
     def test_the_epilogue_blocks_own_chain_states_what_it_wrote(self):
@@ -1695,26 +1697,37 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
                                   os.path.join(tmp, "bitops.aout"))["proof_path"]
             text = open(proof).read()
             lines = text.split("\n")
-            cut = next((i for i, l in enumerate(lines)
-                        if l.startswith("theorem bitops_b4_runs")), None)
+            # The RET block, found by KIND rather than by index: the guard's
+            # instruction count is what decides how many blocks precede it (a
+            # runtime-limit guard adds the `getrlimit` sequence and its
+            # branches), so a hard-coded block number is a test that breaks
+            # whenever the prologue changes without measuring a different
+            # block.
             hdr = re.search(
-                r"/-- Block 4: start=(0x[0-9a-f]+) kind=\w+ "
+                r"/-- Block (\d+): start=(0x[0-9a-f]+) kind=ret "
                 r"\((\d+) instructions", text)
-            self.assertIsNotNone(cut and hdr,
-                                 "the generated proof no longer has block 4's "
-                                 "certificate or its header, so this row is "
-                                 "not measuring the block it names")
-            start, count = int(hdr.group(1), 16), int(hdr.group(2))
+            self.assertIsNotNone(
+                hdr,
+                "the generated proof no longer has a RET block header, so "
+                "this row is not measuring the epilogue it names")
+            bnum = int(hdr.group(1))
+            cut = next((i for i, l in enumerate(lines)
+                        if l.startswith(f"theorem bitops_b{bnum}_runs")), None)
+            self.assertIsNotNone(
+                cut, f"the RET block is b{bnum} but its runs theorem is not "
+                     f"in the generated proof")
+            start, count = int(hdr.group(2), 16), int(hdr.group(3))
             res = _compile(self.EPILOGUE_PROGRAM,
                            os.path.join(tmp, "code.aout"), "arm64")
             base = res["info"]["base_addr"]
             raw = res["code"]
             words = {base + i: int.from_bytes(raw[i:i + 4], "little")
                      for i in range(0, len(raw) - len(raw) % 4, 4)}
-            # the PREFIX run: block 4's certificate is about `qS{m-1}`, whose
-            # last write to x30 is the epilogue's `ldp`
+            # the PREFIX run: the RET block's certificate is about `qS{m-1}`,
+            # whose last write to x30 is the epilogue's `ldp`
             chain, final = G._emit_reg_chain(
-                "bitops", words, "b4", [start + 4 * i for i in range(count - 1)],
+                "bitops", words, f"b{bnum}",
+                [start + 4 * i for i in range(count - 1)],
                 30, st="ST", hname="hchain")
             body = ["\n".join(lines[:cut]),
                     "theorem block_chain (ST : Arm64State) : True := by"]
@@ -1995,7 +2008,21 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         import formal.arm64_proof_gen as G
         import formal.build as fb
         src = os.path.join(self.tmp, "stepok.mojo")
-        code = _entry_code(fb, src)
+        # Read BOTH the bytes and the published string table: the step lemmas
+        # cover the EXECUTABLE region only, because `__TEXT` carries the
+        # interned strings after the bodies and a string byte pattern that
+        # decodes as an instruction would otherwise get a step lemma for a word
+        # no execution reaches (the trap message's `TBZ` word is the measured
+        # one). The expected set is computed over the same range the generator
+        # uses, so a filter that narrowed for any OTHER reason still fails.
+        result = fb.compile_formal(src, output=src[:-5] + ".aout",
+                                   prove=False, check=False)
+        code = result["code"]
+        info = result["info"]
+        base = info["base_addr"]
+        str_addrs = list((info.get("str_addrs") or {}).values())
+        code_end = (min(str_addrs) - base) if str_addrs else len(code)
+        code = code[:max(0, min(code_end, len(code)))]
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, len(code) - len(code) % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
@@ -4396,20 +4423,26 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         """The other backend, and the reason the asymmetry was the bug.
 
         arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
-        decodes, so a program that emits no bounded stop has an empty
-        `extern_calls` and needs nothing subtracted. Nothing here may change
-        that, and the assertion that it has not is what makes the x86-64 fix a
-        fix rather than a lowering of the bar on both sides.
+        decodes, so a program that emits no bounded stop publishes NO
+        `compiler_traps` and needs nothing subtracted from the program's calls.
 
-        The name says "no trap list" and the assertion is `assertFalse`, so it
-        is worth being exact about what it does and does not claim: it claims
-        THIS program's list is empty, and arm64 DOES publish one for a program
-        with a bounded stop — see the two rows below, which are the other half
-        and which this row used to contradict.
+        arm64 reads `RLIMIT_STACK` once in the startup stub
+        (`formal/arm64_codegen.py::_emit_stack_floor_init`), so its `getrlimit`
+        IS in `extern_calls` — but BELOW `func_offset`, where no run test
+        starts. The property that matters is therefore the PROGRAM-call set
+        (`formal/arm64_proof_gen.py::_program_extern_calls`, which subtracts
+        calls below the entry for the same reason x86-64's `_program_externs`
+        does), and that is what this row asserts. The name says "no trap list"
+        and the assertion is `assertFalse`, so it is worth being exact: it
+        claims THIS program's trap list is empty, and arm64 DOES publish one for
+        a program with a bounded stop — see the rows below, which are the other
+        half and which this row used to contradict.
         """
+        from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
-        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
-                         [], "arm64's guard trap is an `svc`, not a call")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the startup stub's `getrlimit` is being read as a "
+                         "call the PROGRAM makes")
         self.assertFalse(info.get("compiler_traps"),
                          "a program with no bounded trap published one, so "
                          "something other than a stop is being recorded")
@@ -6383,17 +6416,27 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
     for a program with no extern call at all.  Both arms are decided by
     `native_decide`, so nothing is left for a reader to take on trust.
 
-    **BOTH branches are pinned, because the reachable one is the one that was
-    already working** and a change that only fixed the unreachable case would
-    look identical from the text.  `modvar`'s call is the div0 guard's error
-    arm; `print1`'s `printf` is on the path.
+    **The `none` arm can no longer be made LIVE by a probe, so its SHAPE is
+    what is pinned.**  `_gen_extern_test` is reached only for a call the program
+    MAKES, and every such call is now on the concrete run: a call behind a
+    source condition is refused by the generator ("the call … is behind a
+    CONDITIONAL"), an uncalled function's call is refused with it, and a
+    compiler trap (`_emit_trap_flush`) is subtracted by `_program_extern_calls`
+    so the program takes the ordinary run path.  The `none` arm is still
+    EMITTED — the theorem is a `match` on the run's own reachability — so the
+    rows below assert its shape: the pre-call state with `pc` pinned, never
+    `Arm64State.init 0 <base>`.
+
+    `print1`'s `printf` is on the path.  `mod_by_var` (`n % d`) used to be the
+    unreached probe: its only unbound call is the div0 guard's `fflush`, and
+    that is now a compiler trap the generator subtracts, so it takes the run
+    path with no extern test at all — `TestCompilerTrapIsNotAProgramCall` is
+    where that is pinned.
     """
 
     # name, source, the extern symbol its image calls, whether the concrete run
-    # gets to the call (MEASURED — see the class docstring).
+    # gets to the call (MEASURED).
     PROBES = (
-        ("modvar", "def modvar(n):\n    d = 4\n    return n % d\n",
-         "fflush", False),
         ("print1", 'def print1(n):\n    printf("hi")\n    return n\n',
          "printf", True),
     )
@@ -6410,7 +6453,13 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
             r = _compile(src, os.path.join(cls.tmp, name + ".aout"), "arm64")
             with open(r["proof_path"], encoding="utf-8") as f:
                 cls.proofs[name] = f.read()
-            cls.calls[name] = r["info"]["extern_calls"]
+            # The startup stub's `getrlimit` is an extern call BELOW
+            # `func_offset` (`_emit_stack_floor_init`), so it is not a call the
+            # PROGRAM makes; filtering it here keeps this class about the one
+            # program call each probe has.
+            entry = r["info"].get("func_offset")
+            cls.calls[name] = [c for c in r["info"]["extern_calls"]
+                               if entry is None or c["addr"] >= entry]
 
     @classmethod
     def tearDownClass(cls):

@@ -9815,12 +9815,21 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
                    entry_values: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
-    Appends a RET sentinel after the code and executes the whole program
-    (starting from the entry stub) with the initial link register pointing
-    at that sentinel, using arm64_exec_go_exit (which only stops at the
-    designated exit address, so recursion is traced correctly). The result
-    in x0 is verified against the semantic model by native_decide.
-    Additional inputs are executed from the function entry directly.
+    Appends a RET sentinel after the code and executes from the ENTRY FUNCTION
+    with the initial link register pointing at that sentinel, using
+    arm64_exec_go_exit (which only stops at the designated exit address, so
+    recursion is traced correctly). The result in x0 is verified against the
+    semantic model by native_decide. Every input starts at the function entry,
+    which is what x86-64's `_gen_runs_test` already does.
+
+    **It starts at `func_entry`, not at `base`, and the startup stub is why.**
+    The stub now reads `RLIMIT_STACK` once (`formal/arm64_codegen.py::
+    _emit_stack_floor_init`), and that is a `bl` to a `__TEXT,__stubs`
+    trampoline the model cannot follow — so a run that started at the stub
+    would halt on the `br` inside the trampoline and report a result that is
+    not the program's, which is what every arm64 run test did until this. The
+    state the entry function sees (x0 = the materialised argument, x30 = the
+    sentinel) is the same one the stub hands it, so nothing is lost.
     """
     exit_addr = base + len(code)
     # The entry function's ARGUMENT words as the startup stub materialized
@@ -9832,7 +9841,7 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     # that says "input 10" about a two-parameter entry whose second argument is
     # 20 would be describing a different program.
     tinput = test_input if arity <= 1 else ", ".join(vals)
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    init = (f"{{ {_entry_run(vals, func_entry, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     _tac = _decide_or_admit(admitted_model)
     # The admission note goes on the FIRST block only, and every docstring here
@@ -9916,17 +9925,41 @@ def _program_extern_calls(info: dict) -> list:
     An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
     predates the key — is read as having none, which is the conservative
     direction: nothing is subtracted and the refusal stands.
+
+    **And a call BELOW the entry function is not the program's either.** The
+    startup stub runs before the entry is called and reads `RLIMIT_STACK` once
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), so its `getrlimit` is in
+    the image, in `extern_calls`, and on NO path the run tests walk: they start
+    at `info["func_offset"]`, by which time the stub has finished. Counting it as
+    a program call suppressed every run test on this backend for every program —
+    the same failure `compiler_traps` was introduced to fix, arriving through the
+    front door instead, and `getrlimit` is not a trap at all (it returns, and the
+    floor the guard compares against is whatever it left in `__DATA`). This is
+    x86-64's `_program_externs` rule, read from the same field.
+
+    The subtraction is by ADDRESS against `func_offset` rather than by symbol,
+    for the same reason as above: a program can call `getrlimit` itself, and
+    dropping the symbol would drop that call too.
     """
     traps = set(info.get("compiler_traps") or ())
-    return [c for c in (info.get("extern_calls") or ())
-            if c.get("addr") not in traps]
+    entry = info.get("func_offset")
+    out = []
+    for c in (info.get("extern_calls") or ()):
+        addr = c.get("addr")
+        if addr in traps:
+            continue
+        if entry is not None and addr is not None and addr < entry:
+            continue
+        out.append(c)
+    return out
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
-                     entry_values: list = None, scope=None) -> tuple:
+                     entry_values: list = None, scope=None,
+                     func_entry: int = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -9982,7 +10015,11 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     # two-parameter entry's run starts from the same x0/x1 the binary was
     # given rather than from an x1 the model invented.
     vals = [str(v) for v in (entry_values or [test_input])]
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    # The run starts at the ENTRY FUNCTION, not at the startup stub, for the
+    # reason `_gen_runs_test`'s docstring gives: the stub's `getrlimit` is a
+    # `bl` through a `__TEXT,__stubs` trampoline the model cannot follow, so a
+    # run that started there would halt before reaching the call being split.
+    init = (f"{{ {_entry_run(vals, func_entry if func_entry is not None else base, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     ret_type_of = {e.name: e.return_type for e in externs}
     blocks = []
@@ -10691,6 +10728,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     check_step_conds()
     func_name = info.get("func_name") or (prog.functions[0].name if prog.functions else "unknown")
     base_addr = info["base_addr"]
+    # The ENTRY FUNCTION's address, NOT the startup stub's. The stub now reads
+    # `RLIMIT_STACK` once (`formal/arm64_codegen.py::_emit_stack_floor_init`),
+    # which is a `bl` through a `__TEXT,__stubs` trampoline the model cannot
+    # follow, so a concrete run that started at the stub would halt on the
+    # trampoline's `br` and report a result that is not the program's. Every
+    # concrete run starts at the function entry with x0 already holding the
+    # materialised argument — the same state the stub hands the function, and
+    # what x86-64's `_x86_entry` already does.
+    _func_entry = info["labels"].get(func_name, base_addr)
     test_input = info.get("test_input", 10)
     code = code or b""
 
@@ -10979,7 +11025,8 @@ def generate_arm64_proof(prog, code, info) -> str:
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
-            admitted_names=_admitted_used_names, scope=_vscope)
+            admitted_names=_admitted_used_names, scope=_vscope,
+            func_entry=info["labels"].get(func_name, base_addr))
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),
@@ -10995,10 +11042,27 @@ def generate_arm64_proof(prog, code, info) -> str:
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
+    # **The step lemmas cover the EXECUTABLE region only, not the string data.**
+    # `__TEXT` carries every function body and THEN every interned string
+    # (`compile`'s string-emission loop), and `_step_result_plan`/`_gen_step_
+    # lemmas` walk every 4-byte word of `code`.  A string byte pattern that
+    # decodes as an instruction the step table knows is therefore planned a step
+    # lemma for a word no execution reaches — and the step-OK lemma's `hne` for
+    # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
+    # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
+    # which every guarded image carries, so EVERY arm64 proof was red on it.
+    # `info["str_addrs"]` is the published string table, so the first string's
+    # address is the end of the code.  The run tests still read the whole
+    # `code` (`{name}_code` is unchanged), so nothing else moves.
+    _str_addrs = list((info.get("str_addrs") or {}).values())
+    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
+    code_end = max(0, min(code_end, len(code)))
+    step_code = code[:code_end]
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
-    step_lemmas = (_gen_step_result_lemmas(func_name, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(func_name, code, base_addr)
+    step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
+                   + "\n\n"
+                   + _gen_step_lemmas(func_name, step_code, base_addr)
                    + ("\n\n" + step_tests if step_tests else ""))
 
     # Fuel for the concrete closed correctness proof. Large enough to let the
@@ -11256,7 +11320,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"    the RET sentinel, and the machine halts once the program has returned to\n"
             f"    it. Proved by native_decide, which scales to any program size. -/\n"
             f"theorem {func_name}_compiles_correctly :\n"
-            f"  (match arm64_exec_go {{ {_entry_run(elist, base_addr, arity)}\n"
+            f"  (match arm64_exec_go {{ {_entry_run(elist, _func_entry, arity)}\n"
             f"      with x30 := UInt64.ofNat {sentinel_addr} }} {func_name}_code {concrete_fuel} with\n"
             f"   | some s => s.x0\n"
             f"   | none => 0) = {_apply_args('mojo', elist)} := by\n"
