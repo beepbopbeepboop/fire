@@ -23326,15 +23326,20 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
-        # A prefix is a SET OF SPELLING FLAGS, not one character: these are the
-        # two-letter raw f-strings the reader used to refuse with a sentence
-        # false about the source ("the character after the prefix is not a
-        # quote" about `rf"…"`, whose next character IS a quote).
+        # A TWO-CHARACTER prefix is a SET OF SPELLING FLAGS, not one character.
+        # The reader used to ask `spelled[1]`, which for `rf` is the `f`, and
+        # refused with "the character after the prefix is not a quote" — false
+        # about a token whose second character is the `f` of the prefix and
+        # whose third is the quote. Raw segmentation is prefix-independent (the
+        # brace rules do not change under `r`), so these compare against
+        # CPython's parse exactly like the rest.
         'rf"a={n}b"',
         'fr"a={n}b"',
-        'Rf"{x}"',
-        'fR"pre{x}post"',
+        'Rf"{x}"',              # upper case, one of each
+        'fR"pre{x}post"',       # flags in the other order
         'rf"{{lit}}"',          # a raw f-string still honours the brace escape
+        'FR"{{lit}}"',          # upper case, and still no field
+        r'rf"^(\s*)from\s+{re.escape(old)}\s+import\s+"',   # the corpus's own
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23388,12 +23393,15 @@ def check_interpolated_segments_against_cpython(verbose=False):
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
                           ('f"', "not even a quoted token"),
-                          # A prefix test that widened the reader's acceptance
-                          # must not turn "unterminated is a refusal" into text
-                          # read as a body: a raw f-string with no closing quote
-                          # still refuses on the DELIMITER test.
+                          # A widened prefix reader must not turn "unterminated
+                          # is a refusal" into text read as a body: a raw
+                          # f-string with no closing quote still refuses on the
+                          # DELIMITER test.
                           ('rf"a={n}', "does not end with"),
-                          ('nof"quote', "not a quote")):
+                          ('rf"a{b', "does not end with"),
+                          # …and a token whose prefix letters are not followed
+                          # by a quote has no knowable body.
+                          ('nof"quote', "no opening quote")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:
@@ -23596,7 +23604,7 @@ def check_interpolated_literal_census(verbose=False):
                 where.get(os.path.relpath(path, here), 0) + 1
         print(f"      interpolated census: {len(unquotable)} literal(s) "
               f"`is_interpolated_literal` admits that are not quoted tokens at "
-              f"all — the filed prefix-test defect, {where}")
+              f"all — a token with no defensible chunk boundary, {where}")
     return passed, failures
 
 

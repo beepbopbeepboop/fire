@@ -6999,9 +6999,19 @@ def specialization_call_refusal(name: str) -> str:
         f"ones an importer asks for — `formal/monomorph.py` compiles each into "
         f"that module's own library and rewrites the call to the mangled name — "
         f"so a call arriving here asked for none: its brackets named no type "
-        f"argument or named a value rather than a type. Write it as "
-        f"`{name}[<a type>](…)` and the library will carry the instantiation; "
-        f"the ways this can still be reached are in "
+        f"argument, or named a value rather than a type (`plain[3](5)`, where "
+        f"the bracket is an argument and not a slot), or named a TYPE ARGUMENT "
+        f"on a function whose type parameter is INFERRED from its parameter "
+        f"types — `def {name}(t: Box[T]) -> T` called as `{name}[Int](b)` — "
+        f"which this path reads off the ARGUMENTS rather than off a bracketed "
+        f"declaration, so no boundary symbol is emitted for it. That last shape "
+        f"is CORRECT SOURCE and this path is short: Mojo infers a template "
+        f"call's type arguments, so call it WITHOUT the bracket — `{name}(b)` "
+        f"with `b: Box[Int]` — which is the same program and is lowered (for "
+        f"that shape the bracketed call is refused and the inferred one builds "
+        f"and answers CPython on both architectures). **Do not add `[<a type>]` "
+        f"— that is the spelling that arrived here.** The ways this can still "
+        f"be reached, with the spelling that works for each, are in "
         f"bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
         f"an ordinary value then the brackets are a subscript, which is not a "
         f"call this path can name at all. Refused rather than emitted with the "
@@ -11232,39 +11242,44 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
-_INTERP_PREFIX_LETTERS = 'fFtTrRbBuU'
+def _is_string_prefix_letter(c: str) -> bool:
+    """True for a character a Python string prefix may be spelled with.
 
-
-def interpolated_literal_delimiters(spelled: str) -> tuple:
-    """`(quote, body_start)` — where an interpolated literal's own text begins.
-
-    THE prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`, `b`
-    and `u` in any order and any number of them, so `rf"…"`, `fr"…"` and `Rb"…"`
-    are all one quote at an index the caller cannot guess from the token's shape.
-    `spelled[1]` is right only for the one-letter spellings (`f"…"`, `t"…"`);
-    asking it for a two-letter one (`rf"…"`, `fr"…"`) reads the second flag as the
-    quote and refuses a token whose next character IS a quote — which is a
-    sentence FALSE about the source (`tools/wave2_extract_shared.py`'s
-    `rf"…"` was the one file in the 768-file scope to reach it).
-
-    `rawness` does NOT change where the chunks and `{…}` fields are: a raw string
-    changes what `\\s` means, not the brace rules, and those are
-    prefix-independent in both spellings. So this returns only the boundary, and
-    a caller that later wants a chunk's VALUE rather than its spelling records
-    rawness separately. The letters are spelled out with `==`-style set
-    membership (`in` on a string) only because `spelled` is text here and not a
-    compiled `char *`; the same test lives in `fire_compiler.py`'s
-    `_string_prefix_start` / `_prefix_is_interpolated`, which is why the two
-    cannot disagree about what a prefix is.
+    Explicit `==` comparisons rather than `c in 'fFrR…'`, for the reason
+    `fire_compiler.py::_string_prefix_start` gives in full: this codegen's
+    compiled `in`-for-char*-against-char* is a documented stub that always
+    returns False, so under self-hosting an `in`-based check here would never
+    advance and every prefixed literal would go unread.
     """
-    i, n = 0, len(spelled)
-    while i < n and spelled[i] in _INTERP_PREFIX_LETTERS:
+    return (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+            or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+            or c == 't' or c == 'T')
+
+
+def interpolated_literal_quote_start(spelled: str) -> int:
+    """Where the opening QUOTE of an interpolated literal's token begins.
+
+    The prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`,
+    `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
+    open their quote at index **2** while `f"…"` opens it at 1. The reader below
+    used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
+    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
+    reader_assumes_a_one_character_prefix.md`. The lexer above it
+    (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
+    known the prefix width since 2026-10-05; this is the one answer the reader
+    was missing, and it is a function rather than an index so the two layers
+    name the same fact.
+
+    **Two, not more, because that is what the language allows** and what
+    `fire_compiler.py::_string_prefix_start` scans for: a legal prefix is one
+    of `r`/`u`/`b`/`f`/`t` or a pair. The scan stops at the first character
+    that is not a prefix letter — which is the quote — so a body that begins
+    with `f` cannot be over-consumed.
+    """
+    i = 0
+    while i < 2 and i < len(spelled) and _is_string_prefix_letter(spelled[i]):
         i += 1
-    if i >= n or spelled[i] not in ('"', "'"):
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    return spelled[i], i
+    return i
 
 
 def interpolated_literal_segments(spelled: str) -> list:
@@ -11301,22 +11316,27 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # THE prefix is a SET OF SPELLING FLAGS, not one character (`rf"…"` and
-    # `fr"…"` are two of them), so the quote's index is asked of the shared
-    # boundary reader rather than assumed to be 1 — the bug this line replaces
-    # refused every two-letter prefix with "the character after the prefix is
-    # not a quote", which is false about a token whose next character IS one.
-    quote, q_at = interpolated_literal_delimiters(spelled)
-    if spelled[q_at:q_at + 3] == quote * 3:
+    # The prefix is a SET OF SPELLING FLAGS, not one character — `rf"…"` and
+    # `fr"…"` are two letters, and the quote is at index `quote_at`, not 1.
+    # `interpolated_literal_quote_start` is the one reader of that width (the
+    # lexer's own is `fire_compiler.py::_string_prefix_start`).
+    quote_at = interpolated_literal_quote_start(spelled)
+    quote = spelled[quote_at] if quote_at < len(spelled) else ""
+    if quote != '"' and quote != "'":
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it has no "
+            f"opening quote after its prefix, so where its text starts is not "
+            f"knowable from the token")
+    if spelled[quote_at:quote_at + 3] == quote * 3:
         term = quote * 3
     else:
         term = quote
-    if not spelled.endswith(term) or len(spelled) < q_at + 2 * len(term):
+    if not spelled.endswith(term) or len(spelled) < quote_at + 2 * len(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[q_at + len(term):-len(term)]
+    body = spelled[quote_at + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)
@@ -11439,7 +11459,17 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    is_t = spelled[:1] in ("t", "T")
+    #
+    # The `t` is looked for across the WHOLE prefix rather than at index 0: a
+    # t-string's prefix may be `tr`/`rt`, so `spelled[:1] in ("t", "T")` called
+    # a `rt"…"` "an f-string". The prefix letters are read with the same helper
+    # `interpolated_literal_segments` now uses, so both spell the width once.
+    _prefix_end = (interpolated_literal_quote_start(spelled)
+                   if isinstance(spelled, str) else 0)
+    is_t = False
+    for _ch in spelled[:_prefix_end]:
+        if _ch == 't' or _ch == 'T':
+            is_t = True
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:
