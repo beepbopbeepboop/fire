@@ -193,6 +193,24 @@ DATA_BASE = TEXT_BASE + 0x4000
 LINKEDIT_BASE = TEXT_BASE + 0x8000
 PAGE_SIZE = 0x4000
 
+
+def _linkedit_vm(linkedit_file: int, g_vm: int, g_size: int) -> int:
+    """Where `__LINKEDIT` is MAPPED: above every segment before it.
+
+    `TEXT_BASE + linkedit_file` is right only while nothing sits at a fixed
+    address past the file layout, and `__DATA` does (`GLOBALS_VM`, 4 MB up). An
+    image with module state then declared `__LINKEDIT` at vmaddr 0x8000 AFTER a
+    `__DATA` at 0x400000, i.e. segments out of ascending order. arm64's dyld
+    tolerates that; Rosetta computes the image's extent from the last segment
+    and slides the whole image wrongly, so every pointer the code formed
+    rip-relative (a string returned from an imported module) landed 0x3f8000
+    below the mapping and the x86-64 image died in `printf` with SIGSEGV."""
+    vm = TEXT_BASE + linkedit_file
+    if g_vm:
+        vm = max(vm, g_vm + g_size)
+    return vm
+
+
 def _dylinker_cmd() -> bytes:
     """LC_LOAD_DYLINKER pointing at /usr/lib/dyld, in the form ld emits.
 
@@ -427,7 +445,7 @@ def build_macho_executable(code: bytes, arch: str = "arm64",
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
-    patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
+    patch(o + 24, "<Q", _linkedit_vm(linkedit_file, g_vm, g_size))
     patch(o + 32, "<Q", linkedit_size)
     patch(o + 40, "<Q", linkedit_file)
     patch(o + 48, "<Q", linkedit_size)
@@ -953,7 +971,7 @@ def build_macho_executable_extern(
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
-    patch(o + 24, "<Q", TEXT_BASE + bind_file)
+    patch(o + 24, "<Q", _linkedit_vm(bind_file, g_vm, g_size))
     patch(o + 32, "<Q", _align_up(linkedit_len, PAGE_SIZE))
     patch(o + 40, "<Q", bind_file)
     patch(o + 48, "<Q", linkedit_len)
@@ -1567,7 +1585,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
-    patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
+    patch(o + 24, "<Q", _linkedit_vm(linkedit_file, g_vm, g_size))
     # `linkedit_len` was computed where the bind stream's ALIGNED offset was
     # decided, and is not recomputed here: recomputing it from `len(trie)` is
     # exactly the drift that put the bind data at an offset the linker rejects
