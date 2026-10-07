@@ -609,17 +609,18 @@ def _gen_stmt_VarDecl(gen, node):
         # insert()/index-stores (no .append for _scan_container_elems to
         # learn from) read back through mojo_list_get_int — every element
         # came back as a raw pointer handle printed as a decimal blob.
-        if ctype == 'MojoList *' and isinstance(node.type_ann, str) \
-                and '[' in node.type_ann and not node.type_ann.startswith('['):
-            _li = gimple_ctypes._split_top_level_commas(
-                node.type_ann.split('[', 1)[1].rstrip(']').strip())
-            if _li:
-                try:
-                    _et = gen._resolve_type(_li[0].strip())
-                except Exception:
-                    _et = None
-                if _et and _et != 'int64_t':
-                    gen._elem_types[node.name] = _et
+        #
+        # The THIRD consumer of the shared helper, and the reason the
+        # helper exists: this copy was written out inline and identically
+        # here as well as on the two initializer-bearing paths, and only
+        # the latter two were consolidated. The observable difference the
+        # consolidation makes is the container KIND — the inline form
+        # tested `ctype == 'MojoList *'` and so silently skipped a
+        # `var s: Set[String]` filled only by `insert`, which is the same
+        # int-elements-read-back shape for a set.
+        _et_noinit = _annotation_container_elem_type(gen, node.type_ann, ctype)
+        if _et_noinit:
+            gen._elem_types[node.name] = _et_noinit
         # `var x: list()` / `var x: dict()` / `var x: set()` -- a bare
         # call-shaped annotation with NO initializer (see _mojo_type's
         # matching "()"-suffix branch for the full story: this project's

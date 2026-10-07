@@ -5284,6 +5284,46 @@ def main():
 main()
 """, "3\ncde\nTrue\ncde\n3\n8\ncde\n")
 
+    # The same annotation→element-type rule on the THIRD path that can
+    # consume a binding statement: a bracketed declaration with NO
+    # initializer (`var s: List[String]`, real Mojo's "must assign before
+    # use" form, which this codegen deliberately does not auto-allocate --
+    # see the VarDecl path's own note) that a later statement then binds.
+    # That copy was a third hand-written twin of the same computation and
+    # had drifted: it tested `ctype == 'MojoList *'`, so a `Set[T]`
+    # declared the same way got no element type at all, where the other
+    # two paths answer for both kinds. It is now the shared helper
+    # (`_annotation_container_elem_type`, the function whose own docstring
+    # says it is the ONE place this rule lives), so all three cannot
+    # disagree again. Every value here is already right -- the set literal
+    # and the list literal each record their own element types on the way
+    # in -- so this pins the CONSOLIDATION, not a fix, and the set is the
+    # half the drift would have lost.
+    test_gimple_stdout("gimple_annotated_container_elem_type_noinit_decl", """\
+def main():
+    var s: List[String]
+    s = ["abc", "de"]
+    print(s[0])
+    print(len(s[0]))
+    for k in s:
+        print(k)
+        print(len(k))
+    var t: Set[String]
+    t = {"abc", "de"}
+    print(len(t))
+    for k in t:
+        print(k)
+        print(len(k))
+    var u: List[Int]
+    u = [7, 8]
+    print(u[0] + 1)
+    var d: Dict[String, Int]
+    d = {"a": 1}
+    print(d["a"] + 1)
+
+main()
+""", "abc\n3\nabc\n3\nde\n2\n2\nabc\n3\nde\n2\n8\n2\n")
+
     # A dynamically-set attribute whose value is a STRING, read back through
     # every spelling. The struct declared no such field, so the field-scan
     # pass minted a phantom one — and minted it `int`, because that is the
