@@ -5,13 +5,57 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the REFUSAL branch has LANDED (2026-10-05) and the RELOCATION has
-not.** Every silent wrong answer in this class is gone — a comprehension whose
-element opens a container is now refused on both architectures with a sentence
-that names the element, the reservation and the iteration count — and the
-relocation steps below are unchanged and still the fix. Read "What landed" first;
-the two paragraphs under it say what the refusal costs, which is one row of the
-sibling document's acceptance set and nothing else.
+**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
+BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
+element is a list / tuple / set / dict LITERAL with no nested container-building
+sub-expression is now materialised per iteration: the element's blob is copied
+into a slot of a `cap`-sized array indexed by the result count, so the aliasing
+is gone AND those programs are no longer refused —
+`[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
+the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
+is the shared predicate and each emitter's `_materialize_compr_element` is the
+copy (see "What landed 2026-10-06" below). What is STILL refused is every element
+whose per-iteration materialisation needs a RUNTIME blob base — a nested
+comprehension, a list of lists, a slice, a constructor call — which is the
+relocation the rest of this document describes, and it is unchanged. Read "What
+landed" first; the paragraphs under it price the refusal, which is now one shape
+(the nested reproducer) rather than the whole class.
+
+## What landed 2026-10-06: the flat-container element is per-iteration
+
+**The refusal was replaced by real per-iteration storage for the shapes a byte
+copy makes sound, on both backends.** `model.comprehension_element_is_flat_container`
+is the one predicate: the element is a list / tuple / set / dict literal and
+NOTHING inside it builds a second container (a nested literal, a comprehension, a
+slice or a call). Both emitters' `_materialize_compr_element` then reserve a
+`cap`-slot array beside the element's own scratch blob and, at the element site,
+`memcpy` the element's blob into slot `i`, where `i` is the result blob's count
+word — the number appended so far, so the append that follows stores the copy and
+not the scratch. The predicate is shared so the two architectures cannot disagree
+about which elements are representable; the message stays
+`model.comprehension_element_blob_refusal` for the shapes that are not.
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[y, y + 1] for y in [10, 20, 30]]`, `r[i][1]` | `11 21 31` | refused | **`11 21 31`** |
+| `[(y, y + 1) for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
+| `[{y, y + 1} for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | refused (runtime base) |
+| `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused (shallow copy) |
+| `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
+| `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
+
+**Why the shallow copy is sound exactly here, and only here.** The copy carries
+the element blob's WORDS; a nested container would be carried as its ADDRESS, so
+every iteration's outer container would point at one inner object — the same
+defect one level down. A NAME is deliberately not a container: `[a, b]` over two
+outer lists copies the outer list and shares `a`/`b`, which is what CPython does.
+That is why the predicate recurses rather than keying on the element's node type.
+
+**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): three
+build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because three
+copies of the last iteration and one element per iteration have the same count),
+the nested / dict-value / list-of-lists refusals, and the one-iteration guard.
 
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
