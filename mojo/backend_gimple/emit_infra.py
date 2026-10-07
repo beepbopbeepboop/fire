@@ -5425,6 +5425,16 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     propagation each already does. A value with no callable return type is a
     no-op, so the common non-callable store costs two dict misses."""
     _rt = gen._callable_ret_types.get(value_text)
+    if _rt is None:
+        # A bound METHOD stored into a module global: its return type lives in
+        # `_bound_method_ret_types` (the per-function table), not
+        # `_callable_ret_types`. Both must survive the store into a global,
+        # because the call site is often a DIFFERENT function than the one
+        # that stored it (`f = None` ... `global f; f = m.truthy` ... `f()`),
+        # where the per-function table has already been reset and the
+        # whole-program one is the only source. Without this the call fell to
+        # the `int64_t` box and a `-> bool` method printed `1` for `True`.
+        _rt = gen._bound_method_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
     _drt = gen._container_callable_ret.get(value_text)
