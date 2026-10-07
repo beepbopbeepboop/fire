@@ -1169,9 +1169,22 @@ def ladder_script():
     (measured: `.tmp` transcripts behind the module's own first commit; with
     `omega` first the same theorem closes in 0.5 s).
     """
-    rungs = [r for r in CT.LADDER if r != "simp_all"] + \
-            [r for r in CT.LADDER if r == "simp_all"]
-    return "first\n" + "\n".join(f"    | {r}" for r in rungs)
+    # `CT.LADDER` is a tuple of `(NAME, SPELLING)` pairs, and this layer reads
+    # the NAME for the order and emits the SPELLING.  The rungs' simp sets are
+    # `formal/contracts.py`'s and are irrelevant here — every obligation is
+    # stated over `Int`, so `simp_all []` (the contracts module's bare
+    # `simp_all`) is what this layer has always emitted, and a rung whose
+    # spelling carries `{lemmas}`/`{extra}` is emitted with an empty list rather
+    # than naming UInt64 lemmas an `Int` goal cannot use.
+    ordered = [r for r in CT.LADDER if r[0] == "omega"] \
+        + [r for r in CT.LADDER if r[0] not in ("omega", "simp_all")] \
+        + [r for r in CT.LADDER if r[0] == "simp_all"]
+    lines = ["first"]
+    for _name, spelling in ordered:
+        text = spelling.replace("[{lemmas}, {extra}]", "[]") \
+                       .replace("[{lemmas}]", "[]")
+        lines.append(f"    | ({text})" if "<;>" in text else f"    | {text}")
+    return "\n".join(lines)
 
 
 def precondition_text(rel, cand):
