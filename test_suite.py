@@ -1232,6 +1232,12 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
+                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
+                     # parity differential was registered in a bucket and given
+                     # a count-checked `expect=`; a census that did not state
+                     # the new marker would fail on the registry's own state,
+                     # which is this check working.
+                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
