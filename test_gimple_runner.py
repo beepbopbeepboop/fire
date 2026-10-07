@@ -10040,6 +10040,25 @@ def main():
     show(data=[1.5, 2.5])
 """, "1.5\n2.5\n")
 
+    # The KEYWORD IDENTIFIER spelling of the same call: a kwarg names the
+    # parameter directly, so `show(data=fs)` is the same call as `show(fs)`
+    # and the caller's own scanned local map already says `fs` is a list of
+    # doubles. Every other case in this group passes something the walk can
+    # read on the spot; this is the only one whose argument is a bare
+    # identifier reached by NAME. Fed only from a literal, the walk left the
+    # callee's loop target untyped and every element read back through
+    # `mojo_list_get_int`, so a list of doubles printed their raw IEEE-754
+    # bit patterns with exit 0.
+    test_gimple_stdout("gimple_for_over_list_param_from_keyword_identifier", """\
+def show(data):
+    for r in data:
+        print(r)
+
+def main():
+    fs = [1.5, 2.5]
+    show(data=fs)
+""", "1.5\n2.5\n")
+
     # A string list is the case where the int64_t default is most visibly
     # wrong: a `char *` element read as an int64_t prints its address.
     test_gimple_stdout("gimple_for_over_list_param_from_str_literal", """\
