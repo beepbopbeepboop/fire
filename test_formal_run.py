@@ -24057,6 +24057,47 @@ def check_blob_growth_guards(verbose=False):
     return passed, failures
 
 
+def check_comptime_nofold_is_rerun(verbose=False):
+    """A recorded `nofold` in the comptime CAS is RE-RUN, not replayed.
+
+    The build behind `formal/comptime_runner.py` can fail transiently — the
+    shared dylib path is briefly unsigned while another worker's `codesign`
+    runs on it — and caching that as "does not fold" turns a momentary race
+    into a permanent refusal no edit can clear, which is the caching rule
+    `CLAUDE.md` states for recorded failures. The probe publishes a `nofold`
+    for a foldable callee's own key and requires the runner to call `_run`
+    anyway and return its value; without the fix the published red is replayed
+    and the hook answers None.
+
+    `_run` is stubbed so the probe costs one CAS publish and no build, and the
+    callee name is unique so `_BUILT`'s process-wide memo cannot answer first.
+    """
+    from formal import comptime_runner as cr
+    import cas
+    src = "def ct_nofold_probe_9f3a(x):\n    return x * 2\n"
+    key = cr._key(src, "ct_nofold_probe_9f3a", (21,))
+    cas.publish(key, ".comptime", b"nofold\n")
+    calls = []
+    real_run = cr._run
+
+    def fake_run(source, fn_name, args):
+        calls.append((fn_name, args))
+        return 42
+
+    cr._run = fake_run
+    try:
+        got = cr.make_call_hook(src)("ct_nofold_probe_9f3a", [21])
+    finally:
+        cr._run = real_run
+    ok = got == 42 and calls == [("ct_nofold_probe_9f3a", (21,))]
+    if verbose and ok:
+        print("  PASS  comptime-nofold-rerun")
+    if ok:
+        return 1, []
+    return 0, [f"a recorded nofold was replayed instead of re-run: got "
+               f"{got!r}, _run calls {calls!r}"]
+
+
 # residual the guard cannot reach, and the number that decided
 # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
 #
@@ -24729,6 +24770,13 @@ def main():
           f"FAIL={len(bg_failures)}")
     passed += bg_passed
     failed += len(bg_failures)
+    nf_passed, nf_failures = check_comptime_nofold_is_rerun(args.verbose)
+    for detail in nf_failures:
+        print(f"  FAIL  comptime-nofold-rerun: {detail}")
+    print(f"formal run: comptime-nofold-rerun PASS={nf_passed} "
+          f"FAIL={len(nf_failures)}")
+    passed += nf_passed
+    failed += len(nf_failures)
     tg_passed, tg_failures = check_type_value_tag_generator(args.verbose)
     for detail in tg_failures:
         print(f"  FAIL  tag-generator: {detail}")

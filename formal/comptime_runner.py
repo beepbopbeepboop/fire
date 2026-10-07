@@ -54,7 +54,18 @@ def _key(source: str, fn_name: str, args: tuple) -> str:
 def _build_and_call(source: str, fn_name: str, args: tuple):
     """Compile `fn_name` from `source` as a formal dylib and call it.
 
-    Returns the function's result, or None if this path cannot produce one."""
+    Returns the function's result, or None if this path cannot produce one.
+
+    **A recorded `nofold` is RE-RUN, and only a folded `ok` is replayed.** The
+    build behind this can fail for a reason that is not a fact about the source
+    — the shared dylib path is briefly unsigned while `codesign` runs on another
+    worker's build, and a `FormalBuildError` from that window is transient — so
+    caching it as "does not fold" turns a momentary race into a permanent
+    refusal that no edit can clear. That is the caching rule `CLAUDE.md` states
+    for recorded failures, applied here: a red is a claim about a RUN, not about
+    the tree. A genuinely unfoldable callee therefore pays a re-build per use,
+    which is the correct trade against a poisoned verdict.
+    """
     from formal.build import compile_formal_dylib
     ckey = _key(source, fn_name, args)
     cached = cas.lookup(ckey, ".comptime")
@@ -63,13 +74,13 @@ def _build_and_call(source: str, fn_name: str, args: tuple):
             with open(cached, "rb") as f:
                 payload = f.read().decode()
             ok, _, val = payload.partition("\n")
-            return int(val) if ok == "ok" else None
+            if ok == "ok":
+                return int(val)
         except (OSError, ValueError):
             pass
     result = _run(source, fn_name, args)
-    cas.publish(ckey, ".comptime",
-                (f"ok\n{result}" if result is not None
-                 else "nofold\n").encode())
+    if result is not None:
+        cas.publish(ckey, ".comptime", f"ok\n{result}".encode())
     return result
 
 
