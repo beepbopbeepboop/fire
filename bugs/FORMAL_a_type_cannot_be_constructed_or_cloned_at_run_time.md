@@ -1,8 +1,14 @@
 # FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time: `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table
 
-**Status: item 1 of the next steps LANDED (2026-10-02, `work/formal8-1`) and its
-measurement is refreshed; items 2 and 3 are each one capability with an owner
-named, and neither is a light change.** Deliberately filed as ONE capability
+**Status: item 1 LANDED (2026-10-02, `work/formal8-1`) and item 2 is ALREADY
+IMPLEMENTED — measured on both architectures 2026-10-05 and now pinned by a row
+that did not exist; item 3 (the reflection table) is still open and is the whole
+of what is left.** Item 2 was recorded here for six weeks as "one capability with
+an owner named, and neither is a light change", and that was wrong: the copy
+construction lowering is in both emitters and answers CPython. What was MISSING
+was not the lowering but the test that could tell a copy from an alias — see
+"What item 2 turned out to be" below, which is also why the doc stays: item 3 is
+open and a doc for an open bug is the right thing to have. Deliberately filed as ONE capability
 rather than two modules. Split out of
 `FORMAL_glob_copy_collections_io_not_attempted.md` — a measurement record of
 `glob`, `copy`, `collections` and `io`, DELETED 2026-10-03 by `work/formal10-3`
@@ -62,6 +68,47 @@ a module nobody has got round to. Writing either module alone would produce a
 function whose name promises a graph walk and delivers an identity, which is the
 outcome `FORMAL_hashlib_sha3_and_blake2s_absent` filed a decision rather
 than shipping one.
+
+## What item 2 turned out to be (measured 2026-10-05, both architectures)
+
+**The copy construction lowers, and answers CPython.** `S(x)` for a
+compile-time-known struct is a fresh block and a field-by-field copy, in BOTH
+backends:
+
+```mojo
+struct Wide:
+    var a: Int
+    var b: Int
+    var c: Int
+
+def copyit(t):
+    var u = Wide(t)
+    u.a = u.a + 100
+    u.c = 0 - 1
+    return u
+```
+
+prints `105 6 -1|5 6 7` — the copy is mutated and **the original is untouched**,
+which is the representation rule ("a clone of a framed struct is a fresh frame")
+and the only thing that separates a copy from an alias. A `List[Int]` FIELD
+copies as a reference and reads back correctly (`Box(a).xs[1]` is `2`).
+
+**What was actually missing is the ROW that tells a copy from an alias.**
+`test_formal_returned_frame.py`'s
+`positional_init_and_copy_constructions_all_land_in_the_block` exercises
+`Wide(t)` and checks that the fields LAND — and an ALIASED copy prints the same
+numbers, so that row would pass either way. It is now joined by
+`a_copy_construction_is_a_fresh_block_not_an_alias`, which mutates the copy and
+reads the ORIGINAL; an alias answers `105 6 -1|105 6 -1` and fails. That row is
+the coverage this doc's item 2 was really asking for, and it is why the item is
+closed rather than re-specified.
+
+**The oracle had to be written out field by field, and that is a fact about the
+two languages rather than a shortcut.** Python has no `S(x)` copy construction —
+`Wide(t)` there calls `__init__(self, t)` and raises `TypeError` — so the CPython
+twin states the same program with three assignments. `copy.copy(t)` is the real
+Python spelling and needs a host module this path does not have, which is §1's
+gap and a backend refusal rather than something a backend row can lean on.
 
 ## What is missing, stated as one thing
 
@@ -151,24 +198,22 @@ reachable by the same step.
    `namedtuple` and what this target offers instead — it converts zero files and
    it is the difference between a reader who knows what to do and a reader who
    files the next bug doc about `collections`.
-2. **`copy.copy` for a compile-time-known struct**: a fresh block and a
-   field-by-field copy, with references copied as references. That is a
-   LOWERING in both backends plus a representation rule ("a clone of a framed
-   struct is a fresh frame"), and it is the same feature
-   `formal/model.py`'s copy-construction refusal already names as missing —
-   "`S(x)` — a copy construction — has no lowering, for any struct and any
-   argument. A fresh block plus an `n`-slot copy is a feature in both backends."
-   **Do these as one change**: they are one feature with two call sites, and
-   filing them separately is how they get half-built.
-   **Not done here, and the reason is a CLAIM rather than a difficulty**: this was
-   `FORMAL_frame_receiver_handoff.md` §4c's write set, and that lane held it —
-   the doc was DELETED 2026-10-03 by `work/formal10-3` with its eight waves
-   landed, its copy-construction gap handed to this document and its string
-   sub-family to the docs that still hold it. The advice sentence above is what a
-   caller gets in the meantime, and it names the honest limit ("a copy chosen at
-   run time, over a graph whose shape the build cannot see, has no answer here").
-   `mojo/middle/offload.py` and `tools/extract_family.py` are additional
-   `import copy` sites the original five did not list.
+2. ~~**`copy.copy` for a compile-time-known struct**~~ **DONE, and it was
+   already done — measured on both architectures 2026-10-05, and the missing
+   half was the test, not the lowering.** See "What item 2 turned out to be"
+   above: `S(x)` is a fresh block and a field-by-field copy in BOTH backends,
+   answers CPython, copies a `List[Int]` field as a reference, and is now pinned
+   by `test_formal_returned_frame.py`'s
+   `a_copy_construction_is_a_fresh_block_not_an_alias` — the row that can tell a
+   copy from an alias, which the row it joins could not. `formal/model.py`'s
+   `_frame_source_structs` is the recognition it rests on and its own docstring
+   already states the refusal that keeps an unrecognised frame from being copied
+   as eight bytes of unrelated memory.
+   **What is still NOT answered here, and is the reason this doc exists**:
+   `import copy` itself is a HOST module (`formal/hostmods/` has no
+   `copy.mojo`, and cannot: `deepcopy` walks an arbitrary object graph), so a
+   caller that writes `copy.copy(node)` still stops at the import. That is §1's
+   advice sentence doing its job, not a gap in the copy construction.
 3. **The reflection table** — a runtime-readable type descriptor and
    construction from it — which is what `namedtuple` at run time and
    `deepcopy` over an arbitrary graph both need, and which is the actual root

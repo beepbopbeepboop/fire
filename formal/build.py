@@ -13258,19 +13258,45 @@ def _lower_builtin_extremum(functions: list, module_names) -> int:
     `for i in range(max(rank - 2, 0))`, and a name beside a number is what a
     clamp is spelled as.
 
-    **AND THE MODULE BODY IS NOT REWRITTEN, which is a measured wrong answer rather
-    than a caution.** `TOP = max(3, 9)` at file level became a `TernaryExpr` in a
-    module-level STORE, and a store of one is not lowered: measured on this tree,
-    `TOP = 9 if 1 else 3` — no `max` anywhere, the source's own conditional
-    expression — answers **0 on arm64 and 0 on x86-64** where CPython answers 9.
-    So the module body's store path drops a `TernaryExpr` to zero rather than
-    refusing it, and a rewrite that reached it would have turned a refusal into a
-    wrong number on both architectures at once. `M.module_body_functions` is the
-    one reader of "this wrapper is a module's top level", and the rewrite asks it
-    rather than matching `MODULE_BODY_NAME` — a library is compiled from SEVERAL
-    sources and each may have a body, so a name match would find one of N. The
-    underlying store bug is filed
-    (`bugs/FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`).
+    **AND THE MODULE BODY IS NOT REWRITTEN, which is a measured wrong answer
+    rather than a caution — and whose REASON was measured again on 2026-10-05,
+    because the sentence this paragraph used to carry was FALSE about the
+    source.** It said a module-level store of a `TernaryExpr` "drops the word to
+    zero rather than refusing it", on the strength of `TOP = 9 if 1 else 3`
+    answering 0. Measured on this tree with the store read back from a FUNCTION
+    (`def show(): return TOP; print(show())`), so the answer cannot depend on
+    which function the image chose as its entry, the store is CORRECT: 9 for
+    `9 if 1 else 3` and 3 for `9 if 0 else 3`, on both architectures, agreeing
+    with CPython. Nothing is dropped.
+
+    **What the 0 actually was is the ENTRY POINT.** `collect_module_symbols`
+    runs at 17105 and this rewrite at 17291, so the module-level table is
+    already built when this pass makes a `TernaryExpr` out of a `max`; a name the
+    table could not fold is `rebound`, `module_body`'s `_is_folded_constant`
+    therefore KEEPS its store as a top-level statement, and a non-empty module
+    body is the image's entry (`entry_function` rule 1) — so `main` is displaced
+    and a program written as `def main(): return TOP` answers the body's own
+    trailing `return 0`. Measured with this fence removed, both architectures:
+
+        TOP = max(3, 9)      ->  0   (the constant is 9)
+        TOP = 3 + 9          -> 12   (it folds, so `main` is the entry)
+        TOP = 9 if 1 else 3  ->  9   (it folds since `fold_module_select_expr`)
+
+    So the fence still prevents a wrong answer, and it is still the right
+    control to use — but what it prevents is the rewrite reaching a store whose
+    value the table has ALREADY been asked about and could not decide, not a
+    store that cannot hold a `TernaryExpr`. The fix for the class itself is in
+    the folder (`model.fold_module_select_expr`, which decides these values);
+    what is left for `max` at module level is only the ORDERING — this pass runs
+    after the table, so a `TernaryExpr` it invents is invisible to it. Moving
+    this pass above `collect_module_symbols` would close that, and is not worth
+    doing for a population this tree's own sources do not contain (six files,
+    measured, and none of them an extremum at module level).
+
+    `M.module_body_functions` is the one reader of "this wrapper is a module's
+    top level", and the rewrite asks it rather than matching
+    `MODULE_BODY_NAME` — a library is compiled from SEVERAL sources and each may
+    have a body, so a name match would find one of N.
 
     **Two or more POSITIONAL arguments and no keyword**, which is the rest of
     the shape question. One argument is `max(xs)` — a fold over a run-time

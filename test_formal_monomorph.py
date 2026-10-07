@@ -1675,6 +1675,65 @@ def main():
     print(a.size())
 """
 
+# The CLASS-ATTRIBUTE read, which is the same subject one position over and was
+# refused for a different reason: `TypeDict.length` is a `MemberExpr` on the
+# TEMPLATE's own name, so the demand walk — which reads CALL SITES — never saw
+# it, and the read found the bare template where `Self.values` names a parameter
+# nothing has supplied.
+#
+# The CPython twin is written as a CLASS ATTRIBUTE because that is what the
+# source spells, and the point of the comparison is that both sides agree on 4
+# and 9 for the two programs. It is not `len()` over a list in the consumer:
+# that would be a different program, which is how this subject was misdiagnosed
+# once already (see the test below).
+CLASSCATTR_LIB = """\
+struct TypeDict[T: AnyType, values: List[T]]:
+    comptime length = len(Self.values)
+    var n: Int
+
+    def get(self) -> Int:
+        return self.n
+"""
+
+CLASSCATTR_PROG = """\
+from sizelib import TypeDict
+
+def main():
+    var d = TypeDict[Int, [1, 2, 3, 4]]()
+    print(TypeDict.length)
+    print(d.get())
+"""
+
+CLASSCATTR_CPYTHON = """\
+class TypeDict:
+    length = len([1, 2, 3, 4])
+    def __init__(self):
+        self.n = 0
+    def get(self):
+        return self.n
+
+def main():
+    d = TypeDict()
+    print(TypeDict.length)
+    print(d.get())
+"""
+
+# The AMBIGUOUS half, and the row that makes the fix a decision rather than an
+# accident: two instantiations of ONE template, and the read names neither. The
+# read spells no type arguments, so "the instantiation it means" is the one the
+# consumer demanded — and a consumer that demands two has two. Answering with
+# either would print a plausible number (4 or 1), which is the failure this
+# module treats as its worst.
+CLASSCATTR_TWO_PROG = """\
+from sizelib import TypeDict
+
+def main():
+    var a = TypeDict[Int, [1, 2, 3, 4]]()
+    var b = TypeDict[Int, [9]]()
+    print(TypeDict.length)
+    return 0
+"""
+
 
 def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
     """`len(Self.values)` in a generic STRUCT builds, runs, and answers CPython.
@@ -1706,6 +1765,63 @@ def test_a_struct_templates_body_is_not_the_body_that_runs(tmpdir):
         check(got == "4\n1\n",
               f"[{arch}] printed {got!r} for two instantiations of one template "
               f"whose bracket value parameter is [1, 2, 3, 4] and then [9]")
+
+
+def test_a_class_attribute_read_names_the_instantiation(tmpdir):
+    """`TypeDict.length` builds, runs, and answers CPython on BOTH backends.
+
+    The third spelling of the same subject as the row above, and the one that
+    was refused by a DIFFERENT pass for a different reason: `TypeDict.length` is
+    a `MemberExpr` on the template's own name, so `all_instantiation_calls` —
+    which reads CALL SITES — never saw it. The instantiated declaration was
+    already published and borrowed (the program also writes
+    `TypeDict[Int, [1, 2, 3, 4]]()`, which is a call site), so the read found
+    the BARE template and hit
+    `model.comptime_class_attribute_parameter_refusal` — "\u2018`TypeDict.length`
+    reads a `comptime` class attribute \u2026 and what it reads is \u2018values\u2019,
+    a PARAMETER of TypeDict\u2019" — for a program whose value the build had
+    already computed as 4.
+
+    The fix is one shape in the SAME traversal that rewrites the constructor, so
+    a rewritten read cannot name a declaration nothing published: the table is
+    `demap` inverted into `monomorph.unique_reads`, which is the reason a
+    reader and a constructor cannot drift apart. Both values are printed, so a
+    rewrite that mangled the constructor's name but not the read's would show.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_classattr", CLASSCATTR_LIB,
+                            CLASSCATTR_PROG, CLASSCATTR_CPYTHON,
+                            libname="sizelib.mojo")
+        check(got == "4\n0\n",
+              f"[{arch}] printed {got!r} for a class-attribute read of a "
+              f"`comptime` attribute whose value is len([1, 2, 3, 4])")
+
+
+def test_a_class_attribute_read_of_two_instantiations_is_refused(tmpdir):
+    """Two instantiations of one template: the read names NEITHER, and says so.
+
+    The row that makes the row above a decision rather than an accident. The
+    read spells no type arguments, so which instantiation it means is not
+    written at the read site — it is the one the consumer demanded, and this
+    consumer demands two. `unique_reads` therefore omits the base and the read
+    keeps the refusal that is true of it.
+
+    **Asserted on the MESSAGE rather than on a number, and that is the point:**
+    a rewrite that resolved the ambiguity would print 4, which is a plausible
+    answer and the reason this needs a needle. The needle is
+    `comptime_class_attribute_parameter_refusal`'s own, and `values` appears in
+    it because naming the PARAMETER is what makes the sentence actionable.
+    """
+    for arch in ARCHES:
+        text = run_pair_case(tmpdir, arch, "mm_classattr_two", CLASSCATTR_LIB,
+                             CLASSCATTR_TWO_PROG, "", expect_ok=False,
+                             libname="sizelib.mojo")
+        for needle in ("reads a `comptime` class attribute of TypeDict",
+                       "'values', a",
+                       "PARAMETER of TypeDict"):
+            check(needle in text,
+                  f"[{arch}] the ambiguous class-attribute read did not say "
+                  f"{needle!r}: {text.strip()[-400:]}")
 
 
 def test_the_same_read_works_in_one_file(tmpdir):
@@ -2595,6 +2711,10 @@ TESTS = [
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
+    ("a class-attribute read names the instantiation",
+     test_a_class_attribute_read_names_the_instantiation),
+    ("a class-attribute read of two instantiations is refused",
+     test_a_class_attribute_read_of_two_instantiations_is_refused),
     ("the same read works in one file",
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",
