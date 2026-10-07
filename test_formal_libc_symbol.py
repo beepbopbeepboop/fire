@@ -415,7 +415,7 @@ BINDING_EXPECTED = {
 # claim. `glob.mojo` calls `basename`/`dirname` without importing them, which is
 # what put them in the `retkind` census's unclassified list; which library
 # answers them is a whole-image fact, so it is read here out of the bind stream
-# rather than argued in a comment — see `HOSTMOD_NON_C_CALLEES`. libc's
+# rather than argued in a comment — see `NON_C_BARE_CALLEES`. libc's
 # `basename(3)`/`dirname(3)` are the wrong answer and a plausible one: both
 # names resolve in this very process (`ctypes.CDLL(None)`), so nothing about the
 # spelling separates them, and libc's `dirname` strips trailing slashes where
@@ -494,14 +494,14 @@ def group_binding(tmpdir, arch, verbose):
         if not any(n.startswith(prefix) for n in gnames):
             fails.append(f"the {arch} glob module binds no {prefix}_<hash> "
                          f"export, so `basename`/`dirname` in "
-                         f"HOSTMOD_NON_C_CALLEES is a claim about a binding "
+                         f"NON_C_BARE_CALLEES is a claim about a binding "
                          f"that is not there; it binds {sorted(gnames)}")
     for spelling in HOSTMOD_C_SPELLINGS:
         if spelling in gnames:
             fails.append(f"the {arch} glob module binds libc's `{spelling}`, "
                          f"which strips trailing slashes where CPython's "
                          f"`os.path.{spelling}` does not — and "
-                         f"`HOSTMOD_NON_C_CALLEES` says this call reaches "
+                         f"`NON_C_BARE_CALLEES` says this call reaches "
                          f"os.path's own")
     return fails
 
@@ -696,17 +696,6 @@ def group_stat(tmpdir, arch, verbose):
 # imported names — no longer finds it, and the anti-rot check below requires the
 # entry to go. `str_copy` is still bare there, and the two are called side by
 # side, which is what makes the pair worth naming.
-HOSTMOD_NON_C_CALLEES = {
-    "admitted": "`@admitted` is a contract decorator "
-                "(formal/admitted.py::ADMITTED_DECORATOR), not a call",
-    "basename": "`os.path`'s own, reached by `glob.mojo` with no import "
-                "statement — it binds `os_path_basename_<hash>` from the "
-                "os.path dylib, measured in the `binding` group",
-    "dirname": "`os.path`'s own, the same shape and the same measurement as "
-               "`basename`",
-    "str_copy": "`os._syscalls`' own byte copy, called from os/__init__.mojo "
-                "the same way",
-}
 
 
 def hostmod_bare_callees():
@@ -719,7 +708,7 @@ def hostmod_bare_callees():
     `os` API's, and the call in `_syscalls.mojo` is the C library's while the
     call in `os/__init__.mojo`'s callers is this project's. Which one a call
     site reaches is a whole-image fact the export tables answer, so a file-level
-    census has to report both and let `HOSTMOD_NON_C_CALLEES` say which are not
+    census has to report both and let `NON_C_BARE_CALLEES` say which are not
     C.
     """
     import fire_compiler as F
@@ -831,7 +820,8 @@ def group_builtin_abi(verbose):
 
 def group_retkind(verbose):
     """`bare_c_return_kind`: the prototype, the export exception, totality."""
-    from formal.model import (BARE_C_RETURN_KINDS, EXTERN_RETURN_VOID,
+    from formal.model import (BARE_C_RETURN_KINDS, NON_C_BARE_CALLEES,
+                              EXTERN_RETURN_VOID,
                               EXTERN_RETURN_WORD, bare_c_return_kind)
     fails = []
 
@@ -881,19 +871,19 @@ def group_retkind(verbose):
     census = hostmod_bare_callees()
     unknown = {n: fs for n, fs in census.items()
                if n not in BARE_C_RETURN_KINDS
-               and n not in HOSTMOD_NON_C_CALLEES}
+               and n not in NON_C_BARE_CALLEES}
     check(not unknown,
           f"all {len(census)} bare callees in formal/hostmods are either in "
-          "BARE_C_RETURN_KINDS or in HOSTMOD_NON_C_CALLEES"
+          "BARE_C_RETURN_KINDS or in NON_C_BARE_CALLEES"
           + ("" if not unknown else "; unclassified: "
              + ", ".join(f"{n} ({sorted(fs)[0]})"
                          for n, fs in sorted(unknown.items()))))
     # …and every name the exceptions claim IS a bare callee, so the exception
     # list cannot grow a name that was never there to excuse.
-    check(not (set(HOSTMOD_NON_C_CALLEES) - set(census)),
-          "every HOSTMOD_NON_C_CALLEES entry is a name the census found"
-          + ("" if set(HOSTMOD_NON_C_CALLEES) <= set(census) else
-             "; stale: " + ", ".join(sorted(set(HOSTMOD_NON_C_CALLEES)
+    check(not (set(NON_C_BARE_CALLEES) - set(census)),
+          "every NON_C_BARE_CALLEES entry is a name the census found"
+          + ("" if set(NON_C_BARE_CALLEES) <= set(census) else
+             "; stale: " + ", ".join(sorted(set(NON_C_BARE_CALLEES)
                                             - set(census)))))
 
     # TOTALITY, backward: a table entry is a claim about a real function, so ask
@@ -943,6 +933,11 @@ def main(n):
     printf("ns_pos=%d@@", clock_gettime_nsec_np(0) > 0)
     printf("ns_gt_2p31=%d@@", clock_gettime_nsec_np(0) > 2147483648)
     printf("len_ok=%d@@", strlen("abcd") == 4)
+    # strcasecmp is the row that was missing: it returns C int, so == -1 and
+    # < 0 must hold and == 4294967295 must not, on both architectures.
+    printf("sc_eq_m1=%d@@", strcasecmp("a", "b") == -1)
+    printf("sc_lt_0=%d@@", strcasecmp("a", "b") < 0)
+    printf("sc_ne_32=%d@@", strcasecmp("a", "b") != 4294967295)
     # …and the four the host-module census found UNCLASSIFIED until 2026-10-05,
     # measured the same way rather than declared. `kill_bad_eq_m1` is the row
     # that MATTERS: `kill` returns 0 or -1, -1 compared as a 64-bit word is the
@@ -987,6 +982,9 @@ RET_EXPECTED = {
     "ns_pos": "1",
     "ns_gt_2p31": "1",
     "len_ok": "1",
+    "sc_eq_m1": "1",
+    "sc_lt_0": "1",
+    "sc_ne_32": "1",
     # The four, established against this host's own C library through `ctypes`
     # in this process rather than stated: `getpid()` is a positive int,
     # `kill(getpid(), 0)` is 0, `kill(getpid(), 0x7FFFFFFF)` is -1 (measured:
