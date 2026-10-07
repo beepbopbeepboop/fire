@@ -53,9 +53,16 @@ WHAT IS NOT HERE, AND WHY
     `TYPE_CHECKING` as a subscript — TYPES. A type is not a value on this path
     and cannot be returned from a module function, let alone stored in a
     module-level name (`bugs/FORMAL_module_state_no_storage.md`).
-    `formal/elf.py` imports `Optional` and `type_system.py` imports six names,
-    and all seven uses are in annotations — which is why this module is one
-    function long and why those two files are unblocked by its EXISTENCE.
+    `formal/elf.py:25` imports `Optional` and `type_system.py:13` imports
+    `Optional, Dict, Set, Tuple, Any` — six imported names across the two
+    files, five of them distinct, and every one of the six appears in an
+    annotation (`formal/elf.py:194` puts `Optional` on a parameter that also
+    has a default), which is why this module is one function long and why
+    those two files are unblocked by its EXISTENCE. The counts are stated with
+    the file and line they are read from, because a count that is only in a
+    docstring is a count that rots: `test_formal_small_hosts.py` checks the two
+    SHAPES, which is the part that matters, and re-reading the two import
+    lines is a two-second check that keeps the sentence true.
   * the submodules `typing_extensions`, and the `collections.abc`-backed
     `io`, `re`, `os` protocol names — each is a module or a protocol class, and
     a protocol class is a type.
@@ -76,7 +83,7 @@ def TYPE_CHECKING() -> int:
     """`typing.TYPE_CHECKING`: 0, i.e. False.
 
     False at run time in CPython, and False here. Checked against CPython's
-    own `typing.TYPE_CHECKING` by `test_formal_typing.py`, which also pins
+    own `typing.TYPE_CHECKING` by `test_formal_small_hosts.py`, which also pins
     the two things this module's existence buys — a `from typing import
     Optional` in a DEFAULT, and one in an ANNOTATION — because those are the
     shapes `formal/elf.py` and `type_system.py` use and neither is exercised by

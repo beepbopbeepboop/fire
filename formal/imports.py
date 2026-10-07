@@ -484,9 +484,11 @@ HOST_MODELLED = frozenset((
     #     the finding: the formal backends ERASE ANNOTATIONS, so a
     #     `from typing import Optional` resolves as soon as the module EXISTS
     #     and `Optional` need not be in its export table, because nothing ever
-    #     reads the name. `formal/elf.py` and `type_system.py` put all seven of
-    #     their imported names in annotations or in a default, which is why the
-    #     module is one function long. `test_formal_small_hosts.py` pins that
+    #     reads the name. `formal/elf.py:25` imports `Optional` and
+    #     `type_system.py:13` imports `Optional, Dict, Set, Tuple, Any` — six
+    #     imported names across the two files, five distinct, every one of the
+    #     six in an annotation or a parameter default — which is why the module
+    #     is one function long. `test_formal_small_hosts.py` pins that
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
