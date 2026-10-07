@@ -392,16 +392,32 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     three, so a PROVED verdict told the reader a contract was closed with a
     tactic the proof never ran.  That is the failure this file exists to
     prevent, committed inside the module that exists to prevent it, which is
-    why it is a row rather than something to notice by reading."""
+    why it is a row rather than something to notice by reading.
+
+    The assertion is on the SPELLING, not the name, and it is stronger for it:
+    `simp_all_toNat` is spelled `simp_all [...] <;> omega`, and a rung whose
+    name appears in the script while a DIFFERENT tactic runs under it is the
+    same drift this row was written for, wearing the name as camouflage.  So
+    every rung's rendered spelling must occur exactly once, and the script must
+    not contain a tactic that no rung spells."""
     from formal import contracts as CT
     script = CT._ladder_script("h0, m_go, sKey")
-    check("the_script_mentions_every_rung",
-          all(r in script for r in CT.LADDER), f"{CT.LADDER} vs\n{script}")
-    for rung in CT.LADDER:
-        check(f"the_script_spellings_one_{rung}",
-              script.count(rung) == 1, script)
+    spellings = [spelling.format(lemmas="h0, m_go, sKey", extra=CT._EXTRA_SIMP)
+                 for _name, spelling in CT.LADDER]
+    check("the_script_spellings_every_rung",
+          all(sp in script for sp in spellings), f"{CT.LADDER} vs\n{script}")
+    for (name, _spelling), sp in zip(CT.LADDER, spellings):
+        check(f"the_script_spellings_one_{name}",
+              script.count(sp) == 1, script)
     check("the_script_names_no_unlisted_tactic",
           "bv_decide" not in script, script)
+    # A rung's NAME is what `Verdict.why` prints, so every name has to be one
+    # word a reader can be shown, and the list must not be empty or a single
+    # rung (`first` with one alternative is not a ladder).
+    names = [name for name, _ in CT.LADDER]
+    check("the_rungs_are_named_for_the_reader",
+          all(n and " " not in n for n in names) and len(names) >= 2,
+          f"{names}")
     src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
            "def cl(n):\n"
            "    if n < 0:\n        return 0\n"
@@ -411,11 +427,11 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     body = e.lean.split(":= by")[-1]
     check("the_EMITTED_theorem_uses_the_listed_rungs",
-          all(r in body for r in CT.LADDER), body)
+          all(sp in body for sp in spellings), body)
     check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
     v = CT.classify(e, lean_ok=True)
     check("the_PROVED_reason_names_the_rungs_that_ran",
-          all(r in v.why for r in CT.LADDER), v.why)
+          all(n in v.why for n in names), v.why)
 
 
 def _postcondition_shape(count):
@@ -924,10 +940,10 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
               "run with --lean only where one exists")
         return
     lib = os.path.join(HERE, "lib")
-    # `mini2` is the example the ladder REACHES and `wrong_clampv` the one it
-    # must refuse.  Both directions matter and one file cannot carry both: a
-    # theorem that closes proves the emitter writes a real proof, and one that
-    # does not prove it is not a `sorry` wearing a `theorem` header.
+    # `mini2` is the example the ladder reached before `simp_all_toNat` and
+    # `bounds_index` is the one it reaches only because of it -- so the pair
+    # says the new rung ADDED reach rather than replacing it.  And
+    # `wrong_clampv` is the one it must still refuse.
     #
     # `bounds_index.mojo` and `clamped.mojo` joined this list with the
     # `UInt64` order bridge (`formal/contracts.py::_ORDER_BRIDGE`) and the
@@ -937,6 +953,10 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # and `clamped` is THREE postconditions, which is the shape whose split was
     # mis-nested.  A ladder that lost either reads as UNKNOWN on a contract it
     # used to close, which is silent -- so both are named here.
+    #
+    # `work/formal52-docs` added a leading `simp_all_toNat` rung (the
+    # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
+    # a rung fails, so that rung can only ADD reach, and these two still close.
     #
     # `mini.mojo` and `abspos.mojo` are still NOT in this list because their
     # contracts are UNREACHED by the ladder and their verdict is UNKNOWN.  That

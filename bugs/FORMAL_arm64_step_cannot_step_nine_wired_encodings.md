@@ -2,6 +2,31 @@
 
 ## Status
 
+**RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
+claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
+produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
+its own document now:**
+
+| defect | document |
+|---|---|
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+
+Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
+written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
+which is the generalisable half: this file's §5 is right that "the gap is the
+model is silent", and the two new defects are the OTHER failure — the model is
+*loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
+see. Re-read §6 before using this file's tooling as a coverage claim.
+
+**The CMN one is this file's own doing**, and that is worth stating rather than
+burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so
+all three are one-line changes to an existing arm's shape"*, the arm that
+prescription produced took the entire `0xffe00000` class, and `Rd` is bits 4:0
+and is not in that mask. A one-line change to an existing arm's SHAPE is a
+statement about the instruction, and this one was a statement about one spelling
+of it.
+
 **`CMN` and `TST` are WIRED as of 2026-10-05, so this file's own reachability
 correction is now stale in the one direction that mattered.** `encode_cmn_xn_xm`
 and `encode_tst_xn_xm` are no longer in
