@@ -466,8 +466,8 @@ def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
                 for c in g.conditions or []:
                     walk_compr(c)
             walk_compr(expr.element)
-            if expr.key is not None:
-                walk_compr(expr.key)
+            if expr.value is not None:
+                walk_compr(expr.value)
             return
         if isinstance(expr, (str, int, float, bool)):
             return
@@ -574,8 +574,8 @@ def used_narrow_types(fn: F.FunctionDef) -> set:
             walk_expr(e.obj)
         elif isinstance(e, F.Comprehension):
             walk_expr(e.element)
-            if e.key is not None:
-                walk_expr(e.key)
+            if e.value is not None:
+                walk_expr(e.value)
             for g in e.generators or []:
                 walk_expr(g.iterable)
                 for c in g.conditions or []:

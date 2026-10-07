@@ -654,8 +654,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     scan_expr(gen.iterable)
                     for cond in (gen.conditions or []):
                         scan_expr(cond)
-                if expr.key is not None:
-                    scan_expr(expr.key)
+                if expr.value is not None:
+                    scan_expr(expr.value)
                 scan_expr(expr.element)
             elif isinstance(expr, gimple_ctypes.SubscriptExpr):
                 # Check if the base (after unwrapping nested subscripts) is the parameter

@@ -6217,8 +6217,8 @@ class Interpreter:
         discipline the docstring below explains.
 
         For a dict comprehension, fire_compiler.py's parser stores the KEY
-        expression in `.element` and the VALUE expression in `.key` (yes,
-        swapped from what the names suggest — see _parse_dict_or_set).
+        expression in `.element` and the VALUE expression in `.value`
+        (see _parse_dict_or_set).
 
         ONE `return`, through a single `result` variable, deliberately —
         the same shape (and for the same reason) as `MojoFunction._invoke`
@@ -6238,7 +6238,7 @@ class Interpreter:
                 if not generators:
                     if expr.kind == 'dict':
                         k = self.eval_expr(expr.element)
-                        v = self.eval_expr(expr.key)
+                        v = self.eval_expr(expr.value)
                         results.append((k, v))
                     else:
                         results.append(self.eval_expr(expr.element))

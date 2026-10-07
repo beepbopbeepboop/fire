@@ -289,8 +289,8 @@ def _lbn_compr_targets(bound: set, expr) -> None:
             for c in g.conditions or []:
                 _lbn_compr_targets(bound, c)
         _lbn_compr_targets(bound, expr.element)
-        if expr.key is not None:
-            _lbn_compr_targets(bound, expr.key)
+        if expr.value is not None:
+            _lbn_compr_targets(bound, expr.value)
         return
     if isinstance(expr, (str, int, float, bool)):
         return

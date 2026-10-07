@@ -1796,7 +1796,7 @@ def _used_idents_node(node) -> set[str]:
     if isinstance(node, Comprehension):
         r3 = _used_idents_node(node.element)
         if getattr(node, 'key', None) is not None:
-            r3 |= _used_idents_node(node.key)
+            r3 |= _used_idents_node(node.value)
         gen_vars: set = set()
         for g in node.generators:
             r3 |= _used_idents_node(g.iterable)

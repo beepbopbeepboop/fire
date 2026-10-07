@@ -3006,6 +3006,7 @@ BARE_C_RETURN_KINDS = {
     "snprintf": (32, True),
     "stat": (32, True),
     "strcmp": (32, True),
+    "strcasecmp": (32, True),
     "strncmp": (32, True),
     "sysctlbyname": (32, True),
     "truncate": (32, True),
@@ -3072,6 +3073,119 @@ BARE_C_RETURN_KINDS = {
 }
 
 
+def _libsystem_handle():
+    """A dlopen-able handle on the C library this image's load command names.
+
+    `None` until the first call, then either a handle or `False` for "this host
+    will not let us ask". Deliberately NOT `ctypes.CDLL(None)`: the global
+    namespace contains everything the *building* process has loaded, so it
+    answers questions about the compiler rather than about the target.
+    Measured on this machine, same symbol, two handles:
+
+        CDLL('/usr/lib/libSystem.B.dylib')   sqlite3_open -> False   correct
+        CDLL(None)                           sqlite3_open -> True    WRONG
+
+    because this python has libsqlite3 in its own global namespace. A build-time
+    audit that inherits that would wave through exactly the symbols it exists to
+    catch. `tools/formal_sweep.py` reached the same conclusion about its own
+    earlier probe, and for the same reason, its own comment is explicit that the
+    global namespace "is a false PASS".
+    """
+    global _LIBSYSTEM_HANDLE
+    if _LIBSYSTEM_HANDLE is None:
+        _LIBSYSTEM_HANDLE = False
+        try:
+            import ctypes
+            import platform
+            if platform.system() == "Darwin":
+                from formal.macho_linker import LIBSYSTEM_PATH
+                name = LIBSYSTEM_PATH.decode().rstrip("\0")
+            else:
+                from formal.elf import DEFAULT_LIBC
+                name = DEFAULT_LIBC
+            _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
+        except Exception:
+            _LIBSYSTEM_HANDLE = False
+    return _LIBSYSTEM_HANDLE
+
+
+_LIBSYSTEM_HANDLE = None
+
+# The 19 names this function used to hardcode, kept ONLY as the fallback for a
+# host that will not let us dlopen its C library. They are a guess at names
+# rather than a check of anything, which is the whole reason the real table
+# exists; on such a host this is no worse than the behaviour being replaced.
+_LIBSYSTEM_LEGACY = frozenset((
+    "printf", "puts", "putchar", "malloc", "calloc", "realloc", "free",
+    "memcpy", "memset", "strlen", "strcmp", "strncmp", "abort", "exit",
+    "atoi", "qsort", "fmod", "pow", "sqrt",
+))
+
+# memo: bare symbol -> bool
+_LIBSYSTEM_MEMO = {}
+
+
+def _is_libsystem(sym: str) -> bool:
+    """True for a symbol the C library this image links actually provides.
+
+    The externs a library legitimately sends outward are the C library's own
+    (`printf`, `malloc`, …), and those are declared by the libSystem load
+    command the image already carries. Everything else has to come from a
+    dependency's export table.
+
+    This used to be a 19-name literal, which was a guess at names rather than a
+    check of anything, and it was wrong in the direction that hides defects: a
+    formal program calling `stat`, `clock_gettime`, `regcomp` or `arc4random_buf`
+    — all of which libSystem genuinely provides, and all of which are the whole
+    reason a module like `os` or `re` is in the *modelled* half of
+    `formal/imports.py`'s host split — was reported as binding a symbol nothing
+    provides. Now the answer comes from dlsym against the real library.
+
+    The name asked about is `model.libc_source_name`'s, not the symbol's own
+    spelling, and the difference is a whole architecture's worth: a
+    `readdir$INODE64` in the symbol list is the 64-bit-inode `readdir(3)` (see
+    `model.target_libc_symbol`), and the dlsym here runs in THIS python3, so it
+    can only answer for the host — where that spelling may not exist at all. On
+    an arm64 host asking about `readdir$INODE64` would report an x86-64 image's
+    correct binding as a symbol nothing provides, which is a build refused over
+    a name that is right.
+
+    Memoised per symbol: this runs once per extern per build, and a dlsym per
+    extern would be a needless syscall storm in a large program.
+    """
+    bare = libc_source_name(sym) if isinstance(sym, str) else sym
+    if not bare:
+        return False
+    hit = _LIBSYSTEM_MEMO.get(bare)
+    if hit is not None:
+        return hit
+    handle = _libsystem_handle()
+    if handle is False:
+        answer = bare in _LIBSYSTEM_LEGACY
+    else:
+        try:
+            answer = hasattr(handle, bare)
+        except Exception:
+            answer = bare in _LIBSYSTEM_LEGACY
+    _LIBSYSTEM_MEMO[bare] = answer
+    return answer
+
+
+# Bare callees this tree spells that are NOT C library entry points (the
+# test that censuses them imports this set). An exact list rather than a
+# filter, so a new name has to be classified rather than quietly skipped.
+NON_C_BARE_CALLEES = {
+    "admitted": "`@admitted` is a contract decorator "
+                "(formal/admitted.py::ADMITTED_DECORATOR), not a call",
+    "basename": "`os.path`'s own, reached by `glob.mojo` with no import "
+                "statement — it binds `os_path_basename_<hash>` from the "
+                "os.path dylib, measured in the `binding` group",
+    "dirname": "`os.path`'s own, the same shape and the same measurement as "
+               "`basename`",
+    "str_copy": "`os._syscalls`' own byte copy, called from os/__init__.mojo "
+                "the same way",
+}
+
 def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
                        forwarded: dict, aliases: dict, dylib_syms: dict):
     """What a BARE call's C prototype says about the return register, or None.
@@ -3095,7 +3209,25 @@ def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
     if dylib_callee_export(by_name, by_module, forwarded, aliases,
                            callee) is not None:
         return None
-    return BARE_C_RETURN_KINDS.get(callee)
+    kind = BARE_C_RETURN_KINDS.get(callee)
+    if kind is not None:
+        return kind
+    if callee in NON_C_BARE_CALLEES:
+        return None
+    if _is_libsystem(callee):
+        raise CodegenError(
+            f"bare call to `{callee}`: it is a symbol the linked C library "
+            f"provides, but it has no row in BARE_C_RETURN_KINDS, so its "
+            f"return register would arrive UNSIGNED and be handed on as a "
+            f"word — a C `int` return that was never sign-extended, which is "
+            f"a silent wrong value (and a wrong `a < 0`) on both "
+            f"architectures. Add a row naming its C prototype "
+            f"((32, True) for a C `int` return, EXTERN_RETURN_WORD for a "
+            f"64-bit integer/size/pointer return, EXTERN_RETURN_VOID for "
+            f"nothing), or, if this name is this project's own, spell the "
+            f"import so the dylib export test resolves it rather than "
+            f"reaching this line bare.")
+    return None
 
 
 def is_external_call_template(e) -> bool:
@@ -24405,14 +24537,11 @@ class ValueKinds:
             # scopes` below); the loss was here, on the way out.
             scopes = self.comprehension_generator_scopes(e)
             if e.kind == "dict":
-                # `e.element` is the dict comprehension's VALUE (`e.key` is the
-                # key), so this is the same arm as the `DictExpr` above and not
+                # `e.element` is the dict comprehension's KEY (`e.value` is the
+                # value), so this is the same arm as the `DictExpr` above and not
                 # the key/value unification a LIST comprehension does below.
                 return list_kind(self.kind_of(e.element, scopes))
-            ek = self.kind_of(e.element, scopes)
-            if e.key is not None:
-                ek = _unify(ek, self.kind_of(e.key, scopes))
-            return list_kind(ek)
+            return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
