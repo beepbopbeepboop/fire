@@ -15,10 +15,14 @@ monotonic in those rungs.
 
 **Status 2026-10-05 (`work/formal52-docs`): the same `Fin`-versus-`Nat` half is
 FIXED (`f21e44cf`), and the ladder is
-no longer limited to ground goals. One of the four rows it could not close now
-closes; the other three fail on a MISSING LIBRARY LEMMA, which is a different
-limit and is named in §6. §4's prescribed fix is REFUTED and is not what
-landed — read §5 before implementing anything from it.**
+no longer limited to ground goals. Of the four rows §3 lists as UNREACHED, TWO
+now close — `bounds_index` AND `clamped`, which the `work/formal40-4` status
+above already recorded — and the other two, `mini` and `abspos`, fail on a
+MISSING LIBRARY LEMMA that is named in §6. (This line said "one of the four …
+the other three" until 2026-10-07; the "three" was stale, and §1's table and §6
+below are corrected to the measured state, re-run on this tree through the real
+generator and `formal/lean.py::run_lean`. §4's prescribed fix is REFUTED and is
+not what landed — read §5 before implementing anything from it.)**
 
 ## 1. What I ran and what I saw
 
@@ -57,13 +61,16 @@ table's movement:**
 | `mini2.mojo` | `@requires(a <= b) @ensures(result <= b)` | **exit 0** | **exit 0** |
 | `wrong_clampv.mojo` | three clauses, one false | exit 1, names the theorem | exit 1, names the theorem |
 | `bounds_index.mojo` | `@requires(i >= 0) @requires(i < n) @ensures(result <= n)` | exit 1 — UNREACHED | **exit 0** |
-| `mini.mojo` | `@ensures(result <= max(n, 3))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
-| `clamped.mojo` | `@ensures(result >= lo)`, `(<= hi)`, `(== clamp(...))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
-| `abspos.mojo` | `@ensures(result == abs(n))` | exit 1 — UNREACHED | exit 1 — a MISSING order direction, §6 |
+| `clamped.mojo` | `@ensures(result >= lo)`, `(<= hi)`, `(== clamp(...))` | exit 1 — UNREACHED | **exit 0** — re-measured 2026-10-07; the conjunction split plus the order bridge close it, and `test_formal_contracts.py --lean` pins it |
+| `mini.mojo` | `@ensures(result <= max(n, 3))` | exit 1 — UNREACHED | exit 1 — a MISSING xor-cancellation lemma, §6 |
+| `abspos.mojo` | `@ensures(result == abs(n))` | exit 1 — UNREACHED | exit 1 — the same MISSING xor-cancellation lemma, §6 |
 
-**exit 0: 1/6 → 2/6**, measured the way §1 describes (the REAL `_gen_go` model
-and the REAL `contract_theorems` theorem, through `formal/lean.py::run_lean`,
-`test_formal_contracts.py --lean` → **308 passed, 0 failed**).
+**exit 0: 1/6 → 3/6**, measured the way §1 describes (the REAL `_gen_go` model
+and the REAL `contract_theorems` theorem, through `formal/lean.py::run_lean`) and
+pinned by `test_formal_contracts.py --lean`, whose case list names `mini2`,
+`bounds_index`, `clamped` as closing and `mini`, `abspos`, `wrong_clampv` as not
+closing — so a rung that reached either of the last two turns that test red
+rather than silently widening the claim.
 
 `wrong_clampv` staying at exit 1 is the load-bearing half of that number: the
 new rung reasons about the goal and CANNOT close a false one. That was also
@@ -216,10 +223,12 @@ Two things changed shape to carry it, and both are in `f21e44cf`:
 
 ## 6. What is still open, and it is a DIFFERENT limit
 
-`mini`, `clamped` and `abspos` are still exit 1, still honestly reported
-UNKNOWN with `Verdict.ok` False. **They no longer fail for §3's reason.** The
-`Fin`-versus-`Nat` gap is closed for all of them; what is left is a missing
-library lemma, and it is small and specific.
+`mini` and `abspos` are still exit 1, still honestly reported
+UNKNOWN with `Verdict.ok` False. (`clamped` was in this sentence until
+2026-10-07; it closes, and it closes because the conjunction split and the order
+bridge both landed — see §1. This section is about the two that remain.)
+**They no longer fail for §3's reason.** The `Fin`-versus-`Nat` gap is closed
+for both; what is left is a missing library lemma, and it is small and specific.
 
 `mini.mojo`'s emitted goal, after the split, is:
 
@@ -230,45 +239,45 @@ h0 : n ^^^ 0x8000000000000000 < 3 ^^^ 0x8000000000000000
 
 The hypothesis is `n < 3` and the goal's own test is `n > 3` — the same fact
 **in the other direction**, which is why the `if` cannot be decided and the
-goal never becomes a `Nat` inequality for `omega` to use. So `mini` needs the
-library's `UInt64` order facts in **all three directions**, and
-`lib/ProofLib.lean:1351-1355` has two of the three
-(`u64_lt_iff_false_of_le`, `u64_le_iff_false_of_lt`). The missing one is:
+goal never becomes a `Nat` inequality for `omega` to use. `abspos`'s is the same
+shape over an **equality**: its `case neg` ends at
 
-```lean
-theorem u64_lt_iff_false_of_lt {a b : UInt64} (h : a < b) : (b < a) ↔ False :=
-  ⟨fun hba => (UInt64.not_lt.mpr (Nat.le_of_lt h)) hba, False.elim⟩
+```
+h0 : n.toNat ^^^ 0x8000000000000000 ≤ 0x8000000000000000
+⊢ -n = n
 ```
 
-**Measured, and it is necessary but NOT sufficient**, which is worth stating
-because "add the third direction" looks like the whole answer and is not:
+where the hypotheses force `n.toNat ^^^ 2^63 = 2^63`, i.e. `n = 0` (or `n = 2^63`
+on the other branch), and the goal is a `UInt64` equality the ladder's bridges
+do not touch.
 
-* with it, `mini`'s `case pos` reduces to `⊢ n ^^^ K ≤ 3 ^^^ K` — which is
-  `h0` read as `≤`, and `simp` cannot do that rewrite on `Fin` because the two
-  orders are different *relations* even though they agree on this pair;
-* `mini`'s `case neg` still leaves `⊢ 3 ^^^ K ≤ (if 3 ^^^ K < n ^^^ K then n
-  else 3) ^^^ K`, i.e. the `if` is STILL undecided, because deciding
-  `¬(3 < n)` from `¬(n < 3)` is the same missing direction again, now with
-  negation on both sides.
+**Re-measured on this tree (2026-10-07), and the shape of the gap is now
+pinned rather than described.** The ladder already carries every order fact §3
+named — `u64_lt_iff_false_of_le`, `u64_le_iff_false_of_lt`, and the two
+`UInt64.*_iff_toNat_*` bridges plus `Nat.le_of_lt` — and `mini`/`abspos` still do
+not close, which says the missing thing is **not** another order direction. Three
+facts, each checked with `#check` against the real `ProofLib`:
 
-So the honest next step is **two** library facts, not one, and the second is
-where the real work is:
+* `UInt64.toNat_inj : a.toNat = b.toNat ↔ a = b` **EXISTS**, so an equality
+  *can* be turned into a `Nat` equality. But as a simp lemma it is oriented the
+  wrong way (it rewrites `a.toNat = b.toNat` *to* `a = b`), so the ladder's
+  `simp_all` never uses it, and `abspos`'s goal is never put in `toNat` form.
+* `UInt64.toNat_xor : (a ^^^ b).toNat = a.toNat ^^^ b.toNat` exists, but
+  **there is no cancellation lemma for `Nat.xor`** — `Nat.xor_eq_zero`,
+  `Nat.xor_right_eq_zero`, `Nat.xor_right_inj` are all absent (measured). So even
+  with the goal in `toNat` form, `n.toNat ^^^ 2^63 = 2^63` does not yield
+  `n.toNat = 0` for `omega`, and that step is the whole of both goals: it is the
+  fact that flipping the top bit twice is the identity, stated as a cancellation
+  rather than as an involution.
+* `UInt64.ge_iff_toNat_ge` and `UInt64.eq_iff_toNat_eq` are still absent, but
+  `UInt64.toNat_inj` is the equality bridge they would have been.
 
-1. `u64_lt_iff_false_of_lt` above (the `Fin` order's own `not_lt` direction);
-2. a form the simplifier can use with a **negated** hypothesis — `simp` will
-   not use a `↔ False` theorem to discharge `¬(b < a)` when what is in context
-   is `¬(a < b)`, so this needs `Nat.lt_of_not_ge`/`Fin` trichotomy in the
-   other direction, or the ladder needs a rung that runs the toNat rewrite and
-   then lets `omega` do the trichotomy (which is what the landed
-   `simp_all_toNat` rung does, and it is why `bounds_index` closed and `mini`
-   did not).
-
-Then `abspos` needs the same pair PLUS its goal is an **equality** over `Fin`,
-and this toolchain has no `UInt64.eq_iff_toNat_eq` (measured: both
-`UInt64.ge_iff_toNat_ge` and `UInt64.eq_iff_toNat_eq` are absent), so its goal
-needs `congrArg UInt64.toNat` or a library lemma. `clamped` is the doc's own
-estimate: three postconditions over a two-way selection on two parameters, so
-`2^2 · 3` branches.
+So the honest next step is **one library fact**, and it is the xor cancellation
+above (equivalently a `sKey`-involution lemma, which is what §4 prescribed for a
+different reason and got wrong in the *statement*), plus a ladder rung that
+applies it to an equality — the bridges the ladder has are all about `<`/`≤`, and
+`abspos`'s goal is neither. `mini` needs the same fact on the branch where the
+`if`'s two directions must be reconciled.
 
 **All of that is a `lib/ProofLib.lean` change plus a rebuild, so it is not this
 worker's to land.** The blocker is memory alone and it is now measured here
