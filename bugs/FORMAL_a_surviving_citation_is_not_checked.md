@@ -13,8 +13,20 @@ cleanest possible demonstration of the gap: the mechanism that catches a stale
 citation caught the document explaining stale citations.
 
 **Status: the FOUR ROWS are fixed (2026-10-05, `work/formal40-2`) and the
-baseline is back to its original floor. The instrument gap is NOT closed and is
-the whole of what is left.**
+baseline is back to its original floor. The instrument gap is CLOSED
+(2026-10-06, this tree): `tools/dangling_doc_refs.py --stale-verdicts` walks every
+live per-stem verdict-table row in `bugs/`, re-runs the stem through
+`test_formal.py`, and reports rows whose claim disagrees — reporting-only,
+never a non-zero exit, and deliberately not in `--ratchet` (a branch that
+fixes one stem must be able to move its row without a ledger refusing to).
+The negative control is `test_dangling_doc_refs.py` (a deliberately wrong row
+MUST be flagged, a matching row must not, a "was `…`" history row must be
+skipped). First measured use, against a synthetic fixture: it correctly
+reported the stale row, and a real run of `test_formal.py -j 1 sgt8` shows
+`sgt8` currently FAILS on master for a different, interprocedural reason —
+so the four-row fix recorded below is still awaiting the `work/formal40-2`
+merge, which is itself the demonstration that the check re-measures rather
+than re-reads prose.**
 
 Every claim that held one of the three files had been **released** by the time
 this was picked up — `python3 tools/control.py claims` lists no worker for any
