@@ -10,6 +10,39 @@ reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
 class: 3 failures before, 3 failures after, identical messages.**
 
+**Re-measured 2026-10-07 (`work/formal115-docs`), and the SYMPTOM has moved
+again — the class no longer fails its assertions, it cannot even build its
+fixture.** `_symbolic_divisor_proof` calls `compile_formal(..., prove=True,
+check=False)`, and on this tree that RAISES `FormalBuildError` in `setUpClass`:
+
+    universal theorem: 2 calls this walk cannot follow
+    (0x10000041c -> 0x100000890 (opaque), 0x100000518 -> 0x100000884 (opaque)),
+    every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge them.
+
+The two calls are the compiler's, not the program's: `0x10000041c` is the
+prologue's stack-floor `getrlimit` and `0x100000518` is the divide-by-zero arm's
+`fflush`. **So the class's `setUpClass` errors on any tree with
+`lib/ProofLib.olean` and skips on one without**, which is why a doc-truth class
+about a residual goal has not reported a goal in two rounds: it is not measuring
+the wrong thing, it is not getting a proof file to measure at all.
+
+This section's own diagnosis (§"Why it went blind") is the upstream half and it
+is right: `_unfollowable_calls` does not subtract `info["compiler_traps"]`. What
+is new, and what blocks the fix this doc wants, is that (a) arm64's
+`compiler_traps` list is EMPTY because the emitter recording was dropped by a
+merge (`8df5b273`, see
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_getrlimit_is_a_program_call.md`),
+so there is nothing to subtract, and (b) subtracting it is measured NOT to reach
+the div0 residual: with the recording restored and the traps filtered out of
+`_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion contract: the
+call in block 2 has to be below the source condition's negation`), not to the
+`⊢ 1 = …` goal. The next step this doc states (option 1, "subtract
+`compiler_traps` in `_unfollowable_calls`") is therefore necessary and not
+sufficient; the walk needs a terminal for a call it cannot follow, which is
+`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`.
+Option 2 (a literal-divisor fixture) remains the only cheap way to make the class
+GREEN, and it changes what the class measures.
+
 ## What I ran
 
     $ python3 tools/memslot.py --gb 8 --label t -- \
