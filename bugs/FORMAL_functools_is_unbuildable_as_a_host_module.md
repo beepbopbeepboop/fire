@@ -9,7 +9,7 @@ brief was to add `functools` to `formal/hostmods/` alongside `collections`,
 **Status 2026-10-05 (`work/formal23-4`): `reduce` is WRITABLE and the module is
 blocked by ONE thing that is not a `functools` capability at all — the module was
 WRITTEN, measured on both architectures, and not landed, and the reason is
-`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`.** Read
+the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`).** Read
 this before §"The exact next step", which is now two steps out of date.
 
     $ printf 'import functools\n\ndef add2(a, b):\n    return a + b\n\ndef main() -> int:\n    printf("r=%d\\n", functools.reduce(add2, [1, 2, 3, 4], 0))\n    return 0\n' > .tmp/ft/fmod.mojo
@@ -42,7 +42,7 @@ a `functools` and that program builds and runs and does not memoise. The bare
 attribute read `functools.lru_cache` refuses correctly and well (naming the
 module, the missing name and what the module publishes), so the refusal
 machinery is there — it is only the DECORATOR spelling that never asks. That is
-`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`, and its
+the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`), and its
 §"The exact next step" also carries the row that constrains the fix
 (`test_dataclasses_formal.py`'s `@dataclasses.dataclass` passes for the SAME
 reason and must keep passing).
@@ -327,7 +327,7 @@ now the whole of the remaining work, is step 2 — with the addition the 2026-10
 Status measured: step 2 alone is not enough, because "a decorator is parsed and
 never applied" is only safe while every decorator a caller can spell is ALREADY a
 refusal. The next step is therefore
-`bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`'s, whose
+the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`)'s, whose
 §"The exact next step" carries the check and the pinned row that constrains it.
 
 Not a module. The root capability is **a first-class function value**, and it is
@@ -352,7 +352,7 @@ Order of work, if it is picked up:
    decorator whose name does not resolve must be REFUSED rather than ignored, or
    publishing any `functools` name turns `@functools.lru_cache` into a program
    that runs and skips the memoisation it asked for** — that is
-   `bugs/FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells.md`, and it
+   the dropped-decorator check fixed in commit 1add9cc6 (`check_decorators_spell_a_member_of_an_imported_module`), and it
    is the actual gate on step 3.
 3. `functools` then follows, and `test_formal_core_hostmods.py` grows a group
    for it the way `enum` and `contextlib` grew theirs — with `reduce` removed

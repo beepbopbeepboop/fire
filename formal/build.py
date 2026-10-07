@@ -2995,6 +2995,13 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
     check_dataclass_constructs(stmts, functions, by_name)
+    # …and the SAME export-map question, asked of a decorator spelling — the
+    # name a decorator writes is never resolved by anything downstream
+    # (`FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells`), so
+    # this is the only place it can be asked.
+    check_decorators_spell_a_member_of_an_imported_module(
+        stmts, functions, imported_module_names=imported_module_names,
+        link_line=link_line)
     # …and AFTER the dataclass check, which is the ordering this block's own
     # rule asks for: a `@dataclass class C(A)` is refused for the dataclass
     # reason whatever its layout is, so the layout refusal must not pre-empt it
@@ -8141,6 +8148,81 @@ def check_frame_field_blob_premises(structs) -> None:
         writes = M.struct_field_container_writes(st)
         if writes:
             raise CodegenError(M.frame_field_premise_refusal(st))
+
+
+def check_decorators_spell_a_member_of_an_imported_module(
+        stmts, functions, imported_module_names=None, link_line=None) -> None:
+    """A decorator that is a MEMBER READ of an imported module must name a
+    name that module PUBLISHES.
+
+    The same question the value-position member read asks
+    (`check_module_symbols`'s `module_reads` arm), one statement later in
+    `_run_late_checks` — and for the measured reason that arm exists: neither
+    backend lowers `@x` at all (`FunctionDef.decorators` is parsed and never
+    emitted), so the name a decorator spells is never resolved by anything
+    downstream. The bare read `functools.lru_cache` is refused with the
+    module's export list; the identical spelling as a decorator built and ran
+    — which is `FORMAL_a_dropped_decorator_never_resolves_the_name_it_spells`.
+
+    NARROW on purpose, measured rather than tasted:
+
+      * DC's OWN decorators are exempt — `DC.is_dataclass_decorator` is the
+        SAME predicate the transform applies, so `@dataclass` and
+        `@dataclasses.dataclass` keep building exactly as they do today
+        (`test_dataclasses_formal.py`'s `dotted_dataclasses_decorator_spelling`
+        row).
+      * `COMPILE_TIME_DECORATOR_NAMES` are exempt — a lowering hint is not a
+        name the source expects to find on a module (`@staticmethod` is the
+        same spelling in both senses).
+      * bare decorator names are NOT asked: `@deco`, `@property`,
+        `@staticmethod` are names the image can place, and asking here would
+        pre-empt the name-placement question that owns them.
+      * a decorator whose root does not resolve to an imported module is not
+        asked: its spelling is an expression this path cannot place as a
+        value at all, and a module read the answer would never be true of.
+
+    `imported_module_names` / `link_line` are what `check_module_symbols`
+    took for its member arm, and the refusal is the SAME ONE
+    (`model.module_attribute_refusal`) with the SAME published lists, so a
+    decorator and a bare read cannot disagree about what the module says."""
+    imported = set(imported_module_names or ())
+    if not imported:
+        return
+    for owner in list(functions or []) + list(stmts or []):
+        decorators = getattr(owner, "decorators", None) or []
+        if not decorators:
+            continue
+        owner_name = getattr(owner, "name", "") or ""
+        for deco in decorators:
+            if DC.is_dataclass_decorator(deco):
+                continue
+            callee = deco.func if isinstance(deco, F.CallExpr) else deco
+            if isinstance(callee, str):
+                if "." not in callee:
+                    continue
+                root = callee.split(".", 1)[0]
+                leaf = callee.rsplit(".", 1)[-1]
+                spelling = callee
+            elif isinstance(callee, F.MemberExpr):
+                base = callee
+                while isinstance(base, F.MemberExpr):
+                    base = base.obj
+                if not isinstance(base, F.IdentExpr):
+                    continue
+                root = base.name
+                leaf = callee.member
+                spelling = M.member_chain_text(callee)
+            else:
+                continue
+            if root not in imported:
+                continue
+            if leaf in M.COMPILE_TIME_DECORATOR_NAMES:
+                continue
+            raise CodegenError(M.module_attribute_refusal(
+                spelling, root, leaf, owner_name,
+                _module_published_names(root, link_line),
+                _module_published_variables(root, link_line),
+                _module_published_containers(root, link_line)))
 
 
 def check_inherited_layouts(structs) -> None:
