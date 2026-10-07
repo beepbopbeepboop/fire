@@ -1386,6 +1386,29 @@ def _struct_name_of(ctype: str) -> str:
         s = s[6:]
     return s.replace(' *', '').strip()
 
+def is_bound_method_value(gen, node, obj_ctype: str) -> bool:
+    """True when `node` is `recv.method` read as a VALUE (not called).
+
+    `obj_ctype` is the C type of `node.obj` and is passed in because the two
+    callers look a bare name up in different tables -- the closure pre-pass in
+    the function's own locals, the Phase 1.7 global scan in the module globals.
+    The answer is the one `_lower_MemberExpr` gives when it routes to
+    `_lower_bound_method_value`: the receiver is a user struct, the method is
+    registered for it, and the name is not a data field. `_quick_type` cannot
+    answer this -- for such a node it reports the method's RETURN type (the
+    estimate `_infer_return_type` wants for a property-shaped read), so a
+    caller that stores the value in a slot typed by `_quick_type` declares a
+    `MojoBoundMethod *` as the method's `int`/`_Bool` result and truncates the
+    pointer."""
+    if not (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)):
+        return False
+    if not obj_ctype.endswith(' *'):
+        return False
+    owner = _struct_name_of(obj_ctype)
+    return (f"{owner}_{node.member}" in gen.func_return_types
+            and node.member not in gen.struct_field_types.get(owner, {}))
+
+
 def struct_elem_repr_shim(gen, ctype: str) -> str:
     """`_mojo_elem_repr_<Struct>` for a CONTAINER-ELEMENT ctype, else ''.
 
@@ -1405,8 +1428,12 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
     emits a shim for every struct in it — so the two cannot disagree.
 
     A unit compiled with `emit_struct_defs=False` emits no reflection preamble
-    at all, so it must not name a shim either: that is why the answer is ''
-    there, checked BEFORE anything is recorded.
+    of its own, so it must not name a shim either -- unless its output is
+    spliced into a root unit that does (`_elem_repr_hosted`, set by
+    `emit_resolve` for an inline import, which also shares the root's
+    `_elem_repr_needed` so the request reaches the preamble that emits it).
+    That is why the answer is '' for any other unit, checked BEFORE anything is
+    recorded.
 
     Returns the shim's NAME, which the caller hands to the runtime as a
     function pointer; the runtime calls it with the slot's word. Empty string
@@ -1418,7 +1445,8 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
     first needed it: the two containers ask the same question about the same
     ctype, and a copy per container is how the two drifted before.
     """
-    if not getattr(gen, 'emit_struct_defs', False):
+    if not (getattr(gen, 'emit_struct_defs', False)
+            or getattr(gen, '_elem_repr_hosted', False)):
         return ''
     if not ctype or not ctype.endswith(' *'):
         return ''

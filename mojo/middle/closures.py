@@ -28,7 +28,7 @@ from fire_compiler import (
     for_target_names,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
-from mojo.middle.exprtypes import _walk_ast, _struct_name_of
+from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
 from mojo.middle.solvers import ClosureInfo
 
 
@@ -235,12 +235,10 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     # field disagree with the body's local (hard C error).
                     if (isinstance(bstmt.value, MemberExpr)
                             and isinstance(bstmt.value.obj, IdentExpr)
-                            and ctx.var_types.get(bstmt.value.obj.name, '').endswith(' *')):
-                        _bmv_owner = _struct_name_of(
-                            ctx.var_types[bstmt.value.obj.name])
-                        if (f"{_bmv_owner}_{bstmt.value.member}" in ctx.func_return_types
-                                and bstmt.value.member not in ctx.struct_field_types.get(_bmv_owner, {})):
-                            t = 'MojoBoundMethod *'
+                            and is_bound_method_value(
+                                ctx, bstmt.value,
+                                ctx.var_types.get(bstmt.value.obj.name, ''))):
+                        t = 'MojoBoundMethod *'
                     if t == 'void':
                         t = 'int64_t'
                     enriched_scope[name] = t

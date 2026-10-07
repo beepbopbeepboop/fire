@@ -10742,6 +10742,15 @@ def gen_module_impl(self, stmts):
             # single source of truth for these RHS types.
             qt3 = self._quick_type(_value)
             return qt3 if qt3 == 'char *' else 'int64_t'
+        elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
+                and gimple_exprtypes.is_bound_method_value(
+                    self, _value,
+                    self.var_types.get(_value.obj.name)
+                    or self._global_var_types.get(_value.obj.name, ''))):
+            # `f = m.method`: the value is the bound method itself. `_quick_type`
+            # answers with the method's RETURN type, which declared the slot
+            # `int` for a `-> bool` method and truncated the pointer.
+            return 'MojoBoundMethod *'
         else:
             qt = self._quick_type(_value) or 'int64_t'
             if qt.endswith(' *'):
@@ -12673,6 +12682,16 @@ def gen_module_impl(self, stmts):
                 global_decls.append(f"int64_t {gname};")
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
+        elif (isinstance(value, MemberExpr) and isinstance(value.obj, IdentExpr)
+                and gimple_exprtypes.is_bound_method_value(
+                    self, value, self._global_var_types.get(value.obj.name, ''))):
+            # `f = m.method` at module scope: the slot holds the bound method,
+            # not its result. The generic arm below asks `_quick_type`, which
+            # answers with the method's RETURN type, and declared the field
+            # `int` / `int64_t` -- truncating the pointer on the store.
+            global_decls.append(f"MojoBoundMethod * {gname};")
+            self._global_var_types[gname] = 'MojoBoundMethod *'
+            self._global_c_decl_types[gname] = 'MojoBoundMethod *'
         else:
             # A dispatch-table global assigned from a non-literal RHS
             # (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from

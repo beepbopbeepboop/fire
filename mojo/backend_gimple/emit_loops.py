@@ -1132,14 +1132,18 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
 
 
 #: The ABSENT fill each slot type selects, keyed by `TypeLattice.list_suffix`.
-#: `None` is the `double` arm's marker for "patched to `(double)0` below", which
-#: is the pre-existing spelling for it; the two integer-ish arms share the
-#: `(int64_t)0` the select is typed in, and a string slot's 0 is the NULL that
-#: `mojo_print` already renders as `None`. It is ONE table rather than three
-#: literals in three arms because a slot that the fill cannot reach uses it too
-#: (see `_gen_for_zip_longest`), and two copies of "what absent means here" is
-#: how the two would come to disagree.
-_ZIP_LONGEST_ABSENT = {'double': None, 'str': '(int64_t)0', 'int': '(int64_t)0'}
+#: Only a slot the fill can never be SELECTED into reads a `double` entry (see
+#: `_zip_longest_reaches` and `_gen_for_zip_longest`): its select arm still has
+#: to compile, and `(double)0` types the `double` arm. A `double` slot that CAN
+#: be padded is a refusal instead, because no double means `absent`. (This entry
+#: used to be `None`, "patched to `(double)0` below"; the patch was lost in a
+#: merge and the literal word `None` was emitted into the C.) The integer-ish
+#: arms share the `(int64_t)0` the select is typed in, and a string slot's 0 is
+#: the NULL that `mojo_print` already renders as `None`. It is ONE table rather
+#: than three literals in three arms because two copies of "what absent means
+#: here" is how the two would come to disagree.
+_ZIP_LONGEST_ABSENT = {'double': '(double)0', 'str': '(int64_t)0',
+                       'int': '(int64_t)0'}
 
 
 def _zip_longest_fill_refusal(fill_ctype: str, slot_domain: str):

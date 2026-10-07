@@ -2542,9 +2542,9 @@ print(k())
     #
     # Two branches named this same program — the rows below it and the
     # materialized-lambda env family — and only one name survived, because
-    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and
-    # `bugs/CODEGEN_bound_method_in_a_module_global_is_truncated_to_int.md` both
-    # CITE it by name. The name those docs carry is the one kept.
+    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and the
+    # bound-method-in-a-module-global report (since fixed) both CITED it by
+    # name. The name those docs carried is the one kept.
     test_gimple_matches_cpython("gimple_materialized_lambda_keeps_a_double_capture", """\
 def m():
     q = 2.5

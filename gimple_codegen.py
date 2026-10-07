@@ -2269,6 +2269,12 @@ class GimpleGen:
         # are lowered, read after, so it is complete by the time the preamble
         # is built.
         self._elem_repr_needed: set = set()
+        # True on a unit compiled with `emit_struct_defs=False` whose output is
+        # spliced into a root translation unit that DOES emit the reflection
+        # preamble, and which therefore shares that root's `_elem_repr_needed`
+        # (see emit_resolve). Without it such a unit would have to refuse to
+        # name a shim at all, which is the wrong answer for an inline import.
+        self._elem_repr_hosted: bool = False
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement

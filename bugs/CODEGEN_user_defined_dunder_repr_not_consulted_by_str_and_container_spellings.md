@@ -68,7 +68,7 @@ and this codegen does not, which is residual 2 below).
 
 Verified: `test_gimple.py` 385 passed / 0 failed; `test_gimple_runner.py` 409
 passed with the same four pre-existing failures as the unpatched tree
-(`bugs/MERGE_bugs4_gimplerunner_four_remaining.md`'s four).
+(the merge-interaction rows, since fixed).
 
 **The two rows still open, unchanged:**
 

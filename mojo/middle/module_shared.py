@@ -1660,6 +1660,16 @@ def bare_global_read_plan(self, name):
     # drops an imported module's `if __name__ == '__main__':`-guarded
     # top-level globals from this scan, so it stays this-module-scoped.
     _owned_here = name in self._own_global_var_types
+    # A name this module's OWN scan concluded a type for is this module's field,
+    # whichever module the shared, name-keyed `_global_to_module` happened to
+    # record first. That map is first-writer-wins across the whole closure, so
+    # with `from fgl_b import N` followed by this module's own `N = 'a-side'`
+    # it answers `fgl_b`, and the caller's last-resort "route to the owner" arm
+    # (taken whenever this module's triple is not registered yet -- it is
+    # registered AFTER the function bodies are emitted) read `b`'s field and
+    # printed 'b-side' where CPython prints 'a-side'.
+    if _owned_here:
+        _global_owner_mod = _this_mod
     # `_as_str(_global_owner_mod)`: the shared `_global_to_module` dict's
     # VALUE erases to a boxed pointer on the self-hosted compiled path, so
     # a bare `_global_owner_mod == _this_mod` compared a stale heap address

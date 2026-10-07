@@ -1228,7 +1228,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # states a removed marker fails on the registry's own state.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
-                     'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
@@ -1238,14 +1237,9 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
           f'(40 of its 46 items exit non-zero), and it is checked against the '
           f'per-item verdicts rather than against a summary line \u2014 see '
-          f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
-          f'4 of 380 \u2014 the '
-          f'compile-and-execute rows that are interactions between the ten '
-          f'branches rather than a bug in any one of them; the count was 4 '
-          f'until 2026-10-04, when the dict-value-kind row it named was '
-          f'fixed (the census had to '
-          f'learn it here too: adding a marker without adding its entry is '
-          f'exactly the drift this check names). `formal-x86-endtoend` is the only '
+          f'`observed_fanout_failures`. `gimplerunner` is NOT here and that is the '
+          f'mechanism working: its `expect=` was removed when the last of the '
+          f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
