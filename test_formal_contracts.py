@@ -527,7 +527,12 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
               f"the_bridge_names_{name}", str(CT._ORDER_BRIDGE))
     e, lines = _postcondition_shape(2)
     simp_lines = [ln for ln in lines if "simp_all" in ln]
-    check(len(simp_lines) == 2, "the_simp_rung_is_emitted_once_per_bullet",
+    # TWO bullets, and the ladder now has TWO `simp_all` rungs (`simp_all_toNat`
+    # from `work/formal52-docs` and the bare `simp_all`), so each bullet emits
+    # both: count the rungs from `LADDER` rather than hard-coding the old one.
+    simp_rungs = [s for _n, s in CT.LADDER if "simp_all" in s]
+    check(len(simp_lines) == 2 * len(simp_rungs),
+          "the_simp_rung_is_emitted_once_per_bullet",
           "\n".join(lines))
     for name in CT._ORDER_BRIDGE:
         check(all(name in ln for ln in simp_lines),
