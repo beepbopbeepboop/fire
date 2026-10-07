@@ -4708,14 +4708,17 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 67):
+    if idx in (0, 13, 14, 16, 17, 34, 35, 51, 67):
         return set()
-    # 66 is `ADDS Xd, Xn, Xm` / `CMN Xn, Xm` (the same word class, split by
-    # `Rd`): `Rd = 31` is the zero register and writes nothing, every other `Rd`
-    # writes it. The model and `_step_rhs` write it for the whole class, so this
-    # row has to as well, or a block's certificate under-approximates the
-    # registers it clobbered.
-    if idx == 66:
+    # 6 is `SUBS Xd, Xn, Xm` / `CMP Xn, Xm` (one class, split by `Rd`) and 66 is
+    # `ADDS Xd, Xn, Xm` / `CMN Xn, Xm`: in both, `Rd = 31` is the zero register
+    # and writes nothing, every other `Rd` writes it. `arm64_step` and
+    # `_step_rhs` write it for the whole class, so this table has to as well, or
+    # a block's certificate under-approximates the registers it clobbered — and
+    # the backend emits `SUBS/ADDS Xd, ...` with `Rd != 31` for the signed `-`/`+`
+    # overflow checks (`_emit_int_alu_checked`'s `encode_subs_xd_xn_xm(0,0,1)` /
+    # `encode_adds_xd_xn_xm(0,0,1)`), not only the CMP/CMN spellings.
+    if idx in (6, 66):
         return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
