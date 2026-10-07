@@ -288,6 +288,12 @@ for enc, name in ((X.encode_sete, "sete"), (X.encode_setne, "setne"),
                   (X.encode_seta, "seta"), (X.encode_setae, "setae")):
     check(f"{name} al", enc(R.RAX), "setcc", mod=3, rm=R.RAX.value)
     check(f"{name} r11b", enc(R.R11), "setcc", mod=3, rm=R.R11.value)
+# SPL/BPL/SIL/DIL carry a null REX (`40`) and must decode to the same register:
+# the byte is a different length from the `al`/`r11b` forms above, and a decoder
+# that did not step over the prefix would name the wrong instruction entirely.
+for enc, name in ((X.encode_sete, "sete"), (X.encode_setbe, "setbe")):
+    for reg in (R.RSP, R.RBP, R.RSI, R.RDI):
+        check(f"{name} {reg.name}", enc(reg), "setcc", mod=3, rm=reg.value)
 
 # branches and calls
 for cc in (0, 1, 2, 4, 5, 6, 7, 10):
@@ -316,6 +322,12 @@ for enc, name in ((X.encode_and_r8_r8, "and"), (X.encode_or_r8_r8, "or")):
           mod=3, reg=R.RCX.value, rm=R.RAX.value)
     check(f"{name} r11b,r10b", enc(R.R11, R.R10), f"alu_rr8:{name}",
           mod=3, reg=R.R10.value, rm=R.R11.value)
+    # The SPL/BPL/SIL/DIL operands, which force the null REX in whichever half
+    # they occupy; the decoder must step over it and name the same register.
+    check(f"{name} al,bpl", enc(R.RAX, R.RBP), f"alu_rr8:{name}",
+          mod=3, reg=R.RBP.value, rm=R.RAX.value)
+    check(f"{name} sil,al", enc(R.RSI, R.RAX), f"alu_rr8:{name}",
+          mod=3, reg=R.RAX.value, rm=R.RSI.value)
 
 # A back-to-back stream decodes as a sequence, not just instruction by
 # instruction: boundaries are the whole point of the decoder.

@@ -130,6 +130,16 @@ CASES = [
     ("setbe %al", lambda: X.encode_setbe(Reg.RAX)),
     ("seta %al", lambda: X.encode_seta(Reg.RAX)),
     ("setae %al", lambda: X.encode_setae(Reg.RAX)),
+    # SPL/BPL/SIL/DIL — the four 8-bit registers whose encoding needs a REX
+    # prefix to exist at all. Without one, ModRM `c4`-`c7` name AH/CH/DH/BH, so
+    # `_setcc`'s old `>= 8` test emitted `setbe %bpl` as `0f 96 c5` = `setbe
+    # %ch` and wrote the high byte of RCX instead of RBP. `as` is the reference
+    # and emits the null REX (`40`) for each, which is what makes this a
+    # byte-identity case rather than a REX-variant one.
+    ("sete %spl", lambda: X.encode_sete(Reg.RSP)),
+    ("setne %bpl", lambda: X.encode_setne(Reg.RBP)),
+    ("setg %sil", lambda: X.encode_setg(Reg.RSI)),
+    ("setbe %dil", lambda: X.encode_setbe(Reg.RDI)),
     # Branch displacements: the assembler spells a target as `.+D`, where the
     # encoded rel is D - insn_length. Each case below sits at offset 0 of its
     # own symbol, so `.+7` means "rel8 of 5" (2-byte jcc) and `.+0x1239`
@@ -199,6 +209,14 @@ CASES += [(f"movq %xmm{xmm}, %{dst.name.lower()}",
 CASES += [("andb %cl, %al", lambda: X.encode_and_r8_r8(R["RAX"], R["RCX"])),
           ("orb %cl, %al", lambda: X.encode_or_r8_r8(R["RAX"], R["RCX"])),
           ("andb %r9b, %r8b", lambda: X.encode_and_r8_r8(R["R8"], R["R9"])),
+          # The same two ops on SPL/BPL/SIL/DIL, in both operand positions: an
+          # 8-bit operand in either the `rm` or the `reg` field forces the null
+          # REX, and the old `>= 8` test emitted neither — `andb %bpl, %al` came
+          # out `20 e8` = `andb %ch, %al`.
+          ("andb %bpl, %al", lambda: X.encode_and_r8_r8(R["RAX"], R["RBP"])),
+          ("andb %al, %bpl", lambda: X.encode_and_r8_r8(R["RBP"], R["RAX"])),
+          ("orb %sil, %al", lambda: X.encode_or_r8_r8(R["RAX"], R["RSI"])),
+          ("orb %dil, %al", lambda: X.encode_or_r8_r8(R["RAX"], R["RDI"])),
           ("setnp %al", lambda: X.encode_setnp(R["RAX"])),
           ("setp %cl", lambda: X.encode_setp(R["RCX"]))]
 

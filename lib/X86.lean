@@ -385,6 +385,16 @@ def x86_msb (v : UInt64) : Bool := v ≥ 0x8000000000000000
 def x86_flags_logic (s : X86State) (res : UInt64) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := false, of_ := false }
 
+/-- The same flags for a BYTE-width logical result: `and`/`or` on `r/m8`, whose
+    result is one byte carried in a `UInt64`.  SF is the MSB of that BYTE — bit
+    7 — and not `x86_msb res`, which reads bit 63 and is therefore always false
+    for a value in 0..255.  A byte operation whose result has bit 7 set is the
+    case this exists for: `orb %bpl, %al` producing 0x80 sets SF on hardware,
+    and the model said clear until `formal/x86_64_model_fuzz.py`'s census put
+    the byte-wise forms in its pool. -/
+def x86_flags_logic8 (s : X86State) (res : UInt64) : X86State :=
+  { s with zf := res = 0, sf := res ≥ 0x80, cf := false, of_ := false }
+
 def x86_flags_add (s : X86State) (a b res : UInt64) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := res < a, of_ := x86_msb a == x86_msb b && (x86_msb res != x86_msb a) }
 
@@ -779,11 +789,27 @@ def x86_div128 (hi lo d : Nat) : Option (Nat × Nat) :=
     toward zero (Int.tdiv), not toward -inf as Int.ediv would.
 
     `none` on a zero divisor and on a quotient outside the signed 64-bit range,
-    for the reason `x86_div128` gives. -/
-def x86_idiv128 (hi lo d : Int) : Option (Int × Int) :=
+    for the reason `x86_div128` gives.
+
+    **`lo` is the UNSIGNED low word and `hi` the SIGNED high word**, and mixing
+    those up was a real defect: the reconstruction is
+    `n = hi * 2^64 + lo`, which is the two's-complement value of the RDX:RAX
+    pair only when `lo` is taken unsigned.  This took `lo : Int` and its caller
+    passed `x86_signed s.rax`, so a dividend whose LOW word had bit 63 set —
+    every dividend with a large-magnitude low half — was reconstructed as
+    `hi * 2^64 - |lo|` instead of `hi * 2^64 + |lo|`.  For `hi = -1` and a
+    negative low word the two differ by `2^64`, which moves the quotient by 1
+    and the remainder by the divisor: measured, `cqo ; idiv rcx` with
+    RAX = 0xc7fde805ec99108d and RCX = 0x73ab48767734d7c1 gave the model
+    quotient `-2` where the CPU and exact arithmetic both give `0` with the
+    dividend's own low word as the remainder.  The CPU was right and the model
+    was wrong; `formal/x86_64_model_fuzz.py` had mis-attributed the whole class
+    to this host and excluded it, and `divide_cases` could not see it because
+    the row's `n` was built with the same signed-low mistake. -/
+def x86_idiv128 (hi : Int) (lo : Nat) (d : Int) : Option (Int × Int) :=
   if d = 0 then none
   else
-    let n := hi * (x86_two64 : Int) + lo
+    let n := hi * (x86_two64 : Int) + (lo : Int)
     let q := Int.tdiv n d
     if x86_fits_int64 q then some (q, Int.tmod n d) else none
 
@@ -809,7 +835,9 @@ def x86_step_alu_r8 (s : X86State) (code : Nat → UInt8) (op : UInt8)
   let av := x86_get_reg s rm &&& 0xff
   let bv := x86_get_reg s reg &&& 0xff
   let res := if op = 0x20 then (av &&& bv) else (av ||| bv)
-  let f := x86_flags_logic s res
+  -- `x86_flags_logic8`, NOT `x86_flags_logic`: the result is a BYTE and its SF
+  -- is bit 7, while the 64-bit helper reads bit 63.  See the helper's docstring.
+  let f := x86_flags_logic8 s res
   some { x86_set_reg_narrow s rm 1 res with rip := endAddr, zf := f.zf, sf := f.sf, cf := f.cf, of_ := f.of_ }
 
 /-- REX-prefixed instruction forms. `op` is the byte after the prefix.
@@ -1122,7 +1150,7 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       -- non-negative dividend returned 0 rather than the negative quotient.
       -- Found by `formal/x86_64_model_fuzz.py --census`; `idiv_r64` was WRONG on
       -- two initial states out of three and the field that differed was RAX.
-      match x86_idiv128 (x86_signed s.rdx) (x86_signed s.rax) (x86_signed a) with
+      match x86_idiv128 (x86_signed s.rdx) s.rax.toNat (x86_signed a) with
       | some (q, rem) =>
         some { s with rax := x86_of_int q, rdx := x86_of_int rem, rip := rip + 3 }
       | none => none
@@ -1205,6 +1233,23 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
                with rip := endAddr }
       | none => none
     else none
+  else if op = 0xff && (code modrmPos).toNat >>> 6 = 3
+      && (code modrmPos).toNat >>> 3 &&& 7 = 2 then
+    -- `FF /2` with mod=11 — `call r64` WITH a REX prefix, i.e. a call through
+    -- R8-R15.  `x86_step_plain` has the arm for the low eight (`b0 = 0xff`),
+    -- this decoder did not, so `encode_call_r64(R.R11)` — the three bytes
+    -- `41 ff d3` — was a step the model REFUSED.  Found by
+    -- `formal/x86_64_model_coverage_test.py` once its generated file was made
+    -- to elaborate: `call R11` was one of five samples whose `x86_step` was
+    -- `none`, and the file had been failing to elaborate EVERY sample, so the
+    -- check reported "all steppable" without asking the model about any of
+    -- them.  Two bytes, not six: the target is the register's own contents, and
+    -- the pushed return address is `rip + 3` (REX + opcode + ModRM).
+    let target :=
+      (x86_get_reg s (((code modrmPos).toNat &&& 7) + x86_rex_b rex)).toNat
+    let rsp' := s.rsp - 8
+    let mem' := mem_write_bytes s.mem rsp'.toNat (UInt64.ofNat (rip + 3)) 8
+    some { s with rip := target, rsp := rsp', mem := mem' }
   else none
 
 /-! ### The `0x66` operand-size prefix
@@ -1551,16 +1596,16 @@ theorem x86_step_and_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some
       { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
         rip := m + 2,
-        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
-        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
-        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
-        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+        zf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
   -- No register parameters, for the reason `x86_step_call_r64` states: the
   -- conclusion quotes the model's own index expressions, so the two sides are
   -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
-        x86_rm_write, x86_flags_logic, x86_msb,
+        x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
         h_rip, h_b0, h_b1, h_mod]
 
 /-- `or r/m8, r8` (08 /r, mod=3): the `!=` half of `x86_step_and_r8_r8`'s
@@ -1574,16 +1619,16 @@ theorem x86_step_or_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some
       { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
         rip := m + 2,
-        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
-        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
-        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
-        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+        zf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
   -- No register parameters, for the reason `x86_step_call_r64` states: the
   -- conclusion quotes the model's own index expressions, so the two sides are
   -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
-        x86_rm_write, x86_flags_logic, x86_msb,
+        x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
         h_rip, h_b0, h_b1, h_mod]
 
 /-- `imul r64, r/m64, imm8` (REX.W 6B /r ib): the three-operand form with a

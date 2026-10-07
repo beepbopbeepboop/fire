@@ -67,66 +67,47 @@ stub into the region does not work.
     divisor is never zero; an overflow can still fault, and the harness's
     `SIGFPE` handler turns that into a `FAULT` row rather than a crash.
 
-## The verdict `HARNESS`, and why it is not "WRONG"
+## There is no `HARNESS` verdict any more, and why there used to be
 
-Two row classes are deliberately NOT model verdicts, because the disagreement is
-one **no x86-64 CPU can produce** and therefore says something about the oracle
-rather than about `lib/X86.lean`. Both were measured on this host under Rosetta 2
-(`arch -x86_64`) and are written up, with the exact programs, in
-`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
+Until 2026-10-07 this file carried a third verdict, `HARNESS`, for a
+disagreement "no x86-64 CPU can produce" — two classes, both measured on this
+host under Rosetta 2. **Both were wrong, and the defect was in this tree rather
+than in Rosetta**, which is why they are gone rather than kept:
 
-**`mul`/`imul`, and nothing but the flags.** `RAX` and `RDX` -- both compared,
-and neither clobbered by the terminator any more -- agree, so the 128-bit product
-is right, so SF and ZF *are* `msb(RAX)` and `RAX == 0` by definition. A
-difference in SF or ZF alone is therefore not a disagreement about the product.
-Measured: `mul rax` with RAX = 0xbf0cb98cd5588737 leaves RAX =
-0xbd35d1c6c33b0dd1 (bit 63 set) and SF = 0, at each of five different initial
-flag values.
+  * **`setcc` into RBP, RSI or RDI.** The bytes this file executed were
+    `0f 96 c5`/`c6`/`c7`, and the CPU is RIGHT about them: with no REX prefix
+    those ModRM bytes name AH/CH/DH/BH — the HIGH bytes of RAX/RCX/RDX/RBX — so
+    `0f 96 c5` is `setbe ch`, not `setbe bpl`. `formal/x86_64.py::_setcc` emitted
+    the prefix for r8-r15 and omitted it for SPL/BPL/SIL/DIL (values 4-7), whose
+    8-bit encodings exist only WITH a prefix present. The fix is
+    `_byte_rex_required`, and `encode_and_r8_r8`/`encode_or_r8_r8` had the same
+    omission for their 8-bit operands — which is why the byte-wise ALU rows were
+    "deliberately not in the pool"; they are in it now.
 
-**`setcc` into RBP, RSI or RDI.** The hardware leaves the named destination
-unchanged and changes one byte of a register the program never names, which
-`0f 94 c5` (`sete rbp`, BPL) cannot do in long mode. Measured here with one
-instruction per program and a fixed initial state, all fifteen `setbe`
-destinations side by side, and the class is ONE DECODE rather than three odd
-registers:
+  * **`mul`/`imul` flags.** `RAX`/`RDX` (the product) agree; only SF and ZF
+    differed. Both are UNDEFINED by Intel SDM Vol. 2 after `MUL`/`IMUL` ("The
+    SF, ZF, AF, and PF flags are undefined"), so the model's value and Rosetta's
+    are both legitimate and comparing them was the bug. That is
+    `undefined_flags`' job, not a verdict class: it now skips exactly SF and ZF
+    when the program's last flag-writing instruction is a multiply, and keeps
+    the CF/OF comparison the instruction DOES define.
 
-    0f 96 c0 (rax) .. 0f 96 c3 (rbx)   the destination register, correct
-    0f 96 c4 (rsp)                      correct
-    0f 96 c5 (rbp)                      rbp UNTOUCHED, byte 1 of RCX becomes 1
-    0f 96 c6 (rsi)                      rsi UNTOUCHED, byte 1 of RDX becomes 1
-    0f 96 c7 (rdi)                      rdi UNTOUCHED and nothing else written
-    41 0f 96 c0 .. c7 (r8..r15)         all correct
+Two further classes the doc named as hardware anomalies were measured and are
+also absent: the "`imul` returns the wrong product" row does not reproduce (512
+random two-operand `imul`s through this harness, 0 wrong products), and the
+"`idiv` is not a 128-bit divide" row was INVERTED — the CPU and exact arithmetic
+agree, and `lib/X86.lean`'s `x86_idiv128` was the wrong one, reconstructing the
+dividend from a SIGNED low word. `formal/x86_64_model_coverage_test.py`'s divide
+table is the regression for it.
 
-so it is the three ModRM bytes `c5`, `c6`, `c7` — `rm` = `rbp`/`rsi`/`rdi`, which
-are the three `rm` values that take **no SIB byte**. `rm` = `rsp` (`c4`) is the
-one that does, and it is correct; every destination needing a REX prefix is
-correct. That is a statement about the decoder and not about three registers,
-and it is why exactly three of the sixteen show up.
+The harness's own entry path is exonerated, by measurement rather than by
+argument (`ENTRY_PROBE_WHY`, and `--entry-probe`): five runs of this module's
+generators on this host (Apple silicon, `arch -x86_64`), 740 programs, 14
+faulted, **0 disagreeing words**.
 
-**The harness's own entry path is exonerated, by measurement rather than by
-argument** (`ENTRY_PROBE_WHY`, and `--entry-probe`). The entry stub installs the
-register file out of `init_block` with real `mov` instructions, so if those
-loads did not land every field of every program would be a false disagreement —
-which is what these two rows would then have been. Five runs of this module's
-own generators on this host (Apple silicon, `arch -x86_64`), 740 programs, 14 of
-them faulted: **0 disagreeing words**. Every GPR, the flags word and all eight
-XMM registers came back exactly as `init_block` asked, on every program. So
-neither row is this harness, and the last word is a native x86-64 run — see the
-bug doc this names for the one command that settles it.
-
-A fuzzer that counted these as model bugs would be reporting a CPU defect as a
-compiler one, which is worse than not running: it sends the next reader into
-`lib/X86.lean` looking for a bug that is not there. They are counted separately,
-named, and excluded from the exit status.
-
-**Each of those two rules has to be an ATTRIBUTION and not a resemblance**, and
-both were resemblance until 2026-10-05, which is why the census (one
-instruction per case) was clean and every RANDOM program was not: the `setcc`
-rule required every instruction of the program to be a `setcc`, so a six-
-instruction program containing one anomalous `setcc` reported `WRONG` and exited
-1. `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` carries the measurement;
-`_impossible_on_hardware` carries the rule, and `test_x86_64_model_fuzz.py`'s
-second class is its counter-direction — the four shapes it must NOT absorb.
+So a differing field is `WRONG` again, with one principled exception: a flag
+`undefined_flags` names is not compared, because the architecture promises
+nothing about it.
 
 ## Reading a run
 
@@ -161,7 +142,7 @@ byte-identical to a line in that one** (1.1%), and they are `memset`,
 `printf` and two Lean `match` arms. Everything that decides a verdict is
 different — the pool is `formal/x86_64.py`'s encoders rather than
 `formal/arm64.py`'s, the address model is one `MAP_FIXED` region rather than a
-translated window, the verdict set has `HARNESS` and `NORUN` where that one has
+translated window, the verdict set has `FAULT` and `NORUN` where that one has
 `ENC-MISMATCH` and `NOSTEP`, and the two Lean halves are launched differently.
 The shareable part is an argument parser and a reporting loop, and
 `tools/tu_grind.py` is already that; neither harness carries its own copy of the
@@ -216,7 +197,11 @@ STACK_TOP_ABS = REGION_BASE + STACK_TOP
 
 MEMBASE = DATA_OFF + DATA_N // 2
 """Where both reserved memory-base registers point, RELATIVE to the region.
-The window is centred on it so a displacement in [-64, 64) always stays inside.
+The window is centred on it so a displacement in `[-64, 64 - size]` keeps an
+access of `size` bytes inside — `_disp` draws from exactly that range, and the
+`size` half is load-bearing: a flat `[-64, 64)` let an 8-byte load at `disp = 57`
+reach offset 128, one past the window, where the model reads 0 and the harness
+reads a byte an earlier program in the batch left there.
 
 The absolute value is `REGION_BASE + MEMBASE`, and both halves need that one:
 the harness puts it in RDX's sibling registers and Lean puts it in `membase`.
@@ -316,7 +301,8 @@ _ENTRY_PROBE_ASM = "".join(
 
 ENTRY_PROBE_WHY = """\
 The entry stub is the ONE step of the harness nothing has ever read back, and it
-is the step every `HARNESS` row would have to be explained through: the stub
+is the step any "the CPU disagrees on every field" reading would have to be
+explained through: the stub
 loads the register file out of `init_block` with real `mov` instructions (note 1
 at the top of this file), so if those loads did not land, every register would
 be wrong and the model would disagree with the hardware on every field of every
@@ -330,11 +316,12 @@ seventeen stores on a path that runs once per program is not a cost worth paying
 for a measurement nobody reads, and the default harness text has to stay what it
 was.
 
-What it settles: `0f 96 c7` is `setbe dil` in long mode, and the census reports
-the hardware leaving `RDI` alone and changing one byte at offset 1 of `RCX`.
-Either the entry file is wrong, or the CPU decoded a byte sequence the manual
-does not allow. The probe reads the entry file, so those are distinguishable on
-the one host this runs on.
+What it settled, and the reason it is worth keeping: the `setcc` class this
+file used to call a hardware anomaly was the CPU being RIGHT about `0f 96 c5`
+(`setbe ch`, not `setbe bpl`, because the encoder omitted the REX prefix). The
+probe is what ruled the entry file out as the cause, and it is the instrument to
+reach for first whenever a field-level disagreement looks like it might be the
+harness rather than the model.
 """
 
 
@@ -408,16 +395,32 @@ def _imm64(r):
                      0x8080808080808080, r.getrandbits(64)])
 
 
-def _disp(r):
-    return r.randrange(-DATA_N // 2, DATA_N // 2)
+def _disp(r, size):
+    """A displacement that keeps an access of `size` bytes inside the window.
+
+    The window is centred on `MEMBASE` (`DATA_N // 2` bytes in), so an operand
+    at `[base + disp]` covers window offsets `DATA_N//2 + disp .. + size`.  A
+    displacement drawn WITHOUT regard to the size can reach past the window:
+    `disp = 57` with an 8-byte load covers offsets 121..128, and offset 128 is
+    outside a 128-byte window.  The model reads 0 there — its `mem_N` returns 0
+    for every address past `dataN` — while the harness reads whatever the region
+    holds, which for a program after the first in a batch is a byte an earlier
+    program's out-of-window STORE left behind (the per-program `memcpy` resets
+    only `DATA_N` bytes).  That is a disagreement about an address neither half
+    should have touched, and it made a verdict depend on BATCH ORDER: measured
+    on seed 3, `mov RSI, [R13+57]` reported `rsi hw=0xf6d0…02 model=0xd0…02`
+    in a batch and AGREED when the same program ran alone.  The bound is
+    therefore size-aware.
+    """
+    return r.randrange(-DATA_N // 2, DATA_N // 2 - size + 1)
 
 
 def _reg(r, pool):
     return r.choice(pool)
 
 
-def _mem(r):
-    return _reg(r, MEM_BASES), _disp(r)
+def _mem(r, size):
+    return _reg(r, MEM_BASES), _disp(r, size)
 
 
 _ALU_RR = (("add", X.encode_add_r64_r64, 4), ("or", X.encode_or_r64_r64, 2),
@@ -478,37 +481,37 @@ def pool():
     # no opcode byte for at all (0x88 and 66-prefixed 0x89).
     @add(5, "mov_r64_rm64")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 8)
         return "mov %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_mov_r64_rm64(d, b, off)
 
     @add(4, "mov_r32_rm32")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 4)
         return "mov %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_mov_r32_rm32(d, b, off)
 
     @add(4, "mov_rm64_r64")
     def _(r):
-        (b, off), s = _mem(r), _reg(r, GENERAL)
+        (b, off), s = _mem(r, 8), _reg(r, GENERAL)
         return "mov [%s%+d], %s" % (b.name, off, s.name), \
             X.encode_mov_rm64_r64(b, off, s)
 
     @add(3, "mov_rm32_r32")
     def _(r):
-        (b, off), s = _mem(r), _reg(r, GENERAL)
+        (b, off), s = _mem(r, 4), _reg(r, GENERAL)
         return "mov [%s%+d], %s" % (b.name, off, s.name), \
             X.encode_mov_rm32_r32(b, off, s)
 
     @add(3, "mov_rm8_r8")
     def _(r):
-        (b, off), s = _mem(r), _reg(r, GENERAL)
+        (b, off), s = _mem(r, 1), _reg(r, GENERAL)
         return "mov [%s%+d], %s" % (b.name, off, s.name), \
             X.encode_mov_rm8_r8(b, off, s)
 
     @add(3, "mov_rm16_r16")
     def _(r):
-        (b, off), s = _mem(r), _reg(r, GENERAL)
+        (b, off), s = _mem(r, 2), _reg(r, GENERAL)
         return "mov [%s%+d], %s" % (b.name, off, s.name), \
             X.encode_mov_rm16_r16(b, off, s)
 
@@ -544,37 +547,37 @@ def pool():
 
     @add(3, "movzx_r64_rm8")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 1)
         return "movzx %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_movzx_r64_rm8(d, b, off)
 
     @add(3, "movsx_r64_rm8")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 1)
         return "movsx %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_movsx_r64_rm8(d, b, off)
 
     @add(2, "movzx_r64_rm16")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 2)
         return "movzx %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_movzx_r64_rm16(d, b, off)
 
     @add(2, "movsx_r64_rm16")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 2)
         return "movsx %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_movsx_r64_rm16(d, b, off)
 
     @add(2, "movsx_r64_rm32")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 4)
         return "movsxd %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_movsx_r64_rm32(d, b, off)
 
     @add(2, "lea_r64_rm64")
     def _(r):
-        d, (b, off) = _reg(r, GENERAL), _mem(r)
+        d, (b, off) = _reg(r, GENERAL), _mem(r, 0)
         return "lea %s, [%s%+d]" % (d.name, b.name, off), \
             X.encode_lea_r64_rm64(d, b, off)
 
@@ -776,33 +779,25 @@ def pool():
         return ("imul %s, %s, %d" % (dst.name, src.name, imm),
                 X.encode_imul_r64_r64_imm(dst, src, imm))
 
-    # **The BYTE-WISE `and`/`or` are deliberately NOT here, and the measurement
-    # is in the bug doc rather than a guess.**  They are emittable, they were
-    # undecodable and unmodelled until 2026-10-05, and they now have a decoder
-    # arm, a model arm, a step lemma each and a `samples()` row each -- so
-    # `tools/formal_isa_census.py`'s LEAN column reads `yes` and `x86_step` is
-    # asked about both.  What is missing is the hardware differential, and the
-    # reason is that this harness disagrees about them on an RBP operand and the
-    # disagreement is NOT yet attributed.  Measured here, one instruction, one
-    # fixed register file, run through this file's own harness:
-    #
-    #     and RAX, RCX   20 c8   -> rax=efaeef4cddfebb42   (correct)
-    #     and R8,  R9    45 20 c8 -> r8 =efaeef4cddfebb42   (correct)
-    #     and RAX, RBP   20 e8   -> rax=efaeef4cddfebb00   (BPL read as 0)
-    #     and RCX, RBP   20 e9   -> rcx=efaeef4cddfebb02   (BPL read as neither
-    #                                                        0 nor 0xff)
-    #
-    # and a STATICALLY LINKED binary with the same four instructions and the same
-    # register values answers all four correctly, so it is this host's harness
-    # rather than `and r/m8, r8`.  That is the same family as
-    # `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`'s `HARNESS_SETCC_DESTS`
-    # -- an RBP operand misbehaving in an emulated region entered by
-    # `setcontext` -- but the byte is a different one and the class is not
-    # characterised, and a verdict class that cannot attribute a difference is
-    # worse than not running the row.  The doc records what is left.
-    #
-    # `and bpl, al` (rm = rbp, ModRM `cd`) disagrees in the same way, so it is
-    # not the reg field alone.
+    # The BYTE-WISE `and`/`or` (`20 /r` / `08 /r`), which exist so a floating
+    # `==` can read the conjunction of ZF and PF without reading the seven bytes
+    # a `SETcc` left in the register.  They were undecodable and unmodelled until
+    # 2026-10-05 and unFUZZABLE until 2026-10-07, because this harness disagreed
+    # about an RBP operand and the disagreement was mis-attributed to the host:
+    # `encode_and_r8_r8(RAX, RBP)` emitted `20 e8` with no REX prefix, which is
+    # `andb %ch, %al` — the high byte of RCX, not BPL.  With `_byte_rex_required`
+    # in `formal/x86_64.py` the encoder emits `40 20 e8`, a 512-case census over
+    # all sixteen `rm` and all sixteen `reg` values agrees with exact arithmetic,
+    # and the rows are in the pool.
+    @add(3, "and_r8")
+    def _(r):
+        d, s = _reg(r, GENERAL), _reg(r, GENERAL)
+        return "and %s, %s" % (d.name, s.name), X.encode_and_r8_r8(d, s)
+
+    @add(3, "or_r8")
+    def _(r):
+        d, s = _reg(r, GENERAL), _reg(r, GENERAL)
+        return "or %s, %s" % (d.name, s.name), X.encode_or_r8_r8(d, s)
 
     # **`call r64` is deliberately NOT here, and this is a HARNESS property
     # rather than a model gap.**  It jumps to a register's contents, and a
@@ -1675,176 +1670,44 @@ REGNAME = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
 
 
-#: Flags hardware leaves UNDEFINED, per Intel SDM Vol. 2, and which instructions
-#: leave which. A value the model gives for one of these is not wrong -- the
-#: hardware promises nothing -- but a fuzzer that compares them reports a
-#: disagreement on every such program that is not a disagreement at all, so the
-#: checker has to know where the promises are. Read off the program's OWN text,
-#: because a separate flag would be a second thing to forget to set.
-#:
-#:   * `DIV`/`IDIV`: "CF, OF, SF, ZF, AF, and PF are undefined".
-#:   * `SHL`/`SHR`/`SAR` with a count other than one: OF is undefined ("the OF
-#:     flag is undefined when the shift count is not 1"). The count is READABLE
-#:     from the instruction text, except for the `cl` forms where it is the
-#:     random value in RCX -- so those always count as "not one".
-UNDEFINED_ALL_FLAGS = ("div ", "idiv ")
-SHIFT_PREFIXES = ("<< ", ">> ", ">>signed ")
-
-
-def undefined_flags(program):
-    """{flag names} the hardware leaves undefined in this program."""
-    out = set()
-    for text, _b in program.items:
-        if text.startswith(UNDEFINED_ALL_FLAGS):
-            return {"zf", "sf", "cf", "of_"}
-        if text.startswith(SHIFT_PREFIXES):
-            _, _, count = text.partition(", ")
-            if count != "1":
-                out.add("of_")
-    return out
-
-
-def diff(hw, model, skip_flags=()):
-    """[(field, hardware value, model value)] — every compared field that
-    differs, in a fixed order so a report is diffable against itself."""
-    out = []
-    for i, name in enumerate(REGNAME):
-        if name in TERMINATOR_CLOBBERS:
-            continue
-        if hw["regs"][i] != model["regs"][i]:
-            out.append((name, hw["regs"][i], model["regs"][i]))
-    for k in range(8):
-        if hw["xmm"][k] != model["xmm"][k]:
-            out.append(("xmm%d" % k, hw["xmm"][k], model["xmm"][k]))
-    for i, (a, b) in enumerate(zip(hw["memq"], model["memq"])):
-        if a != b:
-            out.append(("mem[%d]" % (8 * i), a, b))
-    if True:
-        for name in ("zf", "sf", "cf", "of_"):
-            if name in skip_flags:
-                continue
-            if hw["flags"][name] != model["flags"][name]:
-                out.append((name, int(hw["flags"][name]),
-                            int(model["flags"][name])))
-    return out
-
-
-#: The `setcc` destinations whose rows are a known hardware-side anomaly; see the
-#: module docstring and the bug doc it names. Named rather than inferred, so that
-#: a FIX has to delete the name and a NEW anomaly of the same shape is not
-#: silently absorbed into it.
-#:
-#: **These three are `rm` = `rbp`/`rsi`/`rdi`, and that is not a coincidence of
-#: the pool** — they are the three `rm` values that take no SIB byte, which is
-#: what the one-instruction-per-destination measurement in the module docstring
-#: shows the CPU getting wrong. `rsp` (`rm` = 100, the one that DOES take a SIB)
-#: is excluded from the pool for its own reasons and behaves correctly, and every
-#: destination needing a REX prefix behaves correctly. So a fix on native
-#: hardware deletes these three names, and a fourth anomaly elsewhere stays a
-#: model bug.
-#:
-#: **The name is the REGISTER, the ModRM byte is the DEFINITION**, and the
-#: classifier below reads the bytes: `HARNESS_SETCC_MODRM` is what says a row is
-#: this class, and it is a separate table so the two cannot drift.
-HARNESS_SETCC_DESTS = ("rbp", "rsi", "rdi")
-
-#: `{register: (modrm byte, the register the hardware wrote instead)}` for
-#: `HARNESS_SETCC_DESTS`, measured one destination at a time in the module
-#: docstring: `0f 9x c5` leaves `rbp` alone and sets byte 1 of `rcx`, `c6`
-#: leaves `rsi` alone and sets byte 1 of `rdx`, and `c7` leaves `rdi` alone and
-#: writes nothing at all. So a row of this class disagrees in ONE BYTE of one
-#: register (the destination the hardware did not write) and, for the first two,
-#: one byte of the register named here.
-HARNESS_SETCC_MODRM = {"rbp": (0xC5, "rcx"), "rsi": (0xC6, "rdx"),
-                       "rdi": (0xC7, None)}
-
-#: The registers a group-3 `div`/`idiv` writes, and the opcode bytes that reach
-#: them: `F7 /6` and `F7 /7` with `mod = 11`. `F6`/`F7` with `mod != 11` are the
-#: memory forms, which write the same two registers and are not emitted here.
-HARNESS_DIV_REGS = ("rax", "rdx")
-
-
-def _byte_diffs(a, b):
-    """How many of the eight bytes of two 64-bit words differ."""
-    x = (a ^ b) & 0xFFFFFFFFFFFFFFFF
-    n = 0
-    for _ in range(8):
-        if x & 0xFF:
-            n += 1
-        x >>= 8
-    return n
-
-
-def _anomalous_setcc_dests(code):
-    """The `HARNESS_SETCC_DESTS` registers an ANOMALOUS `setcc` in `code` writes.
-
-    Read through the DECODER, not off a byte scan, and the REX byte is why: the
-    anomaly is three ModRM bytes (`0f 9x c5`-`c7`, i.e. `rm` = `rbp`/`rsi`/`rdi`
-    with no extension), and `41 0f 94 c7` is `sete r15` — the same three bytes
-    with `REX.B` extending `rm` from 7 to 15, which is NOT the anomaly. A scan
-    that cannot see the prefix reports that one as the anomaly and absorbs a real
-    model bug behind it, which is the one thing a verdict class must not do.
-
-    The earlier version also read the pool's own TEXT (`texts[-1]`), which is a
-    per-instruction rendering: a multi-instruction program's last `setcc` is not
-    the only one, so requiring every instruction to be a `setcc` meant the class
-    fired in a one-instruction census and nowhere else. Measured on the pre-fix
-    tree, that reported six of sixteen random programs as `WRONG`.
-    """
-    found = set()
-    for insn in _decode(code):
-        if insn.form != "setcc" or insn.rex & 0x01:
-            continue
-        reg = REGNAME[insn.rm & 7]
-        if reg in HARNESS_SETCC_MODRM:
-            found.add(reg)
-    return found
-
-
-def _has_group3_div(code):
-    """Does `code` contain a register-form `div`/`idiv`?
-
-    The REX byte is optional and irrelevant: `F7` at any position followed by a
-    ModRM byte whose `reg` field is 6 or 7 and whose `mod` is 3 is the
-    instruction, and `F7` with any other `reg` is `not`/`neg`/`mul`/`imul`,
-    which are three different instructions this class is not about.
-    """
-    for i in range(len(code) - 1):
-        if code[i] != 0xF7:
-            continue
-        modrm = code[i + 1]
-        if (modrm >> 6) == 3 and (modrm >> 3) & 7 in (6, 7):
-            return True
-    return False
-
-
-#: The decoded FORM names of the instructions this host's `mul`/`imul` flag
-#: anomaly belongs to. `formal/x86_64_decode.py` names them, so a form it
-#: renames cannot leave this stale: `F7 /4` and `F7 /5` are `group3:mul` and
-#: `group3:imul1`, and `0F AF /r` is `imul_r64_r64`.
-#: `imul_r64_r64_imm` is here for the same reason and by the same measurement:
-#: `imul RDX, R12, -1` in this harness leaves SF clear where the product says
-#: set, which is the `imul_r64_r64` class one form over.  A form missing from
-#: this set is a row the class does not absorb, and a row the class does not
-#: absorb is reported as a model verdict -- so the set has to be complete or the
-#: verdict is wrong.
-HARNESS_MUL_FORMS = frozenset(["group3:" + D._GROUP3[4], "group3:" + D._GROUP3[5],
-                               "imul_r64_r64", "imul_r64_r64_imm"])
-
-#: FORM-name prefixes of the instructions that SET the flags, from the decoder's
-#: own naming: the ALU forms (`alu_rr:`/`alu_ri32:`/`alu_ri8:`) and the shifts
-#: (`shift_imm8:`/`shift_cl:`). `group3:not` is deliberately absent — `NOT`
-#: writes no flag — and `setcc` is absent because it READS them.
-_FLAG_FORM_PREFIXES = ("alu_rr:", "alu_ri32:", "alu_ri8:", "shift_imm8:",
-                       "shift_cl:")
+#: The flags each condition code READS, from the model's `x86_cond`.  Only the
+#: ten conditions the `setcc` pool draws need an entry; the two parity codes are
+#: absent from the pool because `X86State` has no `pf` (see the module
+#: docstring), so nothing here can name a flag the model does not have.
+_CC_FLAGS = {
+    0x0: ("of_",), 0x1: ("of_",), 0x2: ("cf",), 0x3: ("cf",),
+    0x4: ("zf",), 0x5: ("zf",), 0x6: ("cf", "zf"), 0x7: ("cf", "zf"),
+    0x8: ("sf",), 0x9: ("sf",), 0xc: ("sf", "of_"), 0xd: ("sf", "of_"),
+    0xe: ("zf", "sf", "of_"), 0xf: ("zf", "sf", "of_"),
+}
+_FLAGS4 = ("zf", "sf", "cf", "of_")
+#: Form-name prefixes and names, from `formal/x86_64_decode.py`'s own naming.
+_ALU_FORMS = ("alu_rr:", "alu_ri32:", "alu_ri8:", "alu_rr8:", "alu_rr32:")
+_MUL_FORMS = ("group3:mul", "group3:imul1", "imul_r64_r64",
+              "imul_r64_r64_imm")
+_DIV_FORMS = ("group3:div", "group3:idiv")
+_SHIFT_FORMS = ("shift_imm8:", "shift_cl:")
+#: `form -> bytes touched`, for the pool's memory loads and stores.
+_LOAD_MEM = {"mov_r64_rm64": 8, "mov_r32_rm32": 4, "movzx_r64_rm8": 1,
+             "movsx_r64_rm8": 1, "movzx_r64_rm16": 2, "movsx_r64_rm16": 2,
+             "movsx_r64_rm32": 4}
+_STORE_MEM = {"mov_rm64_r64": 8, "mov_rm32_r32_mem": 4, "mov_rm8_r8": 1,
+              "mov_rm16_r16": 2}
+#: Register-only copies `form -> (dst field, src field)`, including the
+#: widening forms whose `reg` is the destination and `rm` the source.
+_REG_COPIES = {"mov_rm64_r64": ("rm", "reg"), "mov_rm32_r32": ("rm", "reg"),
+               "movzx_r64_r8": ("reg", "rm"), "movsx_r64_r8": ("reg", "rm"),
+               "movzx_r64_r16": ("reg", "rm"), "movsx_r64_r16": ("reg", "rm"),
+               "movsxd_r64_r32": ("reg", "rm")}
 
 
 def _decode(code):
     """`decode_all(code)`, or `[]` for a stream this project's decoder refuses.
 
-    The empty list is the safe direction for every question asked of it: a
-    stream it cannot name is a row this file declines to attribute rather than a
-    row it attributes wrongly.
+    The empty list is the safe direction for the taint pass: a stream it cannot
+    name has no undefined value it can PROVE, so the row is compared in full --
+    and if the decoder refuses it, `x86_step` almost certainly refuses it too,
+    which is a `NORUN` and not a comparison at all.
     """
     try:
         return D.decode_all(bytes(code))
@@ -1852,284 +1715,198 @@ def _decode(code):
         return []
 
 
-def _writes_flags(form):
-    return form.startswith(_FLAG_FORM_PREFIXES) or form in HARNESS_MUL_FORMS \
-        or form == "group3:" + D._GROUP3[3]
+def _taint(program):
+    """A forward pass over `program`'s decoded instructions, carrying the value
+    UNDEFINEDNESS the architecture introduces.
 
+    Intel SDM Vol. 2 leaves flags undefined after some instructions -- `MUL`/
+    `IMUL` leave SF, ZF, AF and PF undefined ("The SF, ZF, AF, and PF flags are
+    undefined"); `DIV`/`IDIV` leave all six; a shift by a count other than one
+    leaves OF undefined -- and the model has to give SOME value for each.
+    Comparing them is comparing a promise the architecture did not make, which
+    is the whole of what the old `HARNESS` verdict was about.
 
-def _ends_with_a_multiply(code):
-    """Is the last FLAG-WRITING instruction of `code` a `mul`/`imul`?
+    **It is not only the flags, and that is why this is a dataflow pass rather
+    than a set of names.**  A `setcc` turns a flag into a register byte, so an
+    undefined flag becomes an undefined VALUE, and every field computed from it
+    -- a register the value is copied into, an XMM register, a byte of the
+    compared window -- is undefined too.  Measured through this harness:
+    `imul R10, RBP, 4 ; setge R11` differs in R11 alone (the model's SF is the
+    low word's, Rosetta leaves it clear) and `... ; imul R10, R9, 2 ; mov RSI,
+    R12 ; setl RBP` differs in RBP.  Both are architecturally undefined and
+    neither is a model bug, and the old per-row rule could only absorb the
+    second because it happened to compare the flag too.
 
-    **The last flag-writer, not "one of them" and not "the last instruction".**
-    The flags a run ends with are the flags its last flag-writing instruction
-    set, so that is the instruction a flag difference has to be attributed to —
-    and this host mis-sets SF (and sometimes ZF) for `mul`/`imul`, which is the
-    class the module docstring's first entry describes. Attributing the flags to
-    a multiply that something else set afterwards would be the resemblance this
-    file's rules are not allowed to be, and a `movabs` between the multiply and
-    the end of the program moves no flag, so "the last instruction" would miss
-    the very rows this exists for.
-
-    Decoded with the project's own decoder, because the question is where the
-    instructions END: a byte scan cannot tell a `69 /r id` from an immediate
-    that happens to contain `f7 e6`. A stream the decoder refuses gives `False`
-    — the safe direction, since a `False` leaves the row a model verdict.
+    Returns `(flags, regs, xmm, mem)` -- the flag names, GPR indices, XMM
+    indices and window BYTE offsets that are undefined at the END of the
+    program, which is the only state the fuzzer compares.
     """
-    last = None
-    for insn in _decode(code):
-        if _writes_flags(insn.form):
-            last = insn.form
-    return last in HARNESS_MUL_FORMS
+    flags = set()
+    regs = set()
+    xmm = set()
+    mem = set()
+    stack_tainted = [False]
+
+    def undef_reg(i):
+        return i in regs
+
+    def window(disp, size):
+        return range(DATA_N // 2 + disp, DATA_N // 2 + disp + size)
+
+    def read_mem(insn, size):
+        return any(o in mem for o in window(insn.mem_disp, size))
+
+    def write_mem(insn, size):
+        mem.update(window(insn.mem_disp, size))
+
+    def put(is_undef, i):
+        (regs.add if is_undef else regs.discard)(i)
+
+    for insn in _decode(program.code):
+        form, mod = insn.form, insn.mod
+        if form == "setcc":
+            if any(f in flags for f in _CC_FLAGS.get(insn.cc, ())):
+                regs.add(insn.rm)
+        elif form in _LOAD_MEM:
+            put(read_mem(insn, _LOAD_MEM[form]), insn.reg)
+        elif form in _STORE_MEM and mod != 3:
+            # `mov_rm64_r64` is the decoder's name for BOTH the register move
+            # and the memory store, so the `mod` test is what keeps a register
+            # move from being read as a store into the window.
+            if undef_reg(insn.reg):
+                write_mem(insn, _STORE_MEM[form])
+        elif form == "movq_xmm_rm64":
+            if undef_reg(insn.rm):
+                xmm.add(insn.xmm)
+        elif form in ("mov_r64_imm32", "mov_r64_imm64"):
+            regs.discard(insn.rm)                       # a constant
+        elif form in ("lea_r64_rm64", "lea_r64_rip"):
+            put(insn.mem_base is not None and undef_reg(insn.mem_base),
+                insn.reg)
+        elif form in _REG_COPIES:
+            dst, src = _REG_COPIES[form]
+            put(undef_reg(getattr(insn, src)), getattr(insn, dst))
+        elif form == "cqo":
+            put(undef_reg(0), 2)
+        elif form == "alu_rr32:xor" and insn.reg == insn.rm:
+            regs.discard(insn.rm)                       # `xor r, r` is zero
+            flags = set()
+        elif form in _DIV_FORMS:
+            src = undef_reg(insn.rm) or undef_reg(0) or undef_reg(2)
+            if src:
+                regs.update((0, 2))
+            flags = set(_FLAGS4)                        # all six undefined
+        elif form in _MUL_FORMS:
+            if form == "imul_r64_r64":
+                src = undef_reg(insn.reg) or undef_reg(insn.rm)
+                put(src, insn.reg)
+            elif form == "imul_r64_r64_imm":
+                src = undef_reg(insn.rm)
+                put(src, insn.reg)
+            else:                                       # group3:mul / imul1
+                src = undef_reg(insn.rm) or undef_reg(0)
+                if src:
+                    regs.update((0, 2))
+            flags = set(_FLAGS4) if src else {"sf", "zf"}
+        elif form.startswith(_ALU_FORMS):
+            reads = (insn.reg, insn.rm) if form.startswith(
+                ("alu_rr:", "alu_rr8:", "alu_rr32:")) else (insn.rm,)
+            src = any(undef_reg(i) for i in reads)
+            if form not in ("alu_rr:cmp", "alu_rr:test"):
+                put(src, insn.rm)
+            flags = set(_FLAGS4) if src else set()
+        elif form in ("group3:not", "group3:neg"):
+            if form == "group3:neg":
+                flags = set(_FLAGS4) if undef_reg(insn.rm) else set()
+            if undef_reg(insn.rm):
+                regs.add(insn.rm)
+        elif form.startswith(_SHIFT_FORMS):
+            src = undef_reg(insn.rm) or (form.startswith("shift_cl:")
+                                         and undef_reg(1))
+            put(src, insn.rm)
+            # **A count of 0 moves NO flag at all** (the module docstring's
+            # `_shift_count` note), so an earlier instruction's undefined flags
+            # survive it: `... ; idiv rcx ; >>signed R9, 0` ends with the
+            # divide's undefined CF/SF/ZF, and the old code here reset them
+            # because it treated every shift as a flag-writer.  A `cl` count is
+            # unknown, so it is conservative in the safe direction: the earlier
+            # undefined flags are kept AND OF may be.
+            count = insn.imm if form.startswith("shift_imm8:") else None
+            if count == 0:
+                pass                                  # flags unchanged
+            elif src:
+                flags = set(_FLAGS4)
+            elif count is None:                       # `cl`: 0 is possible
+                flags = flags | {"of_"}
+            elif count == 1:
+                flags = set()
+            else:
+                flags = {"of_"}
+        elif form == "push_r64":
+            if undef_reg(insn.rm):
+                stack_tainted[0] = True
+        elif form == "pop_r64":
+            put(stack_tainted[0], insn.rm)
+        # jcc/jmp/call/nop/ret/leave write no compared field.
+    return flags, regs, xmm, mem
 
 
-#: `form -> how to read its operands`. Only these forms can carry a register's
-#: differing bytes into another place, and they are the ones this pool emits.
-_COPY_MEM = "mov_rm64_r64"
-_COPY_RRR = "mov_r64_r64"
-_COPY_XMM = "movq_xmm_rm64"
-_COPY_MEM_NARROW = ("mov_rm8_r8", "mov_rm16_r16", "mov_rm32_r32_mem")
+def undefined_flags(program):
+    """The flags the hardware leaves undefined at the END of `program`.
 
-#: FORM-name prefixes whose result is a FUNCTION OF ONE OPERAND ALONE, so that a
-#: difference in that operand propagates unchanged: `xor`/`or`/`and`/`add`/
-#: `sub` on a register, and the shifts (a shift is a bit permutation). The
-#: multiply and divide forms are absent on purpose — a product is not a function
-#: of its factors in that sense, so `imul r, r` does NOT carry a difference from
-#: its source, and treating it as if it did would be the resemblance this rule
-#: exists to avoid.
-_PROPAGATING = ("alu_rr:", "alu_ri32:", "alu_ri8:", "shift_imm8:", "shift_cl:")
-
-
-def _propagates(code):
-    """`{field: {register, …}}` — which registers each compared field is
-    COMPUTED FROM, over the forms above.
-
-    This is the propagation half of the `setcc` rule and it is why the rule needs
-    no heuristic: a value written once cannot differ in two places
-    independently, so `setbe rbp` (whose collateral byte lands in RCX) followed
-    by `xor rax, rcx` is ONE anomaly in three fields, and the three differ by the
-    same XOR. Naming the propagation needs the instruction's operands, so it is
-    read off the decoder rather than guessed from the field names — and a field
-    nothing in the program derived from a seeded register gets no entry, which is
-    what keeps an unrelated difference a model verdict.
-
-    **The memory half needs the window's own arithmetic**: both reserved bases
-    point at `MEMBASE`, which is `DATA_N // 2` bytes INTO the window (the window
-    is centred on it so a displacement in `[-64, 64)` stays inside), so a store
-    at `[r13 + d]` is at window offset `DATA_N // 2 + d` and lands in the
-    `mem[…]` field holding that byte. Getting that wrong matches nothing, which
-    is the safe direction.
+    `_taint` is the whole of the undefined-value analysis; this is its flag
+    half, and it is what the old `HARNESS` "mul/imul flags" and "div" rows
+    became once the flag names were read from the SDM instead of the host.
     """
-    out = {}
+    return _taint(program)[0]
 
-    def field_of_mem(insn):
-        src, base, disp = insn.reg, insn.mem_base, insn.mem_disp
-        if not (0 <= src < 16) or base not in (R.R13, R.R14):
-            return None, None
-        off = DATA_N // 2 + disp
-        if off < 0 or off + 8 > DATA_N:
-            return None, None
-        return src, [q for q in range(off // 8, (off + 7) // 8 + 1)]
 
-    for insn in _decode(code):
-        form, mod = insn.form, getattr(insn, "mod", 3)
-        if form in _COPY_MEM_NARROW or (form == _COPY_MEM and mod != 3):
-            src, qs = field_of_mem(insn)
-            if src is None:
-                continue
-            for q in qs:
-                out.setdefault("mem[%d]" % (8 * q), set()).add(REGNAME[src])
-        elif form in (_COPY_MEM, _COPY_RRR) and mod == 3:
-            # `89 /r` and `8B /r` with mod=11: `89` is rm<-reg and `8B` is
-            # reg<-rm, and the decoder gives both the same family name.
-            dst, src = (insn.rm, insn.reg) if form == _COPY_MEM \
-                else (insn.reg, insn.rm)
-            if 0 <= src < 16 and 0 <= dst < 16:
-                out.setdefault(REGNAME[dst], set()).add(REGNAME[src])
-        elif form == _COPY_XMM:
-            src, dst = insn.rm, insn.reg
-            if 0 <= src < 16 and 0 <= dst < 8:
-                out.setdefault("xmm%d" % dst, set()).add(REGNAME[src])
-        elif form.startswith(_PROPAGATING) and mod == 3:
-            if 0 <= insn.rm < 16 and 0 <= insn.reg < 16:
-                out.setdefault(REGNAME[insn.rm], set()).add(REGNAME[insn.reg])
+def diff(hw, model, skip=()):
+    """[(field, hardware value, model value)] — every compared field that
+    differs, in a fixed order so a report is diffable against itself.
+
+    `skip` is a set of FIELD names (`undefined_fields`' vocabulary: a flag, a
+    GPR, `xmm<k>` or `mem[<off>]`), and every one of them is a value the
+    architecture leaves undefined for this program. Skipping them is the whole
+    of what the old `HARNESS` verdict did, now said per field instead of per row
+    and with the flag's own undefinedness propagated to what it reaches.
+    """
+    skip = set(skip)
+    out = []
+    for i, name in enumerate(REGNAME):
+        if name in TERMINATOR_CLOBBERS or name in skip:
+            continue
+        if hw["regs"][i] != model["regs"][i]:
+            out.append((name, hw["regs"][i], model["regs"][i]))
+    for k in range(8):
+        if "xmm%d" % k in skip:
+            continue
+        if hw["xmm"][k] != model["xmm"][k]:
+            out.append(("xmm%d" % k, hw["xmm"][k], model["xmm"][k]))
+    for i, (a, b) in enumerate(zip(hw["memq"], model["memq"])):
+        if "mem[%d]" % (8 * i) in skip:
+            continue
+        if a != b:
+            out.append(("mem[%d]" % (8 * i), a, b))
+    for name in ("zf", "sf", "cf", "of_"):
+        if name in skip:
+            continue
+        if hw["flags"][name] != model["flags"][name]:
+            out.append((name, int(hw["flags"][name]),
+                        int(model["flags"][name])))
     return out
 
 
-def _imul_dests(code):
-    """The registers a THREE-OPERAND `imul r64, r64` (`0F AF /r`) writes.
-
-    Its own class, and the weakest of them: in this harness's context this host
-    sometimes returns the wrong PRODUCT for it — measured, `imul rcx, rax` with
-    RCX = 0xdb93a3a76ecdd572 and RAX = 0xb8a942080f5409f0 leaves RCX =
-    0xc2a21dc73ca65ce0 where exact integer arithmetic and the model both say
-    0xed50ca78d4e11ce0, and the same three bytes in a statically linked binary on
-    this host give the right answer — so it is the `setcontext`-into-RWX context
-    again, and the same one the `mul`/`imul` FLAGS anomaly of the module
-    docstring is about. Intermittent: the census's four one-instruction
-    `imul_r64_r64` cases agree on the product and differ only in SF.
-
-    **What it costs to be wrong about this rule**: a real `imul` model bug in a
-    program that has one is absorbed. The divide has an arithmetic table in
-    `formal/x86_64_model_coverage_test.py` and the multiply does not — that is
-    the gap, and it is named as this file's next step in the bug doc.
-    """
-    found = set()
-    for insn in _decode(code):
-        if insn.form == "imul_r64_r64" and 0 <= insn.reg < 16:
-            found.add(REGNAME[insn.reg])
-    return found
-
-
-def _setcc_dests(code):
-    """Every register a `setcc` in `code` writes, anomalous or not."""
-    found = set()
-    for insn in _decode(code):
-        if insn.form == "setcc" and 0 <= insn.rm < 16:
-            found.add(REGNAME[insn.rm])
-    return found
-
-
-def _impossible_on_hardware(program, fields):
-    """Is this row's shape one no x86-64 CPU can produce?
-
-    Three shapes, all ARGUED in the module docstring rather than pattern-matched
-    on a value, and each an ATTRIBUTION rather than a resemblance: a rule that
-    merely looks like a known anomaly absorbs the model bugs it was added to keep
-    out of the report, which is the one thing a verdict class must not do. So
-    every rule below names the INSTRUCTION a difference belongs to, and the
-    question is never "does this row look like" but "which instruction wrote
-    this field, and is that instruction one this host gets wrong".
-
-    * **a flag belongs to the program's LAST flag-writing instruction.** When
-      that instruction is a `mul`/`imul`, a flag difference is this host's
-      documented SF mislabelling (the module docstring's first entry), and when
-      it is a `div`/`idiv` the divide's own flags are among the undefined ones
-      Intel leaves open. The rule used to require EVERY instruction of the
-      program to be a `mul`/`imul`, which is true of a one-instruction census
-      case and false of every random program -- so the class fired in the census
-      and nowhere else, which is how a documented hardware anomaly was reported
-      as a model bug in six rows of sixteen.
-    * **RAX and RDX belong to a group-3 `div`/`idiv`**, which writes those two
-      registers and nothing else. This host does not compute a 128-bit divide
-      correctly -- 8 of 28 register triples disagree with exact integer
-      arithmetic, measured in hand-written assembly with no compiler in the
-      register setup; see the bug doc -- so a divide row here is not a model
-      verdict. It is the weakest of the three and the only one that can swallow a
-      real `idiv` model bug, which is why the divide's own coverage is carried by
-      `formal/x86_64_model_coverage_test.py`'s arithmetic table and not by this
-      file: the CPU cannot be that oracle here.
-    * **a one-byte difference in a `setcc` destination is the CPU not executing
-      that `setcc`.** The three encodings are named by the doc's measurement
-      (`0f 9x c5`-`c7`, i.e. `rm` = `rbp`/`rsi`/`rdi`), the collateral byte the
-      hardware wrote instead is in `HARNESS_SETCC_MODRM`, and nothing else this
-      backend emits writes a single byte of a register: a 32-bit operation
-      differs in four, a memory store is a `mem[...]` field rather than a
-      register, and flags are named fields.
-
-    **Per field, and a program can contain two of these at once**: a `cqo`/`idiv`
-    pair writing RAX/RDX beside a `setcc` into `rsi` writing RSI is two
-    anomalies, and a whole-row rule could answer neither. A field the program
-    itself COPIED out of an explained register (`movq xmm, r64`, `mov [r13+k],
-    r64`) is part of the same row, because a value written once cannot differ in
-    two places independently -- and the copies are read off the instructions with
-    the project's decoder, so an unrelated difference in `mem[…]` has no entry to
-    match and stays a model verdict.
-    """
-    names = {f for f, _a, _b in fields}
-    dests = _anomalous_setcc_dests(program.code)
-    div_ok = _has_group3_div(program.code)
-    mul_last = _ends_with_a_multiply(program.code)
-    # What each differing field is EXPLAINED by, and the rule is that every one
-    # of them must be explained by something: a row with one unexplained field
-    # left is a model bug whatever else it contains, and a program can contain
-    # two anomalies at once (a `cqo`/`idiv` pair and a `setcc` into `rsi`, with
-    # the divide writing RAX/RDX and the `setcc` writing RSI), which is the case
-    # a whole-row rule cannot answer.
-    #
-    # The three seeds, and what each is:
-    #   * a FLAG belongs to the program's LAST flag-writing instruction, so a
-    #     flag is explained when that instruction is a multiply (the class the
-    #     module docstring's first entry describes) or a divide;
-    #   * RAX and RDX belong to a group-3 `div`/`idiv`, which writes those two
-    #     and nothing else;
-    #   * a `setcc` into one of the three anomalous ModRM bytes leaves its
-    #     destination alone, so the destination's one-byte difference IS the
-    #     anomaly and its XOR is a signature;
-    #   * and then a COPY: `movq xmm, r64` and `mov [m], r64` carry a register's
-    #     byte onwards, so any field whose XOR equals a seeded one is part of the
-    #     same row. That is why the rule compares XORs rather than names -- a
-    #     value written once cannot differ independently in two places.
-    FLAGS = ("zf", "sf", "cf", "of_")
-    collateral = {HARNESS_SETCC_MODRM[d][1] for d in dests
-                  if HARNESS_SETCC_MODRM[d][1]}
-    seeds = set()
-    for name, a, b in fields:
-        if name in FLAGS:
-            continue
-        if name in HARNESS_DIV_REGS and div_ok:
-            seeds.add(name)
-        elif name in dests and _byte_diffs(a, b) == 1:
-            seeds.add(name)
-        elif name in collateral and _byte_diffs(a, b) == 1:
-            # The byte the hardware wrote INSTEAD of the destination is part of
-            # the same anomaly, so a copy of it carries it too.
-            seeds.add(name)
-    # A field is a COPY of a seeded one when the program itself copied that
-    # register into it, which `_copies` reads off the instructions rather than
-    # guessing from the names — so an unrelated difference in `mem[…]` has no
-    # entry to match and stays a model verdict.
-    tainted = _propagates(program.code)
-    copy_ok = {name for name, srcs in tainted.items() if srcs & seeds}
-    # A `setcc` writes 0 or 1 FROM THE FLAGS, so a flag difference in the same
-    # row explains a one-byte 0/1 difference in any `setcc` destination — not
-    # only the three anomalous encodings, because a `setg r8` after this host's
-    # mislabelled ZF is the same defect seen one step later.
-    setcc_dests = _setcc_dests(program.code)
-    flag_differs = any(n in FLAGS for n, _a, _b in fields)
-    imul_dests = _imul_dests(program.code)
-    unexplained = []
-    for name, a, b in fields:
-        if name in FLAGS:
-            if mul_last or div_ok:
-                continue
-        elif name in HARNESS_DIV_REGS and div_ok:
-            continue
-        elif name in dests and _byte_diffs(a, b) == 1:
-            continue
-        elif name in collateral and _byte_diffs(a, b) == 1:
-            continue
-        elif name in copy_ok:
-            continue
-        elif name in setcc_dests and flag_differs \
-                and _byte_diffs(a, b) == 1:
-            continue
-        elif name in imul_dests:
-            continue
-        unexplained.append(name)
-    if unexplained:
-        return None
-    why = []
-    if mul_last:
-        why.append("the program's last instruction is a `mul`/`imul`, which is "
-                   "what set the flags it ended with, and this host "
-                   "mislabels their SF")
-    if dests:
-        why.append("the hardware left %s alone: every difference here is one "
-                   "byte carrying the same value change as a `setcc` into an "
-                   "`0f 9x c5`-`c7` destination the doc's measurement names"
-                   % "/".join(sorted(dests)))
-    if imul_dests & names:
-        why.append("this host returns the wrong PRODUCT for a three-operand "
-                   "`imul r64, r64` in the harness's `setcontext`-into-RWX "
-                   "context, where the model agrees with exact integer "
-                   "arithmetic and with the same bytes in a static image")
-    if div_ok:
-        why.append("this host does not compute a 128-bit divide correctly: the "
-                   "difference is confined to what a group-3 `div`/`idiv` "
-                   "writes, and the arithmetic oracle for that instruction is "
-                   "`formal/x86_64_model_coverage_test.py`'s divide table "
-                   "rather than this file")
-    return "; ".join(why) if why else None
+def undefined_fields(program):
+    """Every compared field `_taint` proves the hardware leaves undefined in
+    `program`: the undefined flags plus each register, XMM register and window
+    byte derived from one, in `diff`'s own field vocabulary."""
+    flags, regs, xmm, mem = _taint(program)
+    out = set(flags)
+    out.update(REGNAME[i] for i in regs)
+    out.update("xmm%d" % k for k in xmm)
+    out.update("mem[%d]" % (8 * (o // 8)) for o in mem)
+    return out
 
 
 def summarise(v):
@@ -2159,12 +1936,9 @@ def evaluate(lean, batch, lib_dir, workdir, verbose=False):
         if mdl is None:
             out.append((p, "NORUN", "x86_step returned none"))
             continue
-        d = diff(hw, mdl, undefined_flags(p))
-        why = _impossible_on_hardware(p, d) if d else None
-        if d and why is None:
+        d = diff(hw, mdl, undefined_fields(p))
+        if d:
             out.append((p, "WRONG", summarise(d)))
-        elif d:
-            out.append((p, "HARNESS", why + " | " + summarise(d)))
         else:
             out.append((p, "AGREE", ""))
     return out, stub
@@ -2316,7 +2090,7 @@ def main(argv):
         if bad:
             print("  …the entry stub did not install the register file the "
                   "fuzzer asked for; every field of every program would then be "
-                  "a false disagreement and the HARNESS rows are not the CPU's "
+                  "a false disagreement and no disagreement would be the CPU's "
                   "fault. See ENTRY_PROBE_WHY.")
             return 1
         print("  every word of every entry register file matches init_block")
@@ -2356,11 +2130,6 @@ def main(argv):
         print("  %-14s %d" % (k, tally[k]))
     if forms:
         _print_census(rows, forms)
-    if tally.get("HARNESS"):
-        print("  %d HARNESS row(s): a disagreement no x86-64 CPU can produce, "
-              "so not a model verdict -- see this file's docstring and "
-              "bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md"
-              % tally["HARNESS"])
 
     if bad and not args.no_minimise:
         print("minimising %d discrepanc%s ..."
@@ -2390,9 +2159,6 @@ def main(argv):
                                             small.regs[1], small.regs[2],
                                             eflags(small.flags)))
 
-    if tally.get("HARNESS"):
-        print("  (HARNESS rows are not model verdicts -- see the bug doc named "
-              "in the module docstring)")
     return 1 if tally.get("WRONG") or tally.get("NORUN") \
         or tally.get("NORUN-MISSING") else 0
 

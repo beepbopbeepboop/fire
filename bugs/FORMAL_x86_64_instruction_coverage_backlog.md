@@ -47,11 +47,11 @@ reader's time:
   edited**: the row is now over-covered, and the only thing left about it is a
   sentence that says why it no longer needs to be in `BACKLOG`.
 
-### The class the byte-wise ALU found, and why it is not in the pool
+### The byte-wise ALU class, and how it turned out
 
-`formal/x86_64_model_fuzz.py` does not draw `and`/`or` yet, and the reason is
-that this harness disagrees about them on an **RBP operand** and the class is
-not characterised:
+`formal/x86_64_model_fuzz.py` did not draw `and`/`or` for a while because this
+harness disagreed about them on an RBP operand and the disagreement was
+attributed to `setcontext`-into-RWX rather than to the encoding:
 
 | one instruction, one fixed register file | this harness | exact |
 |---|---|---|
@@ -60,16 +60,13 @@ not characterised:
 | `and RAX, RBP` (`20 e8`) | `rax = efaeef4cddfebb00` | `…42` |
 | `and RCX, RBP` (`20 e9`) | `rcx = efaeef4cddfebb02` | `…42` |
 
-with RBP = `0xff` before and after, and a **statically linked binary answering
-all four correctly** — so it is this host's emulated region and not `and r/m8,
-r8`.  It is the same family as this repo's
-`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` `HARNESS_SETCC_DESTS`
-(an RBP operand misbehaving under `setcontext`-into-RWX) with a different byte,
-and `and bpl, al` (ModRM `cd`, `rm` = rbp) behaves the same way, so it is not
-the `reg` field alone.  **The row is out of the pool rather than absorbed**,
-because a verdict class that cannot attribute a difference is worse than not
-running the row — the `HARNESS` verdict is excluded from the fuzzer's exit
-status, so a class in it must be an attribution.
+**It was this tree's encoder, and the CPU was right.** `encode_and_r8_r8` (and
+its `or` twin, and `_setcc`) omitted the REX prefix for SPL/BPL/SIL/DIL (values
+4-7), whose 8-bit encodings exist only WITH one: `20 e8` with no prefix is
+`andb %ch, %al` — the HIGH byte of RCX — not BPL. `_byte_rex_required` fixes all
+three and the rows are in the pool now: a 512-case census over every `rm`/`reg`
+pair agrees with exact arithmetic. `encode_setbe(R.RBP)` was the same defect,
+which is what the model-fuzz doc's `HARNESS_SETCC_DESTS` class turned out to be.
 
 **What is left in this file is shape 1** — the nine SSE2 scalar binary64
 encoders, each of which needs a decoder arm, a model arm, a sample and a pool
