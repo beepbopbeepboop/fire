@@ -5622,6 +5622,25 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # agreement about all four flag bits.
         ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
         ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
+        # `ADDS Xd, Xn, Xm` with `Rd ≠ 31`: the SAME `0xab000000` class the `cmn`
+        # row above is the `Rd = 31` spelling of, and the write to `Rd` is the
+        # whole difference. It is the instruction the backend emits for a signed
+        # `+` overflow check (`_emit_int_alu_checked`'s `encode_adds_xd_xn_xm(0,
+        # 0, 1)`), and the row is here rather than folded into `cmn` on purpose:
+        # `arm64_step` claimed the whole class while writing no register, so a
+        # fix that made ONE of the two spellings right and left the other wrong
+        # would pass a test that pinned either one alone.
+        ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
+        # The extended-immediate `sh` field (bits 23:22): `lsl #12` scales the
+        # 12-bit field by 4096, and `arm64_step` read the field and dropped the
+        # shift, so a large constant offset was stepped as if it were the raw
+        # `imm12`. The last row is the anti-rot that matters: a helper that
+        # ALWAYS shifted would pass the two scaled rows and fail this one.
+        ("add x12, x29, #1675, lsl #12",
+         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 1)),
+        ("sub x25, x14, #545, lsl #12",
+         lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
+        ("add x12, x29, #1675", lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 0)),
     )
 
     @classmethod

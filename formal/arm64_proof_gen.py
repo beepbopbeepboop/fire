@@ -3347,7 +3347,7 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
-        imm12 = (w >> 10) & 0xfff
+        imm12 = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         return (f"some {{ s with nzcv := arm64_subs_flags "
                 f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
     if idx == 14:  # B
@@ -3403,13 +3403,16 @@ def _step_rhs(w: int, idx: int):
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
-        imm = (w >> 10) & 0xfff
+        # `sh` (bits 23:22) is `LSL #0` at 0 and `LSL #12` at 1; the arm's mask
+        # keeps bit 23, so a word reaching here has `sh ∈ {0, 1}`. `& 0x1` makes
+        # the shift total without ever computing a reserved immediate.
+        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = (w >> 10) & 0xfff
+        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3536,9 +3539,14 @@ def _step_rhs(w: int, idx: int):
     # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
     # memory helper is the one at that width — the widths are the whole point of
     # these arms: `LDRB` reads ONE byte where `LDR` reads eight.
-    if idx == 66:  # CMN Xn, Xm: the flags of Xn + Xm, which is not CMP's
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg "
-                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 66:  # ADDS Xd, Xn, Xm / CMN Xn, Xm: write Rd and the flags of the
+        # sum. `arm64_set_reg 31` is the identity, so the `Rd = 31` (CMN) spelling
+        # writes no register and the `Rd ≠ 31` one (the signed `+` overflow
+        # check's `ADDS Xd, Xn, Xm`) does — one row for the whole class, exactly
+        # as index 6's CMP/SUBS row covers both spellings of the subtract.
+        return (f"some (arm64_set_reg {rd} {{ s with nzcv := arm64_adds_flags "
+                f"(arm64_reg {(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }} "
+                f"(arm64_reg {(w >> 5) & 0x1f} s + arm64_reg {(w >> 16) & 0x1f} s))")
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
@@ -4700,8 +4708,15 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 66, 67):
+    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 67):
         return set()
+    # 66 is `ADDS Xd, Xn, Xm` / `CMN Xn, Xm` (the same word class, split by
+    # `Rd`): `Rd = 31` is the zero register and writes nothing, every other `Rd`
+    # writes it. The model and `_step_rhs` write it for the whole class, so this
+    # row has to as well, or a block's certificate under-approximates the
+    # registers it clobbered.
+    if idx == 66:
+        return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
     # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
