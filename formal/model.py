@@ -7081,6 +7081,39 @@ def dotted_specialization_refusal(name: str) -> str:
     )
 
 
+def callee_is_a_module_slot_function(name: str, function_names) -> bool:
+    """True when `name(...)` is a call through a module global's slot word.
+
+    The second shape of "a callee this unit has no symbol for", beside
+    `callee_is_a_bound_value`'s parameter-or-local. A module-level
+    `var g = dbl` with `global g` in a function gives `g` a `__DATA` slot
+    (`collect_global_slots`), and the slot's word is the function's entry
+    address — the module body stores it, and a read of `g` as a value already
+    lowers to a load of that slot. But `callee_is_a_bound_value` deliberately
+    subtracts `global_names_bound_in`, so a `global` name is NOT a bound value
+    and `g(21)` took the extern path and emitted a `BL g` against a symbol
+    nothing provides — refused four stages later by the bind audit with a
+    message about the link line rather than about the call. Measured, both
+    architectures: `fire.py run` answers 42 and the image refused to build.
+
+    The evidence is the slot's OWN module-level statement, because that is the
+    only place the value's shape is stated: `GlobalSlot.site` is the statement
+    and its `value` is what the module binds the name to. A function NAME there
+    is a code address; anything else (an integer, a call, a container) is not
+    this predicate's business and is left to the extern path, so an
+    integer-valued global called as a function keeps its refusal rather than
+    becoming a branch through a number. `function_names` is the unit's own
+    definitions — the same table `name not in self._functions` reads — so a
+    name bound to something this unit does not compile is not claimed here.
+    """
+    slot = module_slot(name)
+    if slot is None:
+        return False
+    value = getattr(getattr(slot, "site", None), "value", None)
+    return (isinstance(value, F.IdentExpr)
+            and value.name in (function_names or ()))
+
+
 def callee_is_a_bound_value(fn, name: str) -> bool:
     """True when `name` is a name `fn` binds, so it cannot be a symbol.
 

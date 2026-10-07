@@ -10247,7 +10247,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # itself are the same code either way, and the call is `CALL r64`
         # through R11 instead of `CALL rel32` through a label.
         through_value = (not is_extern_call and name not in self._functions
-                         and M.callee_is_a_bound_value(self._cur_fn, name))
+                         and (M.callee_is_a_bound_value(self._cur_fn, name)
+                              or M.callee_is_a_module_slot_function(
+                                  name, self._functions)))
         # …and the name has to be a BARE one. `_callee_symbol` flattens a
         # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
         # and `a[i](x)` as `a`; only the first of those is a name the function

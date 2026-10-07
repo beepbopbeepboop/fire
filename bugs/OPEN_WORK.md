@@ -113,7 +113,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal97-docs` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
 | `FORMAL_string_value_model.md` | `formal102-docs` | what a string IS on the formal path, and the two things that want to be one |
 | `FORMAL_the_published_surface_figures_are_behind_the_tree.md` | `formal98-docs` | `FORMAL.md` §1/§2.2/§6/§12 publish numbers the tree has outgrown, and TWO registered gate jobs are red on exactly that |
-| `FORMAL_a_module_global_holding_a_function_reads_back_as_zero.md` | **unclaimed** | A module `global` holding a FUNCTION reads back as 0, and a direct call through it does not link |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | `FORMAL_generic_local_binding_has_no_home.md` | **unclaimed** | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
 | `FORMAL_the_runtime_dylib_leaves_its_staging_directory.md` | **unclaimed** | 520 kB per cold CAS, never removed |
