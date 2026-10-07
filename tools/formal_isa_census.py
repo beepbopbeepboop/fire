@@ -596,24 +596,15 @@ BACKLOG = {
     "encode_or_r8_r8": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "as `encode_and_r8_r8`"),
-    # **Eight of shape 1's nine SSE2 rows came out of this dict on 2026-10-06
+    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`
-    # and `cvtsi2sd` each gained a decoder arm, a model arm, a `samples()` row
-    # and a fuzz-pool entry, and the census reads `yes yes yes` for every one.
-    # `encode_imul_r64_r64_imm` above is OVER-COVERED and still listed here —
-    # it was left by the previous pass on purpose ("another claim's write set")
-    # and is a separate stale entry this removal does NOT touch.
-    #
-    # `cvttsd2si_r64_xmm` stays: its LEAN and FUZZ columns are still `no`. The
-    # double-to-int conversion needs a truncate-toward-zero function that is
-    # total over all 2^64 patterns (out of range is the hardware's integer
-    # indefinite), which is a real piece of work and is the doc's next step —
-    # see `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
-    "encode_cvttsd2si_r64_xmm": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the double-to-int conversion: no decoder arm, no model sample and no "
-        "pool entry; `ToIntBits` is a `Prop` and not a total function"),
+    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
+    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
+    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
+    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
+    # listed here — it was left by the previous pass on purpose ("another
+    # claim's write set") and is a separate stale entry this removal does NOT
+    # touch.
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two

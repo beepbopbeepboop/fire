@@ -809,6 +809,17 @@ def pool():
         return ("cvtsi2sd xmm%d, %s" % (xmm, g.name),
                 X.encode_cvtsi2sd_xmm_r64(xmm, g))
 
+    # `cvttsd2si` is the one SSE row a RANDOM XMM mostly drives OUT OF RANGE:
+    # a random 64-bit pattern is a magnitude near 2^1000, and the hardware
+    # answers the integer indefinite `0x8000000000000000` with the invalid flag
+    # set.  `x86_cvttsd` models that, so the row is a real comparison of the
+    # indefinite answer rather than a row that only ever sees ordinary values.
+    @add(1, "cvttsd2si")
+    def _(r):
+        xmm, g = r.randrange(8), _reg(r, GENERAL)
+        return ("cvttsd2si %s, xmm%d" % (g.name, xmm),
+                X.encode_cvttsd2si_r64_xmm(g, xmm))
+
     @add(1, "nop")
     def _(r):
         return "nop", X.encode_nop()

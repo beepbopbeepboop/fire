@@ -339,6 +339,8 @@ def samples():
             X.encode_movq_r64_xmm(gpr, xmm))
         add("cvtsi2sd_xmm_r64", "cvtsi2sd xmm%d, %s" % (xmm, gpr.name),
             X.encode_cvtsi2sd_xmm_r64(xmm, gpr))
+        add("cvttsd2si_r64_xmm", "cvttsd2si %s, xmm%d" % (gpr.name, xmm),
+            X.encode_cvttsd2si_r64_xmm(gpr, xmm))
     return out
 
 

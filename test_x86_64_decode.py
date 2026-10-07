@@ -252,6 +252,13 @@ for xmm, gpr in ((0, R.RAX), (3, R.R12)):
     check(f"cvtsi2sd xmm{xmm},{gpr.name}",
           X.encode_cvtsi2sd_xmm_r64(xmm, gpr), "cvtsi2sd_xmm_r64",
           mod=3, xmm=xmm, reg=xmm, rm=gpr.value)
+    # The reverse direction is a DIFFERENT instruction and its ModRM halves are
+    # swapped: `cvttsd2si r64, xmm` has the GPR in `reg` (REX.R) and the XMM in
+    # `rm`, which is exactly the opposite of `cvtsi2sd`. Sharing the reading
+    # converts the XMM's number as if it were the GPR's.
+    check(f"cvttsd2si {gpr.name},xmm{xmm}",
+          X.encode_cvttsd2si_r64_xmm(gpr, xmm), "cvttsd2si_r64_xmm",
+          mod=3, xmm=xmm, reg=gpr.value, rm=xmm)
 
 # ALU reg/reg
 for enc, name in ((X.encode_add_r64_r64, "add"), (X.encode_or_r64_r64, "or"),

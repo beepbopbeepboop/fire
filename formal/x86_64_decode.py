@@ -296,6 +296,18 @@ def decode_one(code: bytes, off: int) -> Insn:
             raise DecodeError("cvtsi2sd with a memory operand is not emitted")
         return insn(length, "cvtsi2sd_xmm_r64", mod=mod, xmm=reg & 7,
                     reg=reg & 7, rm=rm)
+    if op_f2 and op == 0x0F and byte(p + 1) == 0x2C and w:
+        # `F2 REX.W 0F 2C /r` — `cvttsd2si r64, xmm`
+        # (`encode_cvttsd2si_r64_xmm`), the `double` truncated toward zero.
+        # The ModRM halves are the REVERSE of `cvtsi2sd`'s: the GPR is `reg`
+        # with REX.R and the XMM is `rm` with NO REX.B (there is no XMM8).  A
+        # decoder that shared `cvtsi2sd`'s reading would convert the XMM's
+        # number as if it were the GPR's.
+        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("cvttsd2si with a memory operand is not emitted")
+        return insn(length, "cvttsd2si_r64_xmm", mod=mod, xmm=rm & 7,
+                    reg=reg, rm=rm & 7)
 
     # ── REX-less forms the backend emits ──────────────────────────
     if op == 0x31 and not w:

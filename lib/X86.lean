@@ -1332,6 +1332,41 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
                     cf := ltBits a b || u, sf := false, of_ := false }
   else none
 
+/-- `CVTTSD2SI`'s answer for one binary64 bit pattern: the value truncated
+    toward zero as a signed 64-bit integer.
+
+    This is a total function over all 2^64 patterns, which is what the arm
+    needs and is why it is written at the BIT level rather than through
+    `Float.toInt` (Lean's `Float` API has no `Int` conversion, and
+    `lib/IEEE754.lean`'s `ToIntBits` is a `Prop`).  The three cases are the
+    hardware's:
+
+      * a NaN or an infinity (exponent all ones) → `0x8000000000000000`, the
+        integer indefinite;
+      * a magnitude below 1 (exponent < 1023, bias) → `0`, truncated;
+      * an exponent at or above `1023 + 63` → out of range for `Int64`, the
+        same integer indefinite.  `-2^63` also lands on
+        `0x8000000000000000` and is the one in-range value that does, which
+        is why the bound is `≥ 63` and not `> 63`.
+
+    Below the bound the mantissa (with its implicit leading one) is shifted
+    into an integer and the sign applied by two's complement.  Truncation
+    toward zero, not flooring: `int(-2.9)` is `-2` and this is the `T` in
+    `CVTTSD2SI` (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+def x86_cvttsd (a : UInt64) : UInt64 :=
+  let sign := (a >>> 63) != 0
+  let exp := (a >>> 52) &&& 0x7ff
+  let mant := a &&& 0xfffffffffffff
+  if exp = 0x7ff then 0x8000000000000000
+  else if exp < 1023 then 0
+  else
+    let e := exp - 1023
+    if e ≥ 63 then 0x8000000000000000
+    else
+      let frac := mant ||| 0x10000000000000
+      let mag := if e ≤ 52 then frac >>> (52 - e) else frac <<< (e - 52)
+      if sign then (0 : UInt64) - mag else mag
+
 /-- The `F2`-prefixed scalar-double SSE2 forms `formal/x86_64.py` emits.
 
 `F2` is a SIMD prefix and not a REX byte, so `x86_step` routes it to the plain
@@ -1377,6 +1412,13 @@ def x86_step_f2 (s : X86State) (code : Nat → UInt8) : Option X86State :=
         let r := src + x86_rex_b rex
         some { x86_set_xmm s reg
                  (fromIntBits (x86_signed (x86_get_reg s r))) with rip := p + 3 }
+      else if op2 = 0x2c && w then
+        -- `cvttsd2si r64, xmm`: the `double` truncated toward zero into a
+        -- signed GPR.  The ModRM halves are the REVERSE of `cvtsi2sd`'s — the
+        -- GPR is the `reg` field (REX.R) and the XMM is `rm` — which is the
+        -- asymmetry `encode_cvttsd2si_r64_xmm`'s docstring pins against `as`.
+        let gpr := reg + x86_rex_r rex
+        some { x86_set_reg s gpr (x86_cvttsd (x86_get_xmm s src)) with rip := p + 3 }
       else none
   else none
 
