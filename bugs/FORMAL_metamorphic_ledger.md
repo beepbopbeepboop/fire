@@ -84,6 +84,51 @@ Three reasons this row exists and the others do not substitute for it:
   row: it says how often the budget is the binding constraint, and a reader can
   now see the answer instead of inferring it from a clean tally.
 
+## 2b. 2026-10-07 (`formal112-docs`): the alias hazard in `reorder`, and the `@refines` decorator group
+
+Two defects were found by running the file's own suite rather than by a sweep,
+and both are the shape this ledger exists to record: a tool defect is invisible
+in a tally, and a coverage hole reads as a clean number.
+
+**`reorder` was unsound through an ALIAS, and CPython caught it as
+`transform-invalid` before any build.** `A32 = h31.b23` binds `A32` to the same
+list as `h31.b23`, so `h31.b23[0] = 62` and `w34 = A32[0]` are one cell — but the
+independence test compares names as SPELLED, saw writes `{h31}` against reads
+`{A32}`, and swapped them. The generated `refs:0` program printed `46` where the
+original printed `62`. `_alias_groups` is the fix: an assignment whose right-hand
+side is a name, an attribute or a subscript unions its target with the root of
+that expression, transitively and without regard to where the assignment sits
+(a conditional alias is a possible alias, and a possible alias is a refusal). The
+equivalence is applied to every read/write/escape set before the comparisons, so
+it can only ADD refusals. Two rows pin it: `test_reorder_refuses_a_pair_that_
+aliases_through_a_binding` (every pair in that program aliases, so `reorder` must
+decline the whole function) and `test_reorder_still_swaps_two_independent_
+container_writes` (two DISTINCT lists must still be exchangeable, so the rule was
+not made sound by refusing all memory traffic). This is §5's defect shape one
+more time — the alias is the same class as the closure cell (#6) and the global
+(#7), reached through a binding instead of a call.
+
+**The examples corpus's largest unmeasured group was `@refines`.** `PROOF_
+DECORATOR_RE` removed `@spec`/`@require`/`@ensure` and not `@refines`, so the
+eleven examples that spell it (`absval`, `bigconst`, `bitops`, `chain`, `fact`,
+`identity`, `localmul`, `nonzero`, `pair`, `shiftlr`, `sum`) were refused with
+CPython's own "invalid syntax" at the decorator's line. It is the same class as
+the three the rule already covers — a decorator the PROOF layer reads and the
+run-time path never sees — so it goes through the same parenthesis-depth scan
+(its argument list wraps and contains a `;`). Measured: the examples corpus is
+**93 stems, 90 measured / 3 unmeasured** after the change, where it was 79/14
+before, and all three remaining are the one documented `struct` decision
+(`struct_method`, `struct_point`, `wide_recv`). `test_the_examples_corpus_is_
+mostly_measured` now asserts that exact reason rather than a floor, so a future
+example that cannot be driven for a NEW reason fails the suite instead of
+lowering a number nobody reads.
+
+**And three `TheDriver` rows were stale against the `OracleAnswer` type.** They
+stubbed `cpython_answer` with a bare `(exit, stdout)` tuple, which `oracle_answer`
+no longer recognises (it is a `NamedTuple`), so every one of them read as
+`not-answerable`. Fixed in the test, not the tool: the stub now returns
+`F.OracleAnswer(0, "")`, which is the same shape the real function returns.
+
 ## 3. What metamorphic testing reaches that differential testing cannot, and the measurement
 
 `formal_fuzz` finds a miscompile only where the program PRINTS the value whose lowering is wrong. That is a property of the program, not of the backend, and it is structural: a register-allocation bug in a frame slot the program never prints is invisible to a corpus whose programs all have the same shape.
@@ -101,7 +146,7 @@ This is a real disagreement and it is **not** this tool's to file or attribute: 
 
 ## 5. Defects in the TOOL, which cost more than the backend bugs and are invisible in a tally
 
-Twelve, all caught by the tool's own CPython gate (`CPython(P) == CPython(T)`, run on BOTH sides before any backend is asked) or by the examples/classes/closures corpora. The gate is the reason each of them is a unit-test failure rather than a filed bug.
+Thirteen, all caught by the tool's own CPython gate (`CPython(P) == CPython(T)`, run on BOTH sides before any backend is asked) or by the examples/classes/closures corpora. The gate is the reason each of them is a unit-test failure rather than a filed bug. The thirteenth is §2b's alias hazard, and it is the same `reorder` family as #4-#7 reached through a binding (`A = B`) rather than a call.
 
 | # | what | how it showed | verdict it would have produced |
 |---|---|---|---|
@@ -117,6 +162,7 @@ Twelve, all caught by the tool's own CPython gate (`CPython(P) == CPython(T)`, r
 | 10 | a comprehension's target was bound in the ENCLOSING function, and a PEP 750 `TemplateStr` was invisible to the "source text" check | 9 `fstrings` + hand-written corpus | `rename` renaming half a name |
 | 11 | `extract` deleted a binding a nested scope captures | 7 of 20 `closures` | a printed number moving |
 | 12 | `_bind_body` refused to descend into a nested `def` **except when the `def` WAS the statement**, so `global G6` inside `def bump7` was read as a declaration of the MODULE and `G6` was dropped from `module_bindings` — which is the set `reorder`'s `_reachable_by_a_call` consults | 1 of 5910 pairs in the §2a sweep 6, `stress-mm:18` of `globals` | `G6 = 9` exchanged with `print(bump9(5))`, and the printed value moved from 14 to 25 |
+| 13 | `reorder` compared names as SPELLED, so `A = B` left `B[0] = 62` and `x = A[0]` looking independent | `refs:0` of the generated corpus, `transform-invalid` | a printed element moving from 62 to 46 (§2b) |
 
 Twelve is one more than the eleven above and it is the one worth reading twice,
 because its two consequences pull in OPPOSITE directions and the over-approximating
@@ -218,9 +264,11 @@ Every row in §2 is reproducible from the seed and the index range:
 first three items of the previous session's list are now DONE and are recorded in
 §2a; these are the four that remain:
 
-1. **One `formal/examples` file is unmeasured: `wide_recv.mojo`**, for its
-   `struct Point:`. The rules remove `@spec`/`@require`/`@ensure`, `var` and `fn`
-   and nothing else, deliberately: a Python `class` body of bare annotations has no
+1. **Three `formal/examples` files are unmeasured, all for a `struct` body:
+   `wide_recv.mojo`, `struct_point.mojo` and `struct_method.mojo`** (§2b records
+   the count moving 14 → 3 when `@refines` joined the proof-decorator rule). The
+   rules remove `@spec`/`@require`/`@ensure`/`@refines`, `var` and `fn` and
+   nothing else, deliberately: a Python `class` body of bare annotations has no
    attributes, so `p.get_y()` reads a name that was never assigned while the
    struct's field reads `0` — a real disagreement with CPython manufactured by the
    translation rather than found by it. Giving each field an initialiser is a
