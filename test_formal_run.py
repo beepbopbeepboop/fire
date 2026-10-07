@@ -23274,6 +23274,15 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # Two-character prefixes: the reader indexed the quote at `[1]` and
+        # refused every one of these with a message that named a missing quote
+        # that was not missing. A prefix is a SET of flags, not one character.
+        'rf"a={n}b"',
+        'fr"a={n}b"',
+        'Rf"{x!r:>3}"',
+        'rf"{{lit}}"',          # raw, and the brace escape still applies
+        'rt"a={n}b"',           # a raw t-string
+        'tr"{ {1:2}[1] }"',
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23335,12 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # Widening the prefix reader must not turn "no quote
+                          # here" into a body: a two-character prefix with no
+                          # quote after it is still refused.
+                          ('frabc', "no quote follows its prefix"),
+                          ('fr"a{b', "does not end with")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:
@@ -23435,7 +23449,9 @@ def check_interpolated_literal_census(verbose=False):
                     fields = [s for s in segs if s[0] == 'field']
                     rows.append(dict(
                         path=path, spelled=spelled,
-                        is_t=spelled[:1] in ('t', 'T'),
+                        is_t=any(c in ('t', 'T') for c in spelled[
+                            :_TYPE_VALUE_MODEL.interpolated_literal_prefix(
+                                spelled)]),
                         nfield=len(fields),
                         specs=sum(1 for f in fields if f[2]),
                         convs=sum(1 for f in fields if f[3])))

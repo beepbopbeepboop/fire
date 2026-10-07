@@ -11232,6 +11232,55 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+# The letters a string prefix may be spelled with, in any order and any case.
+# THE prefix is a SET of spelling flags, not one character: `f`, `t`, `r`, `b`
+# and `u` combine (`rf`, `fr`, `Rb`, `tr`), which is why a reader that indexes
+# the quote at `[1]` refuses every two-character prefix.
+_STRING_PREFIX_LETTERS = 'fFrRbBuUtT'
+
+
+def interpolated_literal_prefix(spelled: str) -> int:
+    """The index the prefix ends at — where the opening quote begins, or would
+    for a token that has none.
+
+    THE prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`,
+    `b` and `u` combine in any order and any case, so `rf"…"`, `fr"…"`,
+    `Rf"…"` and `rt"…"` all put the quote at an index the caller cannot guess.
+    Asked by `interpolated_literal_delimiters` (for the quote's position) and
+    by `interpolated_literal_refusal` (for the literal's KIND, which is a
+    prefix question: a `rt"…"` is a t-string and a test on `spelled[:1]` called
+    it an f-string).
+    """
+    i = 0
+    while i < len(spelled) and spelled[i] in _STRING_PREFIX_LETTERS:
+        i += 1
+    return i
+
+
+def interpolated_literal_delimiters(spelled: str) -> tuple:
+    """`(quote, quote_at)` — an interpolated literal token's opening quote and
+    the index it sits at, for ANY prefix spelling.
+
+    It does NOT decide whether the literal IS interpolated — that is
+    `is_interpolated_literal`'s question, answered by the parser's own flag —
+    and it does NOT treat rawness as a segmentation question, because it is
+    not one: `r` changes what a backslash MEANS, not where the literal's chunks
+    and `{…}` fields are. The brace rules (`{{`, `}}`, brace depth, a nested
+    literal inside a field) are prefix-independent, so the same segmenter is
+    correct for a raw and a non-raw spelling.
+
+    Raises `CodegenError` when no quote follows the prefix: that is the one
+    shape where there is no literal text to take apart at all, as opposed to a
+    literal that merely uses a prefix this reader once failed to scan.
+    """
+    i = interpolated_literal_prefix(spelled)
+    if i >= len(spelled) or (spelled[i] != '"' and spelled[i] != "'"):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: no quote "
+            f"follows its prefix, so there is no literal text to take apart")
+    return spelled[i], i
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11315,17 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
-        term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
-    else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
+    # Where the quote is depends on the PREFIX's width, which is why the
+    # boundary comes from `interpolated_literal_delimiters` and not from a
+    # hard-coded index: `rf"…"` and `f"…"` are one reader, not two.
+    quote, qpos = interpolated_literal_delimiters(spelled)
+    term = quote * 3 if spelled[qpos:qpos + 3] == quote * 3 else quote
     if not spelled.endswith(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[qpos + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)
@@ -11410,7 +11448,11 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    is_t = spelled[:1] in ("t", "T")
+    # The KIND is a prefix question, so it is asked of the whole prefix and not
+    # of its first character: `rt"…"` and `tr"…"` are t-strings, and a test on
+    # `spelled[:1]` called them f-strings.
+    is_t = any(c == 't' or c == 'T'
+               for c in spelled[:interpolated_literal_prefix(spelled)])
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:
