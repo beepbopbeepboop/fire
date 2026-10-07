@@ -30249,6 +30249,86 @@ def struct_parameter_not_bound_refusal(struct_name: str, spelling: str,
             f"the instantiation site, not by editing the expression")
 
 
+#: The expression nodes that BUILD a frame container. A comprehension ELEMENT
+#: that is a container literal can be materialised per-iteration only when
+#: nothing inside it builds ANOTHER container: the per-iteration storage is a
+#: byte copy of the element's own blob, so a nested container's ADDRESS would be
+#: copied rather than the container and every iteration would share it. A CALL
+#: is in the set because a constructor such as `List()` allocates too, and a
+#: SLICE because it builds a new blob from an old one.
+_CONTAINER_BUILDING_NODES = (
+    F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr, F.Comprehension,
+    F.SliceExpr, F.CallExpr,
+)
+
+
+def _expr_builds_a_container(e) -> bool:
+    """True when `e` is, or contains, an expression that builds a container."""
+    if e is None or isinstance(e, str):
+        return False
+    if isinstance(e, _CONTAINER_BUILDING_NODES):
+        return True
+    if isinstance(e, F.UnaryOp):
+        return _expr_builds_a_container(e.operand)
+    if isinstance(e, F.BinaryOp):
+        return (_expr_builds_a_container(e.left)
+                or _expr_builds_a_container(e.right))
+    if isinstance(e, F.TernaryExpr):
+        return (_expr_builds_a_container(e.condition)
+                or _expr_builds_a_container(e.then_val)
+                or _expr_builds_a_container(e.else_val))
+    if isinstance(e, F.CompareChain):
+        return any(_expr_builds_a_container(o) for o in e.operands)
+    if isinstance(e, F.MemberExpr):
+        return _expr_builds_a_container(e.obj)
+    if isinstance(e, F.SubscriptExpr):
+        return (_expr_builds_a_container(e.obj)
+                or _expr_builds_a_container(e.index))
+    if isinstance(e, F.WalrusExpr):
+        return _expr_builds_a_container(e.value)
+    return False
+
+
+def comprehension_element_is_flat_container(element) -> bool:
+    """True when a comprehension element is a container a byte copy can make
+    per-iteration.
+
+    THE predicate both emitters ask before materialising an element per
+    iteration, and it is here rather than in either backend so the two
+    architectures cannot disagree about which elements are representable — a
+    comprehension that built on one machine and was refused on the other is the
+    divergence this whole path is built to prevent.
+
+    The element's container is stored per-iteration by copying its own blob into
+    a slot of a `cap`-sized array (see the emitters' `_materialize_compr_element`),
+    and a SHALLOW copy is sound only when nothing inside the element built a
+    second container: the copy would carry the nested container's ADDRESS, so
+    every iteration's outer container would still point at one inner object.
+    That is the same aliasing defect one level down, and it is why the predicate
+    recurses rather than looking at the element's node type alone.
+
+    A NAME is deliberately NOT a container here, and that is correctness rather
+    than a narrowing: `[a, b]` where `a` and `b` are outer lists copies the outer
+    list per iteration and shares `a`/`b`, which is exactly what CPython does —
+    distinct outer lists over the same elements. Only a container the element
+    position itself BUILDS is the defect.
+
+    The shapes that return False keep `comprehension_element_blob_refusal`:
+    a nested comprehension, a list of lists, a slice, a constructor call, and
+    every non-literal expression. Those are the cases whose per-iteration
+    materialisation needs the runtime blob base the refusal's own document
+    describes.
+    """
+    if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
+                                F.DictExpr)):
+        return False
+    if isinstance(element, F.DictExpr):
+        children = [x for pair in element.pairs for x in pair]
+    else:
+        children = list(element.elements)
+    return not any(_expr_builds_a_container(c) for c in children)
+
+
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container.

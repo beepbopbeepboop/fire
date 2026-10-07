@@ -235,11 +235,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | `formal109-docs` | the 13-file row, split by what each call site actually hands over |
 
-### `formal/x86_64_codegen` — 1 document, 0 claimed
+### `formal/x86_64_codegen` — 2 documents, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_a_nested_for_target_unpack_prints_nothing.md` | **unclaimed** | x86-64: a `for` target nested more than one group deep prints nothing and exits 1, where arm64 answers CPython's number |
+| `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` | **unclaimed** | FORMAL x86-64: `getsize` segfaults (executes at address 0) inside an imported hostmod dylib, where arm64 answers |
 
 ### `formal/x86_64_decode` — 2 documents, 0 claimed
 
@@ -269,14 +270,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_one_field_mutator_has_no_method_contract.md` | **unclaimed** | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 
-### `unclassified` — 4 documents, 3 claimed
+### `unclassified` — 3 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal109-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_proof_census_baseline_covers_52_of_93_examples.md` | `formal113-docs` | `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus |
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | `formal115-docs` | `.returncode` is a field access on an integer |
-| `FORMAL_a_comprehension_element_container_aliases_every_iteration.md` | **unclaimed** | a comprehension whose ELEMENT is a container aliases every iteration's element to the LAST one |
 
 ---
 

@@ -2503,7 +2503,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # condition did not fold, and this backend then emits the ordinary
             # runtime branch — the same degradation the gimple path makes, so
             # all three agree on the observable behaviour.
-            which = comptime_eval.resolve_if(stmt, self._comptime_vals)
+            which = comptime_eval.resolve_if(
+                stmt, self._comptime_vals, call_hook=self._comptime_hook)
             if which == "then":
                 for s in stmt.then_body:
                     self._emit_stmt(s)
@@ -2586,9 +2587,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         one that named a shape the author never wrote. Sharing the resolver
         removes the drift by construction rather than by keeping the two
         wordings in step by hand.
+
+        **The `call_hook` is part of sharing it, and omitting it was the same
+        drift one argument in.** arm64 passed `self._comptime_hook`; x86-64 did
+        not, so `comptime var a = square(6)` folded on arm64 and was refused here
+        — and the same omission was in `resolve_if` and `_comptime_iterable`.
+        All three now pass it. `test_formal_x86_64_parity.py`'s
+        `comptime_binding_initialized_by_a_call` is the row.
         """
         name = stmt.target
-        resolved = comptime_eval.resolve_var(stmt, self._comptime_vals)
+        resolved = comptime_eval.resolve_var(
+            stmt, self._comptime_vals, self._comptime_hook)
         if resolved is None:
             raise CodegenError(M.comptime_fold_refusal(name))
         kind, val = resolved
@@ -2623,7 +2632,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         at compile time, else None (→ emit the ordinary runtime loop)."""
         return comptime_eval.resolve_for_iterable(
             iterable, self._comptime_vals, self._comptime_list_asts,
-            self.COMPTIME_UNROLL_CAP)
+            self.COMPTIME_UNROLL_CAP, self._comptime_hook)
 
     def _emit_comptime_target(self, target, value) -> None:
         """Bind a `comptime for` target for one iteration, as an ordinary local
@@ -3570,6 +3579,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.comprehension_element_blob_refusal(
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
+
+    def _materialize_compr_element(self, element, res_offset: int, cap: int,
+                                   before: int) -> None:
+        """Give the element its OWN container per iteration, or refuse.
+
+        The x86-64 twin of arm64's method over the same shared predicate
+        (`M.comprehension_element_is_flat_container`) and the same message, so
+        the two architectures cannot materialise — or refuse — an element
+        differently. RAX on entry holds the element's blob and on exit the
+        per-iteration copy `_compr_append_elem` appends.
+
+        `i` is the result blob's count word (elements appended so far), the
+        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
+        which returns the destination in RAX for free. `before` is the ledger
+        position as the element's emission began, so `bytes_` is the element's
+        own footprint, measured BEFORE the array below steps the same ledger.
+        """
+        bytes_ = self._list_cursor - before
+        if not bytes_ or cap <= 1:
+            return
+        if not M.comprehension_element_is_flat_container(element):
+            raise CodegenError(M.comprehension_element_blob_refusal(
+                f"a comprehension in {self.func_name or '<module>'}", element,
+                cap, bytes_))
+        array_off = self._reserve_blob(cap * bytes_,
+                                       "comprehension element array")
+        # count = result element count so far (= this iteration's ordinal).
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # dest = array_base + count * bytes_
+        self._emit_blob_base(array_off, Reg.R11)
+        self._emit_mov_imm(Reg.RDI, bytes_)
+        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
+        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
+        self._emit_mov_imm(Reg.RDX, bytes_)
+        self._emit_extern_call("memcpy")            # returns dest in RAX
 
     # ── how many times the code being emitted runs ────────────────────
     #
@@ -9120,8 +9168,8 @@ preference.
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
+                self._materialize_compr_element(
+                    expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
             return
 

@@ -1994,6 +1994,29 @@ CASES = [
      "    w = Wrap()\n"
      '    sys.stdout.write("%d" % w.xs[1])\n'
      "    return 0\n"),
+    # A `comptime` binding whose initializer is a CALL.  x86-64's `_bind_comptime`
+    # did not pass its `call_hook` to the shared `comptime_eval.resolve_var`, so
+    # arm64 folded `square(6)` and x86-64 refused the same source with
+    # "comptime a = ... does not fold" — the ARCH DRIFT the refusal text's own
+    # docstring says sharing the resolver removed, still live one argument in.
+    # The same omission was in `resolve_if` and `_comptime_iterable`; all three
+    # now pass the hook, so this program answers 37 on both machines.
+    ("comptime_binding_initialized_by_a_call",
+     "def main():\n"
+     "    comptime var a = square(6)\n"
+     "    comptime var b = add(a, 1)\n"
+     '    printf("%d", b)\n'
+     "    return 0\n"
+     "def square(x):\n"
+     "    return x * x\n"
+     "def add(a, b):\n"
+     "    return a + b\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = 6 * 6\n"
+     "    b = a + 1\n"
+     '    sys.stdout.write("%d" % b)\n'
+     "    return 0\n"),
 ]
 
 

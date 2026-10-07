@@ -10949,6 +10949,51 @@ ctor_field_value=self._ctor_field_value_for(name),
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
+    def _materialize_compr_element(self, element, res_offset: int, cap: int,
+                                   before: int) -> None:
+        """Give the element its OWN container per iteration, or refuse.
+
+        X0 on entry holds the element's blob (the scratch the element site
+        reserved), and on exit holds the per-iteration copy that
+        `_compr_append_elem` appends. The two outcomes:
+
+          * a FLAT container literal (`M.comprehension_element_is_flat_container`)
+            gets a `cap`-slot array beside its scratch, and iteration `i`'s copy
+            lands at slot `i` — `i` is the result blob's count word, which is the
+            number of elements appended so far, so the append that follows stores
+            the copy and not the scratch. The copy is `memcpy`, which returns the
+            destination in X0 for free.
+          * anything else that allocated keeps `_refuse_an_element_blob`, whose
+            message names the construct and the explicit-loop remedy.
+
+        `before` is `_list_cursor` as the element's emission began, so
+        `bytes_ = _list_cursor - before` is the element's own footprint — the
+        ledger delta the refusal is asked of, measured BEFORE the array below
+        steps the same ledger.
+        """
+        bytes_ = self._list_cursor - before
+        if not bytes_ or cap <= 1:
+            return
+        if not M.comprehension_element_is_flat_container(element):
+            raise CodegenError(M.comprehension_element_blob_refusal(
+                f"a comprehension in {self.func_name or '<module>'}", element,
+                cap, bytes_))
+        array_off = self._reserve_blob(cap * bytes_,
+                                       "comprehension element array")
+        # count = result element count so far (= this iteration's ordinal).
+        self._emit_list_base(res_offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(10, 9, 0))
+        # dest = array_base + count * bytes_
+        self._emit_list_base(array_off)
+        self._emit_mov_imm("X11", bytes_)
+        self.asm.emit(encode_mul_xd_xn_xm(11, 10, 11))
+        self.asm.emit(encode_add_xd_xn_xm(11, 9, 11))
+        # memcpy(dest, src, bytes_): X0=dest, X1=src, X2=n.
+        self.asm.emit(encode_mov_zr_xn(1, 0))       # X1 = scratch (source)
+        self.asm.emit(encode_mov_zr_xn(0, 11))      # X0 = destination
+        self._emit_mov_imm("X2", bytes_)
+        self._emit_extern_call("memcpy", 3)         # returns dest in X0
+
     # ── how many times the code being emitted runs ────────────────────
     #
     # A blob's reservation is made ONCE per site, so a site inside a loop has
@@ -11193,8 +11238,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
+                self._materialize_compr_element(
+                    expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
             return
 
