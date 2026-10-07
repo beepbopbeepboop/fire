@@ -190,7 +190,7 @@ def split(p):
     NO return annotation, and that is the convention rather than an oversight: a
     tuple is a frame blob, so an annotation here would be a claim in the dylib
     manifest that nothing can keep
-    (`bugs/FORMAL_string_equality_of_two_unclassified_words.md`).
+    (`FORMAL_string_equality_of_two_unclassified_words`).
     """
     return os.path.split(p)
 
@@ -245,7 +245,7 @@ def relpath(path, start) -> str:
     `start` is REQUIRED and not defaulted: a call from another image does not
     materialize a callee's default arguments — the caller has no signature to
     read them from — so a defaulted parameter arrives as a stack address
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). CPython
+    (`FORMAL_default_argument_not_applied_across_a_dylib`). CPython
     defaults `start` to `os.curdir`, so a caller here passes `curdir()`.
     """
     return os.path.relpath(path, start)

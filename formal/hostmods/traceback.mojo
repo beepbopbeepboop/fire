@@ -31,7 +31,7 @@ That matters because CPython answers that state itself, and its answer is not
 colon, the repr of `None` and a newline. So `format_exc()` here returns that
 exact string and `print_exc()` writes that exact string to descriptor 2 — which
 is byte-for-byte what CPython does in the state this target is always in, and
-which `test_formal_traceback.py` measures by asking CPython rather than by
+which `test_formal_core_hostmods.py` measures by asking CPython rather than by
 asserting a constant.
 
 A `print_exc()` that wrote NOTHING would have been the obvious cheaper answer
@@ -104,7 +104,7 @@ def format_exc() -> str:
     There is none being handled, so this is CPython's own answer for that state
     and not a placeholder for one: `'NoneType: None\\n'`, the text
     `format_exception_only(None, None)` produces.  Measured against CPython by
-    `test_formal_traceback.py`, on both backends.
+    `test_formal_core_hostmods.py`, on both backends.
     """
     return NO_EXCEPTION_IN_FLIGHT
 

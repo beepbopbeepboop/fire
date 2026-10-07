@@ -72,7 +72,7 @@ out rather than guessed at:
     and on x86-64 the bare name is the 32-bit function, whose `struct dirent`
     and `struct stat` are laid out differently. `formal/model.py`'s
     `target_libc_symbol` is that table;
-    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`
+    `FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`
     records what reading the wrong one of the two costs. A host with no x86-64
     support at all still skips the x86-64 half of the suites.
 
@@ -85,7 +85,7 @@ out rather than guessed at:
     (`model.subscript_base_lowering`), so `p[i]` and `p.value()` are the same
     load at the same width. The `UInt8` ANNOTATION on the parameter is what
     makes it so, and it is why every reader below takes `b: Pointer[UInt8]`.
-    (bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.)
+    (FORMAL_subscript_of_a_pointer_reads_a_blob_count.)
 
   * `len()`. It is a builtin whose kind comes from the call site, and a value
     that arrived from a call is classified as a word, so `len(p)` on a
@@ -327,7 +327,7 @@ def str_cmp(a, b) -> int:
 
     This is the one way two strings are ORDERED on this path. `==` and `!=` on
     two `str` values are refused or wrong (see
-    `bugs/FORMAL_string_equality_of_two_unclassified_words.md`), and `os.path`
+    `FORMAL_string_equality_of_two_unclassified_words`), and `os.path`
     needed no ordering at all, so this arrived with `platform.system_alias`,
     which is nothing but two string comparisons and one rewrite.
     """
@@ -748,7 +748,7 @@ def fs_environ_vec() -> Pointer[Pointer[UInt8]]:
     with "the image would bind 1 symbol(s) that nothing provides:
     _NSGetEnviron".  The defect is real and it is written down, with its two
     one-line repairs, in
-    `bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md`; this is
+    `FORMAL_libc_call_whose_name_starts_with_an_underscore`; this is
     not that fix and does not touch the linker, because a light change to
     `_bind_info` on both architectures is not a light change.
 
@@ -810,10 +810,11 @@ def fs_read(fd, buf, n) -> int:
     `fs_close` can open a file and find its size and cannot read a byte of it,
     which is why `io`'s streams, `platform.architecture` and `libc_ver` are all
     absent (the first and last two are named at the definitions that want them,
-    and the stream argument is `bugs/FORMAL_glob_copy_collections_io_not_
-    attempted.md`). Three fixed arguments and no fourth, which is `read(2)`'s
-    own signature: the C library's `fread` takes a `FILE *` and this path has no
-    `FILE`, and `read` is the call that works on a bare descriptor.
+    and the stream argument is
+    `FORMAL_glob_copy_collections_io_not_attempted`). Three fixed arguments and
+    no fourth, which is `read(2)`'s own signature: the C library's `fread`
+    takes a `FILE *` and this path has no `FILE`, and `read` is the call that
+    works on a bare descriptor.
 
     A short read is not an error and is not retried: `n` bytes is what the
     caller asked for and this is what arrived, which is the same contract C has.
@@ -1148,7 +1149,7 @@ def fs_dirent_name(e: Pointer[UInt8]) -> str:
     is what makes `e[21 + i]` a one-byte load rather than a list-blob walk
     bounds-checked against the inode number at offset 0. Without it the same
     line returns a fabricated number, and
-    `bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` has the
+    `FORMAL_subscript_of_a_pointer_reads_a_blob_count` has the
     measurement.
 
     1024 bytes is the array's own size on this target, so a name that long
@@ -1219,13 +1220,13 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 # Every field this module reads is read ONE BYTE AT A TIME through
 # `le16`/`le32`/`le64` below, so each load has the width the field declares.
 # That is the difference from the state
-# `bugs/FORMAL_stat_out_parameter_is_unreadable.md` describes: it was not the
+# `FORMAL_stat_out_parameter_is_unreadable` describes: it was not the
 # offsets that made the struct unreadable, it was that a read of it was a
 # COUNT-WALK — a bounds check against whatever word was at offset 0. A byte
 # read at a declared offset is what C does, and it is now answerable.
 #
 # The offsets are CONSTANTS, and a module-level constant is not exported as a
-# word across a dylib boundary (`FORMAL_module_state_no_storage.md`), so they
+# word across a dylib boundary (`bugs/FORMAL_module_state_no_storage.md`), so they
 # are `int` PARAMETERS of the readers and the values live at the use sites.
 # The names are spelled `ST_*` here as the numbers they are; the spellings a
 # caller uses are the functions further down, which is also where the layout is
@@ -1477,7 +1478,7 @@ def fs_lstat(p, buf) -> int:
 # `struct stat` is laid out differently gets 0 from every `stat_*` function
 # below rather than a plausible wrong number out of adjacent bytes. That is the
 # whole difference from the state
-# `bugs/FORMAL_stat_out_parameter_is_unreadable.md` describes.
+# `FORMAL_stat_out_parameter_is_unreadable` describes.
 #
 # It runs only when the mode says the path is a REGULAR file, for two reasons.
 # `lseek` on a directory descriptor reports something about the directory

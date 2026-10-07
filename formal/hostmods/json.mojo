@@ -148,7 +148,7 @@ ESC_BSLASH = 92
 # `scan_value` -> `scan_array` -> `scan_value` is two frames per level, and a
 # formal image's stack is the machine stack and the frame the backend reserves,
 # neither of which a program can size
-# (`bugs/FORMAL_always_returns_recurses_past_the_stack_on_a_large_function.md`).
+# (`FORMAL_always_returns_recurses_past_the_stack_on_a_large_function`).
 # Measured on a document of nothing but `[` repeated: with no bound at all, 28
 # levels is answered and 29 is SIGSEGV. The bound is set BELOW that ceiling
 # rather than at it, because the check runs inside the frame it is testing for
@@ -900,7 +900,7 @@ def pair(hi, lo) -> int:
     lone ones, so this is CPython's rule and not the RFC's: 0x10000 + ((hi -
     0xD800) << 10) + (lo - 0xDC00), with a `* 1024` for the shift because the
     arm64 immediate form of a left shift is wrong for every amount above 8
-    (`bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`).
+    (`FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8`).
     """
     return 65536 + ((hi - 55296) * 1024) + (lo - 56320)
 
@@ -1000,7 +1000,7 @@ def code_of_utf8(s, i, n) -> int:
 
     Assembled with multiplications rather than shifts because the arm64
     immediate form of a left shift is wrong for every amount above 8
-    (`bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`), and
+    (`FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8`), and
     because `n` is not a constant here.
     """
     var b = byte_or(s, i)

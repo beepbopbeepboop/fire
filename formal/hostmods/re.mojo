@@ -344,7 +344,7 @@ _MAXDEPTH = 20
 #     which reads a COUNT from offset 0 and bounds-checks against it, so a
 #     program that indexes a string for a character gets a plausible number
 #     built out of adjacent bytes
-#     (`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md`);
+#     (`FORMAL_subscript_of_a_pointer_reads_a_blob_count`);
 #   * `value()` needs a DECLARED pointee, so the receiver is a local
 #     `var q: Pointer[UInt8] = p + i` and never an inline `(p + i).value()`.
 # A multi-byte field is assembled with `<<` and taken out with `>>`, both by a
@@ -865,7 +865,7 @@ def _p_group(a, code, nxt: Int) -> Int:
         # `re.IGNORECASE()`) and used to refuse the spelling inside the
         # pattern, which is the same feature twice and made the engine answer
         # `STATUS_UNSUPPORTED` for a pattern its own docstring says it
-        # supports. Found by generating CPython's own `test_re.py` as a
+        # supports. Found by generating CPython's own `test_re` as a
         # conformance table (`test_formal_hostmods_conformance.py`), which is
         # where `(?x) a` and `(?m)^b` come from.
         #
@@ -2683,9 +2683,10 @@ def nl() -> Pointer[UInt8]:
     `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`), so
     `"\\n"` is a real newline and this helper is a convenience rather than a
     necessity. It is kept because the corpus that uses it is being rewritten
-    against the decoded spelling (`bugs/FORMAL_re_corpus_mojo_str_assumes_
-    escapes_are_not_decoded.md`), and until that rewrite lands a subject built
-    this way and one written as a literal have to agree.
+    against the decoded spelling
+    (`FORMAL_re_corpus_mojo_str_assumes_escapes_are_not_decoded`), and until
+    that rewrite lands a subject built this way and one written as a literal
+    have to agree.
     """
     var p: Pointer[UInt8] = str_alloc(1)
     memset(p, 10, 1)
@@ -2730,7 +2731,7 @@ def UNICODE():
 # module was REFUSED at build time with the "they are unequal" message this
 # file's other docstrings quote -- a caller cannot compare a status it cannot
 # type. It was found by `test_formal_hostmods_conformance.py`, which lowers
-# CPython's own `test_re.py` calls to exactly that spelling.
+# CPython's own `test_re` calls to exactly that spelling.
 def STATUS_OK() -> int:
     """The pattern is fine and it matched; the spans are in the caller's list."""
     return 1

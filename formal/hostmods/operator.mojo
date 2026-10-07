@@ -228,7 +228,7 @@ def lshift(a, n) -> int:
     x86-64's `SHL` with a `CL` mask). Measured: `1 << 64` is `0` on this target
     and `2**64` in CPython, and `0 - 1 >> 100` is `0` here and `-1` in CPython —
     two silent wrong answers wearing the name of a shift, which is the shape of
-    bug `FORMAL_known_limits.md` exists to keep out. The `n <= 63` answers are
+    bug `FORMAL_known_limits` exists to keep out. The `n <= 63` answers are
     NOT guesses: every one of them was compared with CPython and agrees
     (`test_formal_core_hostmods.py`'s `op` group, including `-1 << 63`).
     """

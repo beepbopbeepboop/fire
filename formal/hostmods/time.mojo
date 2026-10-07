@@ -65,7 +65,7 @@ rather than of this module, and every function below is shaped by them.
     argument is 36 bytes it cannot fill. Passing an integer where the pointer
     belongs instead passes a null `time_t *` and the image segfaults inside
     libc, so the honest answer here is the refusal. The capability is filed as
-    `bugs/FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`
+    `FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee`
     and the measurement is `test_formal_time.py`'s `structroute` group.
 
   * NO EXCEPTIONS. `time.sleep` on a negative argument raises `ValueError` in

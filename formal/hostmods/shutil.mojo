@@ -371,7 +371,7 @@ def rmtree(path, maxdepth) -> int:
 
     `maxdepth` IS REQUIRED, not defaulted, for the same reason `os.walk`'s is:
     a default argument is not applied to a call from another image
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). CPython's
+    (`FORMAL_default_argument_not_applied_across_a_dylib`). CPython's
     `rmtree` has no depth parameter at all; see the module docstring for why
     that is not the right shape here.
 
@@ -553,7 +553,7 @@ def which(cmd, path) -> str:
 
     `path` is a PARAMETER and is not defaulted to the environment: a default
     argument is not applied to a call from another image
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). A caller who
+    (`FORMAL_default_argument_not_applied_across_a_dylib`). A caller who
     wants the environment's `PATH` passes `getenv("PATH")`, and
     `which_env(cmd)` below is that one call spelled out.
 

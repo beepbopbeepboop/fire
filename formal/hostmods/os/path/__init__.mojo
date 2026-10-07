@@ -42,7 +42,7 @@ deviations that are properties of this target and are stated on each one:
     one would reach a caller as a dylib manifest signature. Every other
     function in this module and in `os/_syscalls.mojo` IS annotated, and that
     is what lets a CALL SITE classify what it got back
-    (bugs/FORMAL_string_equality_of_two_unclassified_words.md): a call result
+    (FORMAL_string_equality_of_two_unclassified_words): a call result
     with no annotation is a word whose provenance is unknown, and `f() == g()`
     on two of those was a comparison of two addresses — `c == d` FALSE for two
     equal strings.
@@ -834,7 +834,7 @@ def expanduser(p) -> str:
     **THE `~name` HALF IS A `getpwnam`, and this function used to claim it could
     not be done.**  It said "reading the password database is not something this
     target can do", and answered `~root/` unchanged where CPython answers
-    `/var/root/`.  That is a divergence CPython's own `test_posixpath.py` has a
+    `/var/root/`.  That is a divergence CPython's own `test_posixpath` has a
     case for — `self.assertEqual(posixpath.expanduser('~root/'), '/var/root')` —
     and it was found by generating that suite's cases rather than by reading it,
     which is the argument for generating them: the case is in the file the whole

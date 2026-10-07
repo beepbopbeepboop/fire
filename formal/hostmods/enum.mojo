@@ -51,7 +51,7 @@ every constant in this directory is one: a module-level name is not exported as 
 word (`bugs/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
 are functions too. Its VALUE is never read — the base is erased — so what it
 returns is not a claim about `Enum`, it is the smallest thing that satisfies the
-export rule. `test_formal_enum.py` pins that: the module builds, a program that
+export rule. `test_formal_core_hostmods.py` pins that: the module builds, a program that
 derives from `Enum` builds, and its members read as their own literals.
 
 **`.value` AND `.name` ARE NOT IN THIS FILE.** They are the enum's whole reason
@@ -106,7 +106,7 @@ def Enum() -> int:
 
     The 0 is not a claim about CPython's `Enum` (which has no integer value). It
     is the smallest answer that satisfies `doc/ABI.md`'s export rule, and
-    `test_formal_enum.py` asserts the thing that actually matters — that a class
+    `test_formal_core_hostmods.py` asserts the thing that actually matters — that a class
     deriving from it builds and its members read as their own literals — rather
     than pinning a number whose being wrong would change no program.
     """

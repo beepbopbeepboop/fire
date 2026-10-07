@@ -24,7 +24,7 @@ and it is worth having for the reason the sweep row is worth having: the
 them then stop on `subprocess` instead — which is a fact about the target with
 an owner, rather than a fact about the target with none. **That is the whole
 yield, and it is worth saying plainly: writing `fcntl` moves ZERO files to
-PASS.** See `bugs/FORMAL_platform_reachable_row_measured.md` §2 for the same
+PASS.** See `FORMAL_platform_reachable_row_measured` §2 for the same
 arithmetic on the `platform` row, which is where the rule this row follows was
 established.
 
@@ -62,7 +62,7 @@ WHAT IS NOT HERE, AND WHY
     arguments for that reason. The struct itself is not the obstacle — it is
     five fields at offsets 0, 2, 8, 16 and 24 — so this is one extension of the
     argument-passing convention away, not a capability; it is written down in
-    `bugs/FORMAL_a_pointer_through_a_variadic_argument.md`.
+    `FORMAL_a_pointer_through_a_variadic_argument`.
 
   * `ioctl(fd, request, arg)`. `ioctl` is not a lock and not a flag: it is a
     DEVICE's private protocol, and the request number means whatever the driver
@@ -319,7 +319,7 @@ def F_GETPATH() -> int:
 # The struct itself is not the obstacle — `struct stat` is read byte-wise in this
 # tree and `struct flock` is five fields at offsets 0, 2, 8, 16 and 24 — so
 # `lockf` is ONE extension of the argument-passing convention away, not a
-# capability. `bugs/FORMAL_a_pointer_through_a_variadic_argument.md` is where
+# capability. `FORMAL_a_pointer_through_a_variadic_argument` is where
 # that is written down, and it is the same gap that keeps
 # `platform.architecture()` (a `read` into a buffer the caller fills) and
 # `struct tm` out of `formal/hostmods/time.mojo`.
@@ -347,7 +347,7 @@ def F_GETPATH() -> int:
 #
 # A `setfd` built on that would report success and change nothing, which is the
 # silent wrong answer about a descriptor this file refused to ship rather than
-# ship. `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md` recorded the
+# ship. `FORMAL_a_variadic_call_drops_its_third_argument` recorded the
 # measurement; the entry `"fcntl": 2` in `VARIADIC_LIBC` is the fix, and
 # `test_formal_fcntl.py`'s `fdflags` group is what says it took.
 #

@@ -3,7 +3,7 @@
 `formal/imports.py`'s FIRST resolution pass finds a `.mojo` source for a name
 in a search root and that wins outright, over the host-module list, so this file
 is what `import fnmatch` binds to. It is the module
-`bugs/FORMAL_platform_reachable_row_measured.md` §5 names as reachable-but-
+`FORMAL_platform_reachable_row_measured` §5 names as reachable-but-
 unwritten, with the `*`-crosses-`/` difference spelled out at `match_core`.
 
 WHAT IS HERE

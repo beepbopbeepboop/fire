@@ -43,8 +43,8 @@ class that means "this target cannot build this file" — and into a refusal tha
 names the thing the file actually needs, which is what every other module in
 this directory is for (`test_formal_core_hostmods.py`'s own table: `type_system.py`
 stopped being "imports 'enum'" and became a refusal about `Type.origin`'s
-dataclass default). `bugs/FORMAL_platform_reachable_row_measured.md` §2 records
-the same accounting for `platform`, and `bugs/FORMAL_host_import_row_5_measured.md`
+dataclass default). `FORMAL_platform_reachable_row_measured` §2 records
+the same accounting for `platform`, and `FORMAL_host_import_row_5_measured`
 goes further and says of four other modules in this row that writing them is not
 worth the day. **This one is different, and the difference is that the capability
 behind it is REAL and reachable**: `mkdtemp`'s body below is `os` calls that
@@ -59,7 +59,7 @@ is `mkdtemp(prefix)`.
   * **No parameter may be omitted at a call across a dylib boundary.** The
     argument register is not written for a default this image cannot see, and
     the backend refuses it by name rather than passing a stack address:
-    `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, whose
+    `FORMAL_default_argument_not_applied_across_a_dylib`, whose
     measurement is why `os.mkdir(path, mode)` and `shutil.rmtree(path, maxdepth)`
     are spelled with every argument. So a three-parameter `mkdtemp` here is a
     function **no caller in this corpus can call**: all 51 spell `mkdtemp(prefix=…)`
@@ -467,7 +467,7 @@ struct TemporaryDirectory:
         that has entries in it, which would leave exactly the tree this contract
         exists to remove. `maxdepth` is spelled because a call across a dylib
         boundary cannot omit an argument
-        (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+        (`FORMAL_default_argument_not_applied_across_a_dylib`).
 
         The answer is `shutil.rmtree`'s — the number of entries removed, so a
         `delete=0` manager and a failed removal are both distinguishable by a

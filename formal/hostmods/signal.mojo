@@ -52,7 +52,7 @@ on Linux and does not exist here at all, and `SIGCHLD` is 17 on Linux and 20
 here. So these are macOS's numbers — the numbers of the two architectures this
 backend emits for — and they are NOT CPython's numbers on a Linux host.
 
-`test_formal_signal.py` therefore compares each name against CPython's LIVE
+`test_formal_core_hostmods.py` therefore compares each name against CPython's LIVE
 `signal` module, name by name, which is the same oracle every other hostmod test
 in this tree uses (`test_formal_stat.py`'s `S_I*` corpus is the precedent, and
 `formal/hostmods/stat.mojo` says "this platform" for the same reason). It does

@@ -32,7 +32,7 @@ because it is not a matter of taste:
     `readdir(3)`/`stat(2)`, whose `struct dirent`/`struct stat` is a different
     layout. That table is `model.target_libc_symbol`'s, and what it cost before
     it was there is
-    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`.
+    `FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`.
     (A host with no x86-64 support at all still skips the x86-64 half of the
     suites, with the reason printed.)
 
@@ -72,7 +72,7 @@ because it is not a matter of taste:
     whether the value it got back is a string. Without it a call result is a
     word of unknown provenance, and `f() == g()` on two of those was an
     ADDRESS comparison — two equal strings compared unequal, silently, on both
-    backends (bugs/FORMAL_string_equality_of_two_unclassified_words.md). The
+    backends (FORMAL_string_equality_of_two_unclassified_words). The
     four functions in `os.path` that return a TUPLE carry no annotation, for
     the reason that file gives.
 
@@ -191,7 +191,7 @@ def linesep() -> str:
     rule (`ast.mojo`'s character sets, `re.mojo`'s `nl`), so it is the one place
     that must not keep asserting a limitation that is gone. Their corpora keep
     the `str_alloc` + `memset` idiom for now — it is correct, and
-    `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" says what
+    `FORMAL_sys_mojos_escape_note_is_stale` §"what remains" says what
     simplifying them would take.
     """
     return "\n"
