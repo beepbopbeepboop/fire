@@ -3040,6 +3040,22 @@ class GimpleGen:
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_is_bound_method':     ('int', ['void *']),
+        # Arity 5..8 of THIS family, which the variadic-callable widening
+        # commit missed: it added 5..8 for `mojo_fnptr_call_N`,
+        # `mojo_fnptr_call_kw_N`, `mojo_maybe_bound_call_N` and
+        # `mojo_maybe_bound_call_kw_N` and left this one behind. Benign
+        # today only by luck -- `_lower_bound_method_call_value` pre-widens
+        # every argument to int64_t before building the pair list, so an
+        # absent row makes `ptype = atype = int64_t` and nothing needs
+        # coercing. It is still a hole in the table whose entire job is to
+        # guarantee GIMPLE-valid argument types for a caller that does NOT
+        # pre-widen, and it is the one family a reader comparing this dict
+        # with fire_runtime.h would find short. Pinned by
+        # test_runtime_header_scan.py's arity-family completeness check.
+        'mojo_bound_method_call_5': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 5),
+        'mojo_bound_method_call_6': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 6),
+        'mojo_bound_method_call_7': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 7),
+        'mojo_bound_method_call_8': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 8),
         # Variadic callables (see runtime/fire_runtime.h's "Variadic
         # callables" comment): a value whose real callee wants its
         # arguments packed into a MojoList/MojoDict rather than passed
@@ -3064,6 +3080,21 @@ class GimpleGen:
         'mojo_maybe_bound_call_kw_3': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_kw_4': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_vararg_call_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        # Arity 0..4 of `mojo_fnptr_call_N`, missing since the family was
+        # first written: the variadic widening added 5..8 and 0..4 were
+        # never here. Same failure mode as the bound-method gap below — an
+        # absent row means `_emit_call` finds no `param_types` and falls
+        # through to `ptype = atype` — but here the caller
+        # (`_lower_fnptr_call_value`) DOES pre-widen, which is why it has
+        # been harmless. The family is now whole; both gaps are pinned by
+        # test_runtime_header_scan.py's completeness check rather than by
+        # four more pinned names, so a sixth family cannot be missed the
+        # same way.
+        'mojo_fnptr_call_0':  ('int64_t', ['void *']),
+        'mojo_fnptr_call_1':  ('int64_t', ['void *', 'int64_t']),
+        'mojo_fnptr_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_3':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_4':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_fnptr_call_5':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_fnptr_call_kw_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_5': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
