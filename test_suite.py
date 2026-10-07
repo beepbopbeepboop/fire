@@ -1231,6 +1231,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'gimplerunner': 3,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
+                     'formal-x86-endtoend': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
@@ -1244,7 +1245,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'until 2026-10-04, when the dict-value-kind row it named was '
           f'fixed (the census had to '
           f'learn it here too: adding a marker without adding its entry is '
-          f'exactly the drift this check names). `formal-toplevel`, '
+          f'exactly the drift this check names). `formal-x86-endtoend` is the only '
+            f'entry that is a Lean proof sweep rather than a compiled or '
+            f'interpreted one, and the count is checkable at all only because '
+            f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
+            f'line: its previous summary (`failing    : N`) is none of '
+            f'`_SUMMARY_FAILURES`\'s three shapes, so a marker claiming a '
+            f'count against it was reported UNCHECKED, which this file '
+            f'treats as a failure. `formal-toplevel`, '
           f'`formal-module-attr` and '
           f'`formal-external-call` are NOT here and that is the mechanism '
           f'working: each `expect=` was removed when the rows it described '

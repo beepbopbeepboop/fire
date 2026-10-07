@@ -653,6 +653,21 @@ def x86_shift_post (s : X86State) (i digit : Nat) (a : UInt64) (k : Nat) :
       else false
     x86_set_flag4 (x86_set_reg s i res) res bitOut ofBit
 
+/-- …and so is its memory, which is the same claim the five other wrappers'
+    `_mem` lemmas make.  This one exists because
+    `formal/x86_64_endtoend_test.py`'s successor table now quotes
+    `x86_shift_post`: every shift goes through it, so a
+    generated proof's closing read projects `.mem` through it.  Without
+    this the projection stops at the shift and drags the whole register file
+    into a term `native_decide` refuses. -/
+theorem x86_shift_post_mem (s : X86State) (i digit : Nat) (a : UInt64)
+    (k : Nat) :
+    (x86_shift_post s i digit a k).mem = s.mem := by
+  simp only [x86_shift_post]
+  split
+  · exact x86_set_reg_mem s i a
+  · simp only [x86_set_flag4, x86_set_reg_mem]
+
 /-- A signed number as the 64-bit PATTERN the machine keeps: two's complement,
     truncated to 64 bits.
 

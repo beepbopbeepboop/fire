@@ -6020,7 +6020,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # not — every other one calls `_emit_overflow_diagnostic` first and names
         # the bound it hit.  Measured before the message, both architectures
         # identical: two in-range lines, then exit 1 with 0 bytes on stderr.
-        self._emit_overflow_diagnostic(
+        self._emit_stop_diagnostic(
             M.subscript_out_of_range_message(
                 M.spelled(e), M.subscript_container_name(e.obj, obj_kind)))
         self._emit_exit(1)

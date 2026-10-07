@@ -50,6 +50,43 @@ deleted with its fix — the lemmas it asked for are in `lib/X86.lean` and wired
 `formal/x86_64_endtoend_test.py`). Re-opened and rewritten 2026-10-02 on
 `work/formal8-14`.
 
+## Status (2026-10-05 — this is now the ONLY red in `formal-x86-endtoend`, and it is a registered `expect=`)
+
+`formal43-x86-endtoend-red` re-measured the whole job
+(`python3 formal/x86_64_endtoend_test.py`, 93 programs, ~55 min, 6.1 GB peak):
+
+| | 2026-10-05 (this doc's subject fixed) | 2026-10-05 after |
+|---|---|---|
+| `terminates` FAIL | **26 of 26** | **1** |
+| proved with no sorry | 13 | **58** |
+| proved with a counted hole | 0 (nothing elaborated) | **6** |
+| no finite tree | 28 | 28 (19 loop, 9 uncovered form) |
+
+The 26 were three stale rows in `_SUCCS` against a corrected model, and the
+rest of that work is in `037f4113` and `7cb21aea`. **The one remaining failure is
+this doc's subject and nothing else**: `formal/examples/wide_recv.mojo` aborts
+with
+
+    libc++abi: terminating due to uncaught exception of type
+      lean::memory_exception: excessive memory consumption detected at 'interpreter'
+
+at `rc=-6`, on the 113-equation chain this doc's `_MAX_UNFOLD = 64` table
+measures. Its own numbers are unchanged by that work — `const2` still closes its
+read at 19 equations, 77 still leaves a hole, 113 still aborts — and it is
+registered as `formal-x86-endtoend`'s `expect='1 of 65'`, so it is now a
+CHECKED red that runs on every `proofs`/`x86` sweep instead of an unobserved
+one.
+
+**What is still missing, unchanged from the 2026-10-04 entry below:** the
+per-step separation invariant, so the closing read needs no unfold at all. The
+interim answer (`_concrete_read` unfolding up to 64 equations and
+`native_decide`-ing the result) is what makes `wide_recv` abort, and the durable
+one is a `mem` lemma per step that keeps the intermediate state abstract — which
+is what `bugs/FORMAL_x86_64_end_to_end_proof.md`'s remaining section also asks
+for. **The concrete next step is unchanged and is in the generator, not in
+`X86.lean`:** thread a "this step wrote only registers" fact through the chain,
+so `.mem` never has to be reconstructed from 113 record updates.
+
 ## Status (2026-10-04 — the read at a `ret` is EVALUATED rather than simplified; the chain's LENGTH is still the wall)
 
 The doc's own advice was "evaluate the closed term instead of simplifying it into

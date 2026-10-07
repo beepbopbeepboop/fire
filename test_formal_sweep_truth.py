@@ -2964,6 +2964,67 @@ class TestX86EndToEndTables(unittest.TestCase):
                 % (form, len(self.ET._FORMS[form][2]), lemma, len(hyps),
                    ", ".join(hyps)))
 
+    def test_every_row_applies_the_state_wrappers_its_lemma_concludes(self):
+        """**A successor table is a copy of the model, so it goes stale when the
+        model is corrected.** Three of this file's rows did, and each one cost a
+        `Type mismatch` on every generated proof:
+
+        | form | the row said | `lib/X86.lean` says | why the model changed |
+        |---|---|---|---|
+        | `setcc` | `x86_set_reg` | `x86_set_reg_narrow s rmv 1` | a one-byte write leaves the other 56 alone; `formal/x86_64_model_fuzz.py --census` measured `setne al` on RAX = 0xdeadbeefcafebabe |
+        | `shift_imm8:*` | `x86_set_reg` + `x86_flags_logic` | `x86_shift_post` | the count was clamped not masked, CF was never set, and `sar` reached for `x86_sign_extend32` |
+        | `imul_r64_r64` | `x86_set_reg`, no flags | `x86_set_flag4 …` | a signed multiply's overflow lands in ZF/SF/CF/OF |
+
+        Nothing caught any of them. The step application elaborates — a wrong
+        successor and a right one are both `Option`-valued terms — so the
+        failure only appears as `Type mismatch` with both 22-field records
+        printed and neither of the two fields that differ named, and no bucket
+        ran the file, so 26 of 26 `terminates` cases were red and nothing said
+        so.
+
+        The invariant is narrow and derivable rather than a list: **a
+        state-valued wrapper in a successor row must be one the lemma's own
+        conclusion applies, and every one the conclusion applies must be in the
+        row.** Which names are state-valued is read off `lib/X86.lean` by the
+        `_mem` lemma convention above them — a wrapper with a `_mem` lemma is
+        one the closing read has to be able to see through — so adding a wrapper
+        to either side without the other fails here, and adding the `_mem` lemma
+        is what makes it visible at all.
+
+        Lean-free, and the whole point: each of the three discoveries cost a
+        100-second proof and most of them cost a corpus sweep to notice at all.
+        """
+        import re as _re
+        wrappers = {m.group(1) for m in
+                    _re.finditer(r"theorem (x86_[A-Za-z_0-9]+)_mem\b", self.src)}
+        self.assertTrue(wrappers,
+                        "no `_mem` lemma found in lib/X86.lean: the convention "
+                        "this reads the state-valued wrappers off is the one "
+                        "that makes them visible")
+        used = lambda t: {n for n in _re.findall(r"x86_[A-Za-z_0-9]+", t)
+                          if n in wrappers}
+        for form in sorted(self.ET._FORMS):
+            lemma = self.ET._FORMS[form][0]
+            i = self.src.index("theorem %s " % lemma)
+            # The statement is everything from `theorem` to its `:= by`, so a
+            # proof's own `have` cannot leak into the comparison.
+            stated = self.src[i:self.src.index(":=", self.src.index(
+                "x86_step", i))]
+            row, model = used(self.ET._SUCCS[form]), used(stated)
+            self.assertEqual(
+                row - model, set(),
+                "%s's successor applies %s and %s concludes with %s: the row "
+                "is a second, stale statement of the model's semantics, and "
+                "the mismatch is a `Type mismatch` printing both whole "
+                "records" % (form, sorted(row - model), lemma,
+                             sorted(model or ["the state itself"])))
+            self.assertEqual(
+                model - row, set(),
+                "%s concludes with %s and its successor applies %s: the row is "
+                "missing what the instruction DOES, which for `imul_r64_r64` "
+                "was its four flags" % (form, sorted(model - row),
+                                        sorted(row or ["nothing"])))
+
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
         either of them fails here rather than in every generated proof.
@@ -4093,18 +4154,35 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         program whose path reaches a call out of the image for some OTHER
         reason — `subscript_var`'s subscript reaches the allocator. `SOURCE`
         crosses a frame but no such call, and the case below asserts that too, so
-        a fixture change cannot quietly stop testing the trap."""
-        text = self._emitted_path("subscript_var")
+        a fixture change cannot quietly stop testing the trap.
+
+        **AND the premise of that paragraph was itself a BUG, which is why the
+        fixture is now `a[n]` rather than `a[1]`.** `subscript_var` reaches the
+        allocator only because the tree followed a `jmp rel32` to `addr + off`
+        instead of `addr + len + off`, so it walked the instruction five bytes
+        before the one the machine runs — and that instruction happened to be the
+        allocator's `call`. Fix the branch target (B13, in the one arm its own
+        comment above it warned about) and the path takes a `jmp` into the
+        helper's body and ends at the helper's `ret` instead, which is a
+        TAIL CALL and is its own leaf kind. So the fixture is now
+        `i = n`: the index is not a literal, the compiler emits the `call`, and
+        the leaf really is a call out of the image.
+
+        `test_a_tail_call_return_is_not_the_end_of_the_run` covers the other
+        leaf kind on `subscript_var` itself, so neither arm of this is untested
+        by moving the fixture.
+        """
+        text = self._emitted(
+            "def main(n) -> Int:\n"
+            "    a = [10, 20, 30]\n"
+            "    i = n\n"
+            "    return a[i]\n")
         found = list(re.finditer(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by\n"
                                  r"[ ]*simp only \[(hs\d+)\]", text))
-        self.assertEqual(len(found), 1,
-                         "this program's one path ends at the allocator, which "
-                         "is out of the image, so it has exactly one trap leaf: "
-                         f"{len(found)}")
+        self.assertTrue(found,
+                        "a path that reaches the allocator, which is out of the "
+                        "image, has a trap leaf of its own: 0 found")
         for m in found:
-            self.assertNotEqual(m.group(2), "s0",
-                                "the halt state is the one the walk reached the "
-                                "call in, not the initial state")
             self.assertEqual(m.group(4), "hs" + m.group(2)[1:],
                              "the halt fact is proved from the successor "
                              f"equation that defines {m.group(2)}")
@@ -4115,6 +4193,38 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                              text,
                              "the trap arm is a HALT and not a step: the runner "
                              "stops at `st.rip = exit` before it steps")
+
+    def test_a_tail_call_return_is_not_the_end_of_the_run(self):
+        """A `ret` in a frame a `jmp` entered is a HALT, not the exit sentinel.
+
+        `formal/examples/subscript_var.mojo` with a LITERAL index compiles to a
+        `jmp rel32` into the helper's body rather than a `call`, and the `ret`
+        it reaches has no return address on any stack — the machine pops
+        whatever the frame holds, which is a local. So the closing fact
+        `s_N.rip = 0` is FALSE there, and it is a `sorry` inside that fact's
+        guard, so nothing would report it. B25's failure mode exactly.
+
+        This is the same answer the tree already gives a call out of the image —
+        name the `ret`'s own address as the halt address, so
+        `x86_exec_go_exit` stops one instruction earlier and the claim becomes
+        the one the model supports. So all three properties are checked: the
+        halt is the `ret`'s address and NOT zero, there is NO `x86_step_ret` for
+        it, and the theorem names the `ret` as the address it stops at.
+        """
+        text = self._emitted_path("subscript_var")
+        halt = re.search(r"have (hhalt\d+) : (s\d+)\.rip = (\d+) := by", text)
+        self.assertIsNotNone(halt, "a tail-called `ret` is a leaf with a halt "
+                         "fact of its own:\n" + text[-2000:])
+        state, addr = halt.group(2), halt.group(3)
+        self.assertNotEqual(addr, "0",
+                            "the popped word is a local in the jumped-into "
+                            "frame, not the zero the exit sentinel is")
+        self.assertNotIn("x86_step_ret", text,
+                         "the tail-call arm is a HALT and not a step: the "
+                         "runner stops at `st.rip = exit` before it steps")
+        self.assertIn("rc %s 100000).isSome = true" % addr, text,
+                      "…and the statement names the `ret`'s own address, which "
+                      "is what makes the claim true rather than stronger")
 
     def test_the_guards_branches_are_settled_and_not_walked(self):
         """What replaced the doubling, on the fixture that used to show it.

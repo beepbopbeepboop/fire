@@ -1938,7 +1938,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         relocation.
         """
         before = len(self.asm.extern_refs)
-        self._emit_overflow_diagnostic(text)
+        self._emit_stop_diagnostic(text)
         if len(self.asm.extern_refs) == before + 1:
             return self.asm.extern_refs[-1][1]
         # No extern was recorded, which means the call did not go through
@@ -6008,7 +6008,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jcc(COND_AE, bad_label)     # index >= count
         self._emit_jmp(ok_label)
         self.asm.label(bad_label)
-        self._emit_overflow_diagnostic(message)
+        self._emit_stop_diagnostic(message)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
 

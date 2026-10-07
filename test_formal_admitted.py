@@ -1356,9 +1356,13 @@ AXIOM_CLOSURE = {
     # record update or a `match` on a literal, which is the same proof the five
     # `_mem` facts beside them already carry, and a fall in `clean` is the
     # direction this column is watched in: a wrapper that did not leave memory
-    # alone would put `rdi` into a term the closing read has to evaluate. The
-    # partition still closes (150 = 2 + 147 + 0 + 1).
-    "X86": (150, 2, 147, 0, 1, 0),
+    # alone would put `rdi` into a term the closing read has to evaluate.
+    #
+    # **And +1 more from `work/formal43-x86-endtoend-red`**, whose `x86_shift_post`
+    # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
+    # reaches no decide axiom, so `asked` and `clean` both move by one. The
+    # partition still closes (151 = 2 + 148 + 0 + 1).
+    "X86": (151, 2, 148, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
