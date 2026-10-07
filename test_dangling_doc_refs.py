@@ -33,6 +33,13 @@ TABLE = """
 """
 
 
+# The stems the fixture's "ledger" knows; `verdict_claims` only reads a row whose
+# stem the ledger has, which is the one parser both the committed-ledger report
+# and this fresh-run mode share.
+LEDGER = {s: ('lean-rejected', None, False) for s in
+          ('keeps', 'flips', 'flips2', 'oldrow', 'unmeasured', 'varies')}
+
+
 class StaleVerdictRows(unittest.TestCase):
     def test_a_deliberately_wrong_row_is_the_one_reported(self):
         with tempfile.TemporaryDirectory() as td:
@@ -41,7 +48,7 @@ class StaleVerdictRows(unittest.TestCase):
                 f.write(TABLE)
             stub = {'keeps': 'fail', 'flips': 'fail', 'flips2': 'pass',
                     'varies': 'pass'}
-            rows = d.stale_verdict_rows([doc], lambda s: stub[s])
+            rows = d.stale_verdict_rows([doc], lambda s: stub[s], LEDGER)
             self.assertEqual(
                 [(r[2], r[3], r[4]) for r in rows],
                 [('flips', 'pass', 'fail'),
@@ -54,15 +61,15 @@ class StaleVerdictRows(unittest.TestCase):
                 f.write(TABLE)
             stub = {'keeps': 'fail', 'flips': 'pass', 'flips2': 'fail',
                     'varies': 'pass'}
-            self.assertEqual(d.stale_verdict_rows([doc], lambda s: stub[s]),
+            self.assertEqual(d.stale_verdict_rows([doc], lambda s: stub[s], LEDGER),
                              [])
 
     def test_verdict_claims_skips_historical_rows(self):
-        claims = list(d.verdict_claims(TABLE))
+        claims = list(d.verdict_claims(TABLE, LEDGER))
         self.assertEqual(
             sorted((s, c) for _n, s, c in claims),
-            [('flips', 'pass'), ('flips2', 'fail'), ('keeps', 'fail'),
-             ('varies', 'pass')])
+            [('flips', 'proved'), ('flips2', 'lean-rejected'),
+             ('keeps', 'lean-rejected'), ('varies', 'proved')])
 
 
 if __name__ == '__main__':

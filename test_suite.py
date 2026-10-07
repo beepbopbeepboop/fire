@@ -5559,15 +5559,33 @@ def test_the_formal_doc_index_is_current():
     # and unclaimed documents; requiring the two to DIFFER is what stops this
     # from passing vacuously on a tree where they happen to agree, and
     # requiring the reduced order to BE name order is what stops the sort being
-    # dropped as dead code. Read from `block`, the file as it is: `planted` has
-    # had every `**unclaimed**` rewritten to a worker name, so there is nothing
-    # mixed left in it to look at.
+    # dropped as dead code.
+    #
+    # The mixed block is BUILT, not read from the file. The first version read
+    # `block` and so asserted that some worker held a claim on the machine at the
+    # moment the suite ran: with every task finished it failed ("nothing to
+    # undo"), which is the machine-state dependence this whole check exists to
+    # keep out of the tree's verdict. So claim the last document (by name) of an
+    # area that has two or more, render, and put `live_claims` back.
+    by_area = {}
+    for r in F.rows():
+        by_area.setdefault(r[1], []).append(r[0])
+    crowded = sorted(g for g in by_area.values() if len(g) >= 2)
+    planted_claim = ({sorted(crowded[0])[-1]: ['planted-worker']}
+                     if crowded else {})
+    real_live_claims = F.live_claims
+    F.live_claims = lambda: planted_claim
+    try:
+        mixed_block = F.render()
+    finally:
+        F.live_claims = real_live_claims
+
     def row_order(block):
         return [[ln for ln in part.splitlines() if F._is_row(ln)]
                 for part in re.split(r'^### ', block, flags=re.M)]
 
-    on_disk = row_order(block)
-    after = row_order(F.without_claims(block))
+    on_disk = row_order(mixed_block)
+    after = row_order(F.without_claims(mixed_block))
     mixed = [grp for grp in on_disk
              if any('**unclaimed**' in ln for ln in grp)
              and any('**unclaimed**' not in ln for ln in grp)]

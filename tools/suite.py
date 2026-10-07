@@ -1492,6 +1492,17 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
      desc='no file cites a deleted bug doc more than it used to')
+# The two checks that arrived with a merge and ran by nothing (the estate check
+# in suite-self-test reported both). The stale-verdict half of doc-refs has a
+# negative control -- a deliberately wrong verdict row must be flagged or the
+# report can never fail -- and the Comprehension shape test pins the field names
+# a dict comprehension's key and value live in, which formal/model.py reads.
+test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
+     extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
+     desc='the stale-verdict report flags a wrong row and passes a right one')
+test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
+     cache=True, extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
+     desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
 # the closure-capture pass (by-reference capture), and a regression in any one
@@ -3617,6 +3628,7 @@ BUCKETS = {
               # rather than as a counted test, which is why an estate failure
               # is a FAIL on a test the tally does not mention.
 'preflight', 'suite-self-test', 'doc-refs',
+              'doc-refs-stale-verdicts', 'comprehension-parse-shape',
               # The four cheapest of the eight formal host-module suites, and
               # the only formal BUILD-AND-RUN coverage in the gate. 4-7 s and
               # 0.04-0.06 GB each, against the same two backends the proofs

@@ -271,101 +271,6 @@ def find(skip=()):
     return have, by_doc, by_file
 
 
-# ── the stale-verdict report ───────────────────────────────────────────────
-# A `bugs/` document that keeps a per-stem VERDICT TABLE (a markdown table with
-# a backticked stem in the second cell and a verdict in the third) is making a
-# claim about the tree, and the ratchet above only catches citations of DELETED
-# documents — a row reading `sgt8 | lean-rejected` stayed false-but-green for
-# days after the tree learned to pass `sgt8`. Nothing in the tree re-checks a
-# surviving row's claim, so this report does: walk the rows, re-measure each
-# named stem, and print the rows whose claim disagrees with a fresh verdict.
-#
-# It is reporting-only (it never fails an exit code, and it is NOT in the
-# ratchet), for the same reason `BARE_REF` is reporting-only: the tables are
-# prose-adjacent, a branch that fixes one stem must be able to move its row
-# without a ledger refusing to, and a branch that has not seen its own
-# table-prints is indistinguishable from one that has. Make it visible; the
-# decision to fix the row is the branch's.
-#
-# The "current verdict" source is `test_formal.py` itself: a row claims what
-# Lean currently says about the stem, and `test_formal.py -j 1 <stem>` is the
-# command that answers it. The pure part (`verdict_claims` parsing rows,
-# `stale_verdict_rows` comparing them to a measure) is what the negative
-# control pins: a checker that cannot flag a deliberately wrong row checks
-# nothing.
-
-_VERDICT_CELL = re.compile(r'^\s*(?:\*\*)?([A-Za-z0-9_-]+)')
-
-_PASS_CLAIMS = ('pass', 'ok')
-_FAIL_CLAIMS = ('fail', 'lean-rejected', 'bound-exceeded', 'proof-refused',
-                'admitted', 'known-gap', 'expected', 'too-large')
-
-
-def verdict_claims(text):
-    """(lineno, stem, 'pass'|'fail') for every live verdict row.
-
-    A row is `| <n|—> | `stem` | `verdict` | …`. A verdict cell that is
-    HISTORY — "was `lean-rejected`", "n/a", "not measured", or a row that
-    starts a count column rather than naming a stem — is skipped, because the
-    row only claims the tree's state when it speaks in the present tense.
-    "**PASS (2026-10-05)**" is a present-tense claim and is checked.
-    """
-    for lineno, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-        if not line.startswith('|') or line.rstrip(' ').endswith('|---'):
-            continue
-        cells = [c.strip() for c in line.strip('|').split('|')]
-        if len(cells) < 3:
-            continue
-        stem_m = re.match(r'^`([A-Za-z0-9_]+)`$', cells[1])
-        if not stem_m:
-            continue
-        cell = cells[2].lstrip('`*').lower()
-        if cell.startswith('was') or 'not measured' in cell \
-                or cell.startswith('n/a') or 'fixed' == cell:
-            continue
-        m = _VERDICT_CELL.match(cells[2].lstrip('`* ').lower())
-        if not m:
-            continue
-        token = m.group(1)
-        if token in _PASS_CLAIMS:
-            yield lineno, stem_m.group(1), 'pass'
-        elif token in _FAIL_CLAIMS:
-            yield lineno, stem_m.group(1), 'fail'
-
-
-def stale_verdict_rows(doc_paths, measure):
-    """(path, lineno, stem, claimed, observed) for every row disagreeing
-    with `measure(stem)` — a callable returning 'pass' or 'fail'."""
-    cached = {}
-    out = []
-    for path in doc_paths:
-        try:
-            with open(path, encoding='utf-8', errors='replace') as f:
-                text = f.read()
-        except OSError:
-            continue
-        for lineno, stem, claimed in verdict_claims(text):
-            if stem not in cached:
-                cached[stem] = measure(stem)
-            observed = cached[stem]
-            if observed is not None and observed != claimed:
-                out.append((path, lineno, stem, claimed, observed))
-    return out
-
-
-def measure_stem(stem):
-    """The stem's current verdict, from the proof runner itself."""
-    import subprocess
-    proc = subprocess.run(
-        [sys.executable, os.path.join(ROOT, 'test_formal.py'), '-j', '1',
-         stem],
-        cwd=ROOT, capture_output=True, text=True, timeout=600)
-    tail = (proc.stdout or '') + (proc.stderr or '')
-    return 'pass' if re.search(r'PASS=\s*1\b', tail) and \
-        not re.search(r'FAIL=\s*[1-9]', tail) else 'fail'
-
-
 # ── the ratchet ────────────────────────────────────────────────────────────
 # Per-file ceilings, so the corpus can only shrink and a NEW citation of a
 # deleted doc is a failure rather than a line in a census nobody diffs.
@@ -712,6 +617,50 @@ def stale_verdicts(ledger=None, docs=None, skip=()):
                 out.append((rel, lineno, stem, said, recorded, timed_on,
                             cached))
     return sorted(out)
+
+
+def stale_verdict_rows(doc_paths, measure, ledger=None):
+    """(path, lineno, stem, claimed, observed) for every row disagreeing
+    with `measure(stem)` -- a callable returning 'pass' or 'fail'.
+
+    The FRESH-RUN twin of `stale_verdicts`: same parser (`verdict_claims`, one
+    implementation), but the comparison is against a measurement taken now
+    rather than against the committed ledger, which is the right instrument
+    when the ledger itself may be the stale side. A claim reads as 'pass' when
+    the document says `proved`/PASS and as 'fail' for every red spelling,
+    because `measure` -- like `test_formal.py` -- cannot tell the reds apart.
+    Reporting only; see `stale_verdicts` for why.
+    """
+    if ledger is None:
+        ledger = load_verdict_ledger()
+    cached = {}
+    out = []
+    for path in doc_paths:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except OSError:
+            continue
+        for lineno, stem, said in verdict_claims(text, ledger):
+            claimed = 'pass' if said == 'proved' else 'fail'
+            if stem not in cached:
+                cached[stem] = measure(stem)
+            observed = cached[stem]
+            if observed is not None and observed != claimed:
+                out.append((path, lineno, stem, claimed, observed))
+    return out
+
+
+def measure_stem(stem):
+    """The stem's current verdict, from the proof runner itself."""
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, os.path.join(ROOT, 'test_formal.py'), '-j', '1',
+         stem],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    tail = (proc.stdout or '') + (proc.stderr or '')
+    return 'pass' if re.search(r'PASS=\s*1\b', tail) and \
+        not re.search(r'FAIL=\s*[1-9]', tail) else 'fail'
 
 
 def stale_verdict_heading():
