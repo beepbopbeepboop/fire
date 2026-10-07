@@ -3669,6 +3669,21 @@ def main():
     print([x for x, in nums(1)])
 """, "[1, 2, 3]\n")
 
+    # A real MULTI-slot target over a one-value-per-resume generator is not a
+    # spelling — CPython raises TypeError — and this scalar model has no
+    # iterator protocol to unpack the value with. It used to fall through to
+    # declaring the target STRING `(a, b)` as a variable, which is not C
+    # (`gcc: expected ')' before ',' token`). It is now refused by name.
+    test_generator_refused("gen_multi_slot_target_over_one_value_generator_refused", """\
+def g():
+    yield 1
+
+def main():
+    for a, b in g():
+        print(a, b)
+main()
+""", "multi-slot `for` target over a generator whose yield arity is not a tuple")
+
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a

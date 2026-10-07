@@ -3315,6 +3315,22 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         _one = _single_loop_target_name(var)
         if _one is not None:
             var = _one
+        elif gimple_ctypes.for_target_is_tuple(var):
+            # A real MULTI-slot target (`for a, b in g():`) over a generator
+            # that yields ONE value per resume: `tuple_slot_ctypes` is None
+            # because the generator's yields are not tuple literals. There is
+            # no lowering — this scalar model has no iterator protocol, so
+            # unpacking the value is not something it can do — and the old
+            # fall-through declared the target STRING `(a, b)` as a variable
+            # name, which is not C (`gcc: expected ')' before ',' token`).
+            # Refuse by name rather than emit that, matching this project's
+            # "fall back to interpreting the module from source" convention.
+            raise RuntimeError(
+                "cannot compile a multi-slot `for` target over a generator "
+                f"whose yield arity is not a tuple (`for {var} in "
+                f"{api.get('base')}(...)`): the generator yields one value per "
+                "resume, and unpacking that value needs a runtime iterator "
+                "protocol this scalar generator model does not have")
         gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
