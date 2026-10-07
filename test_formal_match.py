@@ -674,14 +674,12 @@ ROWS = [
     # see it. A lowering that built a separate function per arm, or that
     # lowered the arm body into a synthetic block, would skip the cleanup
     # entirely. CPython's order — the `finally` runs BEFORE the returned value
-    # reaches the caller — is what this row pins, and it is ALSO where the row
-    # finds somebody else's bug: the FIRST exit out of a `try` body flushes the
-    # pending `finally` and the second one does not, so this image is missing
-    # the `fin` that CPython prints before `20`. That defect is not about
-    # `match` (it reproduces with a plain `if` in the `try`, measured) and it is
-    # written down in
-    # `bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md`, so this
-    # row is in the KNOWN-DEFECT table at the end of this file rather than here.
+    # reaches the caller — is what this row pins. The SECOND-exit shape that
+    # used to be separate (and was missing its `fin`) is now
+    # `second_exit_from_a_try_runs_the_finally` just below: it was pinned as a
+    # KNOWN-DEFECT row until the shared `_flush_pending_finally` stopped
+    # truncating its frame list (the second-exit path used to drop the
+    # `finally`).
     ("arm_return_inside_a_try_runs_the_finally", "def f(n):\n"
      "    try:\n"
      "        match n:\n"
@@ -696,6 +694,29 @@ ROWS = [
      "\n"
      "def main():\n"
      "    print(f(1))\n"
+     "    print('done')\n"
+     "    return 0\n", ("cpython",), "module"),
+    # Every `return` out of a `try` body must run the `finally`, not only the
+    # first one the emitter happens to visit (source order). This is the row
+    # that used to carry the missing `fin` before `20`; the fix is that
+    # `_flush_pending_finally` keeps its frame list and guards re-entrancy by
+    # identity instead, so both exits emit the cleanup.
+    ("second_exit_from_a_try_runs_the_finally",
+     "def f(n):\n"
+     "    try:\n"
+     "        match n:\n"
+     "            case 1:\n"
+     "                print('one')\n"
+     "                return 10\n"
+     "            case _:\n"
+     "                return 20\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    print(f(1))\n"
+     "    print(f(2))\n"
      "    print('done')\n"
      "    return 0\n", ("cpython",), "module"),
     # A `match` inside an arm, with BOTH subjects an EXPRESSION, so each `match`
@@ -911,33 +932,13 @@ ROWS = [
 # behind.
 #
 # (name, body, the answer the image gives today, CPython's answer, the doc).
-KNOWN_DEFECT_ROWS = [
-    # The FIRST exit out of a `try` body flushes the pending `finally`; the
-    # second one finds the emitter's frame list already emptied and emits
-    # nothing. So `fin` is missing before the `20`. Measured with a plain `if`
-    # in place of the `match`, so it is not a `match` bug:
-    # bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md
-    ("second_exit_from_a_try_drops_the_finally",
-     "def f(n):\n"
-     "    try:\n"
-     "        match n:\n"
-     "            case 1:\n"
-     "                print('one')\n"
-     "                return 10\n"
-     "            case _:\n"
-     "                return 20\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "    return 0\n"
-     "\n"
-     "def main():\n"
-     "    print(f(1))\n"
-     "    print(f(2))\n"
-     "    print('done')\n"
-     "    return 0\n",
-     "one\nfin\n10\n20\ndone\n", "one\nfin\n10\nfin\n20\ndone\n",
-     "bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md"),
-]
+#
+# EMPTY since 2026-10-05: the one row here
+# (`second_exit_from_a_try_drops_the_finally`) went green when the shared
+# `_flush_pending_finally` stopped truncating its frame list, and it moved to
+# `ROWS` as `second_exit_from_a_try_runs_the_finally` with a CPython oracle.
+# `judge_known_defect` stays so the next defect has a place to be pinned.
+KNOWN_DEFECT_ROWS = []
 
 
 # ── the Lean model: is a `match` as PROVABLE as the `if` it lowers to? ─────────

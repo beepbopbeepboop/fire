@@ -850,6 +850,12 @@ class X86_64Codegen:
         # Enclosing try-finally bodies, outermost first. Flushed before a
         # return/break/continue so the finally runs on those paths too.
         self._pending_finally = []
+        # The `fin` lists currently being emitted by a flush, and those already
+        # emitted for the exit path being unwound. Identity-keyed re-entrancy
+        # guards that replace the old destructive truncation (see
+        # `_flush_pending_finally`; the same fix on arm64).
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1415,6 +1421,8 @@ class X86_64Codegen:
         self._comptime_vals: dict = {}
         self._comptime_list_asts: dict = {}
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
@@ -2204,8 +2212,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-            self._flush_pending_finally()
-            self._emit_epilogue()
+            if not self._flush_pending_finally():
+                self._emit_epilogue()
             return
 
         if isinstance(stmt, F.ExprStmt):
@@ -2686,23 +2694,57 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._str_intern[s] = label
         return label
 
-    def _flush_pending_finally(self, depth: int = 0) -> None:
+    def _flush_pending_finally(self, depth: int = 0) -> bool:
         """Emit the pending try-finally frames from `depth` inward.
 
         `depth` is 0 for a return (every enclosing finally runs) and the
         enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). The list is truncated first, so a return
-        inside a finally does not re-enter the same body. RAX (the return
-        value being built) is saved across the flush in a 16-byte slot."""
-        if len(self._pending_finally) <= depth:
-            return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
-        self._push_slot(Reg.RAX)
+        opened INSIDE that loop). RAX (the return value being built) is saved
+        across the flush in a 16-byte slot.
+
+        Returns whether the flushed bodies ENDED the path (an unconditional
+        `return` inside one of them), so the caller does not emit a second
+        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
+        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+
+        The frames are KEPT. The old code `del`'d them to stop a `return` in a
+        `finally` re-entering its own body, but that also removed the frame for
+        every LATER exit site in the same `try`, so a second `return` emitted no
+        cleanup at all (pinned by
+        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        Re-entrancy is an identity question, answered by
+        `_emitting_finally`/`_finished_finally` without destroying the stack.
+        x86-64 never crashed on the double epilogue, but it was right by
+        accident rather than by design; the same fix applies.
+        """
+        if not self._emitting_finally:
+            self._finished_finally = set()
+        fins = [f for f in self._pending_finally[depth:]
+                if id(f) not in self._emitting_finally
+                and id(f) not in self._finished_finally]
+        if not fins:
+            return False
+        run = []
+        terminated = False
         for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
-        self._pop_slot(Reg.RAX)
+            run.append(fin)
+            if _always_returns(fin):
+                terminated = True
+                break
+        saved = not terminated
+        if saved:
+            self._push_slot(Reg.RAX)
+        for fin in run:
+            self._emitting_finally.add(id(fin))
+            try:
+                for s in fin:
+                    self._emit_stmt(s)
+            finally:
+                self._emitting_finally.discard(id(fin))
+            self._finished_finally.add(id(fin))
+        if saved:
+            self._pop_slot(Reg.RAX)
+        return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -10316,7 +10358,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # itself are the same code either way, and the call is `CALL r64`
         # through R11 instead of `CALL rel32` through a label.
         through_value = (not is_extern_call and name not in self._functions
-                         and M.callee_is_a_bound_value(self._cur_fn, name))
+                         and (M.callee_is_a_bound_value(self._cur_fn, name)
+                              or M.callee_is_a_module_slot_function(
+                                  name, self._functions)))
         # …and the name has to be a BARE one. `_callee_symbol` flattens a
         # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
         # and `a[i](x)` as `a`; only the first of those is a name the function
