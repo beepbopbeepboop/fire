@@ -227,11 +227,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | `formal99-docs` | the 13-file row, split by what each call site actually hands over |
 
-### `formal/x86_64_codegen` — 1 document, 1 claimed
+### `formal/x86_64_codegen` — 2 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_a_nested_for_target_unpack_prints_nothing.md` | `formal98-docs` | x86-64: a `for` target nested more than one group deep prints nothing and exits 1, where arm64 answers CPython's number |
+| `FORMAL_x86_64_cross_module_function_value_call_segfaults.md` | **unclaimed** | x86-64: a comptime specialization through a FUNCTION VALUE across a dylib boundary SIGSEGVs |
 
 ### `formal/x86_64_decode` — 2 documents, 2 claimed
 
