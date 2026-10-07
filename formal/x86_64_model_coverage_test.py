@@ -239,7 +239,11 @@ def samples():
     # conjunction of ZF and PF without reading the seven bytes a `SETcc` left
     # in the register.  Two register pairs, because REX.B and REX.R both have to
     # be decoded and a low pair cannot show that.
-    for dst, src in ((R.RAX, R.RCX), (R.R11, R.R10)):
+    # The RBP operand is in the set because the byte-wise forms are the other
+    # half of the REX-prefix defect `formal/x86_64.py::_byte_rex_required`
+    # fixes: `andb %bpl, %al` needs the null REX to name BPL rather than CH, and
+    # the model's `x86_step_rex` arm has to step the three-byte encoding.
+    for dst, src in ((R.RAX, R.RCX), (R.R11, R.R10), (R.RAX, R.RBP)):
         add("alu_rr8:and", "and %s, %s" % (dst.name, src.name),
             X.encode_and_r8_r8(dst, src))
         add("alu_rr8:or", "or %s, %s" % (dst.name, src.name),
@@ -290,7 +294,7 @@ def samples():
                       (X.encode_setg, "setg"), (X.encode_setge, "setge"),
                       (X.encode_setb, "setb"), (X.encode_setbe, "setbe"),
                       (X.encode_seta, "seta"), (X.encode_setae, "setae")):
-        for reg in (R.RAX, R.R11):
+        for reg in (R.RAX, R.R11, R.RBP):
             add("setcc", "%s %s" % (name, reg.name), enc(reg))
 
     # branches and calls
@@ -870,8 +874,22 @@ def divide_cases():
         rows.append((label, "x86_div128", "Nat", hi, lo, d,
                      None if q >= two64 else (q, r)))
 
-    def idiv_row(label, hi, lo, d):
-        n = hi * two64 + lo
+    def idiv_row(label, n, d):
+        """A signed 128-bit dividend `n`, split into the RDX:RAX pair the model
+        takes: a SIGNED high word and an UNSIGNED low word.
+
+        **`n` and `d` are the exact integers, and the split is derived here**,
+        rather than the caller passing a `hi`/`lo` pair and the expectation
+        being built from the same pair.  That distinction is the whole of a bug
+        this table could not see: `x86_idiv128` reconstructed the dividend as
+        `hi * 2^64 + lo` with `lo` SIGNED, and a row that passed
+        `(hi, lo) = (-1, -1)` and computed its `n` the same way agreed with the
+        model while both disagreed with any real RDX:RAX pair.  Taking the
+        actual 128-bit value forces the low word through `% 2^64` (so it lands
+        in `[0, 2^64)`), which is what the register pair means.
+        """
+        lo = n % two64
+        hi = (n - lo) // two64
         if d == 0:
             rows.append((label, "x86_idiv128", "Int", hi, lo, d, None))
             return
@@ -891,15 +909,26 @@ def divide_cases():
     div_row("div: (2^128-1) / 1 refuses", two64 - 1, two64 - 1, 1)
     div_row("div: 2^127 / 2^63 == 2^64 refuses", 1 << 63, 0, 1 << 63)
     div_row("div: a zero divisor refuses", 0, 10, 0)
-    idiv_row("idiv: 10 / 7", 0, 10, 7)
-    idiv_row("idiv: -10 / 7", 0, -10, 7)
-    idiv_row("idiv: 0 / -1 fits", 0, 0, -1)
-    idiv_row("idiv: (-2^64-1) / -1 refuses (quotient 2^64+1)", -1, -1, -1)
-    idiv_row("idiv: (2^63-1) / 1 fits at the top edge", 0, imax, 1)
-    idiv_row("idiv: -2^63 / 1 fits at the bottom edge", 0, imin, 1)
-    idiv_row("idiv: 2^63 / 1 refuses", 0, imax + 1, 1)
-    idiv_row("idiv: -2^63-1 / 1 refuses", 0, imin - 1, 1)
-    idiv_row("idiv: a zero divisor refuses", 0, 10, 0)
+    idiv_row("idiv: 10 / 7", 10, 7)
+    idiv_row("idiv: -10 / 7", -10, 7)
+    idiv_row("idiv: 0 / -1 fits", 0, -1)
+    idiv_row("idiv: (2^63-1) / 1 fits at the top edge", imax, 1)
+    idiv_row("idiv: -2^63 / 1 fits at the bottom edge", imin, 1)
+    idiv_row("idiv: 2^63 / 1 refuses", imax + 1, 1)
+    idiv_row("idiv: -2^63-1 / 1 refuses", imin - 1, 1)
+    idiv_row("idiv: -(2^64+1) / -1 refuses (quotient 2^64+1)", -(two64 + 1), -1)
+    idiv_row("idiv: a zero divisor refuses", 10, 0)
+    # The rows that carry the SIGNED-HIGH/UNSIGNED-LOW split, which is where the
+    # old reconstruction was wrong: a dividend whose LOW word has bit 63 set and
+    # whose quotient still fits.  Every value here is a real RDX:RAX pair
+    # (hi = RDX, lo = RAX), so the CPU is an oracle too — and on this host it
+    # agrees with the exact value while the pre-fix model did not.
+    idiv_row("idiv: -2^64 + 0xc7fde805ec99108d / a positive divisor fits (q=0)",
+             -0x380217fa1366ef73, 0x73ab48767734d7c1)
+    idiv_row("idiv: -2^64 + 0x89e7d15f17362f25 / a negative divisor fits (q=4)",
+             -0x76182ea0e8c9d0db, -0x1c10063f30bb22c1)
+    idiv_row("idiv: -2^64 + 0x9d2c67eda13ffe79 / a small positive divisor (q=-2)",
+             -0x62d398125ec00187, 0x2fa91425cb008853)
     return rows
 
 
@@ -1422,11 +1451,19 @@ def lemma_check_failures(out, checks, filename):
 
 
 def lean_source(samps):
-    out = ["import X86", "",
-           "/-- Each sample sits at its own address so a failure names the form. -/",
-           "def at (base : Nat) (i : Nat) : UInt8 :=",
-           "  match base + i with",
-           "  | _ => 0"]
+    # Each sample sits at its own address so a failure names the form; the
+    # `code_<i>` functions below are the whole of that.
+    #
+    # There used to be a `def at (base i : Nat) : UInt8` helper here and it was
+    # NEVER USED — but it made the file a SYNTAX ERROR, because `at` is a Lean
+    # keyword: "unexpected token 'at'; expected identifier" at line 4. Lean
+    # still reported an error for every `example` below, and the caller's
+    # `unstepped` test looked for the example's SOURCE TEXT in the output, which
+    # Lean's `Function expected at` diagnostics do not quote — so the check
+    # reported "all steppable" on a file that elaborated none of them. Measured
+    # on this tree before the deletion: `Coverage.lean rc=1`, 101 errors, and
+    # the script still exited 0. `x86_step` was never asked about any sample.
+    out = ["import X86", ""]
     for i, (form, label, enc) in enumerate(samps):
         items = ", ".join("0x%02x" % b for b in enc)
         out.append("def code_%d (a : Nat) : UInt8 :=" % i)
@@ -1434,8 +1471,23 @@ def lean_source(samps):
                    % (BASE + i * 16, items, BASE + i * 16))
     for i, (form, label, enc) in enumerate(samps):
         out.append("/-- `%s` — %s (%s) -/" % (label, enc.hex(" "), form))
-        out.append("example : (x86_step (X86State.init 10 %d) code_%d %d).isSome = true := by"
-                   % (BASE + i * 16, i, BASE + i * 16))
+        # `x86_step` takes the state and the code function and NOTHING ELSE —
+        # the exit pc belongs to `x86_exec_exit`. A third argument here is
+        # `Function expected at`, which fails EVERY example and made this file
+        # elaborate none of them while the caller still reported "all
+        # steppable". Measured on this tree before the fix: `Coverage.lean
+        # rc=1`, 101 errors, script exit 0.
+        #
+        # The state is `X86State.init 10 BASE` with RAX and R11 made NONZERO,
+        # and the reason is `div`/`idiv`: `init` zeroes every register but RDI,
+        # and the group-3 samples below take their divisor from the `rm`
+        # operand — RAX and R11 — so a zero divisor is `#DE` and `x86_step`
+        # CORRECTLY returns `none`, which the check cannot tell from "the model
+        # cannot step the form". Measured once the file elaborated: `div RAX`,
+        # `div R11`, `idiv RAX` and `idiv R11` were four of five `none`s.
+        out.append("example : (x86_step ({ X86State.init 10 %d with "
+                   "rax := 0x10, r11 := 0x10 }) code_%d).isSome = true := by"
+                   % (BASE + i * 16, i))
         out.append("  native_decide")
     return "\n".join(out) + "\n"
 
@@ -1615,10 +1667,27 @@ def main():
                   "means nothing.")
             return 1
         mout = cp.stdout + cp.stderr
+    # A sample the model cannot step makes Lean fail the `native_decide` on its
+    # example, and the error names that LINE.  The examples are emitted three
+    # lines each (comment, `example`, `native_decide`) after the `code_<i>`
+    # definitions, so the failing line maps straight back to a sample.
+    #
+    # Reading the line number — and NOT looking for the example's source text in
+    # the output, which is what this did — is the fix: Lean's `native_decide`
+    # and `Function expected at` diagnostics do not quote the example line, so
+    # the old check reported "all steppable" on a file that elaborated NONE of
+    # the examples (`Coverage.lean rc=1`, 101 errors, exit 0).
+    block0 = 3 + 2 * len(samps)          # 1-based line of sample 0's comment
     unstepped = []
-    for i, (form, label, enc) in enumerate(samps):
-        if ("example : (x86_step (X86State.init 10 %d) code_%d" % (BASE + i * 16, i)) in text:
-            unstepped.append((form, label, enc))
+    for line in text.splitlines():
+        m = re.search(r"Coverage\.lean:(\d+):\d+: error:", line)
+        if not m:
+            continue
+        off = int(m.group(1)) - block0
+        if 0 <= off < 3 * len(samps):
+            item = samps[off // 3]
+            if item not in unstepped:
+                unstepped.append(item)
     forms = {f for f, _l, _e in samps}
     print("x86-64 model coverage: %d samples over %d forms — %s"
           % (len(samps), len(forms),

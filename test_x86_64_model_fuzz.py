@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """The model-fuzz harness's two UNREAD steps: its ENTRY path, and its VERDICTS.
 
-`formal/x86_64_model_fuzz.py` is not a gate job — it is a tool, and its
-`HARNESS` verdict rows (`mul`/`imul` flags, `setcc` into `rbp`/`rsi`/`rdi`) are
-the ones a reader must NOT go looking for in `lib/X86.lean`. Two of the harness's
-own steps decide that, and nothing reads either of them back.
+`formal/x86_64_model_fuzz.py` is not a gate job — it is a tool. Until
+2026-10-07 it carried a `HARNESS` verdict for a disagreement "no x86-64 CPU can
+produce", for `mul`/`imul` flags and `setcc` into `rbp`/`rsi`/`rdi`. **Both were
+wrong**: the `setcc` bytes were an encoder that omitted a REX prefix (so the CPU
+was right to read `setbe ch`), and the flags were SF/ZF, which the SDM leaves
+UNDEFINED after a multiply. The verdict is gone; what decides a row is now
+`WRONG` (a model bug) or `AGREE`, with undefined flags skipped.
 
 **The entry path.** The entry stub installs the register file out of
 `init_block` with real `mov` instructions, and if those loads did not land every
-field of every program would be a false disagreement — which is what the
-`HARNESS` rows would then have been. `--entry-probe` is that read-back, and the
-first class here is its pins.
+field of every program would be a false disagreement. `--entry-probe` is that
+read-back, and the first class here is its pins.
 
-**The verdicts.** A row is `WRONG` (a model bug), `HARNESS` (a disagreement no
-x86-64 CPU can produce) or `FAULT`, and which one a row gets is decided in
-Python from the program's bytes and the list of differing fields. Both rules
-were wrong, and both were silent in the worst way: a random program containing
-one anomalous `setcc` was reported as a `WRONG` model bug and made the tool exit
-1, and `minimise` handed back a prefix that agreed when run on its own. The
-second class here is Lean-free and native-free on purpose — it is about which
-verdict a row gets, so it can be asked without either half.
+**The verdicts.** A row is `WRONG` (a model bug), `AGREE`, `NORUN` or `FAULT`,
+and which one it gets is decided in Python from the program's bytes and the
+list of differing fields. The rules were wrong, and silent in the worst way: a
+random program containing one `setcc` into RBP was reported as a `WRONG` model
+bug (the encoder's fault, not the model's), and `minimise` handed back a prefix
+that agreed when run on its own. The second class here is Lean-free and
+native-free on purpose — it is about which verdict a row gets, so it can be
+asked without either half.
 
 **Not registered in `tools/suite.py`** (this session's rules forbid registering
 without being asked), so run it directly:
@@ -249,11 +251,14 @@ def shutil_which(name):
 
 
 class TestTheVerdictIsAboutTheModel(unittest.TestCase):
-    """The reporter's two rules, because each was WRONG and both were silent.
+    """The reporter's rules, which decide a row's verdict from the program's
+    bytes and the differing fields alone — no Lean, no native run.
 
-    Neither needs Lean and neither needs a native run: both are about which
-    verdict a row gets, which is decided in Python from the program's bytes and
-    the list of differing fields.
+    The `HARNESS` verdict is gone (see the module docstring): the `setcc` class
+    was an encoder bug — the CPU was right about `0f 96 c5` — and the
+    `mul`/`imul` class was undefined flags. What is left to pin is
+    `undefined_flags`, because a flag it names must NOT be compared and a flag
+    it does not name must be.
     """
 
     # ── minimisation ────────────────────────────────────────────────────
@@ -318,83 +323,114 @@ class TestTheVerdictIsAboutTheModel(unittest.TestCase):
         self.assertIs(one.mem, prog.mem)
         self.assertEqual(one.flags, prog.flags)
 
-    # ── the HARNESS classes ──────────────────────────────────────────────
-    def test_a_setcc_anomaly_is_a_harness_row_in_a_larger_program_too(self):
-        """The documented `setcc` anomaly, wherever it appears in the program.
+    # ── which flags are undefined ────────────────────────────────────────
+    def test_a_multiply_leaves_sf_and_zf_undefined(self):
+        """`MUL`/`IMUL` define CF/OF (does the product fit) and leave SF, ZF, AF
+        and PF undefined, so a program whose LAST flag-writer is a multiply must
+        skip exactly SF and ZF.
 
-        The old rule required EVERY instruction to be a `setcc`, which is true of
-        a one-instruction census case and false of every random program — so
-        `-n 16 --ninstr 6 --seed 5` reported six `WRONG` rows and exited 1, all
-        six of them the anomaly the module docstring says must be excluded. The
-        rule now reads the bytes (`0f 9x c5`-`c7`) and asks whether the
-        disagreement is exactly what that instruction's misbehaviour explains.
+        This is the whole of what the old `HARNESS` "this host mislabels SF" row
+        was: the model sets SF from the low word and Rosetta leaves it clear, and
+        neither is wrong — the architecture promises nothing about it.
         """
-        prog = _program([("mov RCX, 7", F.X.encode_mov_r64_imm32(F.R.RCX, 7)),
-                         ("add RAX, RCX", F.X.encode_add_r64_r64(F.R.RAX,
-                                                                 F.R.RCX)),
-                         ("setbe RSI", F.X.encode_setbe(F.R.RSI))])
-        # what the CPU does: leaves RSI alone, and sets byte 1 of RDX
-        fields = [("rsi", 0x1111111111111111, 0x1111111111111110),
-                  ("rdx", 0x2222222222222200, 0x2222222222220000)]
-        why = F._impossible_on_hardware(prog, fields)
-        self.assertIsNotNone(why,
-                             "a program whose only difference is one byte of "
-                             "RSI and one byte of RDX, and which contains "
-                             "`setbe rsi`, is the documented anomaly")
-        self.assertIn("rsi", why)
+        for text, enc in (
+                ("imul RAX, RCX",
+                 F.X.encode_imul_r64_r64(F.R.RAX, F.R.RCX)),
+                ("imul RAX", F.X.encode_imul_r64_1op(F.R.RAX)),
+                ("imul RAX, RCX, 4",
+                 F.X.encode_imul_r64_r64_imm(F.R.RAX, F.R.RCX, 4)),
+                ("mul RAX", F.X.encode_mul_r64(F.R.RAX))):
+            self.assertEqual(F.undefined_flags(_program([(text, enc)])),
+                             {"zf", "sf"}, text)
 
-    def test_a_real_model_bug_is_still_a_model_bug(self):
-        """The counter-direction, and the one that matters: what the new rule
-        must NOT absorb.
+    def test_a_divide_leaves_all_four_undefined(self):
+        """Intel SDM: "CF, OF, SF, ZF, AF, and PF are undefined" after DIV."""
+        p = _program([("mov RCX, 7", F.X.encode_mov_r64_imm32(F.R.RCX, 7)),
+                      ("cqo", F.X.encode_cqo()),
+                      ("idiv RCX", F.X.encode_idiv_r64(F.R.RCX))])
+        self.assertEqual(F.undefined_flags(p), {"zf", "sf", "cf", "of_"})
 
-        Four rows, each a shape the anomaly cannot produce: a whole register
-        differing (a 32-bit operation differs in four bytes), a flag differing,
-        a memory word differing, and a one-byte difference in a register with no
-        anomalous `setcc` in the program at all.
+    def test_a_shift_leaves_of_undefined_unless_the_count_is_one(self):
+        """`OF` is undefined for a shift count that is neither 0 nor 1, and a
+        count of 0 moves NO flag at all — so with nothing undefined before it,
+        a count of 0 leaves nothing undefined either."""
+        for count, want in ((1, set()), (3, {"of_"}), (0, set()),
+                            (64, {"of_"})):
+            p = _program([("<< RAX, %d" % count,
+                           F.X.encode_shift_r64_imm8("<<", F.R.RAX, count))])
+            self.assertEqual(F.undefined_flags(p), want, "count %d" % count)
+
+    def test_only_the_last_flag_writer_decides(self):
+        """An earlier undefined-flag instruction does not taint a later defined
+        one, and vice versa: the flags a run ends with are its last writer's."""
+        p = _program([("idiv RCX", F.X.encode_idiv_r64(F.R.RCX)),
+                      ("add RAX, RCX",
+                       F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX))])
+        self.assertEqual(F.undefined_flags(p), set(),
+                         "the `add` redefines all four flags")
+        p2 = _program([("add RAX, RCX",
+                        F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX)),
+                       ("mul RCX", F.X.encode_mul_r64(F.R.RCX))])
+        self.assertEqual(F.undefined_flags(p2), {"zf", "sf"},
+                         "the multiply is last and leaves SF/ZF undefined")
+
+    def test_a_shift_by_zero_does_not_redefine_an_undefined_flag(self):
+        """The measured seed-3 row: `... ; idiv rcx ; >>signed R9, 0` ends with
+        the divide's undefined CF/SF/ZF, because a count of 0 moves no flag and
+        the divide left all four undefined."""
+        p = _program([("idiv RCX", F.X.encode_idiv_r64(F.R.RCX)),
+                      (">>signed R9, 0",
+                       F.X.encode_shift_r64_imm8(">>signed", F.R.R9, 0))])
+        self.assertEqual(F.undefined_flags(p), {"zf", "sf", "cf", "of_"})
+
+    def test_an_undefined_flag_reaches_the_setcc_destination_and_beyond(self):
+        """A `setcc` after a multiply reads an undefined SF, so its result is
+        undefined, and a later copy of it is undefined too.
+
+        This is why `undefined_fields` is a dataflow pass and not a flag set:
+        the measured `imul R10, RBP, 4 ; setge R11` differs in R11 alone, and a
+        `mov` of that R11 into another register would differ there too.
         """
-        setcc = F.X.encode_setbe(F.R.RSI)
-        prog = _program([("mov RCX, 7", F.X.encode_mov_r64_imm32(F.R.RCX, 7)),
-                         ("setbe RSI", setcc)])
-        for label, fields in (
-                ("a whole register", [("rax", 0x1111111111111111,
-                                       0x2222222222222222)]),
-                ("a flag", [("rsi", 0x1111111111111111, 0x1111111111111110),
-                            ("zf", 1, 0)]),
-                ("memory", [("mem[0]", 1, 0)]),
-                ("a fourth register", [("rcx", 0x1111111111111111,
-                                        0x1111111111111110)])):
-            self.assertIsNone(F._impossible_on_hardware(prog, fields),
-                              "%s differing is not the setcc anomaly and must "
-                              "stay a model verdict" % label)
+        p = _program([("imul RAX, RCX",
+                       F.X.encode_imul_r64_r64(F.R.RAX, F.R.RCX)),
+                      ("setge R11", F.X.encode_setge(F.R.R11)),
+                      ("mov RSI, R11",
+                       F.X.encode_mov_r64_r64(F.R.RSI, F.R.R11))])
+        uf = F.undefined_fields(p)
+        for field in ("sf", "r11", "rsi"):
+            self.assertIn(field, uf)
+        # …and a `setge` after an `add` is NOT undefined: the `add` defines SF.
+        p2 = _program([("add RAX, RCX",
+                        F.X.encode_add_r64_r64(F.R.RAX, F.R.RCX)),
+                       ("setge R11", F.X.encode_setge(F.R.R11))])
+        self.assertEqual(F.undefined_fields(p2), set())
 
-    def test_one_byte_of_a_register_with_no_anomalous_setcc_is_a_model_bug(self):
-        """The shape, without the encoding: one byte of RSI and nothing else.
+    def test_not_does_not_write_flags(self):
+        """`NOT` writes no flag, so a program whose only flag-shaped instruction
+        is a `not` has no flag-writer and nothing undefined."""
+        self.assertEqual(
+            F.undefined_flags(_program([("not RAX",
+                                         F.X.encode_not_r64(F.R.RAX))])),
+            set())
 
-        This is the case the byte-pattern requirement exists for. A `setcc` into
-        a destination that behaves (`0f 9x c4` is `rm` = `rsp`, which takes a
-        SIB byte) is not this class, and neither is a model bug that happens to
-        move one byte.
-        """
-        prog = _program([("setbe R9", F.X.encode_setbe(F.R.R9))])
-        fields = [("r9", 0x1111111111111111, 0x1111111111111110)]
-        self.assertIsNone(F._impossible_on_hardware(prog, fields))
-
-    def test_the_modrm_bytes_are_the_definition_and_the_names_agree(self):
-        """`HARNESS_SETCC_DESTS` is the reader-facing list; the ModRM byte is
-        what the CPU decodes. Two tables that can disagree is one table too
-        many, so this checks they have not."""
-        self.assertEqual(sorted(F.HARNESS_SETCC_DESTS),
-                         sorted(F.HARNESS_SETCC_MODRM))
-        for reg in F.HARNESS_SETCC_DESTS:
-            modrm = F.HARNESS_SETCC_MODRM[reg][0]
-            idx = F.R[reg.upper()].value
-            self.assertEqual(
-                F._anomalous_setcc_dests(F.X.encode_setbe(F.R[reg.upper()])),
-                {reg},
-                "`setbe %s` must be %s and the byte must be the one the "
-                "doc's measurement names" % (reg, hex(modrm)))
-            self.assertEqual(modrm & 7, idx & 7,
-                             "the ModRM byte's `rm` field IS the destination")
+    def test_a_differing_undefined_flag_is_not_compared(self):
+        """`diff` with `undefined_flags` drops exactly the flags it names, and
+        the counter-direction is the one that matters: a flag the program DID
+        define is still compared and a difference there is still a model bug."""
+        p = _program([("mul RAX", F.X.encode_mul_r64(F.R.RAX))])
+        hw = {"regs": [0] * 16, "xmm": [0] * 8,
+              "memq": [0] * (F.DATA_N // 8),
+              "flags": {"zf": False, "sf": False, "cf": True, "of_": True}}
+        mdl = {"regs": [0] * 16, "xmm": [0] * 8,
+               "memq": [0] * (F.DATA_N // 8),
+               "flags": {"zf": True, "sf": True, "cf": True, "of_": True}}
+        self.assertEqual(F.diff(hw, mdl, F.undefined_flags(p)), [],
+                         "SF and ZF are undefined after a multiply")
+        mdl["flags"]["cf"] = False
+        d = F.diff(hw, mdl, F.undefined_flags(p))
+        self.assertEqual([f for f, _a, _b in d], ["cf"],
+                         "CF is defined by the multiply and a difference IS a "
+                         "model bug")
 
 
 def _program(items, regs=None):

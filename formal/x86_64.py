@@ -98,6 +98,24 @@ def _modrm(mod: int, reg: int, rm: int) -> int:
     return (mod << 6) | ((reg & 7) << 3) | (rm & 7)
 
 
+def _byte_rex_required(reg: Reg) -> bool:
+    """Does naming `reg` as an 8-BIT operand require a REX prefix?
+
+    The four byte registers with a number below 4 — AL/CL/DL/BL — are encodable
+    without one, and the short form is what `as` emits, so a byte form whose
+    operands are all 0-3 must not carry a prefix a byte-identity differential
+    would flag.
+
+    Values 4-7 are the trap.  Those ModRM encodings address SPL/BPL/SIL/DIL only
+    WITH a REX prefix present; without one they are AH/CH/DH/BH, the high bytes
+    of RAX/RCX/RDX/RBX.  A null REX (`0x40`) is therefore load-bearing, not
+    decoration, and a form that omits it writes a different register than the
+    one its caller named.  Values 8-15 need the prefix for REX.B/REX.R, which is
+    the reason this predicate is `>= 4` and not `in (4, 5, 6, 7)`.
+    """
+    return reg.value >= 4
+
+
 def _rm_disp(base: Reg, disp: int) -> tuple:
     """`mod` field plus displacement bytes for `[base + disp]`.
 
@@ -815,10 +833,22 @@ def encode_lea_r64_rip(dst: Reg, disp: int) -> bytes:
 # ── setcc ────────────────────────────────────────────────────────────
 
 def _setcc(reg: Reg, cc: int) -> bytes:
-    """REX 0F 90+cc /0 — set byte reg to the condition code's boolean value."""
+    """REX 0F 90+cc /0 — set byte reg to the condition code's boolean value.
+
+    The REX prefix is required for SPL/BPL/SIL/DIL (values 4-7) as well as for
+    R8B-R15B, and the two reasons are different.  For 8-15 it is what extends
+    the register field.  For 4-7 it is what makes the operand the LOW byte of
+    RSP/RBP/RSI/RDI at all: without a REX prefix the very same ModRM bytes
+    (`C4`-`C7`) name the HIGH bytes AH/CH/DH/BH of RAX/RCX/RDX/RBX, so
+    `0F 96 C5` is `setbe ch` and never `setbe bpl`.  This encoder used to omit
+    the prefix for 4-7, which assembled to a correct-looking instruction that
+    wrote the wrong register; `test_x86_64_encoders.py` pins the four against
+    `as`, and `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` records the
+    fuzz rows it was misread as a hardware anomaly through.
+    """
     enc = [0x0F, 0x90 + cc]
-    if reg.value >= 8:
-        enc.insert(0, _rex(b=1))
+    if _byte_rex_required(reg):
+        enc.insert(0, _rex(b=1 if reg.value >= 8 else 0))
     enc.append(_modrm(3, 0, reg.value & 7))
     return bytes(enc)
 
@@ -1335,14 +1365,19 @@ def encode_and_r8_r8(dst: Reg, src: Reg) -> bytes:
     whatever the previous expression left in it — as part of the value.
     """
     assert isinstance(dst, Reg) and isinstance(src, Reg)
-    # No REX when neither register needs one: `20 /r` is two bytes for AL/CL and
+    # No REX when no operand needs one: `20 /r` is two bytes for AL/CL and
     # `40 20 /r` is the same instruction with a null REX, which assembles and is
     # one byte longer than the reference — and a byte-identity differential
     # against `clang -arch x86_64` would then fail on an encoding that is
     # correct. This file's encoders are the short form wherever the short form
     # exists, which is why `_rex` is called only when it has a bit to set.
+    #
+    # "Needs one" includes SPL/BPL/SIL/DIL (values 4-7), whose byte encoding
+    # exists only WITH a REX prefix — see `_byte_rex_required`. The condition
+    # used to be `>= 8`, so `andb %bpl, %al` emitted `20 e8`, which is
+    # `andb %ch, %al`: it read the high byte of RCX instead of BPL.
     enc = []
-    if dst.value >= 8 or src.value >= 8:
+    if _byte_rex_required(dst) or _byte_rex_required(src):
         enc.append(_rex(r=1 if src.value >= 8 else 0,
                         b=1 if dst.value >= 8 else 0))
     enc += [0x20, _modrm(3, src.value & 7, dst.value & 7)]
@@ -1350,10 +1385,15 @@ def encode_and_r8_r8(dst: Reg, src: Reg) -> bytes:
 
 
 def encode_or_r8_r8(dst: Reg, src: Reg) -> bytes:
-    """or r/m8, r8 — 08 /r. The `!=` half of `encode_and_r8_r8`'s conjunction."""
+    """or r/m8, r8 — 08 /r. The `!=` half of `encode_and_r8_r8`'s conjunction.
+
+    The REX condition is `encode_and_r8_r8`'s and for the same reason: values
+    4-7 (SPL/BPL/SIL/DIL) are only reachable with a prefix present, so `>= 8`
+    alone would emit `orb %dil, %al` as `08 f8`, which is `orb %bh, %al`.
+    """
     assert isinstance(dst, Reg) and isinstance(src, Reg)
     enc = []
-    if dst.value >= 8 or src.value >= 8:
+    if _byte_rex_required(dst) or _byte_rex_required(src):
         enc.append(_rex(r=1 if src.value >= 8 else 0,
                         b=1 if dst.value >= 8 else 0))
     enc += [0x08, _modrm(3, src.value & 7, dst.value & 7)]
