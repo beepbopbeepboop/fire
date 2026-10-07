@@ -11232,6 +11232,46 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+def _is_string_prefix_letter(c: str) -> bool:
+    """True for a character a Python string prefix may be spelled with.
+
+    Explicit `==` comparisons rather than `c in 'fFrR…'`, for the reason
+    `fire_compiler.py::_string_prefix_start` gives in full: this codegen's
+    compiled `in`-for-char*-against-char* is a documented stub that always
+    returns False, so under self-hosting an `in`-based check here would never
+    advance and every prefixed literal would go unread.
+    """
+    return (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+            or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+            or c == 't' or c == 'T')
+
+
+def interpolated_literal_quote_start(spelled: str) -> int:
+    """Where the opening QUOTE of an interpolated literal's token begins.
+
+    The prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`,
+    `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
+    open their quote at index **2** while `f"…"` opens it at 1. The reader below
+    used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
+    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
+    reader_assumes_a_one_character_prefix.md`. The lexer above it
+    (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
+    known the prefix width since 2026-10-05; this is the one answer the reader
+    was missing, and it is a function rather than an index so the two layers
+    name the same fact.
+
+    **Two, not more, because that is what the language allows** and what
+    `fire_compiler.py::_string_prefix_start` scans for: a legal prefix is one
+    of `r`/`u`/`b`/`f`/`t` or a pair. The scan stops at the first character
+    that is not a prefix letter — which is the quote — so a body that begins
+    with `f` cannot be over-consumed.
+    """
+    i = 0
+    while i < 2 and i < len(spelled) and _is_string_prefix_letter(spelled[i]):
+        i += 1
+    return i
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11306,27 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
+    # The prefix is a SET OF SPELLING FLAGS, not one character — `rf"…"` and
+    # `fr"…"` are two letters, and the quote is at index `quote_at`, not 1.
+    # `interpolated_literal_quote_start` is the one reader of that width (the
+    # lexer's own is `fire_compiler.py::_string_prefix_start`).
+    quote_at = interpolated_literal_quote_start(spelled)
+    quote = spelled[quote_at] if quote_at < len(spelled) else ""
+    if quote != '"' and quote != "'":
         raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
+            f"cannot read an interpolated literal from {spelled!r}: it has no "
+            f"opening quote after its prefix, so where its text starts is not "
+            f"knowable from the token")
+    if spelled[quote_at:quote_at + 3] == quote * 3:
         term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
     else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
+        term = quote
     if not spelled.endswith(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[quote_at + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)
@@ -11410,7 +11449,17 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    is_t = spelled[:1] in ("t", "T")
+    #
+    # The `t` is looked for across the WHOLE prefix rather than at index 0: a
+    # t-string's prefix may be `tr`/`rt`, so `spelled[:1] in ("t", "T")` called
+    # a `rt"…"` "an f-string". The prefix letters are read with the same helper
+    # `interpolated_literal_segments` now uses, so both spell the width once.
+    _prefix_end = (interpolated_literal_quote_start(spelled)
+                   if isinstance(spelled, str) else 0)
+    is_t = False
+    for _ch in spelled[:_prefix_end]:
+        if _ch == 't' or _ch == 'T':
+            is_t = True
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:

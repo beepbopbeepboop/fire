@@ -23274,6 +23274,16 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # A TWO-CHARACTER prefix. The reader used to ask `spelled[1]`, which
+        # for `rf` is the `f`, and refused with "the character after the prefix
+        # is not a quote" — false about a token whose second character is the
+        # `f` of the prefix and whose third is the quote. Raw segmentation is
+        # prefix-independent (the brace rules do not change under `r`), which
+        # is why these compare against CPython's parse exactly like the rest.
+        'rf"a={n}b"',
+        'fr"a={n}b"',
+        r'rf"^(\s*)from\s+{re.escape(old)}\s+import\s+"',   # the corpus's own
+        'FR"{{lit}}"',          # upper case, and still no field
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23336,12 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # …and the widened prefix reader must not turn an
+                          # UNTERMINATED raw f-string into a body: it still has
+                          # to notice that the token does not close with the
+                          # quote the prefix opened.
+                          ('rf"a{b', "does not end with")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:
@@ -23529,7 +23544,7 @@ def check_interpolated_literal_census(verbose=False):
                 where.get(os.path.relpath(path, here), 0) + 1
         print(f"      interpolated census: {len(unquotable)} literal(s) "
               f"`is_interpolated_literal` admits that are not quoted tokens at "
-              f"all — the filed prefix-test defect, {where}")
+              f"all — a token with no defensible chunk boundary, {where}")
     return passed, failures
 
 
