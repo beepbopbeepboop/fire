@@ -14,6 +14,8 @@
 #     ./list_subscript_past_end.arm64 ; echo $?
 #     10
 #     30
+#     formal: a[3] is out of range -- index 3 is not below the 3 elements the
+#     blob holds. CPython raises `IndexError: list index out of range` ...
 #     1
 #     2>&1 1>/dev/null | wc -c   ->   0
 #

@@ -716,6 +716,12 @@ dylib_exports: list = None, globals_base: int = None,
         self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
+        # The ADDRESSES of the `BL fflush` this backend emits inside its own
+        # bounded stops, published as `info["compiler_traps"]` and subtracted by
+        # `formal/arm64_proof_gen.py::_program_extern_calls` from the program's
+        # own extern calls. See `_emit_exit` for why the subtraction is the
+        # difference between a proof and a `lean-rejected` row.
+        self._compiler_trap_addrs: set = set()
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -1085,6 +1091,13 @@ dylib_exports: list = None, globals_base: int = None,
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
+            # The `BL fflush` inside each of this backend's own bounded stops.
+            # They are calls the COMPILER emitted, on paths the program takes
+            # only when it is about to stop, and the proof generator subtracts
+            # them from `extern_calls` — see
+            # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
+            # arm64 twin of x86-64's `_program_externs`.
+            "compiler_traps": sorted(self._compiler_trap_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has

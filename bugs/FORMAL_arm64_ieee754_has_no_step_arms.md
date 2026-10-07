@@ -9,6 +9,36 @@ same call in the same minute (measurement, method and control in
 CONFIRMED"). Nothing else in this file is blocked and §"The exact next step"
 below is unchanged; it needs a worker who can afford the build.
 
+**Status: OPEN. NOT fixed, and the order §"The exact next step" gives is
+CONFIRMED by measurement while its REASON was not — the reason is not the flags
+and it is not "more work": `Float` has a `Decidable` ORDER and NO `Decidable`
+EQUALITY, so one of the ten arms is writable in the existing `work_step_*`
+shape and the other nine are not writable in it at all.** Measured 2026-10-05
+and pinned by
+`test_formal_call_proof_gen.py::TestFloatOrderIsDecidableAndFloatEqualityIsNot`
+(three two-line Lean files, no ProofLib import, 0.9 s):
+
+| question | answer | what it decides |
+|---|---|---|
+| `theorem t : (1.0 : Float) < 2.0 := by native_decide` | **accepted** | an `FCMP` arm's result is an `if`-chain over `<` / `unordered` (`lib/IEEE754.lean`'s `key` and `unordered`), so `native_decide` closes it — `FCMP` is writable |
+| the same by `by decide` | **rejected**: "`Float.decLt 1.0 2.0` did not reduce to `isTrue` or `isFalse`" | the KERNEL cannot reduce a float comparison, so no `bv_decide` in any `work_step_*` can see a float operand |
+| `example : Decidable ((0.0 : Float) / (0.0 : Float) = (0.0 : Float)) := inferInstance` | **rejected**: "failed to synthesize instance of type class `Decidable (0.0 / 0.0 = 0.0)`" | an arm whose RESULT IS A FLOAT VALUE — `FADD`, `FSUB`, `FMUL`, `FDIV`, `SCVTF`, `FCVTZS`, `FMOV` to/from V — has no `rfl`, no `simp` and no `decide` to close its lemma with, because a `work_step_*` ends in exactly one of those and all three need that equality |
+
+So §"The exact next step"'s advice ("start with `FCMP` alone, not the
+arithmetic") is right and its stated reason is the wrong one: `FCMP` is first
+because it is the only one of the ten whose result is a DECISION rather than a
+value, and a decision over `Float` is decidable while a value's equality is not.
+The other nine are not "the same change nine more times" — they need either a
+`Decidable` over `Float` (a library question, not a `ProofLib` one) or the D
+registers held as raw bit patterns with the arithmetic left to
+`lib/IEEE754.lean`'s `faddBits`/`fdivBits` and the comparisons decided on
+THOSE, which is decidable because they are `Nat`/`UInt64` functions.
+
+**What landed:** this measurement, the test that pins it, and this Status. No
+model row, no `Arm64State` field, nothing in `lib/ProofLib.lean` — the doc's own
+step 1 ("`Arm64State` gains D0-D7") is a change to the state every arm64 theorem
+quantifies over, and landing it for one arm with no consumer is the kind of half
+change this project's rules call a shortcut.
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census: `formal/arm64_codegen.py` emits ten scalar IEEE-754 binary64
 instructions, every one of them has a byte-exact `as` differential in

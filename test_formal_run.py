@@ -3281,6 +3281,25 @@ CASES = [
      "    var e = {\"c\": 3}\n"
      "    printf(\"other=%d\", len(e))\n"
      "    return 0\n", 0, "before=2@@after=0@@other=1"),
+    # ── THE CONTROL for the out-of-range SUBSCRIPT rows ──────────────────────
+    #
+    # Those rows are in `STDERR_CASES` and assert that a past-the-end index
+    # STOPS and names the bound. A guard that fired on the wrong arm — one that
+    # rejected an in-range index, or that rejected the negative-index fold
+    # `_emit_subscript_addr`/`_emit_bounds_check` apply before comparing —
+    # would pass every one of them, so the case that says the check still admits
+    # what it admitted is not optional.
+    #
+    # `a[-1]` and `a[0]` are CPython's 30, and they are here because they are
+    # the two spellings the fold exists for: `-1 + 3 == 2` is the LAST element
+    # and not the second, and a check that compared the folded index against the
+    # count instead would take the out-of-range arm here and answer the message
+    # above rather than a number.
+    ("subscript_in_range_still_reads_and_still_wraps",
+     "def main(n):\n"
+     "    var a = [10, 20, 30]\n"
+     "    printf(\"@@%d@@%d@@%d\", a[0], a[2], a[-1])\n"
+     "    return 0\n", 0, "@@10@@30@@30"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -15058,7 +15077,96 @@ STDERR_CASES = [
     # and `|` are pinned. `*` builds on both, so the difference there is that
     # its reservation is exact for a literal operand: the run-time total cannot
     # exceed the estimate without a name in one of them.
+    #
+    # ── the SUBSCRIPT's out-of-range arm, which was the last SILENT bounded
+    # stop on this path ──────────────────────────────────────────────────────
+    #
+    # `_emit_subscript_addr`'s `oob_label` (arm64) and `_emit_bounds_check`'s
+    # `bad_label` (x86-64) fired the bounds check and then called `exit(1)` with
+    # no `_emit_overflow_diagnostic` above them, so `a[3]` on a three-element
+    # list printed the in-range lines and stopped having written **nothing at
+    # all** — not stdout, not stderr, on both architectures. The CHECK was
+    # always there and always correct; what was missing is which bound it hit,
+    # which is why `formal/memcheck/list_subscript_past_end.mojo` could report
+    # MATCH (the answer and the exit status are both stable) and a reader could
+    # still conclude the bound was absent. Hence four rows rather than one: the
+    # message's NUMBERS are a property of what the build can know statically,
+    # and each of the three shapes below is a different answer from
+    # `model.subscript_out_of_range_message`, so one row cannot cover them.
+    #
+    # The needles are chosen to be load-bearing: the site says WHICH subscript,
+    # the number says which bound, and CPython's own answer says what the
+    # program would have said instead. A message that said only "index out of
+    # range" would leave a reader unable to tell this from a frame-budget
+    # refusal, which has a different remedy.
+    ("subscript_past_end_names_the_index_and_the_count",
+     "def main(n):\n"
+     "    var a = [10, 20, 30]\n"
+     "    printf(\"%d\\n\", a[0])\n"
+     "    printf(\"%d\\n\", a[2])\n"
+     "    printf(\"%d\\n\", a[3])\n"
+     "    return 0\n",
+     1, ["a[3] is out of range", "index 3 is not below the 3 elements",
+         "IndexError: list index out of range"]),
+    # A NEGATIVE index past the start is the same arm (it stays negative after
+    # the `index += count` fold and is rejected UNSIGNED), and it is its own row
+    # because the number on the message is the SOURCE index and not the folded
+    # one: reporting the register's value would print `-1` for an `a[-4]`, which
+    # is not what the source asked for and not what CPython reports either.
+    ("subscript_past_the_start_names_the_source_index",
+     "def main(n):\n"
+     "    var a = [10, 20, 30]\n"
+     "    printf(\"%d\\n\", a[-4])\n"
+     "    return 0\n",
+     1, ["a[-4] is out of range", "index -4 is not below the 3 elements",
+         "IndexError: list index out of range"]),
+    # The index is NOT statically known and the count IS: the message names the
+    # count and says in words that the index is computed at run time, rather
+    # than printing a bound it cannot count or a number it cannot read. This row
+    # is what stops a "fix" that formats the index at run time from being
+    # accepted: the oob block is one the arm64 CFG walk FOLLOWS, so a decimal
+    # conversion there needs an `arm64_step` row and an `hne_` fact in all 18
+    # `work_step_*` theorems (see `model.subscript_out_of_range_message`).
+    ("subscript_past_end_with_a_run_time_index_names_the_count",
+     "def main(n):\n"
+     "    var a = [10, 20, 30]\n"
+     "    var i = 5\n"
+     "    printf(\"%d\\n\", a[i])\n"
+     "    return 0\n",
+     1, ["a[i] is out of range", "not below the 3 elements",
+         "computed at run time"]),
+    # Neither is known: the base is a PARAMETER, so this build never saw the
+    # blob it indexes and cannot read its count at emit time. The row that says
+    # so out loud rather than guessing is the point — `model.
+    # exact_blob_count` returns None here and the message has to be honest about
+    # which of its two numbers it is missing.
+    ("subscript_past_end_through_a_parameter_names_neither_number",
+     "def pick(t: List[Int], k: Int) -> Int:\n"
+     "    return t[k]\n\n"
+     "def main(n):\n"
+     "    var a = [10, 20, 30]\n"
+     "    printf(\"%d\\n\", pick(a, 5))\n"
+     "    return 0\n",
+     1, ["t[k] is out of range", "computed at run time", "can name neither"]),
 ]
+
+# The stdout each STDERR_CASE must ALSO produce, for the rows where stdout is
+# part of what is being asserted. It is a mapping rather than a fifth column
+# because `STDERR_CASES` is a four-column shape dispatched positionally against
+# `run_stderr_case`, and widening it would make every one of the existing rows
+# carry a slot it does not use.
+#
+# The reason this exists at all: `run_stderr_case` reads stderr and the exit
+# status, so a row here cannot tell "the program printed its in-range lines and
+# then stopped" from "the program printed nothing". For an out-of-range
+# SUBSCRIPT that distinction is the whole finding — the symptom before the fix
+# was two correct lines followed by silence, and a stdout assertion pins that
+# the stop happens AFTER them and adds nothing of its own.
+STDERR_STDOUT = {
+    "subscript_past_end_names_the_index_and_the_count": "10\n30\n",
+    "subscript_past_end_with_a_run_time_index_names_the_count": "",
+    "subscript_past_end_through_a_parameter_names_neither_number": "",
+}
 
 # `d[k] = v` INSERTS, and these are the answers CPython gives. They are in
 # `CASES` rather than in a dict-shaped suite because the construct is a STORE
@@ -15173,15 +15281,24 @@ WIDE_OFF_CASES = [
 ]
 
 
-def run_stderr_case(name, source, want_exit, needles, tmpdir, verbose):
+def run_stderr_case(name, source, want_exit, needles, tmpdir, verbose,
+                    want_stdout=None):
     """The program must stop at run time, exit `want_exit`, and SAY WHY.
 
-    Three assertions, in the order of how badly each has been missed before:
-    the exit status (the only thing the old behaviour asserted), the needles on
-    stderr (the thing it did not have at all), and the two architectures
-    producing the SAME stderr byte for byte.
+    Four assertions, in the order of how badly each has been missed before:
+    the exit status (the only thing the oldest behaviour asserted), the needles
+    on stderr (the thing it did not have at all), the two architectures
+    producing the SAME stderr byte for byte, and — for the rows that name a
+    `want_stdout` — that stdout is exactly it.
 
-    That last one is not tidiness. `model.list_append_overflow_message` exists
+    `want_stdout=""` is a real assertion ("this program printed nothing before
+    it stopped"), and for the out-of-range SUBSCRIPT rows it is the one that
+    matters most: the symptom there was two correct lines followed by silence,
+    so pinning those two lines is what shows the stop happens after them and
+    contributes nothing of its own.
+
+    The two-architecture comparison is not tidiness either.
+    `model.list_append_overflow_message` exists
     so the two backends cannot name one limit differently, and the only way to
     know they are calling it is to compare what came out — two emitters with two
     copies of a sentence pass every needle and diverge on the fourth word.
@@ -15210,9 +15327,15 @@ def run_stderr_case(name, source, want_exit, needles, tmpdir, verbose):
                            f"{missing!r}; stderr: {run.stderr.strip()[-300:]!r}. "
                            f"A bare exit with nothing on either stream is the "
                            f"defect this case exists for")
+        if want_stdout is not None and run.stdout != want_stdout:
+            return False, (f"--backend={backend} wrote {run.stdout!r} on "
+                           f"stdout, expected exactly {want_stdout!r}. What the "
+                           f"program printed BEFORE the bounded stop is part of "
+                           f"this case's finding, not decoration")
         seen[backend] = run.stderr
         if verbose:
             print(f"      --backend={backend} exit={run.returncode} "
+                  f"stdout={run.stdout!r} "
                   f"stderr={run.stderr.strip()[:80]!r}")
     if seen["arm64"] != seen["x86_64"]:
         return False, (f"the two architectures named the limit differently:\n"
@@ -24565,6 +24688,16 @@ def main():
     off_names = {c[0] for c in WIDE_OFF_CASES}
     module_names = {c[0] for c in CROSS_MODULE_CASES}
     stderr_names = {c[0] for c in STDERR_CASES}
+    # A `STDERR_STDOUT` key naming a row that is not a `STDERR_CASES` row is a
+    # stdout expectation nothing will ever check, and the row it was written for
+    # has probably been renamed — which is exactly the shape of bug this suite
+    # exists to catch, so it is refused before a single image is built rather
+    # than noticed by whoever reads the log.
+    stale = sorted(set(STDERR_STDOUT) - stderr_names)
+    if stale:
+        print(f"ERROR: STDERR_STDOUT names no STDERR_CASES row: {stale}",
+              file=sys.stderr)
+        return 2
 
 
 
@@ -24674,7 +24807,7 @@ def main():
                 elif name in stderr_names:
                     ok, detail = run_stderr_case(
                         name, source, want_exit, want_stdout, tmpdir,
-                        args.verbose)
+                        args.verbose, STDERR_STDOUT.get(name))
                 elif name in module_names:
                     ok, detail = run_module_case(
                         name, source, want_exit, want_stdout, tmpdir,

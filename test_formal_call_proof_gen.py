@@ -635,6 +635,84 @@ class TestGeneratorSource(unittest.TestCase):
         for note in notes:
             self.assertIn("shadows entry", note)
 
+    def test_smulh_is_modelled_and_disjoint_from_mul(self):
+        """The four things `SMULH` costs, and the one that is easy to get wrong.
+
+        `formal/arm64_codegen.py` emits `smulh` for
+        `formal/model.py::int_overflow_traps` — "did `a * b` fit in 64 signed
+        bits", which a wrapping `MUL` cannot answer — and until 2026-10-05
+        `arm64_step` had no arm for it, so every one of the 71 fuzz draws of it
+        in 400 flagged cases was a `NOSTEP`: a proof that cannot step an
+        instruction is a proof about nothing.
+
+        What is asserted here is the wiring, and the SECOND row is the one that
+        matters: `SMULH` and `MUL` differ only in bit 22, so a mask that cleared
+        it would make the two claim the same words and whichever arm came first
+        in `arm64_step`'s chain would answer for both — a proof about a
+        different instruction, which is the failure `check_step_conds` exists to
+        make loud. So this asserts both words resolve to DIFFERENT rows and that
+        the new row's mask is bit-22-preserving.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            w = fn(*args)
+            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
+                else w
+
+        smulh = word(A.encode_smulh_xd_xn_xm, 2, 0, 1)
+        mul = word(A.encode_mul_xd_xn_xm, 2, 0, 1)
+        self.assertEqual(smulh, 0x9b417c02,
+                         "`smulh x2, x0, x1` is not the word the encoder "
+                         "produces, so every assertion below would be about a "
+                         "word no image contains")
+        self.assertEqual(smulh & ~mul, 0x00400000,
+                         "SMULH and MUL must differ in bit 22 and nowhere else, "
+                         "or the disjointness below is not what makes them "
+                         "disjoint")
+        s_idx, m_idx = G._step_branch_index(smulh), G._step_branch_index(mul)
+        self.assertIsNotNone(s_idx, "SMULH resolves to no step-table row")
+        self.assertIsNotNone(m_idx, "MUL resolves to no step-table row")
+        self.assertNotEqual(s_idx, m_idx,
+                            "SMULH and MUL land on the SAME row, so the "
+                            "generator would describe one of them while the "
+                            "model steps the other")
+        mask, base = G._STEP_CONDS[s_idx]
+        self.assertEqual((mask, base), (0xffe07c00, 0x9b407c00))
+        self.assertEqual(base & 0x00400000, 0x00400000,
+                         "the row's own base must set bit 22 — that is what "
+                         "separates it from MUL's `0x9b007c00`")
+        self.assertTrue(mask & 0x00400000,
+                        "the row's mask must KEEP bit 22; `0xffa07c00` would "
+                        "clear it and claim MUL's words too")
+        # `_WORK_STEP` is what makes the model's branch a fact a generated
+        # block can USE (the step-result lemma `exact`s the library lemma at
+        # this word), and `_regs_written` is what a block's certificate asserts
+        # about the registers a step clobbered.
+        self.assertIn(s_idx, G._WORK_STEP_BY_IDX,
+                      "no `work_step_*` lemma is wired for the new row, so a "
+                      "program containing it cannot get a step-result lemma")
+        lemma, tests = G._WORK_STEP_BY_IDX[s_idx]
+        self.assertEqual(lemma, "work_step_smulh")
+        self.assertIn((0xffe07c00, 0x9b407c00), tests,
+                      "the library lemma must be stated at THIS row's word "
+                      "test, or the step-result lemma `exact`s a hypothesis it "
+                      "cannot prove")
+        self.assertEqual(G._regs_written(smulh, s_idx), {2},
+                         "SMULH writes Xd and nothing else, exactly as MUL "
+                         "does; a certificate that claims more or less is a "
+                         "false claim about the block")
+        self.assertIn("smulh64", G._step_rhs(smulh, s_idx),
+                      "the right-hand side must name the library definition, "
+                      "not restate the identity inline: the step-result lemma "
+                      "is closed by `exact`ing the library lemma at this word, "
+                      "so a second statement is a chance to drift")
+        self.assertIn("smulh64", G._step_rhs_generic(s_idx),
+                      "the word-relative form (`lib/work.lean`) must name it "
+                      "too, or the two right-hand sides disagree about the same "
+                      "instruction")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -4105,6 +4183,21 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     address, not by symbol, because an image that both traps and `raise`s has two
     `exit` facts to tell apart.
 
+    **arm64 publishes a trap list too now, and the reason is a different trap.**
+    Its STACK-FLOOR guard is still a raw `svc` and still needs nothing — the row
+    `test_arm64_needs_no_trap_list_and_keeps_its_run_tests` still holds for a
+    program that emits no bounded stop at all. But `_emit_exit` flushes before
+    it traps (`fflush(NULL)`, so a program that printed something keeps it), and
+    that flush is a `BL` to the C library, which puts a real `fflush` into
+    `extern_calls` for every bounded stop in the image. Measured on
+    `formal/examples/mod_by_var.mojo` (`n % d`, a variable divisor): its image's
+    ONLY unbound call is the `fflush` in the divide-by-zero arm, and
+    `_gen_extern_test` read that as the program's one opaque call and emitted a
+    `run_pc_reached … = true` for an address the run never reaches — a false
+    obligation, rejected by `native_decide`, so a program that computes, runs
+    and is modelled correctly was a `lean-rejected` row of
+    `tools/formal_proof_census.py`. The rows below are that fix's pins.
+
     Every row of this class is cheap: proof GENERATION, no Lean.  That the run
     tests which come back are TRUE is a separate claim and only Lean tells it
     (`TestStringValueInTheModel` below is the assertion that the string model
@@ -4117,6 +4210,12 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
     RETURNS_A_STRING = "def main(n: Int) -> Int:\n    return \"small\"\n"
     PRINTS = "def main(n: Int) -> Int:\n    print(42)\n    return 7\n"
+    # The arm64 half: a bounded stop the program never reaches, and therefore
+    # the only unbound call in the image. `n % d` with a VARIABLE divisor is
+    # what puts the call there — `_emit_div_shift_pow` guards the divide by a
+    # zero divisor and the guard's `_emit_exit` flushes — and `formal/examples/
+    # mod_by_var.mojo` is the committed copy of this program.
+    DIVISOR = "def mod_by_var(n):\n    d = 4\n    return n % d\n"
 
     @classmethod
     def setUpClass(cls):
@@ -4143,6 +4242,25 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                 cls.built[(arch, name)] = open(
                     r["proof_path"], encoding="utf-8").read()
                 cls.built[(arch, name, "info")] = r["info"]
+        # The arm64 row is a separate loop because it is arm64-ONLY: the same
+        # program on x86-64 has a different trap (a call to the C library's
+        # `exit`, in the guard's prologue) and asserting about one backend's
+        # list inside the other's table is how a row ends up checking nothing.
+        path = os.path.join(cls.tmp, "divisor.mojo")
+        with open(path, "w") as f:
+            f.write(cls.DIVISOR)
+        try:
+            r = fb.compile_formal(
+                path, arch="arm64",
+                output=os.path.join(cls.tmp, "divisor-arm64.aout"),
+                prove=True, check=False)
+            cls.built[("arm64", "divisor")] = open(
+                r["proof_path"], encoding="utf-8").read()
+            cls.built[("arm64", "divisor", "info")] = r["info"]
+            cls.built[("arm64", "divisor", "code")] = r["code"]
+        except Exception as e:                        # noqa: BLE001
+            cls.built[("arm64", "divisor")] = None
+            cls.built[("arm64", "divisor", "error")] = f"{type(e).__name__}: {e}"
 
     @classmethod
     def tearDownClass(cls):
@@ -4277,21 +4395,151 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
         """The other backend, and the reason the asymmetry was the bug.
 
-        arm64's trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so its
-        `extern_calls` was always empty for a program that calls nothing and
-        its run tests were never suppressed. Nothing here may change that, and
-        the assertion that it has not is what makes the x86-64 fix a fix rather
-        than a lowering of the bar on both sides.
+        arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
+        decodes, so a program that emits no bounded stop has an empty
+        `extern_calls` and needs nothing subtracted. Nothing here may change
+        that, and the assertion that it has not is what makes the x86-64 fix a
+        fix rather than a lowering of the bar on both sides.
+
+        The name says "no trap list" and the assertion is `assertFalse`, so it
+        is worth being exact about what it does and does not claim: it claims
+        THIS program's list is empty, and arm64 DOES publish one for a program
+        with a bounded stop — see the two rows below, which are the other half
+        and which this row used to contradict.
         """
         info = self._info("arm64", "plain")
         self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
                          [], "arm64's guard trap is an `svc`, not a call")
         self.assertFalse(info.get("compiler_traps"),
-                         "arm64 published compiler traps, so its trap is no "
-                         "longer the in-image `svc` this assertion assumes")
+                         "a program with no bounded trap published one, so "
+                         "something other than a stop is being recorded")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
+
+    def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
+        """arm64's own trap is a `BL fflush`, and it must be published as one.
+
+        Every published address must be an `fflush` in `extern_calls` — the
+        flush is a real call and has to stay accounted for on the link line —
+        and the list must not be empty for a program whose image contains a
+        bounded stop, because a generator with nothing to subtract puts
+        `_gen_extern_test` on a path the program never takes.
+        """
+        info = self._info("arm64", "divisor")
+        traps = info.get("compiler_traps")
+        self.assertTrue(traps,
+                        "the image has a divide-by-zero stop and no trap was "
+                        "published, so its `fflush` is being read as a call "
+                        "the program makes")
+        by_addr = {e["addr"]: e["sym"]
+                   for e in (info.get("extern_calls") or [])}
+        for addr in traps:
+            self.assertIn(addr, by_addr,
+                          f"{addr:#x} is published as a trap but is not an "
+                          f"extern call at all, so the subtraction would "
+                          f"silence nothing and the list is wrong")
+            self.assertEqual(by_addr[addr], "fflush",
+                             f"the trap at {addr:#x} is a "
+                             f"{by_addr[addr]!r} call, and subtracting a "
+                             f"program call is the defect the by-address rule "
+                             f"exists to prevent")
+
+    def test_a_recorded_trap_is_the_bl_and_not_the_instruction_before_it(self):
+        """The recorded address must be the `BL`, which is NOT where the call
+        starts emitting.
+
+        `fflush(NULL)` emits `mov w0, #0` and THEN `bl fflush`, so the
+        assembler's position before the call is twelve bytes short of the
+        instruction. Taking that position records an address that is not in
+        `extern_calls` at all, the subtraction matches nothing, and the
+        generator is exactly as wrong as it was before — with a list published
+        that claims it is not. That is what this row is for: it decodes the word
+        at every published address out of the EMITTED CODE and requires it to be
+        a `BL` (step-table index 15), and separately requires the word twelve
+        bytes earlier not to be one — without that second half the row would
+        pass on an image whose layout happens to put another call in front.
+        """
+        import formal.arm64_proof_gen as G
+        info = self._info("arm64", "divisor")
+        code = self.built[("arm64", "divisor", "code")]
+        base = info["base_addr"]
+        traps = info.get("compiler_traps") or []
+        self.assertTrue(traps)
+        for addr in traps:
+            off = addr - base
+            word = int.from_bytes(code[off:off + 4], "little")
+            self.assertEqual(G._step_branch_index(word), 15,
+                             f"the word at the published trap {addr:#x} is "
+                             f"{word:#010x}, which is not a `BL`: the recorded "
+                             f"address is not the call")
+            before = int.from_bytes(code[off - 4:off], "little")
+            self.assertNotEqual(G._step_branch_index(before), 15,
+                                f"the instruction before the published trap "
+                                f"{addr:#x} is also a `BL`, so this row could "
+                                f"not tell the two apart")
+
+    def test_a_program_whose_only_unbound_call_is_a_trap_gets_its_run_test(self):
+        """The whole fix: `n % d` with a variable divisor, end to end.
+
+        Its image's only unbound call is the divide-by-zero guard's flush, on a
+        path the program never takes (the divisor is 4). Before the subtraction
+        `_gen_extern_test` treated it as the program's one opaque call and
+        emitted `mod_by_var_pre_reaches_0 : run_pc_reached … = true`, which is
+        FALSE — `native_decide` rejected it with "evaluated that the
+        proposition to be false", so a program that computes, runs and is
+        modelled correctly was a `lean-rejected` census row.
+
+        Three assertions, because "it generates something" is not the claim: no
+        `pre_reaches` theorem is emitted at all (the extern-test shape is not
+        taken), the ordinary run test IS emitted with the program's real answer,
+        and the image's program-call list is empty — so what removed the false
+        obligation is the subtraction and not a generator that stopped asking.
+        """
+        text = self._text("arm64", "divisor")
+        self.assertNotIn("pre_reaches", text,
+                         "the false obligation is being emitted again: this "
+                         "image has no program call for one to be about")
+        self.assertNotIn("extern_fflush_step", text,
+                         "the trap's `BL` is still being bridged as if the "
+                         "program made it")
+        self.assertIn("run_result_exit", text,
+                      "the program's own run test is missing, so the "
+                      "subtraction removed the section instead of the trap")
+        self.assertRegex(text, r"run_result_exit \{ \(Arm64State\.init 10",
+                         "the concrete run test must start from the entry "
+                         "state and carry the program's answer")
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self._info("arm64", "divisor")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the subtraction did not remove the trap")
+        self.assertTrue(info.get("extern_calls"),
+                        "the image really does carry the `fflush`, so this "
+                        "row is not passing because there was nothing to "
+                        "subtract")
+
+    def test_the_arm64_subtraction_is_by_address_not_by_symbol(self):
+        """The same design decision as the x86-64 row, on the other backend.
+
+        An image that both traps and prints has an `fflush` that is the
+        compiler's and a `printf` that is the program's; subtract by symbol and
+        the wrong half disappears. And an `info` with no `compiler_traps` — a
+        dylib, or an emitter that predates the key — must subtract nothing,
+        which is the conservative direction.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        trap, printed = 0x1000, 0x2000
+        info = {
+            "extern_calls": [{"sym": "fflush", "addr": trap},
+                             {"sym": "printf", "addr": printed}],
+            "compiler_traps": [trap],
+        }
+        self.assertEqual(_program_extern_calls(info),
+                         [{"sym": "printf", "addr": printed}])
+        self.assertEqual(len(_program_extern_calls(
+            {"extern_calls": info["extern_calls"]})), 2,
+            "with no traps published both calls are the program's")
+        self.assertEqual(_program_extern_calls({}), [])
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
@@ -5121,6 +5369,115 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             self.assertEqual(p.stdout, "",
                              f"{backend}: the program printed after a zero "
                              f"divisor: {p.stdout!r}")
+
+
+class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
+    """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
+
+    `bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
+    and not with the arithmetic, and gives a reason about the FLAGS ("it has
+    the flags to get right rather than a register") rather than about
+    PROVABILITY. This class is the measurement behind that choice, and it is a
+    question about LEAN rather than about arm64 — which is why it is three
+    two-line files with no ProofLib import (0.3 s each, not a proof run), one
+    per question, so each verdict is its own exit status and nothing has to be
+    parsed out of a shared transcript:
+
+    * a `Float` ORDER has a `Decidable` instance and `native_decide` closes it.
+      An `FCMP` arm's result is an `if`-chain over `<` / `unordered`
+      (`lib/IEEE754.lean`'s `key` and `unordered` decide the flags), so that is
+      the shape the order supports.
+    * the KERNEL does not reduce `Float.decLt` (`decide` fails where
+      `native_decide` succeeds). Anything in a `work_step_*` proof that needs
+      kernel reduction over a comparison — `bv_decide` above all — therefore
+      cannot see a float.
+    * a `Float` EQUALITY has **no `Decidable` instance at all**. So an arm whose
+      result is a float VALUE — `FADD`, `FSUB`, `FMUL`, `FDIV`, `SCVTF`,
+      `FCVTZS`, the two `FMOV`s — has no `rfl`, `simp` or `decide` to close its
+      lemma with, because all three need that equality.
+
+    That is the difference between the one arm the doc asks for first and the
+    nine it defers, and it is worth three tests because the alternative is a
+    worker writing `work_step_fadd` against a `Decidable` that is not there —
+    and, worse, an arm that "almost" works and is never checked.
+    """
+
+    #: `name -> (source, must_succeed, needle_when_it_fails_or_not)`.
+    QUESTIONS = {
+        # The order, by the compiler: this is what `native_decide` gives an
+        # `FCMP` arm's `if`-chain.
+        "order_native": ("theorem t : (1.0 : Float) < 2.0 := by native_decide",
+                         True, None),
+        # The same order by the kernel: the load-bearing negative, because a
+        # `work_step_*` proof is `unfold; rw [if_neg …]; rfl`, and `rfl` is
+        # kernel reduction.
+        "order_kernel": ("theorem t : (1.0 : Float) < 2.0 := by decide",
+                         False, "did not reduce"),
+        # The equality the arithmetic arms would need.
+        "value_equality": ("example : Decidable "
+                           "((0.0 : Float) / (0.0 : Float) = (0.0 : Float)) "
+                           ":= inferInstance",
+                           False, "failed to synthesize"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean:
+            raise unittest.SkipTest("no Lean: every assertion here is about "
+                                    "what Lean's own instances do, and none of "
+                                    "them is answerable without it")
+        cls.tmp = tempfile.mkdtemp(prefix="a2-float-dec-")
+        from formal import lean as FLEAN
+        cls.out = {}
+        for name, (src, _ok, _needle) in cls.QUESTIONS.items():
+            path = os.path.join(cls.tmp, name + ".lean")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(src + "\n")
+            r = FLEAN.run_lean(lean, [os.path.basename(path)], cwd=cls.tmp,
+                               env={"LEAN_PATH": os.path.join(HERE, "lib")})
+            cls.out[name] = (r.returncode, (r.stdout or "") + (r.stderr or ""))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _ask(self, name):
+        rc, out = self.out[name]
+        want_ok, needle = self.QUESTIONS[name][1:]
+        if want_ok:
+            self.assertEqual(rc, 0,
+                             "%s: Lean's answer changed, and this class is "
+                             "the measurement behind the ORDER of work in "
+                             "`bugs/FORMAL_arm64_ieee754_has_no_step_arms.md` "
+                             "-- re-read it before believing the row below: %s"
+                             % (name, out[:400]))
+        else:
+            self.assertNotEqual(rc, 0,
+                                "%s: this now WORKS, so the obstacle it was "
+                                "measured to be is gone and the document that "
+                                "cites it is stale: %s" % (name, out[:400]))
+            self.assertIn(needle, out,
+                          "%s: it fails for a different reason than the one "
+                          "recorded, which means the recorded reason is not "
+                          "what is stopping the work: %s" % (name, out[:400]))
+
+    def test_a_float_ORDER_is_decidable_and_native_decide_closes_it(self):
+        """What makes `FCMP` — and only `FCMP` — writable in this shape."""
+        self._ask("order_native")
+
+    def test_the_kernel_does_not_reduce_a_float_order(self):
+        """`decide` failing where `native_decide` succeeds, which is why no
+        `bv_decide` in a `work_step_*` can ever see a float operand."""
+        self._ask("order_kernel")
+
+    def test_a_float_VALUE_equality_is_not_decidable_at_all(self):
+        """The obstacle for the other NINE arms, and the reason it is not
+        "just a bit more work": there is no instance for `rfl`, `simp` or
+        `decide` to use, so an arithmetic `work_step_*` cannot be finished at
+        all until a `Decidable` over `Float` (or a bit-pattern representation
+        of the D registers) exists."""
+        self._ask("value_equality")
 
 
 class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):

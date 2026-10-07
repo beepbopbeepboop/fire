@@ -442,10 +442,26 @@ def gen_flagged_alu(rng, free):
     int_overflow_traps` asks for it — and it shares the model branch with
     `CMN` (`Rd = 31` is the same word with the result discarded), which is why
     the census's LEAN column already reads `yes` for it. `SMULH` is the other
-    half of the overflow question and the model has NO arm for it, so a case
-    that draws it is a `NOSTEP`: that is the finding, not a pool bug, and
-    `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` is where the model side
-    is written down.
+    half of the same overflow question and it now has a model arm too
+    (`arm64_step`'s last, `(0xffe07c00, 0x9b407c00)`, with `work_step_smulh`),
+    so the 71 draws of it in 400 flagged cases are STEPs and the fuzzer's
+    differential is over the high half of the product rather than over the
+    flags. **Every one of those 71 draws was a `NOSTEP` until 2026-10-05**, when
+    `arm64_step` gained its last arm and `work_step_smulh` with it — the
+    instruction the emitter calls for the overflow check was an encoder with no
+    model arm anywhere, which is the shape the ISA census's LEAN column exists
+    to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
+    it).
+
+    **`TST` is NOT here and its absence is a gap of its own**, which is this
+    pool's version of the "a lowering no fuzz case draws is not a lowering"
+    question: `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`
+    since 2026-10-05, `arm64_step` has had `work_step_tst` for weeks, and the
+    census's FUZZ column still reads `NO` because nothing in this file spells
+    it — so `tools/formal_isa_census.py`'s
+    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` is red on
+    that row today. Filed as `bugs/FORMAL_the_flagged_fuzz_pool_does_not_draw_
+    tst.md`; not fixed here because the pool is another claim's area.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)

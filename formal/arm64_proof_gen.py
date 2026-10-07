@@ -3241,6 +3241,26 @@ _STEP_CONDS = [
     # is a three-line change once it is gone.
     # `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
     # carries the rest.
+    #
+    # 68 SMULH. APPENDED for the reason 51 was. The mask is the SAME VALUE
+    # entry 4 (MUL) uses, `0xffe07c00`, and that is not a copy-paste: on the
+    # data-processing class bit 22 is `S`, the mask KEEPS it, and the two BASES
+    # differ there — MUL is `0x9b007c00` (bit 22 clear, because MUL sets no
+    # flags) and SMULH is `0x9b407c00` (bit 22 set, where on this class the bit
+    # means "the high half" instead). So the pair is disjoint, and it is
+    # disjoint BECAUSE the mask keeps bit 22: a mask of `0xffa07c00` would clear
+    # it and claim MUL's words too.
+    #
+    # That is what `work_step_smulh`'s 67 `bv_decide` facts measure — that no
+    # EARLIER arm, entry 4 included, claims these words — and it is why
+    # `check_step_conds` (which requires this table and `arm64_step` to be the
+    # same SET) is a real check here and not a bookkeeping one.
+    #
+    # `formal/arm64_codegen.py::encode_smulh_xd_xn_xm` is the emitter's caller,
+    # `formal/model.py::int_overflow_traps` is the decision that wants it ("did
+    # `a * b` fit in 64 signed bits", which a wrapping MUL cannot answer), and
+    # `test_arm64_encoders.py` checks the encoding against `as`.
+    (0xffe07c00, 0x9b407c00),  # 68 SMULH Xd, Xn, Xm
 ]
 
 
@@ -3294,6 +3314,17 @@ def _step_rhs(w: int, idx: int):
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s + arm64_reg {rm} s))"
     if idx == 4:  # MUL
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s * arm64_reg {rm} s))"
+    if idx == 68:  # SMULH: the HIGH half of the signed 128-bit product
+        # `smulh64`, not an inline expression, and the reason is the same one
+        # `work_step_smulh` in lib/ProofLib.lean gives: the answer needs a
+        # 128-bit intermediate this model does not have, and the definition
+        # that does have one states it as the unsigned high word less a
+        # conditional copy of each negative operand. Spelling it inline here
+        # would be a SECOND statement of that identity, and the step-result
+        # lemma is closed by `exact`-ing the library lemma at this word, so the
+        # two right-hand sides have to be defeq — a copy is a chance to drift.
+        return (f"some (arm64_set_reg {rd} s (smulh64 (arm64_reg {rn} s) "
+                f"(arm64_reg {rm} s)))")
     if idx == 3:  # SUB register (also covers NEG when rn = XZR)
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s))"
     if idx == 7:  # AND register
@@ -3661,6 +3692,9 @@ def _step_rhs_generic(idx: int):
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - arm64_reg {_RM} s))"
     if idx == 4:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s * arm64_reg {_RM} s))"
+    if idx == 68:
+        return (f"some (arm64_set_reg {_RD} s (smulh64 (arm64_reg {_RN} s) "
+                f"(arm64_reg {_RM} s)))")
     if idx == 5:
         return f"some (arm64_set_reg {_RD} s (-(arm64_reg {_RM} s)))"
     if idx == 6:
@@ -3889,6 +3923,7 @@ _WORK_STEP = [
     (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
     (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
+    (68, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -4669,7 +4704,11 @@ def _regs_written(w: int, idx: int):
         return set()
     if idx == 15:
         return {30}
-    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33):
+    # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
+    # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
+    # membership states, and a second row saying the same thing is how
+    # `_regs_written` and the model's arm drift apart.
+    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
@@ -9837,6 +9876,52 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     return "\n\n".join(blocks)
 
 
+def _program_extern_calls(info: dict) -> list:
+    """The extern calls the PROGRAM makes — `extern_calls` less this backend's own.
+
+    `info["extern_calls"]` is every unbound `BL` the image carries, and
+    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted as
+    its own bounded stops: the `BL fflush` inside each `_emit_exit`. Subtracting
+    it here is what puts the run tests back for a program whose only unbound
+    call is one of those.
+
+    **Measured on `formal/examples/mod_by_var.mojo` (`n % d`, a variable
+    divisor), and this is the whole reason the subtraction exists.** Its image
+    carries exactly ONE unbound call — the `fflush` in the DIVIDE-BY-ZERO arm of
+    `_emit_div_shift_pow` — and the call is on a path the program never takes,
+    because the divisor is 4. Before this, `_gen_extern_test` treated it as the
+    program's one opaque call and emitted
+
+        theorem mod_by_var_pre_reaches_0 :
+          run_pc_reached { … } mod_by_var_code 4294968440 200000 = true := by
+          native_decide
+
+    which is FALSE, and `native_decide` said so in the generated file's own
+    words (`error: Tactic `native_decide` evaluated that the proposition to be
+    false`), so the example was a `lean-rejected` row of
+    `tools/formal_proof_census.py`. It was not a false theorem shipped — Lean
+    rejects it — but it was a program that computes correctly, runs correctly,
+    and is modelled correctly, refused a proof over a construct the PROGRAM never
+    executes. The model agrees: the run from the entry state reaches
+    `4294968476` with `x0 = 2`, which is `10 % 4`, and never has a pc inside
+    `429496846c..4294964890` — the trap block the call sits in.
+
+    Subtract by ADDRESS, not by symbol, for the reason x86-64's `_program_externs`
+    gives: an image that both traps and prints has two facts to tell apart, and
+    dropping every `fflush` would also drop one the program really does reach.
+    A `raise` reaches `_emit_diverge` → `_emit_exit`, so it loses its run test
+    too — which is correct, because the model halts at that flush and cannot
+    say what the program did next anyway.
+
+    An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
+    predates the key — is read as having none, which is the conservative
+    direction: nothing is subtracted and the refusal stands.
+    """
+    traps = set(info.get("compiler_traps") or ())
+    return [c for c in (info.get("extern_calls") or ())
+            if c.get("addr") not in traps]
+
+
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
@@ -10886,7 +10971,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"  {eval_eq_mojo_proof}"
         )
     code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
-    extern_calls = info.get("extern_calls") or []
+    extern_calls = _program_extern_calls(info)
     externs = list(getattr(prog, "externs", []) or [])
     step_tests = ""
     if extern_calls:
