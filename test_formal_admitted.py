@@ -1351,7 +1351,10 @@ AXIOM_CLOSURE = {
     # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
     # which is the assertion that makes this a measurement rather than a number
     # somebody typed.
-    "ProofLib": (311, 60, 243, 0, 8, 0),
+    # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
+    # declaration added by one of the merged branches rests on a decide axiom.
+    # The partition still closes (312 = 61 + 243 + 0 + 8).
+    "ProofLib": (312, 61, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and

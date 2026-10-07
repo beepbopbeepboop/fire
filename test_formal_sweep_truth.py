@@ -3932,12 +3932,12 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         digits — so a hole in an imported `.olean` arrived as a bare line number
         in a file it had never seen, and `hole_at` resolved it against the
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:451:8` position came back as `"hstep11's side condition, line
-        451"`, which is confident, specific and completely wrong, because 451 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 451 of the
+        `«lib».X86:461:8` position came back as `"hstep11's side condition, line
+        461"`, which is confident, specific and completely wrong, because 461 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 461 of the
         generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
-        (The line is 451 and not the 503 an earlier version of this case used,
+        (The line is 461 and not the 503 an earlier version of this case used,
         because the emission moved: `_GUARD`'s comment says what removed the
         steps between them.)
 
@@ -3961,11 +3961,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:451:8`\n", module),
-            "hstep11's side condition, line 451",
-            "the control: OUR hole at 451 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 451")
-        for label, pos in (("«lib».X86", 451), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:461:8`\n", module),
+            "hstep11's side condition, line 461",
+            "the control: OUR hole at 461 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 461")
+        for label, pos in (("«lib».X86", 461), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -3978,8 +3978,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:451:8`\n"),
-            "hstep11's side condition, line 451",
+                "`«lib».X86:461:8`\n"),
+            "hstep11's side condition, line 461",
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
@@ -4569,8 +4569,12 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
     #: examples that were already here still produce what they produced.
-    TOTAL = (105, 3693)
-    TOTAL_PRE_MERGE52 = (69, 2366)
+    #: **Re-pinned 2026-10-06 from 3 693 to 3 697, by the merge of
+    #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
+    #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
+    #: so the corpus walks four more steps. The trees are unchanged at 105.
+    TOTAL = (105, 3697)
+    TOTAL_PRE_MERGE52 = (69, 2368)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
