@@ -6962,19 +6962,28 @@ def specialization_call_refusal(name: str) -> str:
     LEADING arguments (see the calling convention above): the call site
     evaluates the brackets and passes them first. That is a decision about a
     signature, so it can only be made against a declaration — and when the
-    name is not a function this unit compiles, there is none. The two
-    spellings that reach here are both unanswerable, and they are unanswerable
-    for the same reason:
+    name is not a function this unit compiles, there is none. Three spellings
+    reach here, and the third is the one the first wording of this sentence
+    got wrong:
 
       * the name is a generic of ANOTHER module. Its instantiation is the
         boundary symbol (doc/ABI.md §Generics), one per set of type arguments,
         and `formal/monomorph.py` compiles the ones an importer asks for into
         that module's own library and REWRITES the call site to the mangled
         name — so a call that arrives here is one whose brackets named no
-        instantiation: a bare call with no arguments, an argument that is a
-        value rather than a type, a dotted `module.name[…]`, or a template in
-        a type ANNOTATION rather than a callee position.
+        instantiation: an argument that is a value rather than a type, a
+        dotted `module.name[…]`, or a template in a type ANNOTATION rather
+        than a callee position.
         `bugs/FORMAL_generic_monomorph_scope.md` lists each with its next step.
+      * the name is a function of another module whose generic parameter is
+        IMPLICIT — `def name(x: Box[T])`, with the parameter written in the
+        SIGNATURE and no bracket to bind. There the type is INFERRED from the
+        call, so a bracket the source wrote is not read at all; the repair is
+        the bare call, and it is the same program (measured: the identical
+        module with `def unbox(t: Box[T])` builds as `unbox(b)` and is refused
+        as `unbox[Int](b)`, both architectures). This is why the sentence must
+        not tell the reader to write `name[<a type>](…)` — for this shape that
+        is the spelling already on the line.
       * the name is an ordinary VALUE and the brackets are a subscript. A
         subscript of a value is not a call this path can name at all.
 
@@ -6994,19 +7003,23 @@ def specialization_call_refusal(name: str) -> str:
     return (
         f"{name}[…](…) calls a name this unit does not compile, so the "
         f"brackets cannot be bound. If `{name}` is a generic of another module "
-        f"then its instantiation is the boundary symbol, one per set of type "
+        f"whose parameters are spelled in brackets (`def {name}[T](…)`) then "
+        f"its instantiation is the boundary symbol, one per set of type "
         f"arguments (doc/ABI.md §Generics), and this path DOES instantiate the "
         f"ones an importer asks for — `formal/monomorph.py` compiles each into "
         f"that module's own library and rewrites the call to the mangled name — "
         f"so a call arriving here asked for none: its brackets named no type "
-        f"argument or named a value rather than a type. Write it as "
-        f"`{name}[<a type>](…)` and the library will carry the instantiation; "
-        f"the ways this can still be reached are in "
-        f"bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
-        f"an ordinary value then the brackets are a subscript, which is not a "
-        f"call this path can name at all. Refused rather than emitted with the "
-        f"brackets dropped: that builds, runs, and returns a number the "
-        f"source never wrote, with nothing on the link line to catch it"
+        f"argument or named a value rather than a type. If `{name}`'s generic "
+        f"parameter is instead IMPLICIT — written in the signature "
+        f"(`def {name}(x: Box[T])`), with no bracket to bind — the type "
+        f"argument is INFERRED from the call and the bracket is not needed: "
+        f"write `{name}(…)`, which is the same program and one the library "
+        f"answers. If `{name}` is instead an ordinary value then the brackets "
+        f"are a subscript, which is not a call this path can name at all. The "
+        f"ways this can still be reached are in "
+        f"bugs/FORMAL_generic_monomorph_scope.md. Refused rather than emitted "
+        f"with the brackets dropped: that builds, runs, and returns a number "
+        f"the source never wrote, with nothing on the link line to catch it"
     )
 
 
