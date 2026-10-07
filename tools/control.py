@@ -586,7 +586,7 @@ def restart(name, why):
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
-    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=t["model"])
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=getattr(a, "model", None) or t["model"])
     cmd_spawn(ns)
     return new
 
@@ -717,7 +717,7 @@ def main():
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
-    s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.set_defaults(f=cmd_restart)
+    s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_restart)
     s = sub.add_parser("unstick"); s.add_argument("--idle-min", type=float, default=25); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_unstick)
     s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
