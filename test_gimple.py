@@ -134,6 +134,63 @@ def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
         os.unlink(path)
 
 
+def gimple_body_compiles(mojo_src: str) -> tuple[bool, str, str]:
+    """`gimple_compiles` with the one flag that makes gcc ACTUALLY parse a
+    `__GIMPLE` function's body as GIMPLE: `-x c`.
+
+    A closure body and a struct-method body are emitted with the
+    `__GIMPLE` attribute, which tells gcc "this text is already GIMPLE,
+    do not re-lower it" — and gcc honours that only when it is reading
+    the file as C. `fire.py build_executable`'s compile step is the one
+    that does (`... -c -o o.ci -x c`), and it is the path the whole
+    self-host build goes through; `gimple_compiles` above (and
+    driver._build, and tools/compile_one.py) leave the language to the
+    `.c` suffix, so gcc lowers the body from C itself and tolerates C
+    that GIMPLE has no form for.
+
+    The gap is not academic: it hid a lowering that emitted
+    `_t3 = !mojo_is_tuple ((MojoList *)x);` and
+    `_t4 = (_t2 != 0) && (_t3 != 0);` — three separate GIMPLE violations
+    (a call is a statement and never an operand; `&&` does not exist; a
+    parenthesized assignment RHS does not parse) — for the whole history
+    of the tuple-marker `isinstance(x, list)` check, until the self-host
+    build compiled the backend that emits it and gcc said "'!' not valid
+    in GIMPLE before '!' token" (mojoc / selfhost / bootstrap-stage2-cc).
+    Use this for anything emitted inside a closure or a struct method.
+    """
+    c_src = compile_to_gimple(mojo_src)
+    with tempfile.NamedTemporaryFile(suffix='.ci', mode='w', delete=False) as f:
+        f.write(c_src)
+        path = f.name
+    try:
+        r = subprocess.run(
+            [GCC, '-fgimple', '-fsyntax-only', '-x', 'c', f'-I{_RUNTIME_INC}', path],
+            capture_output=True, text=True,
+        )
+        return r.returncode == 0, c_src, r.stderr
+    finally:
+        os.unlink(path)
+
+
+def test_gimple_body(name: str, mojo_src: str):
+    """`test`, for source whose interesting text lands in a `__GIMPLE`
+    body — see `gimple_body_compiles` for why that needs its own gate."""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_body_compiles(mojo_src)
+    if ok:
+        print(f"PASS  {name}")
+        _PASS += 1
+        return
+    print(f"FAIL  {name}")
+    print("      --- generated C ---")
+    for i, line in enumerate(c_src.splitlines(), 1):
+        print(f"      {i:3}: {line}")
+    print("      --- gcc stderr ---")
+    for line in stderr.splitlines():
+        print(f"      {line}")
+    _FAIL += 1
+
+
 def test(name: str, mojo_src: str):
     global _PASS, _FAIL
     ok, c_src, stderr = gimple_compiles(mojo_src)
@@ -6353,6 +6410,46 @@ fn main():
     var b = b'x'
     print(isinstance(b, bytes))
     print(isinstance(5, bytes))
+""")
+
+    # A tuple is a MojoList carrying the tuple marker, so `isinstance(t,
+    # list)` on a value whose static C type is already `MojoList *` is the
+    # one isinstance this codegen answers with two runtime calls
+    # (`mojo_is_registered_list` AND NOT `mojo_is_tuple`) rather than
+    # statically. Inside a CLOSURE that answer's body is `__GIMPLE`, so it
+    # has to be real GIMPLE and not merely valid C: it used to be emitted
+    # as `!mojo_is_tuple ((MojoList *)x)` and a `&&` of two comparisons,
+    # which gcc rejects ("'!' not valid in GIMPLE before '!' token") the
+    # moment anything compiles the backend itself — that is the self-host
+    # build, and it took mojoc / selfhost / bootstrap-stage2-cc out. The
+    # `list`-annotated parameter is what gives the check a `MojoList *`
+    # static type to fire on; the nested `def` is what makes the body
+    # `__GIMPLE`. Both are load-bearing, so neither is optional here.
+    test_gimple_body("isinstance_list_tuple_check_in_closure", """\
+def outer(v: list):
+    def inner():
+        return isinstance(v, list)
+    return inner()
+
+def main():
+    print(outer([1, 2]))
+    print(outer((3,)))
+""")
+
+    # The same answer reached through a struct field rather than a
+    # parameter, and asked as a NEGATIVE (`not isinstance(...)`), which
+    # adds the `== 0` leg — the other half of the join the old `&&` was
+    # standing in for.
+    test_gimple_body("isinstance_list_tuple_check_on_struct_field", """\
+struct Box:
+    var items: list
+
+    def is_list(self):
+        return not isinstance(self.items, list)
+
+def main():
+    var b = Box([4, 5])
+    print(b.is_list())
 """)
 
     # bytes value type (Stage 2b) — %-formatting + body-usage param inference
