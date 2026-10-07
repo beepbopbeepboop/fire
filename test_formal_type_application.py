@@ -161,17 +161,29 @@ BOUNDARY_REFUSALS = [
     # The documented give-up, kept as a test rather than as a comment:
     # `subscript_callee_names` only recognises a base that is a bare
     # IdentExpr, so `xs[0](5)` — a genuine value, subscripted, then called — is
-    # not a type application and is refused by the specialization refusal, which
-    # names the brackets rather than the allocator. If a future change widens the
+    # not a type application and is refused. If a future change widens the
     # recogniser to every subscripted callee, this is the row that says it went
     # too far.
+    #
+    # **WHICH refusal answers it has moved, and the row is the guard, not the
+    # spelling.** It used to be `specialization_call_refusal`, whose sentence is
+    # about BRACKETS — and `[0]` is an index, not a type argument, so naming the
+    # brackets was the wrong diagnosis for this program. The not-a-code-address
+    # analysis (`formal/model.py::not_a_code_address_refusal`) now answers first,
+    # and it is the true one: `xs[0]` is a value the source says cannot hold a
+    # function's entry, and CPython raises `TypeError` on the same text. The
+    # needle follows the message; what this row PINS is that the construct is
+    # still refused rather than answered (a widening of the recogniser that let
+    # it through would make `run_boundary_case` fail on `rc != 0`, which is the
+    # property the comment above was really asking for). `test_formal_
+    # specialization.py` owns the message itself, on both ends of the analysis.
     ("a_subscripted_value_called_is_not_a_type_application",
      "def main(n: Int) -> Int:\n"
      "    var xs = [1, 2, 3]\n"
      "    var y = xs[0](5)\n"
      "    printf(\"y=%d\", y)\n"
      "    return 0\n",
-     "calls a name this unit does not compile"),
+     "is called as a FUNCTION and the source says it holds"),
     # …and the type's own ARGUMENT is compile-time by construction, so it is
     # exempt as part of the bracket rather than as a value. `Self.T` inside
     # `List[Self.T]()` is a MemberExpr, not an IdentExpr, and `Subscript` names
