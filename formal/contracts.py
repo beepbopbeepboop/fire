@@ -139,7 +139,7 @@ _SIGN_FLIP = "0x8000000000000000"
 # UInt64 arithmetic as Lean spells it.  `UInt64.div` / `UInt64.mod` rather than
 # a bare `/` or `%`, which on `UInt64` is not the truncating operation -- the
 # same table `_dylib_spec_lean` uses, reached through it.
-_ARITH_OPS = {"+", "-", "*", "/", "%"}
+_ARITH_OPS = {"+", "-", "*", "/", "//", "%"}
 
 # The verdict set.  Named constants rather than bare strings because
 # `classify` and every consumer have to agree on the SPELLING, and a typo in a
@@ -522,7 +522,12 @@ class _Reader:
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                return (_Op.ARITH, op, a, b)
+                # `//` and `/` are the SAME IR tag.  The machine computes
+                # `UInt64.div` for both -- `_eval_of`'s `/` is `a // b` and
+                # `_lean_of`'s `/` is `UInt64.div`, the word reading -- so
+                # normalising the spelling here is what keeps one reader for
+                # the operator rather than a second one in every caller.
+                return (_Op.ARITH, "/" if op == "//" else op, a, b)
             return None
         if kind == "TernaryExpr":
             test = self.truth(getattr(node, "condition", None))
@@ -1185,7 +1190,7 @@ def unlowered_reason(contract, params, model_name=None) -> str:
         (f"`{c.text}`" if c.is_pragma else f"`@{c.name}(...)`") for c in bad)
     return (f"{len(bad)} of {len(contract.clauses)} clause(s) has no Lean "
             f"rendering ({spelled}); the expression subset a contract may use "
-            f"is literals, the parameters, `result`, `+ - * / %`, the six "
+            f"is literals, the parameters, `result`, `+ - * / // %`, the six "
             f"comparisons, `and`/`or`/`not`, a conditional expression, and "
             f"`abs`/`min`/`max`/`clamp`")
 
@@ -1332,7 +1337,7 @@ class SourceRunner:
             return (a - b) & _MASK
         if op == "*":
             return (a * b) & _MASK
-        if op == "/":
+        if op in ("/", "//"):
             if b == 0:
                 raise Unsupported("a division by zero (the machine traps here)")
             return (a // b) & _MASK

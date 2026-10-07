@@ -175,6 +175,44 @@ def test_the_reader_takes_both_spellings(tmpdir=None):
           len(c.requires) == 1 and len(c.ensures) == 1 and bool(c), repr(c))
 
 
+def test_the_reader_reads_the_floordiv_spelling(tmpdir=None):
+    """`a // b` is the SAME IR tag as `a / b`, on both readers.
+
+    `formal/contracts.py`'s arithmetic arm was keyed on `_ARITH_OPS`, which
+    held `/` and not `//` — the AST's own spelling for integer division — so a
+    clause over `//` was refused with a subset list that named `/`, and
+    `SourceRunner` raised `Unsupported('//')` on any body that wrote it.  The
+    IR tag and both printers already handled the operator (`/` renders as
+    `UInt64.div` and evaluates as `a // b`), so the fix normalises the
+    spelling rather than adding a second rendering: one reader, one tag.
+    """
+    from formal import contracts as CT
+    src = "@ensures(result == a // b)\ndef h(a, b):\n    return a // b\n"
+    fn = functions(parse(src))[0]
+    c = contract_of(fn, "x.mojo", src)
+    check(bool(CT.contract_theorems(c, ["a", "b"], fn=fn)),
+          "a clause over `//` emits a Lean theorem", repr(c))
+    check(CT.unlowered_reason(c, ["a", "b"]) == "",
+          "and `unlowered_reason` is empty for it, so the subset list is not "
+          "being quoted about an operator that IS in the subset",
+          CT.unlowered_reason(c, ["a", "b"]))
+    lean = CT._lean_of((CT._Op.ARITH, "/", (CT._Op.VAR, "a"),
+                        (CT._Op.VAR, "b")))
+    check(lean == "(a UInt64.div b)",
+          "`//` renders through the same `/` tag as `UInt64.div` (the word "
+          "reading the machine computes)", lean)
+    check(CT.SourceRunner(functions(parse(
+        "def h(a, b):\n    return a // b\n"))[0])(7, 2) == 3,
+        "the source evaluator runs a `//` body (7 // 2 = 3)")
+    check(CT.SourceRunner(functions(parse(
+        "def h(a, b):\n    return a // b\n"))[0])(9, 2) == 4,
+        "and truncates toward zero on the word reading (9 // 2 = 4)")
+    check(CT.SourceRunner(functions(parse(
+        "def h(a, b, c):\n    return (a // b) // c\n"))[0])(17, 2, 2) == 4,
+        "and a NESTED `//` reads too — the reader recurses, so normalising "
+        "only the top node would pass the first two rows and fail this one")
+
+
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     """The difference every consumer needs between "promised nothing" and
     "promised something".  A checker that treats them alike reports a
@@ -1012,6 +1050,7 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
 
 ALL = [
     test_the_reader_takes_both_spellings,
+    test_the_reader_reads_the_floordiv_spelling,
     test_a_function_with_no_decoration_is_NOT_a_contract,
     test_the_comment_pragma_is_read_too,
     test_an_unreadable_clause_is_a_REFUSAL,
