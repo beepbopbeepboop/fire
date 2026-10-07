@@ -18,8 +18,40 @@ tree, across 109 files
          DELETED_ONCE.md, NEVER_WRITTEN.md, NEVER_WRITTEN_REAL.md …
 ```
 
+**Re-measured 2026-10-06 (`work/formal66-loop-invariants`), and the count had
+moved, which is this doc's subject happening again rather than a new bug:**
+
+```
+$ python3 tools/dangling_doc_refs.py
+7 citations of 6 bugs/ docs that are not there, across 2 files
+     1  <the -b13 sweep map>            # spelled WITHOUT the `bugs/` prefix on
+         bugs/FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
+                                        # purpose: quoting a walk's own output
+     1  NEVER_WRITTEN.md                # reproduces a citation, which is how
+         test_suite.py:2653             # this measurement found itself, once
+         test_suite.py:5216
+     … (the four `test_suite.py` marker fixtures)
+```
+
+*(The `-b13` map is named without its `bugs/` prefix above on purpose: this file
+quotes a walk that REPORTED that path, and writing it out with the prefix makes
+the quote itself a citation — the walk then reports eight instead of seven, and
+`--ratchet` fails on this file.  Measured, and it is the sharpest version of this
+doc's own subject: a document that names a missing doc in order to report it has
+to name it in a spelling the walk cannot see.)*
+
+The seventh was the `-b13` sweep map, **deleted** when `-b14` replaced it, cited
+from one bug doc that predates the replacement.  **Fixed on this branch**: the
+citation now names `-b14` (the round that measured the same fact, §4.2), so
+`python3 tools/dangling_doc_refs.py --ratchet` is green again and the
+actionable count is back to **zero** — the six `test_suite.py` marker fixtures
+and nothing else.  **The lesson is the one this doc is about**: a deleted map
+cost one citation, and nothing counted it until the ratchet ran; the walk is the
+only thing that sees a citation whose target stopped existing.
+
 **The `bugs/`-prefixed half is finished, and what remains is the six
-`test_suite.py` deliberately names.** That file is skipped by the walk's own
+`test_suite.py` deliberately names** (it was seven on 2026-10-06; the seventh is
+accounted for in the re-measurement below and fixed). That file is skipped by the walk's own
 design ("it is where a walk for missing files is guaranteed to find one — the
 `expect=`/`disabled=` marker checks below deliberately name `NEVER_WRITTEN.md`
 and `NO_SUCH_DOC_ANYWHERE.md` to prove they can fail"), so 6/6 are the marker

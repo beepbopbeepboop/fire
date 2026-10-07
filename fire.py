@@ -227,11 +227,16 @@ def _extract_gpu_flags(args: list):
 
 
 def _extract_formal_flags(args: list):
-    """`--formal`, `--no-prove`, `--check-contracts`, `--opt`, and the rest.
+    """`--formal`, `--no-prove`, `--check-contracts`, `--loop-invariants`,
+    `--opt`, and the rest.
 
     `--check-contracts` asks for the host contracts' assumption TEXT rather
     than their count; `--opt` turns on `formal/peephole.py`, the verified
     peephole pass. Both are off by default and both defaults are deliberate.
+    `--loop-invariants` turns on the DISCHARGE half of
+    `formal/loop_invariants.py`; its synthesis half runs either way and is
+    published in the build result, because it costs no tool and a loop with no
+    derivable invariant is a fact about the source.
     For `--opt` the reason is that every rewrite the pass performs is licensed
     by a theorem in `lib/Peephole.lean` saying the machine model is unchanged,
     but a proved rewrite is only as good as the pass's ability to decide the
@@ -243,6 +248,7 @@ def _extract_formal_flags(args: list):
     formal = False
     prove = True
     check_contracts = False
+    loop_invariants = False
     opt = False
     remaining = []
     for a in args:
@@ -252,11 +258,13 @@ def _extract_formal_flags(args: list):
             prove = False
         elif a == '--check-contracts':
             check_contracts = True
+        elif a == '--loop-invariants':
+            loop_invariants = True
         elif a == '--opt':
             opt = True
         else:
             remaining.append(a)
-    return formal, prove, check_contracts, opt, remaining
+    return formal, prove, check_contracts, loop_invariants, opt, remaining
 
 
 def _pop_flag_value(argv: list, flag: str):
@@ -398,6 +406,7 @@ def _trust_note(result) -> str:
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64",
                        check_contracts: bool = False,
+                       loop_invariants: bool = False,
                        opt: bool = False) -> int:
     """The one formal executable path: `fire build --formal` and bare
     `fire --formal <file>` both land here, and nothing else builds one.
@@ -415,6 +424,7 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                                     prove=prove, check=prove,
                                     arch=arch,
                                     check_contracts=check_contracts,
+                                    loop_invariants=loop_invariants,
                                     link_dylibs=list(link_dylibs or []),
                                     opt=opt)
         if result.get("peephole"):
@@ -423,6 +433,13 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
             print(f"peephole: {fired}")
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
+        # A build can COMPUTE an answer and then refuse, and the refusal used
+        # to swallow it — `--loop-invariants` on a program the machine proof
+        # generator refuses printed nothing at all, which is most of the
+        # programs `formal/loop_examples/` holds.  The notes ride on the
+        # exception (`formal/build.py::FormalBuildError.notes`).
+        for note in getattr(e, "notes", ()) or ():
+            print(f"build: {note}", file=sys.stderr)
         return 1
     except Exception as e:
         print(f"build: {e}", file=sys.stderr)
@@ -436,6 +453,9 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
     contracts = _contract_note(result, check_contracts)
     if contracts:
         print(contracts)
+    loops = _loop_note(result, loop_invariants)
+    if loops:
+        print(loops)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -496,6 +516,55 @@ def _contract_note(result: dict, checked: bool) -> str:
         mode = ("checked in the image and in the proof; a REFUTED one fails "
                 "the build")
     return (f"contracts: {len(entries)} declared ({mode}):\n"
+            + "\n".join(lines))
+
+
+def _loop_note(result: dict, checked: bool) -> str:
+    """What this build's LOOPS are and what was derived for them, as one block.
+
+    Printed ALWAYS, including when the build did not discharge the
+    obligations, because the SYNTHESIS costs no tool and a build that said
+    nothing about a loop it had already analysed is a build that reads exactly
+    like a build of a file with no loops.  Every status is UNKNOWN without
+    `--loop-invariants`, and that is the honest answer rather than a passing
+    one: `PROVED` can only be reached by the ladder closing a named theorem,
+    which means a `lean` run, which means the flag.
+
+    The block names each loop's FAMILY and each obligation's role, because the
+    useful question about a loop layer is "what does it do for a MIN SCAN", and
+    a single verdict per file cannot answer it.
+    """
+    rows = list(result.get("loop_invariants") or [])
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        head = f"loop {r['loop']} of `{r['fn']}`: {r['status'].upper()}"
+        bits = [f"[{r['family']}]"]
+        if r.get("invariant"):
+            bits.append(f"invariant `{r['invariant']}`")
+        else:
+            bits.append("no affine invariant")
+        if r.get("variant"):
+            bits.append(f"variant `{r['variant']}`")
+        else:
+            bits.append("no decreasing affine variant")
+        if r.get("precondition"):
+            bits.append(f"precondition `{r['precondition']}`")
+        closed = len(r.get("discharged") or [])
+        total = len(r.get("obligations") or [])
+        lines.append(f"  {head} — {'; '.join(bits)}; {closed}/{total} "
+                     f"obligation(s) closed by the ladder")
+        for ob in r.get("obligations") or []:
+            if ob["status"] != "proved":
+                lines.append(f"      {ob['status'].upper()} {ob['role']} "
+                             f"{ob['name']}: {ob['detail']}")
+    mode = ("discharged with the ladder"
+            if checked else
+            "SYNTHESISED only — pass --loop-invariants to discharge the "
+            "obligations with the ladder, which costs one lean run per source. "
+            "Every status below is UNKNOWN until then, and UNKNOWN is not a pass")
+    return (f"loop invariants: {len(rows)} loop(s) ({mode}):\n"
             + "\n".join(lines))
 
 
@@ -1175,7 +1244,8 @@ def main():
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
-    formal, prove, check_contracts, opt, rest = _extract_formal_flags(rest)
+    formal, prove, check_contracts, loop_invariants, opt, rest = \
+        _extract_formal_flags(rest)
     # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
     # @gpu/@kernel code is unaffected. Extracted here, alongside the other
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
@@ -1364,7 +1434,8 @@ def main():
                 result = _fb.compile_formal_dylib(
                     dylib_inputs, output=dylib_output, arch=dylib_arch,
                     prove=prove, check=prove,
-                    check_contracts=check_contracts)
+                    check_contracts=check_contracts,
+                    loop_invariants=loop_invariants)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -1452,7 +1523,8 @@ def main():
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=False, link_dylibs=build_link_dylibs,
-                arch=backend, check_contracts=check_contracts, opt=opt))
+                arch=backend, check_contracts=check_contracts,
+                loop_invariants=loop_invariants, opt=opt))
 
         try:
             import driver
@@ -1625,7 +1697,8 @@ def main():
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=True, arch=backend,
-                check_contracts=check_contracts, opt=opt))
+                check_contracts=check_contracts,
+                loop_invariants=loop_invariants, opt=opt))
         try:
             import driver
             rc = driver.compile_program(

@@ -47,6 +47,12 @@ from formal import dataclass_transform as DC
 class FormalBuildError(Exception):
     """A refusal the path states rather than guesses past, printed by callers.
 
+    `notes` is a list of extra lines a caller may print with the message.  It
+    exists for one measured reason: a build can compute an answer and then
+    refuse, and the refusal was swallowing the answer (see the raise site in
+    `compile_formal`, where the loop layer's verdicts ride along).  Empty by
+    default, so an existing caller that prints only `str(exc)` is unaffected.
+
     `proof_refused` is False here and True only on the ONE raise that re-wraps
     a proof generator's `NotImplementedError`, and it exists because that re-wrap
     is right and still costs a reader its diagnosis: `fire.py build --formal`
@@ -61,6 +67,11 @@ class FormalBuildError(Exception):
     direction matters because `codegen-refused` is the class the census's own
     docstring says a reader must not UNDER-count.
     """
+
+    #: A CLASS attribute, so `FormalBuildError.notes` is `()` on every instance
+    #: that does not set it and no existing caller can see a changed attribute.
+    #: `compile_formal` sets it on the one raise that has something to add.
+    notes = ()
 
     proof_refused = False
 
@@ -1765,6 +1776,7 @@ def compile_formal(source_path: str, output: str = None,
                    check: bool = True, arch: str = "arm64",
                    fmt: str = None, link_dylibs: list = None,
                    check_contracts: bool = False,
+                   loop_invariants: bool = False,
                    opt: bool = False) -> dict:
     """Compile `source_path` through the formal path for `arch`.
 
@@ -1802,6 +1814,15 @@ def compile_formal(source_path: str, output: str = None,
     (`result["contracts"]`), so a default build is not silent about a contract
     it did not check: `fire.py` prints them, and a REFUTED one prints as a
     refutation with its counterexample.
+
+    loop_invariants: DERIVE each loop's invariant and variant from its own
+    transition relation (`formal/loop_invariants.py`), emit the obligations as
+    Lean theorems, and discharge them with `formal/contracts.py::LADDER`.  OFF
+    by default because it costs one `lean` run per source, and that run is a
+    separate answer from the machine proof this build otherwise makes.  The
+    SYNTHESIS always runs and is published either way, so a loop with no
+    candidate is reported on every build; see the `loop_invariants` entry of the
+    result.
 
     opt: run the verified peephole pass (`formal/peephole.py`) over the emitted
     instruction list. OFF by default, and every rewrite it performs is
@@ -2086,6 +2107,8 @@ def compile_formal(source_path: str, output: str = None,
     #     reads the body's own statements and an instrumented body is not the
     #     source.
     contract_verdicts = []
+    loop_verdicts = _loop_invariant_verdicts(
+        source_path, source, ordered, check=loop_invariants)
     _verdicts, _why = _search_contracts({source_path: source}, ordered,
                                         enforce=check_contracts)
     if _why is not None:
@@ -2168,6 +2191,13 @@ def compile_formal(source_path: str, output: str = None,
         # so a build that did not check its contracts is still not silent
         # about them, and each entry says which of the two happened.
         "contracts": contract_verdicts,
+        # What this build's SOURCE's LOOPS are, what this layer synthesised for
+        # them, and what the ladder closed.  Published ALWAYS — the synthesis
+        # costs no tool and a loop with no candidate is a fact about the source
+        # that a reader is entitled to on every build — and the statuses are
+        # UNKNOWN when `--loop-invariants` was not asked for, because no Lean
+        # ran.  See `_loop_invariant_verdicts`.
+        "loop_invariants": loop_verdicts,
         # How many instructions the peephole pass removed, per rule, and empty
         # when it was not asked to run. Published because the measurement is the
         # pass's whole point and reading it out of a log line is worse than
@@ -2239,6 +2269,16 @@ def compile_formal(source_path: str, output: str = None,
                 f"a function of the entry argument alone. The generator's own "
                 f"word for it: {e}")
             refused.proof_refused = True
+            # **The loop layer's verdicts ride along on the refusal**, and the
+            # reason is measured rather than tidied: the machine proof
+            # generator refuses `for` loops and while loops with an accumulator
+            # (measured on `cd2a1678`: eleven of the twelve programs in
+            # `formal/loop_examples/`), and that raise happens AFTER this build
+            # has already synthesised their invariants. So a caller who asked
+            # for `--loop-invariants` on exactly the programs the layer was
+            # written for saw NOTHING, because the note is printed after a
+            # `compile_formal` that raised.
+            refused.notes = _loop_note_lines(loop_verdicts, loop_invariants)
             raise refused from e
 # The `f_contract` theorems, APPENDED here rather than emitted by
         # `generate_proof`.  Two reasons, and the second is the one that
@@ -2392,6 +2432,104 @@ def _search_contracts(sources: dict, ordered, functions_by_source=None,
               "because the contract is a claim about the program and the "
               "program's answers do not change.")
     return out, None
+
+
+def _loop_note_lines(rows, checked):
+    """The loop layer's verdict lines, for a build that is about to refuse.
+
+    One reader for the rows and one for the wording, because `fire.py`'s
+    `_loop_note` prints the same thing on the success path and a caller that
+    compared the two would otherwise be comparing prose.
+    """
+    if not rows:
+        return []
+    out = []
+    for r in rows:
+        bits = [f"[{r['family']}]"]
+        bits.append(f"invariant `{r['invariant']}`" if r.get("invariant")
+                    else "no affine invariant")
+        bits.append(f"variant `{r['variant']}`" if r.get("variant")
+                    else "no decreasing affine variant")
+        if r.get("precondition"):
+            bits.append(f"precondition `{r['precondition']}`")
+        closed = len(r.get("discharged") or [])
+        total = len(r.get("obligations") or [])
+        out.append(f"loop {r['loop']} of `{r['fn']}`: {r['status'].upper()} — "
+                   + "; ".join(bits)
+                   + f"; {closed}/{total} obligation(s) closed by the ladder")
+    out.append("(the build is about to refuse above, and the loop layer's "
+               "verdicts were computed before it did — they are a separate "
+               "answer from the machine proof this build did not finish)")
+    return out
+
+
+def _loop_invariant_verdicts(source_path, source, ordered, check=False):
+    """The loop-invariant layer's verdicts for one source, as plain dicts.
+
+    Plain dicts for the reason `_admitted_summary` and `_search_contracts` both
+    return them: the consumer is often another process reading a cached
+    `.result` blob.
+
+    **Published ALWAYS, discharged only under `check`.**  The synthesis — read
+    each loop, build its transition relation, derive the candidates by linear
+    algebra, run the bounded search over the loop's own statements — costs no
+    tool at all, so a build that published nothing would say nothing about a
+    loop it had already analysed.  What costs a `lean` run is the discharge, and
+    that is what the flag is for.
+
+    **Every verdict is UNKNOWN without `--loop-invariants`, and the reason is
+    carried in the row.**  `formal/contracts.py::classify` states the same rule
+    for contracts and the reason is the same: `PROVED` can only be reached by
+    something that closed the named theorem, and the bounded search is a check
+    and not a proof.
+
+    A source whose reading raises is reported as one row with the exception's
+    own sentence rather than dropped, because a loop layer that is silent about a
+    file it could not read is indistinguishable from a layer that found nothing
+    — and this one is measured against a corpus where the interesting answers
+    are the refusals.
+    """
+    from formal import loop_invariants as LI
+    out = []
+    lean = None
+    if check:
+        from formal import lean as L
+        lean_bin = L.find_lean(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        lean = LI.lean_runner(lean_bin) if lean_bin else None
+    try:
+        mod = F.Parser(F.py_tokenize(source)).parse_module()
+    except Exception as exc:
+        return [{"fn": "?", "loop": 0, "status": LI.UNKNOWN, "why":
+                 f"this source does not parse, so no loop was read ({exc})"}]
+    for fn in [x for x in mod if type(x).__name__ == "FunctionDef"]:
+        try:
+            out.extend(LI.check_function(
+                fn, source_path or "<source>", lean=lean))
+        except Exception as exc:
+            out.append(LI.LoopVerdict(
+                fn=fn, index=0, family="unreadable",
+                why_family=f"{type(exc).__name__}: {exc}",
+                status=LI.UNKNOWN))
+    rows = []
+    for v in out:
+        row = {"fn": getattr(v.fn, "name", "?"), "loop": v.index,
+               "family": v.family, "status": v.status,
+               "family_why": v.why_family,
+               "invariant": v.invariants[0].text if v.invariants else None,
+               "variant": v.variants[0].text if v.variants else None,
+               "precondition": v.precondition,
+               "discharged": [ob.role for ob in v.obligations
+                              if ob.status == LI.PROVED],
+               "search_skipped": max([c["skipped"] for c in v.candidates]
+                                     or [0]),
+               "obligations": [{"role": ob.role, "name": ob.name,
+                                "status": ob.status or LI.UNKNOWN,
+                                "detail": (ob.detail or "")[:300]}
+                               for ob in v.obligations],
+               "checked_with_lean": bool(check and lean is not None)}
+        rows.append(row)
+    return rows
 
 
 def _instrument_contracts(sources: dict, ordered, functions_by_source=None):
@@ -21863,7 +22001,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                          link_dylibs: list = None, arch: str = "arm64",
                          fmt: str = "macho", reexports: dict = None,
                          statements: dict = None,
-                         borrowed_structs: list = None) -> dict:
+                         borrowed_structs: list = None,
+                         loop_invariants: bool = False) -> dict:
     """Compile `source_paths` into one dylib for `arch`.
 
     `arch`/`fmt` select the CODEGEN and the container, exactly as
@@ -22483,6 +22622,22 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                         enforce=check_contracts)
     if _why is not None:
         raise FormalBuildError(_why)
+    dylib_loop_invariants = []
+    if loop_invariants:
+        # The library path has NO semantic model of its own — `formal/imports.py`
+        # answers for a module's exports — so there is nothing here for the
+        # synthesis to read, and the flag is accepted and IGNORED rather than
+        # half-honoured.  A row saying so is published so a caller that asked
+        # for it can tell "nothing to do" from "silently not done".
+        dylib_loop_invariants = [{
+            "fn": "<dylib>", "loop": 0, "status": "skipped",
+            "family": "library",
+            "family_why": ("`compile_formal_dylib` builds a library from "
+                           "several sources with no semantic model of any of "
+                           "them, so `formal/loop_invariants.py` has no loop "
+                           "to read; build the sources as an executable to "
+                           "get the layer's verdicts"),
+            "obligations": []}]
     dylib_contracts = _verdicts
     if check_contracts:
         _why = _instrument_contracts(dylib_sources, ordered,
@@ -22593,6 +22748,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # asks "what did this program promise" does not have to know which
             # of the two front ends produced the artifact.
             "contracts": dylib_contracts,
+        "loop_invariants": dylib_loop_invariants,
             "exports": exports,
             "backend": f"{arch}/elf-dylib",
             # Same field, same meaning, same shape as the program path's and the
@@ -22725,6 +22881,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         # It is absent from the NAMESPACE result above because that path emits
         # no code at all and so has no body for a contract to constrain.
         "contracts": dylib_contracts,
+        "loop_invariants": dylib_loop_invariants,
         "exports": exports,
         "backend": f"{arch}/macho-dylib",
         # Same field, same meaning, same shape as the program path's: a module
