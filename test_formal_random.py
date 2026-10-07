@@ -4,8 +4,8 @@ r"""`formal/hostmods/random.mojo`, differential against CPython's `random`.
     python3 test_formal_random.py [-v] [group ...]
 
 Groups: `resolve`, `callers`, `widths`, `twist`, `seeds`, `rejection`,
-`statuses`, `absent`. With no argument, all. Every group that builds an image
-builds it on BOTH backends.
+`statuses`, `matrix`, `absent`. With no argument, all. Every group that builds
+an image builds it on BOTH backends.
 
 WHY THE ORACLE IS CPython'S OWN `random`, CALLED, NEVER TYPED
 --------------------------------------------------------------
@@ -29,7 +29,7 @@ The module docstring names four ways to transcribe MT19937 wrong; three of them
 have a group here, and each is a case rather than a comment because a
 transcription that is wrong produces answers of the right SHAPE:
 
-1. **`_getrandbits(k)` FOR 33 <= k.** The first word drawn is the LOW word and
+1. **`getrandbits(k)` FOR 33 <= k.** The first word drawn is the LOW word and
    the low word is not shifted. The tempting simplification
    `((w0 | (w1 << 32)) >> (64 - k))` drops the top bits of the LOW word too, so
    for `k = 33` it answers 2 bits where CPython answers 33 — and every answer
@@ -37,8 +37,12 @@ transcription that is wrong produces answers of the right SHAPE:
    timestamp corpus. **This is not hypothetical: it is what the module said
    first, and `widths` caught it on its first run**, arm64 and x86-64 alike,
    because `randrange(0, 2**33)` answered 2 and 3. `widths` has a case for
-   every branch of that function, k = 1, 32, 33, 40, 62, 63, in one program so
-   the two-word path is reached from the same state as the one-word path.
+   every branch of that function reached through `randrange`, k = 1, 32, 33,
+   40, 62, 63, in one program so the two-word path is reached from the same
+   state as the one-word path — and `matrix` asks `getrandbits` DIRECTLY for
+   every width 1..64 from seven seeds, which is the measurement `widths`
+   cannot reach through `randrange` (widths 2..31 and 34..61, and `k = 64`,
+   whose answer does not fit `randrange`'s signed-word width).
 
 2. **THE TWIST.** 624 words of state are consumed per 624 draws, and the
    recurrence is a different shape on the far side of the boundary (the second
@@ -115,10 +119,32 @@ def backends():
     register file would answer differently. `gimple_codegen.py` and
     `myinterpreter.py` are separately maintained lowerings of one AST
     (`CLAUDE.md`), so "both agree" is evidence and "one of them agreed" is not.
+
+    A host with no x86-64 support returns one name and `main` says so on the
+    screen, rather than the x86-64 half passing over quietly. On arm64 Darwin
+    that support is Rosetta 2, and it is PROBED rather than assumed — an
+    arm64 Darwin host without it fails every x86-64 run with "Bad CPU type in
+    executable" (measured), which reads as the module's fault and is the
+    host's. `/usr/bin/true` is a universal binary, so `arch -x86_64
+    /usr/bin/true` succeeds exactly when Rosetta 2 is installed.
     """
     if platform.machine() in ("arm64", "aarch64"):
+        if platform.system() == "Darwin" and not _rosetta():
+            return ["arm64"]
         return ["arm64", "x86_64"]
     return ["x86_64"]
+
+
+_rosetta_cache = []
+
+
+def _rosetta():
+    """Whether this Darwin arm64 host can execute an x86-64 image, probed once."""
+    if not _rosetta_cache:
+        r = subprocess.run(["arch", "-x86_64", "/usr/bin/true"],
+                           capture_output=True)
+        _rosetta_cache.append(r.returncode == 0)
+    return _rosetta_cache[0]
 
 
 def build(src, name, backend=None):
@@ -263,14 +289,14 @@ def cpy_values(seed, lo, hi, count):
 # ── groups ─────────────────────────────────────────────────────────────────
 
 def group_resolve(tmpdir, verbose):
-    """`import random` binds to this module, and it publishes two names.
+    """`import random` binds to this module, and it publishes three names.
 
     The export half is the assertion that matters: a dylib publishes its
-    FUNCTIONS, so `seed` and `randrange` resolving is the capability and
-    anything else being absent is the boundary. `_twist`, `_next32` and
-    `_getrandbits` are deliberately private — `formal/hostmods/shlex.mojo`
-    records what happens when a private name is treated as an export — and
-    `absent` is where they are asked for.
+    FUNCTIONS, so `seed`, `getrandbits` and `randrange` resolving is the
+    capability and anything else being absent is the boundary. `_twist`,
+    `_next32` and `_bit_length` are deliberately private —
+    `formal/hostmods/shlex.mojo` records what happens when a private name is
+    treated as an export — and `absent` is where they are asked for.
     """
     src = program(
         emit_rows(["random.randrange(0, 1000)", "random.randrange(0, 1000)",
@@ -285,15 +311,16 @@ def group_resolve(tmpdir, verbose):
           f"{RANDOM_MODULE} is not there, so `import random` cannot bind to it")
     with open(RANDOM_MODULE) as f:
         text = f.read()
-    for name in ("def seed(", "def randrange("):
+    for name in ("def seed(", "def getrandbits(", "def randrange("):
         check(name in text, f"{RANDOM_MODULE} does not declare {name}")
-    for name in ("_twist", "_next32", "_getrandbits", "_bit_length"):
+    for name in ("_twist", "_next32", "_bit_length"):
         check(f"def {name}(" in text,
               f"{RANDOM_MODULE} lost the private helper {name}, and "
               f"randrange's answer depends on it")
     if verbose:
-        print(f"    bound on {', '.join(backends())}, two names published")
-    return True, f"module found, seed/randrange published, helpers private"
+        print(f"    bound on {', '.join(backends())}, three names published")
+    return True, (f"module found, seed/getrandbits/randrange published, "
+                  f"helpers private")
 
 
 def group_callers(tmpdir, verbose):
@@ -335,7 +362,7 @@ def group_callers(tmpdir, verbose):
 
 
 def group_widths(tmpdir, verbose):
-    """One case per branch of `_getrandbits`, from ONE state.
+    """One case per branch of `getrandbits`, from ONE state.
 
     The six widths are `k = 1`, `k = 32` (the fast path's last bit),
     `k = 33` (the two-word path's first bit — the case the wrong simplification
@@ -513,6 +540,14 @@ def group_statuses(tmpdir, verbose):
         # would answer it -1 too.
         ("width_2_63_minus_1",
          "random.randrange(0, 9223372036854775807)", None),
+        # `getrandbits`'s published domain is 0 <= k <= 64, so its two edges
+        # are statuses: k < 0 is CPython's ValueError, and k > 64 needs more
+        # than one word. k = 0 is answered (CPython answers 0 and draws
+        # NOTHING), and it is pinned here rather than in `matrix` because the
+        # value is the point there and the boundary is the point here.
+        ("grb_zero", "random.getrandbits(0)", 0),
+        ("grb_negative", "random.getrandbits(0 - 1)", -1),
+        ("grb_over_64", "random.getrandbits(65)", -1),
     ]
     for backend in backends():
         src = program(["random.seed(1)"] +
@@ -562,6 +597,29 @@ def group_statuses(tmpdir, verbose):
     check(0 <= served < 2**63 - 1,
           "CPython's own answer for the 2**63 - 1 width is not in range, so "
           "the row this group pins as ANSWERED is not about this input")
+    # The same three boundary questions for `getrandbits`: CPython answers
+    # getrandbits(0) with 0, raises ValueError for a negative width, and
+    # answers getrandbits(65) with a value this path cannot hold.
+    check(cpy.getrandbits(0) == 0,
+          "CPython's getrandbits(0) is not 0, so the pinned boundary row is "
+          "not about this host")
+    try:
+        cpy.getrandbits(-1)
+        raise Failure("CPython's getrandbits(-1) did not raise ValueError")
+    except ValueError:
+        pass
+    # getrandbits(65)'s range is [0, 2**65), half of it above one word; a few
+    # draws land there with probability 1 - 2**-16, and a bounded loop keeps
+    # the check from being a tautology about the range.
+    over = False
+    for _ in range(16):
+        if cpy.getrandbits(65) >= 1 << 64:
+            over = True
+            break
+    check(over,
+          "16 of CPython's getrandbits(65) draws all fit one word, so the "
+          "claim that this host cannot represent every such answer is not "
+          "about this input")
     if verbose:
         print(f"    {len(cases)} status case(s) per backend; CPython raises "
               f"ValueError on the 3 empty ranges")
@@ -574,15 +632,12 @@ def group_absent(tmpdir, verbose):
 
     Each is a refusal rather than an absence because an absence is what a caller
     reads as a silent zero: `random.Random(3)` in `test_gimple.py` and
-    `random.getrandbits(8)` must both fail to build, and the message has to name
+    `random.random()` must both fail to build, and the message has to name
     the identifier so the reader knows which name is missing.
     """
     cases = [
         ("Random", "def main() -> Int32:\n    var r = random.Random(3)\n"
                    "    return 0\n"),
-        ("getrandbits", "def main() -> Int32:\n"
-                        "    printf(\"%lld\\n\", random.getrandbits(8))\n"
-                        "    return 0\n"),
         ("random", "def main() -> Int32:\n"
                    "    printf(\"%lld\\n\", random.random())\n    return 0\n"),
         ("randint", "def main() -> Int32:\n"
@@ -600,6 +655,61 @@ def group_absent(tmpdir, verbose):
                   f"{len(backends())} backend(s)")
 
 
+def group_matrix(tmpdir, verbose):
+    """`getrandbits(k)` asked DIRECTLY, every width 1..64, from seven seeds.
+
+    `widths` reaches `getrandbits` only through `randrange(0, 2**k)`, which
+    cannot express a width of `2**64` and which pins only the two ends of each
+    branch's range. This group is the whole matrix `randrange` cannot ask for:
+    7 seeds x 64 widths = 448 answers per backend, one image per backend, each
+    seed drawn as ONE run of 64 mixed widths so a wrong word count anywhere
+    shifts every later answer in the run.
+
+    The `k = 64` rows are compared MODULO `2**64`: CPython's value is in
+    `[0, 2**64)` and this path's word is signed, so a value with the top bit
+    set prints negative. That is the one width where the two differ in
+    REPRESENTATION rather than in value, and the module's own docstring says
+    so at `getrandbits`.
+    """
+    seeds = (0, 1, 23, 17, 20260930, 1 << 32, -7)
+    widths = tuple(range(1, 65))
+    import random as cpy
+    for backend in backends():
+        lines = []
+        want = []
+        idx = 0
+        for s in seeds:
+            lines.append(f"random.seed({s})")
+            cpy.seed(s)
+            values = [f"random.getrandbits({k})" for k in widths]
+            lines.extend(emit_rows(values, start=idx))
+            want.extend(cpy.getrandbits(k) for k in widths)
+            idx += len(widths)
+        got = [v for _, v in records(run(build(program(lines),
+                                               "random_matrix", backend)))]
+        check(len(got) == len(want),
+              f"[{backend}] {len(got)} record(s) for {len(want)} draw(s)")
+        for i, (g, w) in enumerate(zip(got, want)):
+            k = widths[i % len(widths)]
+            if k == 64:
+                # The representational row: same bits, possibly negative as a
+                # signed word. Compare as unsigned 64-bit values.
+                same = (int(g) % (1 << 64)) == w
+            else:
+                same = g == str(w)
+            if not same:
+                seed = seeds[i // len(widths)]
+                raise Failure(
+                    f"[{backend}] seed({seed}) getrandbits({k}) (draw {i}): "
+                    f"the image answered {g}, CPython's is {w}")
+    if verbose:
+        print(f"    {len(seeds)} seeds x {len(widths)} widths agree with "
+              f"CPython per backend (k=64 modulo 2**64)")
+    return True, (f"{len(seeds)} seeds x {len(widths)} widths = "
+                  f"{len(seeds) * len(widths)} answers per backend, all "
+                  f"CPython's (k=64 modulo 2**64)")
+
+
 GROUPS = {
     "resolve": group_resolve,
     "callers": group_callers,
@@ -608,6 +718,7 @@ GROUPS = {
     "seeds": group_seeds,
     "rejection": group_rejection,
     "statuses": group_statuses,
+    "matrix": group_matrix,
     "absent": group_absent,
 }
 

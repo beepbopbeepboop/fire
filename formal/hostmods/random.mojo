@@ -89,9 +89,13 @@ this file, and each of them changes every answer rather than one of them.
    when the seed is 0. `seed(0)` and an unseeded generator are different states
    in CPython, and `seed(0)` must reproduce the first.
 4. **FOR `getrandbits(k)` WITH 33 ≤ k ≤ 64 THE FIRST WORD DRAWN IS THE LOW
-   WORD.** The value is `(w0 | (w1 << 32)) >> (64 - k)` with `w0` drawn first,
-   and the top word is shifted RIGHT by `64 - k` before it is placed, which is
-   the same thing. `randrange(1, 4_000_000_000 * 10**9)` in
+   WORD, AND THE LOW WORD IS NOT SHIFTED.** CPython shifts the TOP word down
+   by `64 - k` before placing it, so the value is
+   `w0 | ((w1 >> (64 - k)) << 32)` with `w0` drawn first. The whole-value
+   reading, `(w0 | (w1 << 32)) >> (64 - k)`, is a DIFFERENT function — it
+   drops the top `64 - k` bits of the low word too — and
+   `test_formal_random.py`'s `widths` group caught exactly that spelling on
+   its first run. `randrange(1, 4_000_000_000 * 10**9)` in
    `test_formal_time.py` is `k = 62`, so that call site is in the half of this
    function where the word order decides the answer.
 
@@ -126,11 +130,6 @@ WHAT IS NOT HERE, AND WHY — each one measured, none of them approximated
     this path has no way to spell, and `None` seeds from `urandom`. A float or
     a string argument is refused by the declared parameter type rather than
     answered by the integer path, which is the failure a caller can see.
-  * **`getrandbits` as a module-level name** — it is here as the private
-    `_getrandbits`, because it is a step of `randrange` and not of a call site.
-    A name with no caller in the tree is not a capability, it is a comment
-    (`formal/imports.py`'s `HOST_MODELLED` rule, and `shlex.mojo`'s `_split`
-    for the case where shipping one is a trap).
   * **`random()`, `randint`, `uniform`, `shuffle`, `sample`, `choice`, and the
     gaussian cache** — no caller in this repository spells any of them, so they
     are absent rather than approximated. `random()` in particular would be
@@ -282,11 +281,11 @@ def _bit_length(n: int) -> int:
     return b
 
 
-def _getrandbits(k: int) -> int:
-    """CPython's `getrandbits(k)` for `k <= 63`, which is all `randrange` asks.
+def getrandbits(k: int) -> int:
+    """CPython's `getrandbits(k)` for `0 <= k <= 64`.
 
     `k <= 32` is the fast path: one tempered word, shifted down so the answer
-    has exactly `k` bits. `33 <= k <= 63` is the two-word case, and TWO things
+    has exactly `k` bits. `33 <= k <= 64` is the two-word case, and TWO things
     about it are the answer rather than the spelling: the word drawn FIRST is the
     LOW word, and **the low word is NOT shifted at all** — CPython shifts the
     TOP word down before placing it, so the value is `w0 | ((w1 >> (64 - k))
@@ -299,10 +298,26 @@ def _getrandbits(k: int) -> int:
     `test_formal_random.py`'s corpus against CPython on the first run, and the
     shape that is here is the one that composes the two words the way the C does.
 
-    `(w1 >> s) << 32` with `s = 64 - k >= 1` is below `2^k`, so the answer fits a
-    signed 64-bit word; that is also why `k = 64` is not served here — see
-    `randrange`.
+    **TWO STATUSES WHERE CPython DOES SOMETHING ELSE**, both `-1`, the module's
+    convention because there are no exceptions here (FORMAL.md phase 7):
+
+      * `k < 0`. CPython raises `ValueError: number of bits must be
+        non-negative`.
+      * `k > 64`. CPython answers a value of `k` bits, which needs more than
+        one 64-bit word and is not a value this path has.
+
+    `k = 64` is served, and the answer's BITS are CPython's: `(w0 | (w1 << 32))`
+    with both words drawn. When the top bit is set the signed word prints
+    negative, which is the one width where this path's answer and CPython's
+    differ in REPRESENTATION rather than in value — `test_formal_random.py`'s
+    `matrix` group compares that width modulo `2**64` for exactly that reason.
+    `k = 0` draws NOTHING, as CPython's does, which `matrix` also measures: a
+    draw there would shift every later answer in its seed's run.
     """
+    if k < 0:
+        return -1
+    if k > 64:
+        return -1
     if k == 0:
         return 0
     if k <= 32:
@@ -432,7 +447,7 @@ def randrange(a: int, b: int) -> int:
     papered over:
 
       * `b <= a`. CPython raises `ValueError: empty range`. The alternative here
-        was not a refusal but a HANG: `_bit_length(0)` is 0, `_getrandbits(0)`
+        was not a refusal but a HANG: `_bit_length(0)` is 0, `getrandbits(0)`
         is 0, and `0 >= 0` never ends.
       * a width above `2**63 - 1`, which is CPython's own bound as well —
         `_index` is `PyLong_AsSsize_t`, so `randrange(-(2**63), 2**63 - 1)` is a
@@ -445,7 +460,7 @@ def randrange(a: int, b: int) -> int:
     The width is computed in this path's signed word, so a true width of `2**63`
     or more arrives here already NEGATIVE (it is `width - 2**64`). Asking
     `_bit_length` about it first answers 0 — the loop counts `while v > 0`, and a
-    negative `v` is not `> 0` — and then `_getrandbits(0)` is 0 and
+    negative `v` is not `> 0` — and then `getrandbits(0)` is 0 and
     `while 0 >= width` with a negative `width` never ends. Measured: the first
     spelling of this module with a `k >= 64` guard hung for the full 300 s the
     test allows instead of answering, and `test_formal_random.py`'s `statuses`
@@ -458,7 +473,7 @@ def randrange(a: int, b: int) -> int:
     if width < 0:
         return -1
     var k = _bit_length(width)
-    var r = _getrandbits(k)
+    var r = getrandbits(k)
     while r >= width:
-        r = _getrandbits(k)
+        r = getrandbits(k)
     return a + r
