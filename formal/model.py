@@ -12912,8 +12912,7 @@ def set_union_refusal(left: str, right: str) -> str:
 
 
 def container_setop_refusal(op: str, left: str, right: str, left_is_set: bool,
-                            right_is_set: bool, left_is_dict: bool = False,
-                            right_is_dict: bool = False) -> str | None:
+                            right_is_set: bool) -> str | None:
     """Why `left {op} right` is not a set-algebra lowering, or None when it is.
 
     The gate a backend asks once it has TOLD `container_operator_refusal` that

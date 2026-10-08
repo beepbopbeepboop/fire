@@ -8099,9 +8099,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 or M.container_operand_is_blob(self._expr_str_kind(e.right))):
             reason = M.container_setop_refusal(
                 op, M.spelled(e.left), M.spelled(e.right),
-                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                left_is_dict=self._is_dict_subscript(e.left),
-                right_is_dict=self._is_dict_subscript(e.right))
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
             if reason is not None:
                 raise CodegenError(reason)
             self._emit_set_algebra(e.left, e.right, op)
