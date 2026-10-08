@@ -6488,6 +6488,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+            # The TARGET AS A TREE, not the flattened name list: a nested group
+            # `a, (b, c)` must stay a nested group so the arity check counts 2
+            # against the element's blob and recurses, exactly as arm64's
+            # `_emit_for_unpack` does.  Flattening it (the old
+            # `_emit_for_unpack(tnames, …)` here) compared the blob's count of
+            # 2 against a target count of 3 and exited 1 with nothing printed,
+            # where arm64 and CPython both answer.  `M.for_target_tree` is the
+            # one parser both backends now use, so the two cannot disagree
+            # about what a target's shape is.
+            ttree = M.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
 
             self._while_counter += 1
             wid = self._while_counter
@@ -6554,10 +6569,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if len(tnames) == 1:
-                    self._store_var(tnames[0], Reg.RAX)
+                if not isinstance(ttree, list):
+                    self._store_var(ttree, Reg.RAX)
                 else:
-                    self._emit_for_unpack(tnames, Reg.RAX,
+                    self._emit_for_unpack(ttree, Reg.RAX,
                                           f"{fn}_flt{wid}")
 
                 for s in stmt.body:
@@ -9157,10 +9172,20 @@ preference.
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if len(tnames) == 1:
-                self._store_var(tnames[0], Reg.RAX)
+            # The tree, not the flattened names, for the `for`-loop arm's
+            # reason: a nested group `(b, c)` is a second unpack, and flattening
+            # it makes the runtime arity check compare against the wrong count.
+            # `M.for_target_tree` is the one parser both backends use.
+            ttree = M.for_target_tree(gen.target) if isinstance(
+                gen.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple of "
+                    f"plain names (got {gen.target!r})")
+            if isinstance(ttree, list):
+                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
             else:
-                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
+                self._store_var(ttree, Reg.RAX)
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next

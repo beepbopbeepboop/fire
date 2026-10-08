@@ -31,7 +31,6 @@ from formal import model as M
 from formal import monomorph
 from mojo.middle.boundnames import (
     bound_names_in_order, _lbn_target_names,
-    _lbn_split_commas,
 )
 
 # Fixed per-function scratch above the saved-pair area. 8160 = 2×4080
@@ -163,45 +162,6 @@ _SRET_LOCAL = "__sret_block"
 # pointer to the cell holding it, and the two are read in that order at each
 # exit (`model.receiver_writeback_name` is the rule).
 _RECV_CELL_LOCAL = "__receiver_cell"
-
-
-def _for_target_tree(target: str):
-    """Parse a for/comprehension target string into a leaf name or nested list.
-
-    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; `'a, b'` (the comprehension
-    Generator.target spelling, no surrounding parens) → `['a', 'b']`;
-    `'(a, (b, c))'` → `['a', ['b', 'c']]`. Returns None when a leaf is not
-    a plain identifier. Uses the shared top-level comma split (naive
-    `.split(',')` tears nested groups)."""
-    t = target.strip()
-    if t.startswith("(") and t.endswith(")"):
-        parts = _lbn_split_commas(t[1:-1])
-        tree = []
-        for p in parts:
-            child = _for_target_tree(p)
-            if child is None:
-                return None
-            tree.append(child)
-        return tree if tree else None
-    # Bare comma form (comprehension targets): 'a, b' / 'a, b, c'
-    if "," in t:
-        parts = _lbn_split_commas(t)
-        if len(parts) > 1:
-            tree = []
-            for p in parts:
-                child = _for_target_tree(p)
-                if child is None:
-                    return None
-                tree.append(child)
-            return tree if tree else None
-    if t.startswith("*"):
-        rest = t[1:].strip()
-        if rest.isidentifier():
-            return "*" + rest
-        return None
-    if t.isidentifier():
-        return t
-    return None
 
 
 def _collect_var_names(f: F.FunctionDef) -> list:
@@ -3687,7 +3647,7 @@ dylib_exports: list = None, globals_base: int = None,
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of "
                     f"plain names (got {stmt.target!r})")
-            ttree = _for_target_tree(stmt.target) if isinstance(
+            ttree = M.for_target_tree(stmt.target) if isinstance(
                 stmt.target, str) else stmt.target
             if ttree is None:
                 raise CodegenError(
@@ -11315,7 +11275,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple "
                     f"of plain names (got {gen.target!r})")
-            ttree = _for_target_tree(gen.target) if isinstance(
+            ttree = M.for_target_tree(gen.target) if isinstance(
                 gen.target, str) else gen.target
             if ttree is None:
                 raise CodegenError(

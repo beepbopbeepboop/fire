@@ -26505,6 +26505,52 @@ def _target_names(target):
     return _lbn_target_names(target) if isinstance(target, str) else []
 
 
+def for_target_tree(target: str):
+    """A `for`/comprehension target STRING as a leaf name or a nested list.
+
+    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; the comprehension spelling
+    `'a, b'` (no surrounding parens) → `['a', 'b']`; `'(a, (b, c))'` →
+    `['a', ['b', 'c']]`. A starred leaf keeps its star (`'*rest'`). Returns
+    None when a leaf is not a plain identifier, so a caller refuses the whole
+    target rather than unpacking a name it cannot spell.
+
+    This is the ONE tree parser both backends' `for`-target emit asks.
+    arm64 had it privately as `_for_target_tree` while x86-64 flattened the
+    target with `_lbn_target_names` instead, so `for a, (b, c) in [...]` on
+    x86-64 compared the element's count against the FLATTENED arity (3) and
+    exited 1 with nothing printed, where arm64 and CPython both answer. The
+    split is the shared one (`fire_compiler.target_slots`, through
+    `_lbn_split_commas`), because a naive `.split(',')` tears nested groups.
+    """
+    from mojo.middle.boundnames import _lbn_split_commas
+    t = target.strip()
+    if t.startswith("(") and t.endswith(")"):
+        tree = []
+        for p in _lbn_split_commas(t[1:-1]):
+            child = for_target_tree(p)
+            if child is None:
+                return None
+            tree.append(child)
+        return tree if tree else None
+    # Bare comma form (comprehension targets): 'a, b' / 'a, b, c'
+    if "," in t:
+        parts = _lbn_split_commas(t)
+        if len(parts) > 1:
+            tree = []
+            for p in parts:
+                child = for_target_tree(p)
+                if child is None:
+                    return None
+                tree.append(child)
+            return tree if tree else None
+    if t.startswith("*"):
+        rest = t[1:].strip()
+        return "*" + rest if rest.isidentifier() else None
+    if t.isidentifier():
+        return t
+    return None
+
+
 def _comprehension_target_names(target) -> list:
     """The names ONE generator target binds, in source order.
 

@@ -1565,7 +1565,52 @@ CASES = [
      "    a, (b, c) = t\n"
      "    sys.stdout.write(\"%d %d %d\" % (a, b, c))\n"
      "    return 0\n"),
-    # `x if c else y`, with the UNTAKEN arm made observable.  arm64 has a CSEL
+    # A NESTED TUPLE TARGET ON A `for` STATEMENT, which is the same shape as the
+    # row above one construct over and was fixed separately.  The `for` arm of
+    # x86-64's `_emit_for_list` passed the target's FLATTENED leaf names to
+    # `_emit_for_unpack`, so `a, (b, c)` became a target arity of 3 and the
+    # element's blob count of 2 tripped the runtime arity check: the image built,
+    # exited 1 and printed NOTHING, where arm64 answered and CPython agrees.
+    # arm64 already passed a tree (its own `_for_target_tree`, now the shared
+    # `model.for_target_tree`), so the two machines disagreed about one source
+    # file — the shape this whole file exists to end.
+    #
+    # The sum, not a single unpacked word: two elements are iterated and each
+    # contaminates the result, so a lowering that bound the first element's
+    # fields to the second's (or dropped the nested group) prints a different
+    # number rather than exiting 1 in a way a wrong-but-plausible fix could hide.
+    ("nested_tuple_target_in_a_for",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, c) in [(1, (20, 300)), (2, (30, 400))]:\n"
+     "        s = s + a + b + c\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, c) in [(1, (20, 300)), (2, (30, 400))]:\n"
+     "        s = s + a + b + c\n"
+     "    sys.stdout.write(\"%d\" % s)\n"
+     "    return 0\n"),
+    # …and TWO nested groups, because the recursion is the claim: `[a, [b, [c,
+    # d]]]` needs the inner group's element to be a blob as well, and a fix that
+    # handled one level (the row above) and not the recursion passes that row and
+    # fails this one.
+    ("doubly_nested_tuple_target_in_a_for",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4))), (5, (6, (7, 8)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4))), (5, (6, (7, 8)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    sys.stdout.write(\"%d\" % s)\n"
+     "    return 0\n"),
     # for this, which reads two registers at once and so evaluates both arms;
     # a branchless lowering of a conditional whose arms have effects answers a
     # different program, and the difference is in what the program PRINTS, not

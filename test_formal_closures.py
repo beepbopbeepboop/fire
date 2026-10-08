@@ -166,15 +166,14 @@ CASES = [
     # dropping `k`, and this case would be refused with `'k' has no home`.
     #
     # **NESTED groups (`for a, (b, c) in …`) are deliberately NOT a row here,
-    # and the reason is a separate x86-64 defect in the UNPACK itself rather
-    # than in the capture.** Measured on this tree: `for a, (b, c) in [(1, (20,
-    # 300))]: s = s + b + a` — a program with NO nested `def` in it at all —
-    # prints 21 on arm64 and prints NOTHING and exits 1 on x86-64, with
-    # `loop_target_names` forced to return `[]` (i.e. with this change's arm
-    # neutralised back to master's behaviour), so it is not a regression from
-    # it. `bugs/FORMAL_x86_64_a_nested_for_target_unpack_prints_nothing.md`.
-    # A closure row on that shape would be measuring the unpack, not the
-    # capture, and would go red for a reason its own name does not say.
+    # and the reason is that the UNPACK is a separate construct from the
+    # capture.** A closure row on that shape would be measuring the unpack, not
+    # the capture, and would go red for a reason its own name does not say.
+    # The unpack itself is now pinned where it belongs: the nested `for` target
+    # built and ran on x86-64 and printed NOTHING, exit 1, where arm64 and
+    # CPython answer (the two machines disagreed about one source file), and
+    # `test_formal_x86_64_parity.py`'s `nested_tuple_target_in_a_for` and
+    # `doubly_nested_tuple_target_in_a_for` are the rows that check both.
     ("a_nested_def_capturing_an_unpacked_loop_target",
      "def outer():\n"
      "    s = 0\n"
