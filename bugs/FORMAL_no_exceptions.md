@@ -1,5 +1,18 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
+**Status 2026-10-07 (`formal126-docs`): item 3 of "The next step" is DONE, and
+the claim below that "there is no test in the tree that raises on this path" is
+no longer true.** `test_formal_exceptions.py` landed 2026-10-05 and is 285
+checks, 0 failures: it builds and runs, on BOTH architectures, every `raise`
+shape this document describes and against CPython — a raise under a handler (a
+`RFUSED` row that must name the construct), a `try` with nothing raised, a
+`return` as the control, `SystemExit`'s status word, the two `ZeroDivisionError`
+guards, the float divide, `assert`, and `finally` on the way out — plus the three
+REFUSED rows that keep the handler-arm boundary a checked claim. Items 1 and 2
+below (one discoverable convention; an EH runtime or not) are unchanged design
+projects, and item 1's cost is three host modules' worth of churn, which is not
+this document's to spend.
+
 **Status:** open, and it is a LIMIT OF THE TARGET rather than a defect — but it
 is load-bearing for every module under `formal/hostmods/`, and until it had a
 document `formal/hostmods/json.mojo` cited a file that did not exist. Found

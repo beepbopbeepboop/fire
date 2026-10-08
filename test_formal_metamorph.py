@@ -385,6 +385,34 @@ class TransformSoundness(unittest.TestCase):
                                      f"{tname} is not deterministic, so a "
                                      f"finding cannot be re-run")
 
+    def test_reorder_does_not_swap_a_store_past_a_read_through_an_alias(self):
+        """`a = o.v` makes `o.v[0] = 62` and `a[0]` the SAME object.
+
+        The name-level independence test sees `{o}` against `{a}`, disjoint, and
+        swaps them — moving the store past the read that observes it.  The
+        oracle caught it on `refs:0` of `formal_fuzz`'s `refs` mix (the printed
+        value moved 62 -> 46); this is the minimised program.
+
+        The dependent pair is the only swappable one here, so the correct answer
+        is that `reorder` declines the program outright (`NotApplicable`, not an
+        unsound twin).  Asserted directly rather than through a corpus run
+        because the transform chooses a pair at random: a regression would only
+        fire on the seeds that happened to pick the dependent pair.
+        """
+        src = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = [0]\n"
+               "def main() -> Int32:\n"
+               "    o = Box()\n"
+               "    a = o.v\n"
+               "    o.v[0] = 62\n"
+               "    w = a[0]\n"
+               "    print(w)\n"
+               "    return 0\n")
+        tree = ast.parse(src)
+        with self.assertRaises(M.NotApplicable):
+            M.TRANSFORMS["reorder"](tree, M.Analysis(tree), random.Random("t"))
+
 
 class ScopeResolution(unittest.TestCase):
     """The predicates `Analysis` computes, one case each.
@@ -1023,6 +1051,11 @@ class Normalising(unittest.TestCase):
          ("@spec", "@require"), ()),
         ("@spec(\n    f_spec; f_spec 0 = 1)\ndef f(n):\n    return n\n",
          ("@spec",), ()),
+        # The refinement corpus's decorator: not valid Python without removal
+        # (`;` inside the parentheses), so it is the reason eleven examples were
+        # in the "CPython still declines it" bucket.
+        ("@refines(Specs.abs64; 64)\ndef absval(n):\n    return n\n",
+         ("@refines",), ()),
         ("def f(n):\n    var a = 1\n    return a + n\n",
          ("var ",), ("a = 1",)),
         ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
