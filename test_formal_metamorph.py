@@ -329,6 +329,41 @@ class TransformSoundness(unittest.TestCase):
                         f"{tname} does not apply to {label}, and nothing else "
                         f"in this file measures it")
 
+    def test_reorder_refuses_a_pair_that_aliases_through_a_binding(self):
+        """`b = a` makes `a` and `b` one cell, so a write through `b[0]` is not
+        independent of a read through `a[0]`.
+
+        Measured before the alias rule existed: `t_reorder` swapped
+        `b[0] = 7` past `print(a[0])` — writes `{b}`, reads `{a}`, disjoint as
+        SPELLED and one list in fact — and CPython answered `0` where the
+        original answers `7`.  The generated corpus reached the same shape on
+        `refs:0`, where the moved element was `62` against `46`.  Every pair in
+        this program aliases, so `reorder` must decline the whole function.
+        """
+        text = ("def main() -> Int32:\n"
+                "    a = [0]\n"
+                "    b = a\n"
+                "    b[0] = 7\n"
+                "    print(a[0])\n"
+                "    return 0\n")
+        self.assertIsNone(twin(text, "alias_through_a_binding", "reorder"))
+
+    def test_reorder_still_swaps_two_independent_container_writes(self):
+        """The control: two DISTINCT containers are still independent.
+
+        Without this row the alias rule could have been made sound by refusing
+        every pair of memory statements, and the transform would report a clean
+        tally while measuring nothing.
+        """
+        text = ("def main() -> Int32:\n"
+                "    a = [0]\n"
+                "    b = [0]\n"
+                "    a[0] = 7\n"
+                "    b[0] = 8\n"
+                "    print(a[0], b[0])\n"
+                "    return 0\n")
+        self.assertIsNotNone(twin(text, "two_containers", "reorder"))
+
     def test_no_transform_is_measured_on_nothing(self):
         """Every transform in the table is in `MUST_APPLY`, and vice versa.
 
@@ -673,7 +708,7 @@ class TheDriver(unittest.TestCase):
                 "verbatim": None, "driver_args": "", "test_input": None,
                 "notes": (), "reason": None}
         with mock.patch.object(F, "cpython_answer",
-                               return_value=((0, ""), "")), \
+                               return_value=(F.OracleAnswer(0, ""), "")), \
              mock.patch.object(M.F, "run_on",
                                lambda b, t, d, n, test_input=None:
                                base_by_backend[b]):
@@ -1179,23 +1214,32 @@ class Normalising(unittest.TestCase):
     def test_the_examples_corpus_is_mostly_measured(self):
         """The coverage number this file exists to keep honest.
 
-        41 of 52 was the state this normaliser was written for, and the 11 that
-        were not measured were all refused for a spelling rather than for a
-        semantics.  Asserting a floor rather than 52 keeps the assertion honest
-        when a future example adds a construct — the point is that the tool
-        measures the corpus, not that it measures every file in it.
+        Every example must be measured EXCEPT the ones unmeasured for the ONE
+        documented reason, and that reason is a decision rather than a spelling:
+        a `struct` body is not removable syntax (a Python `class` of bare
+        annotations has no attributes, so the translation would manufacture a
+        disagreement with CPython rather than find one).  Asserting the exact
+        reason rather than a floor is what makes a NEW unmeasured example a
+        failure here instead of a coverage number that quietly fell — the
+        `@refines` decorator group is the precedent: eleven examples were
+        refused with CPython's "invalid syntax" until `PROOF_DECORATORS` learned
+        the spelling, and a floor would have hidden them.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
         stems = [f for f in os.listdir(EXAMPLES) if f.endswith(".mojo")]
-        driven = 0
+        undriven = []
         for stem in stems:
             with open(os.path.join(EXAMPLES, stem)) as f:
-                if M.example_program(f.read())["text"] is not None:
-                    driven += 1
-        self.assertGreaterEqual(driven, len(stems) - 1,
-                                f"{len(stems) - driven} of {len(stems)} examples "
-                                f"are not measured")
+                prog = M.example_program(f.read())
+            if prog["text"] is None:
+                undriven.append((stem, prog["reason"]))
+        wrong = [(s, why) for s, why in undriven
+                 if "does not remove: 'struct'" not in (why or "")]
+        self.assertEqual(
+            wrong, [],
+            f"{len(wrong)} of {len(stems)} examples are not measured for a "
+            f"reason other than the documented `struct` decision: {wrong[:5]}")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(

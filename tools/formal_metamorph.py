@@ -1866,6 +1866,57 @@ def _reachable_by_a_call(an, fn):
     return set(an.module_bindings) | _captured_names(fn)
 
 
+def _alias_groups(fn):
+    """`name -> representative`, from the assignments in `fn` that BIND an alias.
+
+    An assignment whose right-hand side is a NAME, an ATTRIBUTE or a SUBSCRIPT
+    binds its target to the SAME object as the root of that expression —
+    `A32 = h31.b23` makes `A32[0]` and `h31.b23[0]` one cell — so the two
+    spellings have to be treated as one name by the independence test.  The
+    analysis is deliberately over-approximating and it can only ADD refusals:
+
+      * it unions TRANSITIVELY (`A = B; C = A` puts all three in one class);
+      * it ignores WHERE the assignment sits, so a binding inside an `if`/`for`
+        counts as if it always ran — a conditional alias is a possible alias and
+        a possible alias is a refusal;
+      * it descends into every statement of `fn` but stops at a nested
+        `def`/`lambda`/`class`, which is a separate scope.
+
+    Measured: without it `t_reorder` swapped `h31.b23[0] = 62` past
+    `w34 = A32[0]` on `refs:0` of the generated corpus — writes `{h31}`, reads
+    `{A32}`, disjoint as SPELLED and one list in fact — and CPython caught it as
+    `transform-invalid` with the printed element moving from 62 to 46.
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda, ast.ClassDef)):
+            continue
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, (ast.Name, ast.Attribute,
+                                            ast.Subscript))):
+            for root in _names_in(node.value):
+                union(node.targets[0].id, root)
+        stack.extend(ast.iter_child_nodes(node))
+    return {name: find(name) for name in parent}
+
+
 def t_reorder(module, an, rng):
     """Swap two adjacent statements of a function body that cannot interact.
 
@@ -1883,7 +1934,12 @@ def t_reorder(module, an, rng):
         (`_reachable_by_a_call` — a module-level binding, or a name a nested
         scope captures) is not exchanged with a statement that calls anything.
         This is the rule no amount of looking at the two statements finds, and
-        it carries the closure-cell and the global hazards at once.
+        it carries the closure-cell and the global hazards at once;
+      * two names BOUND TO ONE OBJECT by an assignment (`A32 = h31.b23`) are one
+        name for every rule above, so a memory write through one spelling and a
+        memory read through the other conflict.  `_alias_groups` is the
+        equivalence, and it is the rule that closes the aliasing hazard the
+        spelling-based test used to miss.
 
     Every one of those is a decidable predicate, and the CPython oracle then
     checks the RESULT — but the predicate is the transform, and the oracle is the
@@ -1898,7 +1954,16 @@ def t_reorder(module, an, rng):
     pairs = []
     for fn in an.functions:
         infos = [_info(s) for s in fn.body]
-        reach = _reachable_by_a_call(an, fn)
+        groups = _alias_groups(fn)
+
+        def alias(names):
+            return {groups.get(n, n) for n in names}
+
+        for info in infos:
+            info.reads = alias(info.reads)
+            info.writes = alias(info.writes)
+            info.escapes = alias(info.escapes)
+        reach = alias(_reachable_by_a_call(an, fn))
         for i in range(len(fn.body) - 1):
             a, b = infos[i], infos[i + 1]
             if a.terminal or b.terminal:
@@ -2195,15 +2260,24 @@ TRANSFORM_WHY = {
 #
 # Each rule, and why removing it changes nothing a run can observe:
 #
-#   PROOF_DECORATORS  `@spec(…)`, `@require(…)`, `@ensure(…)` are read by the
-#                     PROOF layer; the run-time path never sees them.  They have
-#                     to be REMOVED rather than merely made parseable, because
-#                     CPython would execute them and raise NameError on
-#                     `spec`/`require`/`ensure` — so keeping them would trade a
-#                     coverage hole for an oracle that cannot answer.  Measured:
-#                     `count.mojo` built VERBATIM answers `0` on both backends,
-#                     and so does the same file with its three annotation lines
-#                     gone.
+#   PROOF_DECORATORS  `@spec(…)`, `@require(…)`, `@ensure(…)`, `@refines(…)` are
+#                     read by the PROOF layer; the run-time path never sees them.
+#                     They have to be REMOVED rather than merely made parseable,
+#                     because CPython would execute them and raise NameError on
+#                     `spec`/`require`/`ensure`/`refines` — so keeping them would
+#                     trade a coverage hole for an oracle that cannot answer.
+#                     Measured: `count.mojo` built VERBATIM answers `0` on both
+#                     backends, and so does the same file with its three
+#                     annotation lines gone.  `@refines` is the same class and
+#                     the same removal: the eleven examples that spell it
+#                     (`absval`, `bigconst`, `bitops`, `chain`, `fact`,
+#                     `identity`, `localmul`, `nonzero`, `pair`, `shiftlr`,
+#                     `sum`) were the corpus's largest unmeasured group until it
+#                     was added here, each refused with CPython's own "invalid
+#                     syntax" at the decorator's line.  Its argument list wraps
+#                     and contains a `;` (`@refines(Specs.abs64; 64)`), so it
+#                     goes through `_drop_proof_decorators`' parenthesis-depth
+#                     scan rather than a line deletion.
 #   VAR_DECL          `var x = e` and `x = e` are one construct on this path.
 #                     `formal/examples/vardecl.mojo` exists BECAUSE the two
 #                     spellings behave identically here: its own comment calls
@@ -2228,7 +2302,7 @@ TRANSFORM_WHY = {
 #: STATEMENT and a comment may contain the word: `vardecl.mojo`'s own first line
 #: is a comment whose text is "`var a = 1` is a `VarDecl`", and a rule that
 #: rewrote inside it would corrupt prose into code.
-PROOF_DECORATOR_RE = re.compile(r"^[ \t]*@(spec|require|ensure)\s*\(")
+PROOF_DECORATOR_RE = re.compile(r"^[ \t]*@(spec|require|ensure|refines)\s*\(")
 VAR_DECL_RE = re.compile(r"^([ \t]*)var[ \t]+", re.MULTILINE)
 FN_DECL_RE = re.compile(r"^([ \t]*)fn[ \t]+", re.MULTILINE)
 
@@ -2237,7 +2311,8 @@ FN_DECL_RE = re.compile(r"^([ \t]*)fn[ \t]+", re.MULTILINE)
 #: parenthesis depth: `@spec(` opens one, and the line ends at the one that
 #: closes it — whichever line that is.
 def _drop_proof_decorators(lines):
-    """`lines` without the `@spec`/`@require`/`@ensure` lines; `(kept, count)`."""
+    """`lines` without the `@spec`/`@require`/`@ensure`/`@refines` lines;
+    `(kept, count)`."""
     kept, depth, n = [], 0, 0
     for line in lines:
         if depth == 0 and PROOF_DECORATOR_RE.match(line):
