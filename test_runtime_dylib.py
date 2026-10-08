@@ -253,6 +253,48 @@ def test_cache_hit_is_the_same_file_and_reverified():
               'an unusable flag fails loudly rather than being dropped', str(e))
 
 
+_RT_LEAK_WORKER = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import build_stdlib_dylib as bsd
+print(bsd.runtime_dylib(arch=bsd.normalize_arch()))
+'''
+
+
+def test_a_cold_build_removes_its_staging_directory():
+    """A cold runtime-dylib build stages its objects in a `mojo_rt_*` temp
+    directory and `os.replace`s only the finished dylib out. The directory must
+    not be left behind.
+
+    This is not a tidiness assertion: the per-test models that set
+    `GMOJO_HOME` to a fresh `mkdtemp()` build into a cold CAS on every run, so a
+    leaked directory is ~520 kB per test that happens to build a `mojo_*` name,
+    and nothing about the ARTIFACT can see it — every other assertion in this
+    file reads the dylib. One reproducibility sweep measured 34 such
+    directories, ~17 MB, from a 312-case corpus, before the `finally` landed.
+
+    The build runs in a subprocess with a CAS home and a TMPDIR of its own, so
+    the build is genuinely COLD (a shared home would be a cache hit and never
+    reach `mkdtemp`), the leak is observable in a directory this test owns, and
+    the throwaway CAS is removed with it rather than growing the real one."""
+    home = tempfile.mkdtemp(prefix='test_rt_leak_home_')
+    tmp = tempfile.mkdtemp(prefix='test_rt_leak_tmp_')
+    try:
+        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+        r = subprocess.run([sys.executable, '-c', _RT_LEAK_WORKER, HERE],
+                           capture_output=True, text=True, env=env)
+        check(r.returncode == 0,
+              'a cold runtime_dylib build in a fresh CAS home succeeds',
+              (r.stderr or '').strip()[-300:])
+        leftovers = sorted(n for n in os.listdir(tmp) if n.startswith('mojo_rt_'))
+        check(not leftovers,
+              'a cold runtime_dylib build removes its mojo_rt_ staging directory',
+              f'left behind: {leftovers}')
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_wrong_arch_object_is_rejected():
     """The check that makes the flag trustworthy. An object built for the OTHER
     architecture must be refused by name, with both architectures in the
@@ -1015,6 +1057,7 @@ def main():
     test_unreachable_arch_fails_with_a_reason()
     test_both_arch_dylibs_build_and_are_distinct()
     test_cache_hit_is_the_same_file_and_reverified()
+    test_a_cold_build_removes_its_staging_directory()
     test_wrong_arch_object_is_rejected()
     test_export_table_entries_are_all_real_definitions()
     test_every_defined_entry_point_is_advertised()
