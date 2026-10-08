@@ -2189,6 +2189,47 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
           "unclassified names only if there are many of them")
 
 
+def test_the_find_spec_decided_names_are_unreachable(tmpdir, _shared):
+    """The five names `find_spec` decides of the unclassified set are claimed.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measured the
+    oracle and found it splits the unclassified set 5 and 200: `find_spec`
+    returns NO SPEC for `_gdbm`, `_overlapped`, `_tkinter`, `_winapi` and
+    `_wmi` on this host, which is the rule at the top of `formal/imports.py`
+    applied — the object is missing from the target, so they are
+    `unreachable` rather than a per-name judgement with no measurement behind
+    it. This pins the direction that §0.5 named as the next step: the oracle
+    decides a name's TIER, and the five it decides are claimed and not left in
+    no tier.
+
+    **The measurement is CPython's own and is host-specific, and that is the
+    point rather than a fragility** — a host that carries Tcl/Tk or gdbm would
+    answer a spec for `_tkinter`/`_gdbm`, and then the classification would be
+    wrong and this row is the right place to say so. All five are private, so
+    this moves the PUBLIC unclassified count by zero.
+    """
+    import importlib.util
+    five = ("_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi")
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    for name in five:
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the five `find_spec` "
+              "decides are not claimed")
+        check(I.host_module_tier(name) == "unreachable",
+              f"host_module_tier({name!r}) answered "
+              f"{I.host_module_tier(name)!r}, want 'unreachable'")
+        answer, _detail = I.host_module_verdict(name, relative_to=probe,
+                                                project_root=probe)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}")
+        check(name.startswith("_"),
+              f"{name} is not private, so this row moves the public count")
+        check(importlib.util.find_spec(name) is None,
+              f"find_spec found a spec for {name} on this host, which is the "
+              "measurement the tier rests on — the object is NOT missing from "
+              "the target and the entry is wrong")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5250,6 +5291,8 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
+    ("the names find_spec decides are unreachable, not unclassified",
+     test_the_find_spec_decided_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",
