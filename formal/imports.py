@@ -3314,13 +3314,18 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    for bindings, _why in (library_free or {}).values():
+    source_of = {}
+    for src, (bindings, _why) in (library_free or {}).items():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.
+            # neither has a callee, so the refusal has to reach either.  The
+            # SOURCE is the defining module's, which is the key this table is
+            # built under — the refusal reads it to name the rule that applied.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
+            source_of.setdefault(bound, src)
+            source_of.setdefault(defining, src)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -3334,8 +3339,12 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
+            rule, declared = M.export_rule_for(
+                callee.name, exempt[callee.name],
+                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope))
+                M.imported_callee_refusal(callee.name, sym, scope,
+                                          rule=rule, declared=declared))
 
 
 def _enclosing_scopes(stmts: list) -> list:

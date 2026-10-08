@@ -44104,7 +44104,93 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+def export_rule_for(name: str, module: str, link_line=None,
+                    source: str = None) -> tuple:
+    """`(rule, declared)` for `name` as `module`'s SOURCE states it.
+
+    The one reader of `reflect.export_exclusions` for a REFUSAL, so that a
+    message about "the export rule" can name the rule that actually applied
+    instead of enumerating the four candidates — and can say, for the case that
+    is not an exclusion at all, that the module declares no such name.
+
+    The source comes from either
+      * `source`, a path (the `check_library_free_calls` site has it as the key
+        of the `library_free` table it is walking); or
+      * `link_line`, the raw manifest list a build carries, whose entries record
+        the defining module's own `source` (`write_dylib_manifest`). `module` is
+        matched against each entry's `module`, which is the spelled module name
+        the diagnostic itself uses.
+
+    Returns `(rule, declared)`:
+      * `(EXCL_*, True)`  — the module declares `name` and the rule excluded it;
+      * `(None, False)`   — the module declares no function or struct by that
+        name at all (the `now` in `runtime/stdlib_wrapper.mojo`, and an alias
+        spelled as its target's name);
+      * `(None, True)`    — declared and NOT excluded, which cannot be why a call
+        reached a refusal (see `(None, None)` in the caller);
+      * `(None, None)`    — no source could be read, so nothing is claimed.
+    """
+    text = None
+    if source:
+        try:
+            with open(source, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = None
+    if text is None and link_line:
+        for d in link_line:
+            if (d.get("module") or "") != (module or ""):
+                continue
+            path = d.get("source")
+            if not path:
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                text = None
+            break
+    if text is None:
+        return None, None
+    import reflect                                   # lazy — pulls the backend
+    try:
+        parsed = reflect.Parser(reflect.py_tokenize(text)).parse_module()
+        excluded = reflect.export_exclusions(text, parsed)
+    except Exception:                                # noqa: BLE001
+        return None, None
+    if name in excluded:
+        return excluded[name], True
+    declared = any(
+        isinstance(s, (reflect.FunctionDef, reflect.StructDef))
+        and getattr(s, "name", None) == name for s in parsed)
+    return None, declared
+
+
+#: The one-line gloss of each export rule the refusal names, keyed by
+#: `reflect`'s own constant (read lazily, because `reflect` pulls the backend).
+def _export_rule_why() -> dict:
+    import reflect
+    return {
+        reflect.EXCL_PRIVATE:
+            "a name with a leading `_` is private — the source saying it is not "
+            "for another module",
+        reflect.EXCL_GENERIC:
+            "a generic template is not one symbol but one per instantiation, "
+            "and each instantiation is the boundary symbol — "
+            "`formal/monomorph.py` compiles one into the defining module's "
+            "library when an importer asks for it, and a bare call asks for "
+            "none",
+        reflect.EXCL_OVERLOADED:
+            "an overload has no single symbol, and one trie entry cannot be two "
+            "instantiations",
+        reflect.EXCL_CLIB:
+            "a C library name like `exit` or `write` is provided by libSystem "
+            "(right for a call, wrongly named as this module's own definition)",
+    }
+
+
+def imported_callee_refusal(name: str, sym, fn_name: str,
+                            rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     Distinct from `module_global_refusal` because the two are different facts,
@@ -44124,6 +44210,15 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     symbol denotes it) or a C library name. `_get_kgen_string` in
     `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
     construct for nineteen swept files.
+
+    **It names the ONE rule that applied when `rule`/`declared` are passed in**,
+    and it is `export_rule_for` above that computes them from the defining
+    module's own source. The fallback below (no source readable) still
+    enumerates the four, but every caller that has the source passes the answer,
+    so a reader of the export-gate row gets "it is a generic template" rather
+    than four candidates — and the file whose name the module does not declare
+    at all (`runtime/stdlib_wrapper.mojo`'s `from time import now`) gets
+    `declared=False` and the sentence that says so.
 
     **The generic clause is no longer a claim that this path cannot do the
     thing** — it can, and it did so the moment it was asked, so saying so here
@@ -44152,6 +44247,66 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
+    # The rule that ACTUALLY applied, when the defining module's source was read
+    # (`export_rule_for`) — one sentence instead of four candidates, so a reader
+    # is not sent to look for an underscore, a bracket, a second definition and
+    # a C name in a file that has none of them.
+    if rule is not None:
+        why = _export_rule_why().get(rule) or f"it is excluded as `{rule}`"
+        import reflect
+        if rule == reflect.EXCL_GENERIC:
+            # The generic rule carries the whole explanation the fallback used to
+            # carry, because it is the ONE rule whose "why" a reader acts on:
+            # the bare spelling is CORRECT source and the missing piece is the
+            # inference. `test_formal_monomorph.py` pins every clause of it.
+            return (f"{who}`{name}` is called, and it is imported from `{mod}`, "
+                    f"so the call has to bind a symbol `{mod}` exports. That "
+                    f"module does not export it, and the reason is `doc/ABI.md`'s "
+                    f"export rule applied to the DECLARATION: {why}. A generic "
+                    f"template's instantiations ARE compiled into that module's "
+                    f"library when an importer asks for them "
+                    f"(`formal/monomorph.py`), so this call is one that asked "
+                    f"for none — it names no type argument, or names one that is "
+                    f"a value rather than a type, or spells the template as "
+                    f"`module.{name}`. **If the call names no type argument at "
+                    f"all, the SOURCE is right and this path is short**: Mojo "
+                    f"infers a template call's type arguments, so `{name}(…)` "
+                    f"with no bracket is correct code — the stdlib's own "
+                    f"`FormatStruct(writer, \"Allocation\")` is spelled that way "
+                    f"— and this path does not infer them yet. Its demand "
+                    f"pipeline reads type arguments off an explicit bracket, so "
+                    f"a bare call arrives here with no instantiation to bind; "
+                    f"the inference, the 123 measured files it is worth, and the "
+                    f"shape of the missing piece are in "
+                    f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"
+                    f"arguments_are_inferrable.md. So write the operation in this "
+                    f"module, or call a public function that does it — which is "
+                    f"the same program with a definition this image can bind. "
+                    f"Spelling it `{name}[<a type>](…)` will carry the "
+                    f"instantiation, and is a workaround for this gap rather "
+                    f"than a correction to your code")
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. That module "
+                f"does not export it, and the reason is `doc/ABI.md`'s export "
+                f"rule applied to the DECLARATION: {why}. The exclusion is "
+                f"measured and settled in bugs/FORMAL_known_limits.md §1.1, and "
+                f"the generic case in §1.2.")
+    # …and the case that is NOT an exclusion at all: the module's own source
+    # declares no such name. `runtime/stdlib_wrapper.mojo`'s `from time import
+    # now` is this, and the old four-candidate sentence sent the reader to look
+    # for an underscore, a bracket, a second definition and a libSystem name in
+    # `formal/hostmods/time.mojo`, which has none of them.
+    if declared is False:
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. **`{mod}` "
+                f"declares no function or struct named `{name}` at all**, so "
+                f"`doc/ABI.md`'s export rule (a leading `_`, a generic template, "
+                f"an overload, a C library name) is not the reason and none of "
+                f"its four clauses applies. The name is coming from somewhere "
+                f"other than `{mod}`'s own source — an alias or a re-export "
+                f"spelled in the importer, or a misspelling — so check the "
+                f"spelling and what `{mod}` actually declares before changing "
+                f"the call.")
     return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
             f"call has to bind a symbol `{mod}` exports. That module does not "
             f"export it, and the reason is `doc/ABI.md`'s export rule rather "

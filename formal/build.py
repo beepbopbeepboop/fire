@@ -14701,7 +14701,10 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
     published = _module_published_names(module, link_line)
     if not published or base_name in published:
         return None
-    return M.imported_callee_refusal(base_name, sym, fn_name)
+    rule, declared = M.export_rule_for(base_name,
+                                       getattr(sym, "module", None), link_line)
+    return M.imported_callee_refusal(base_name, sym, fn_name,
+                                     rule=rule, declared=declared)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None) -> None:
@@ -15892,8 +15895,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.is_import_alias(cname, import_aliases)
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
+                    rule, declared = M.export_rule_for(
+                        cname, getattr(csym, "module", None), link_line)
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name))
+                        cname, csym, fn.name, rule=rule, declared=declared))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16024,8 +16029,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # fact about the boundary and not about storage — see the
                     # `bracket_callees` note above for why this is refused here
                     # rather than allowed to reach a dangling `BL`.
+                    rule, declared = M.export_rule_for(
+                        name, getattr(sym, "module", None), link_line)
                     raise CodegenError(M.imported_callee_refusal(
-                        name, sym, fn.name))
+                        name, sym, fn.name, rule=rule, declared=declared))
                 # A module-level name with no slot, refused for the reason a
                 # module-level name is refused: nothing writes it, so its value
                 # is the module-level one, and the build can only know that if
@@ -20355,7 +20362,15 @@ def dylib_export_lists(dylibs: list) -> list:
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},
              "variables": list(d.get("variables") or []),
-             "containers": list(d.get("containers") or [])}
+             "containers": list(d.get("containers") or []),
+             # The defining module's OWN source, carried so that a refusal that
+             # has only the module NAME can read the declaration the export rule
+             # was applied to (`model.export_rule_for`).  It is the same file the
+             # library was compiled from — the argument `_imported_structs`
+             # already makes for a struct declaration read back out of a
+             # manifest — rather than a second lookup of a path this list
+             # already heard.
+             "source": d.get("source")}
             for d in (dylibs or [])]
 
 
