@@ -239,14 +239,14 @@ def realpath(p) -> str:
     return os.path.realpath(p)
 
 
-def relpath(path, start=".") -> str:
+def relpath(path, start) -> str:
     """`posixpath.relpath(path, start)`. CPython's, in `os.path.relpath`.
 
-    `start` defaults to `"."`, which IS CPython's default (`os.curdir` is the
-    string `"."` on a POSIX target). A call from another image DOES materialize
-    a callee's default arguments now — `formal/imports.py`'s
-    `external_declarations` hands the emitter the callee's own declaration — so
-    this is CPython's signature rather than a workaround.
+    `start` is REQUIRED and not defaulted: a call from another image does not
+    materialize a callee's default arguments — the caller has no signature to
+    read them from — so a defaulted parameter arrives as a stack address
+    (`FORMAL_default_argument_not_applied_across_a_dylib`). CPython
+    defaults `start` to `os.curdir`, so a caller here passes `curdir()`.
     """
     return os.path.relpath(path, start)
 
