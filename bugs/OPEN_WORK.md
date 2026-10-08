@@ -148,7 +148,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | **unclaimed** | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
 | `FORMAL_stdlib_module_names_are_not_classified.md` | **unclaimed** | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | **unclaimed** | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
-| `FORMAL_the_export_gate_row_is_148_files_and_one_gate.md` | **unclaimed** | the corpus's largest codegen row is ONE function, and 133 of its 145 refusals named no line |
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 

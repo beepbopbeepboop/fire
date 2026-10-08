@@ -14539,6 +14539,49 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _export_rule_for(module: str, name: str, link_line):
+    """Which `doc/ABI.md` export rule kept `name` off `module`'s boundary.
+
+    The answer a refusal about a bare call needs, and it is the SAME rule the
+    export table was built by (`reflect.export_exclusions`) rather than a
+    second statement of it: `_module_published_names` says the name is not
+    published, and this says WHY, from the defining module's own source.  The
+    source travels in the library's manifest and reaches here through
+    `dylib_export_lists` — the manifest records it for exactly this kind of
+    reader (`_imported_structs` reads a struct declaration back out of one).
+
+    Returns one of `reflect`'s `EXCL_*` constants, `model.EXPORT_RULE_DECLARED`
+    (the file names the declaration but no rule excluded it from the export set
+    — an alias, or a shape this path does not emit), `model.EXPORT_RULE_ABSENT`
+    (the file never names it), or `None` when the source cannot be consulted
+    (no library for `module`, or no `source` in its manifest), which is the
+    caller's cue to fall back to the unqualified sentence rather than invent a
+    rule.  `None` is the only "I could not look" answer; a looked-at file never
+    returns it.
+    """
+    if not link_line or not module:
+        return None
+    source = None
+    for lib in dylib_export_lists(link_line):
+        if lib.get("module") == module:
+            source = lib.get("source")
+            break
+    if not source:
+        return None
+    try:
+        with open(source, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    import reflect                              # lazy, as in _export_entries
+    excluded = reflect.export_exclusions(text)
+    if name in excluded:
+        return excluded[name]
+    if name in reflect.declared_names(text):
+        return M.EXPORT_RULE_DECLARED
+    return M.EXPORT_RULE_ABSENT
+
+
 def _module_published_variables(module: str, link_line) -> set:
     """The module-level names the library built for `module` treats as VARIABLES.
 
@@ -14701,7 +14744,9 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
     published = _module_published_names(module, link_line)
     if not published or base_name in published:
         return None
-    return M.imported_callee_refusal(base_name, sym, fn_name)
+    return M.imported_callee_refusal(
+        base_name, sym, fn_name,
+        _export_rule_for(module, base_name, link_line))
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None) -> None:
@@ -15893,7 +15938,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name))
+                        cname, csym, fn.name,
+                        _export_rule_for(getattr(csym, "module", None), cname,
+                                         link_line)))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16025,7 +16072,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # `bracket_callees` note above for why this is refused here
                     # rather than allowed to reach a dangling `BL`.
                     raise CodegenError(M.imported_callee_refusal(
-                        name, sym, fn.name))
+                        name, sym, fn.name,
+                        _export_rule_for(getattr(sym, "module", None), name,
+                                         link_line)))
                 # A module-level name with no slot, refused for the reason a
                 # module-level name is refused: nothing writes it, so its value
                 # is the module-level one, and the build can only know that if
@@ -20351,6 +20400,7 @@ def dylib_export_lists(dylibs: list) -> list:
     which of the two shapes it is (`model.dylib_module_variables`,
     `model.dylib_module_containers`)."""
     return [{"module": d.get("module") or "",
+             "source": d.get("source"),
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},
@@ -21225,13 +21275,13 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
-                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a rule that "
-                f"a module nothing binds needs no library at all, an importer "
-                f"reading the constant directly instead of linking a library "
-                f"for it (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_"
-                f"a_dylib.md`). Neither exists here, so this is refused at the "
-                f"build rather than linked as a library with nothing in it, and "
-                f"nothing here is waiting on this file.")
+                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a BACKEND "
+                f"rule that a module nothing binds needs no library at all, an "
+                f"importer reading the constant directly instead of linking a "
+                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
+                f"cannot_be_a_dylib.md`). Neither exists here, so this is "
+                f"refused at the build rather than linked as a library with "
+                f"nothing in it, and nothing here is waiting on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and

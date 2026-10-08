@@ -44104,7 +44104,56 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+#: The two answers `build._export_rule_for` can give that are not one of
+#: `reflect`'s `EXCL_*` rules: the defining module NAMES the declaration but the
+#: export table does not carry it (an alias, or a shape this path does not emit
+#: as a boundary symbol), and the file never names it at all. Kept here rather
+#: than in `build.py` because this is the module that turns them into a sentence
+#: and `build.py` reads them off it.
+EXPORT_RULE_DECLARED = "declared-not-published"
+EXPORT_RULE_ABSENT = "name-not-declared"
+
+#: `reflect`'s rule constants (`EXCL_PRIVATE` etc.) -> the clause that rule
+#: contributes.  The keys are the rule strings themselves, so this table and the
+#: export rule cannot disagree about how many rules there are; a rule that is
+#: not in here (and is not one of the two sentinels) makes the caller print the
+#: unqualified sentence rather than invent a clause.
+_EXPORT_RULE_CLAUSES = {
+    "private": "a name with a leading `_` is private",
+    "c-library-symbol": "a C library name like `exit` or `write` is provided "
+                        "by libSystem rather than by this module",
+    "overloaded": "the name is overloaded, so no single symbol denotes it",
+    "generic-template": "it is a generic template, which is not one symbol but "
+                        "one per instantiation (`_get_kgen_string[asm]()` is "
+                        "the measured case — both at once)",
+}
+
+
+def _generic_inference_tail(name: str) -> str:
+    """The bare-call half of `imported_callee_refusal`, shared by its generic
+    branch and its unqualified fallback so the two cannot say it differently."""
+    return (
+        f"A generic template's instantiations ARE compiled into that module's "
+        f"library when an importer asks for them (`formal/monomorph.py`), so "
+        f"this call is one that asked for none — it names no type argument, or "
+        f"names one that is a value rather than a type, or spells the template "
+        f"as `module.{name}`. **If the call names no type argument at all, the "
+        f"SOURCE is right and this path is short**: Mojo infers a template "
+        f"call's type arguments, so `{name}(…)` with no bracket is correct "
+        f"code — the stdlib's own `FormatStruct(writer, \"Allocation\")` is "
+        f"spelled that way — and this path does not infer them yet. Its demand "
+        f"pipeline reads type arguments off an explicit bracket, so a bare call "
+        f"arrives here with no instantiation to bind; the inference, the 123 "
+        f"measured files it is worth, and the shape of the missing piece are "
+        f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+        f"inferrable.md. So write the operation in this module, or call a "
+        f"public function that does it — which is the same program with a "
+        f"definition this image can bind. Spelling it `{name}[<a type>](…)` "
+        f"will carry the instantiation, and is a workaround for this gap rather "
+        f"than a correction to your code")
+
+
+def imported_callee_refusal(name: str, sym, fn_name: str, reason=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     Distinct from `module_global_refusal` because the two are different facts,
@@ -44152,36 +44201,42 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
-    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
-            f"call has to bind a symbol `{mod}` exports. That module does not "
-            f"export it, and the reason is `doc/ABI.md`'s export rule rather "
-            f"than anything about this call: a name with a leading `_` is "
-            f"private, a generic template is not one symbol but one per "
-            f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
-            f"both at once), an overload has no single symbol, and a C library "
-            f"name like `exit` or `write` is provided by libSystem. The "
+    head = (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+            f"call has to bind a symbol `{mod}` exports. ")
+    if reason == EXPORT_RULE_ABSENT:
+        return head + (
+            f"That module does not export it, and it is not an export-rule "
+            f"exclusion at all: the module declares no `{name}` — check the "
+            f"spelling, or the module it is imported from.")
+    if reason == EXPORT_RULE_DECLARED:
+        return head + (
+            f"That module does not export it: it DECLARES `{name}`, but the "
+            f"library built for it publishes no symbol for that name — an "
+            f"alias or a shape this path does not emit as a boundary symbol — "
+            f"so the call has no callee.")
+    clause = _EXPORT_RULE_CLAUSES.get(reason)
+    if clause is not None and reason == "generic-template":
+        return head + (
+            f"That module does not export it, and the reason is `doc/ABI.md`'s "
+            f"export rule rather than anything about this call: {clause}. The "
             f"exclusion is measured and settled in "
             f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
-            f"A generic template's instantiations ARE compiled into that "
-            f"module's library when an importer asks for them "
-            f"(`formal/monomorph.py`), so this call is one that asked for "
-            f"none — it names no type argument, or names one that is a value "
-            f"rather than a type, or spells the template as `module.{name}`. "
-            f"**If the call names no type argument at all, the SOURCE is right "
-            f"and this path is short**: Mojo infers a template call's type "
-            f"arguments, so `{name}(…)` with no bracket is correct code — the "
-            f"stdlib's own `FormatStruct(writer, \"Allocation\")` is spelled that "
-            f"way — and this path does not infer them yet. Its demand pipeline "
-            f"reads type arguments off an explicit bracket, so a bare call "
-            f"arrives here with no instantiation to bind; the inference, the 123 "
-            f"measured files it is worth, and the shape of the missing piece are "
-            f"in "
-            f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
-            f"So write the operation in this module, or call a public function "
-            f"that does it — which is the same program with a definition this "
-            f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
-            f"instantiation, and is a workaround for this gap rather than a "
-            f"correction to your code")
+            + _generic_inference_tail(name))
+    if clause is not None:
+        return head + (
+            f"That module does not export it, and the reason is `doc/ABI.md`'s "
+            f"export rule rather than anything about this call: {clause}. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1.")
+    return head + (
+        f"That module does not export it, and the reason is `doc/ABI.md`'s "
+        f"export rule rather than anything about this call: a name with a "
+        f"leading `_` is private, a generic template is not one symbol but one "
+        f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
+        f"both at once), an overload has no single symbol, and a C library "
+        f"name like `exit` or `write` is provided by libSystem. The exclusion "
+        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
+        f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,

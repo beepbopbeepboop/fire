@@ -929,15 +929,22 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
           f"something other than the export rule, which is the fact that "
           f"decides it: {text.strip()[-300:]}")
     check("a name with a leading `_` is private" in text,
-          f"the refusal does not say WHICH of the four exclusions keeps this "
-          f"name off the boundary, and it is the private one: "
-          f"{text.strip()[-300:]}")
+          f"the refusal does not say WHICH exclusion keeps this name off the "
+          f"boundary, and it is the private one: {text.strip()[-300:]}")
     check("doc/ABI.md" in text or "export rule" in text,
           f"the refusal does not name the rule that keeps the name off the "
           f"boundary: {text.strip()[-300:]}")
-    check("one per instantiation" in text or "monomorph" in text
-          or "instantiation is the boundary symbol" in text,
-          f"the refusal does not say WHY a name is not one boundary symbol: "
+    # It must name the rule that APPLIED, not list the candidates: a
+    # `_`-prefixed non-generic name is private and nothing else, and the
+    # sentence used to enumerate generic/overload/libSystem reasons that are
+    # all false about `_helper`.  The three markers below are the other three
+    # rules' own words (`formal/model.py::_EXPORT_RULE_CLAUSES`), and none of
+    # them belongs in a private name's message.
+    check("one per instantiation" not in text
+          and "is overloaded, so no single symbol" not in text
+          and "provided by libSystem" not in text,
+          f"the refusal still lists candidate rules that do not apply to a "
+          f"private non-generic name; it should name the private one only: "
           f"{text.strip()[-300:]}")
 
 

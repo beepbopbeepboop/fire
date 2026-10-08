@@ -3334,8 +3334,17 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
+            # The rule is `EXCL_GENERIC` by construction, not by guessing:
+            # `library_free_edges` exempts an edge only when every name it binds
+            # is a template (`MM.template_names`), which is the same
+            # `reflect.export_exclusions` decision this names, so the refusal
+            # says which rule kept the name off the boundary rather than listing
+            # the four. A non-template name keeps the library and never reaches
+            # this call.
+            import reflect
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope))
+                M.imported_callee_refusal(callee.name, sym, scope,
+                                          reflect.EXCL_GENERIC))
 
 
 def _enclosing_scopes(stmts: list) -> list:

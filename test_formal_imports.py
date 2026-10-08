@@ -3722,6 +3722,65 @@ METHOD_CALL_MODULE = (
     "def widen[T: Intable](v: T) -> T:\n  return v\n")
 
 
+def test_the_export_refusal_names_the_rule_that_actually_applied(
+        tmpdir, _shared):
+    """The refusal names the ONE rule, and says a name the module lacks is absent.
+
+    `model.imported_callee_refusal` used to list all four `doc/ABI.md` export
+    rules whatever the case, so a name a module does not declare at all was
+    answered by sending the reader to look for an underscore, a bracket, a
+    second definition or a libSystem name — none of which the module has. The
+    measured case is `runtime/stdlib_wrapper.mojo`'s `from time import now`:
+    `formal/hostmods/time.mojo` declares no `now`, and `build._export_rule_for`
+    now reads the defining module's own source (through the `source` its
+    manifest carries) to say which rule applied, or that none did.
+    """
+    # A name declared nowhere in the module: the message must say so, and must
+    # NOT hand the reader the other three rules.
+    root = os.path.join(tmpdir, "exportrule_absent")
+    os.makedirs(root)
+    write_tree(root, {
+        "lib.mojo": "def present(v: Int) -> Int:\n  return v\n",
+        "prog.mojo": "from lib import absent\n"
+                     "def main():\n  return absent(3)\n",
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0 and "absent" in text,
+          f"a bare call to a name the module does not declare was not refused "
+          f"by name: {text.strip()[-300:]}")
+    check("declares no `absent`" in text,
+          f"the refusal did not say the module declares no such name: "
+          f"{text.strip()[-300:]}")
+    check("a name with a leading `_` is private" not in text
+          and "one per instantiation" not in text,
+          f"the refusal still lists export rules that do not apply to a name "
+          f"the module does not declare: {text.strip()[-300:]}")
+
+    # A private name IS an export-rule exclusion, and the message must name
+    # that one and only that one (not the generic/overload/libSystem
+    # candidates).
+    root2 = os.path.join(tmpdir, "exportrule_private")
+    os.makedirs(root2)
+    write_tree(root2, {
+        "lib.mojo": "def anchor(v: Int) -> Int:\n  return v\n"
+                    "def _hidden(v: Int) -> Int:\n  return v\n",
+        "prog.mojo": "from lib import _hidden\n"
+                     "def main():\n  return _hidden(3)\n",
+    })
+    fresh_cas()
+    result2, _out2 = build(root2, "prog.aout", expect_ok=False)
+    text2 = result2.stderr or result2.stdout
+    check("a name with a leading `_` is private" in text2,
+          f"the private name's refusal did not name the private rule: "
+          f"{text2.strip()[-300:]}")
+    check("one per instantiation" not in text2
+          and "provided by libSystem" not in text2,
+          f"the private name's refusal listed rules that do not apply to it: "
+          f"{text2.strip()[-300:]}")
+
+
 def _bare_template_call_program(caller: str) -> str:
     return ("from mylib import widen\n" + caller)
 
@@ -3928,7 +3987,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           f"on: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
-    check("nothing an importer could bind" in reason,
+    check("no address an importer could bind" in reason,
           f"the refusal stopped saying why the refusal is correct: {reason}")
     # The private sibling is a DIFFERENT branch and must not have been edited.
     priv = os.path.join(tmpdir, "private_only.mojo")
@@ -5156,6 +5215,8 @@ TESTS = [
      test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
     ("a bare call to a template is refused by the export rule",
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
+    ("the export refusal names the rule that actually applied",
+     test_the_export_refusal_names_the_rule_that_actually_applied),
     ("the bare-call refusal names the method the call is in",
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",
