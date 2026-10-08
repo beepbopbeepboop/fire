@@ -246,6 +246,23 @@ def _range_args(iterable):
     return None
 
 
+def _strip_stars(tree):
+    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
+    leaf.
+
+    This backend has never handled a starred for-target as a REST binding: it
+    read the leaf names from `_lbn_target_names`, which drops the star, and
+    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
+    keeps the nested fix from turning the (already broken on both backends)
+    starred spelling into a build refusal on one architecture only — see
+    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
+    if isinstance(tree, list):
+        return [_strip_stars(c) for c in tree]
+    if isinstance(tree, str) and tree.startswith("*"):
+        return tree[1:].strip()
+    return tree
+
+
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
 
@@ -6488,6 +6505,28 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+            # The NESTED shape, not the flat leaf list: a tuple target's
+            # element is itself a `[count][e0…]` blob, so `for a, (b, c) in …`
+            # has to unpack the group against the element at its position.
+            # Passing `tnames` here counted the group's LEAVES into the OUTER
+            # arity check — `for a, (b, c) in [(1, (20, 300))]` compared the
+            # element blob's count of 2 against a target count of 3 and
+            # exited(1) with NOTHING printed, where arm64 and CPython both
+            # answer. `fire_compiler.for_target_tree` is the same tree arm64's
+            # `_emit_for_list` unpacks, so the two cannot nest differently.
+            # (`*rest` leaves keep their star in the tree; the bound-name walk
+            # above is what this backend has always read for those, and a
+            # starred for-target is broken on BOTH backends — see
+            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.)
+            ttree = F.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+            if isinstance(ttree, list):
+                ttree = _strip_stars(ttree)
+            is_tuple_target = isinstance(ttree, list)
 
             self._while_counter += 1
             wid = self._while_counter
@@ -6554,11 +6593,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if len(tnames) == 1:
-                    self._store_var(tnames[0], Reg.RAX)
-                else:
-                    self._emit_for_unpack(tnames, Reg.RAX,
+                if is_tuple_target:
+                    # RAX = the element (a pointer to its own `[count][e0…]`
+                    # blob). Nested groups are blobs too, so `_emit_for_unpack`
+                    # recurses — the same tree arm64 hands its own unpack.
+                    self._emit_for_unpack(ttree, Reg.RAX,
                                           f"{fn}_flt{wid}")
+                else:
+                    self._store_var(tnames[0], Reg.RAX)
 
                 for s in stmt.body:
                     self._emit_stmt(s)
@@ -9157,10 +9199,24 @@ preference.
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if len(tnames) == 1:
-                self._store_var(tnames[0], Reg.RAX)
+            # The NESTED tree, exactly as `_emit_for_list` above reads it: a
+            # generator target unpacks the same way a for-target does, and
+            # passing the flat leaves counted a nested group's elements into the
+            # outer arity check. arm64's comprehension generator reads the same
+            # `fire_compiler.for_target_tree`, so the two cannot nest
+            # differently here either.
+            ttree = F.for_target_tree(gen.target) if isinstance(
+                gen.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple of "
+                    f"plain names (got {gen.target!r})")
+            if isinstance(ttree, list):
+                ttree = _strip_stars(ttree)
+            if isinstance(ttree, list):
+                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
             else:
-                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
+                self._store_var(tnames[0], Reg.RAX)
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next

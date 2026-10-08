@@ -31,7 +31,6 @@ from formal import model as M
 from formal import monomorph
 from mojo.middle.boundnames import (
     bound_names_in_order, _lbn_target_names,
-    _lbn_split_commas,
 )
 
 # Fixed per-function scratch above the saved-pair area. 8160 = 2×4080
@@ -164,44 +163,11 @@ _SRET_LOCAL = "__sret_block"
 # exit (`model.receiver_writeback_name` is the rule).
 _RECV_CELL_LOCAL = "__receiver_cell"
 
+# The for/comprehension target tree parser is `fire_compiler.for_target_tree`,
+# read here as `_for_target_tree` so the two formal backends and the register
+# allocator cannot disagree about how a target's groups nest.
 
-def _for_target_tree(target: str):
-    """Parse a for/comprehension target string into a leaf name or nested list.
-
-    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; `'a, b'` (the comprehension
-    Generator.target spelling, no surrounding parens) → `['a', 'b']`;
-    `'(a, (b, c))'` → `['a', ['b', 'c']]`. Returns None when a leaf is not
-    a plain identifier. Uses the shared top-level comma split (naive
-    `.split(',')` tears nested groups)."""
-    t = target.strip()
-    if t.startswith("(") and t.endswith(")"):
-        parts = _lbn_split_commas(t[1:-1])
-        tree = []
-        for p in parts:
-            child = _for_target_tree(p)
-            if child is None:
-                return None
-            tree.append(child)
-        return tree if tree else None
-    # Bare comma form (comprehension targets): 'a, b' / 'a, b, c'
-    if "," in t:
-        parts = _lbn_split_commas(t)
-        if len(parts) > 1:
-            tree = []
-            for p in parts:
-                child = _for_target_tree(p)
-                if child is None:
-                    return None
-                tree.append(child)
-            return tree if tree else None
-    if t.startswith("*"):
-        rest = t[1:].strip()
-        if rest.isidentifier():
-            return "*" + rest
-        return None
-    if t.isidentifier():
-        return t
-    return None
+_for_target_tree = F.for_target_tree
 
 
 def _collect_var_names(f: F.FunctionDef) -> list:
