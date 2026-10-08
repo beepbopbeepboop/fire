@@ -272,5 +272,9 @@ being precise about what it is a result ABOUT:
 So the next session should not read this file as "the backend is right about 10,000
 pairs of the same program twice". It should read §6's item 2 — the stdlib — as the
 place where the shapes this corpus does not have actually live, and it should read
-`bugs/FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md`
-as the place where a measured asymmetry turned up on a shape the corpus does have.
+the measured per-architecture recursion-depth asymmetry — `STACK_FLOOR_BUDGET_BYTES`
+is a byte budget against a 128 KiB arm64 frame and a 16 KiB x86-64 one, so the same
+program answers to depth 470 on x86-64 and traps at 59 on arm64, now stated in
+`model.call_graph_depth` and pinned by `test_formal_run.py`'s
+`check_stack_floor_decision` — as the place where an asymmetry turned up on a shape
+the corpus does have.
