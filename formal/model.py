@@ -44104,7 +44104,65 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+#: `imported_callee_refusal`'s "the caller could not read the defining module's
+#: source" answer. Deliberately distinct from `None`, which is the positive
+#: answer "that module declares no such name": the two are different facts (one
+#: about this call, one about the module) and collapsing them would make the
+#: reader of a `for`/`if` treat "cannot tell" as "does not exist".
+EXPORT_RULE_UNASKED = "unasked"
+
+
+def export_rule_for(module, name, link_line):
+    """Which `reflect.export_exclusions` rule keeps `name` out of `module`.
+
+    Returns one of `reflect`'s four rule strings — `'private'`,
+    `'generic-template'`, `'overloaded'`, `'c-library-symbol'` — or `None` when
+    the module's source IS readable and declares no such name at all, or
+    `EXPORT_RULE_UNASKED` when it cannot be read (no library for `module` on the
+    line, no `source` in its manifest, or an unreadable file).
+
+    **The `None` answer is the one this function exists for.** `runtime/
+    stdlib_wrapper.mojo` does `from time import now` and calls it, and
+    `formal/hostmods/time.mojo` declares no `now` and no `sleep` — so the
+    refusal, which enumerated the four rules, sent the reader to look for an
+    underscore, a bracket, a second definition or a libSystem name in a file
+    that has none of them. The rule is already computed by
+    `reflect.export_exclusions`, which is the ONE place the rule is stated; what
+    was missing is the path from a module NAME to that module's source, and the
+    link line's manifest records it (`source`). Read through the manifest rather
+    than a name→path guess, so the bytes are the ones the library was built from
+    — the same argument `_imported_structs` makes for a struct it reads back out
+    of a manifest.
+
+    A `name` that is declared but PUBLIC is not in `export_exclusions` and so
+    answers `None` too; that is the right reading here, because a public name is
+    in the library's export table and cannot reach this refusal — a caller that
+    does reach it with a readable source is asking about a name the module does
+    not publish under that spelling.
+    """
+    if not module or not link_line:
+        return EXPORT_RULE_UNASKED
+    for lib in link_line:
+        if (lib.get("module") or "") != module:
+            continue
+        src = lib.get("source")
+        if not src:
+            return EXPORT_RULE_UNASKED
+        try:
+            with open(src, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return EXPORT_RULE_UNASKED
+        import reflect                              # lazy — cycle
+        try:
+            return reflect.export_exclusions(text).get(name)
+        except Exception:                           # a source it cannot parse
+            return EXPORT_RULE_UNASKED
+    return EXPORT_RULE_UNASKED
+
+
+def imported_callee_refusal(name: str, sym, fn_name: str,
+                            rule=EXPORT_RULE_UNASKED) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     Distinct from `module_global_refusal` because the two are different facts,
@@ -44152,9 +44210,16 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
-    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+    head = (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
             f"call has to bind a symbol `{mod}` exports. That module does not "
-            f"export it, and the reason is `doc/ABI.md`'s export rule rather "
+            f"export it")
+    if rule == EXPORT_RULE_UNASKED:
+        # The caller could not read the defining module's source, so the honest
+        # answer is the enumeration rather than a guess at which rule applied.
+        # Kept byte-identical to the pre-`rule` message so a caller that cannot
+        # ask does not get a different sentence for the same fact.
+        return head + (
+            f", and the reason is `doc/ABI.md`'s export rule rather "
             f"than anything about this call: a name with a leading `_` is "
             f"private, a generic template is not one symbol but one per "
             f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
@@ -44182,6 +44247,59 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
             f"instantiation, and is a workaround for this gap rather than a "
             f"correction to your code")
+    if rule is None:
+        # The module's own source was read and declares no such name. This is
+        # the sentence that is true about `time.now` and the one the four-rule
+        # enumeration got wrong by omission: none of the four rules applies,
+        # because there is no declaration for any of them to exclude.
+        return head + (
+            f", because `{mod}` declares no `{name}` at all — `{name}` is not a "
+            f"function or a type of that module, so there is no declaration for "
+            f"`doc/ABI.md`'s export rule to keep off the boundary. Check the "
+            f"spelling and the module, or write the operation in this module — "
+            f"which is the same program with a definition this image can bind")
+    if rule == "private":
+        return head + (
+            f", and the reason is `doc/ABI.md`'s export rule rather than "
+            f"anything about this call: a name with a leading `_` is private "
+            f"and never crosses the boundary. Call a public function that does "
+            f"it, or write the operation in this module")
+    if rule == "overloaded":
+        return head + (
+            f", and the reason is `doc/ABI.md`'s export rule rather than "
+            f"anything about this call: an overloaded name has no single symbol "
+            f"to bind. Call it through a spelling that selects one definition, "
+            f"or write the operation in this module")
+    if rule == "c-library-symbol":
+        return head + (
+            f", and the reason is `doc/ABI.md`'s export rule rather than "
+            f"anything about this call: a C library name like `exit` or `write` "
+            f"is provided by libSystem, not by `{mod}`")
+    # generic-template: the one rule where the old enumeration's guidance is
+    # still the right guidance, so it is kept and only the other three rules are
+    # dropped.
+    return head + (
+        f", and the reason is `doc/ABI.md`'s export rule rather than anything "
+        f"about this call: a generic template is not one symbol but one per "
+        f"instantiation (`_get_kgen_string[asm]()` is the measured case — both "
+        f"at once). A generic template's instantiations ARE compiled into that "
+        f"module's library when an importer asks for them "
+        f"(`formal/monomorph.py`), so this call is one that asked for none — it "
+        f"names no type argument, or names one that is a value rather than a "
+        f"type, or spells the template as `module.{name}`. **If the call names "
+        f"no type argument at all, the SOURCE is right and this path is "
+        f"short**: Mojo infers a template call's type arguments, so `{name}(…)` "
+        f"with no bracket is correct code — the stdlib's own "
+        f"`FormatStruct(writer, \"Allocation\")` is spelled that way — and this "
+        f"path does not infer them yet. Its demand pipeline reads type arguments "
+        f"off an explicit bracket, so a bare call arrives here with no "
+        f"instantiation to bind; the inference, the 123 measured files it is "
+        f"worth, and the shape of the missing piece are in "
+        f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
+        f"So write the operation in this module, or call a public function that "
+        f"does it — which is the same program with a definition this image can "
+        f"bind. Spelling it `{name}[<a type>](…)` will carry the instantiation, "
+        f"and is a workaround for this gap rather than a correction to your code")
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,

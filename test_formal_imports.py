@@ -3718,6 +3718,42 @@ def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared
           f"{text.strip()[-300:]}")
 
 
+DECLARES_NOTHING_ELSE_MODULE = (
+    "def present() -> Int:\n  return 1\n")
+
+
+def test_a_callee_the_module_declares_nowhere_names_that(tmpdir, _shared):
+    """`from time import now` where `time` has no `now` is refused by name.
+
+    `imported_callee_refusal` used to enumerate the four `doc/ABI.md`
+    exclusions whatever the module actually contained, so a reader of
+    `runtime/stdlib_wrapper.mojo` (`from time import now, sleep`) was sent to
+    look for an underscore, a bracket, a second definition or a libSystem name
+    in `formal/hostmods/time.mojo`, which has none of them. The rule is now read
+    from the defining module's own source (`model.export_rule_for` →
+    `reflect.export_exclusions`), and a name the module declares nowhere gets
+    the one sentence that is true of it — and NOT the enumeration, which is the
+    half that sent the reader after three constructs the file does not contain.
+    """
+    root = os.path.join(tmpdir, "declares_nowhere")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": DECLARES_NOTHING_ELSE_MODULE,
+                      "prog.mojo": "from mylib import absent\n"
+                                   "def main() -> Int:\n  return absent()\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a call to a name the module declares nowhere built successfully")
+    check("declares no `absent`" in text,
+          f"the refusal does not say the module declares no such name, which is "
+          f"the fact that decides it: {text.strip()[-300:]}")
+    check("a name with a leading `_` is private" not in text
+          and "generic template is not one symbol" not in text,
+          f"the refusal still enumerates the four exclusions for a name none of "
+          f"them applies to: {text.strip()[-300:]}")
+
+
 METHOD_CALL_MODULE = (
     "def widen[T: Intable](v: T) -> T:\n  return v\n")
 
@@ -5160,6 +5196,8 @@ TESTS = [
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",
      test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store),
+    ("a callee the module declares nowhere is told so, not the four rules",
+     test_a_callee_the_module_declares_nowhere_names_that),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a constants-only module is not told nothing could be added",
