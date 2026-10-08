@@ -54,19 +54,24 @@ reason that is not a choice:
   `call` can live that no proof layer walks. That is exactly what x86-64 does
   (`x86_64_codegen.py::_emit_stack_floor_init`) and it works there.
 
-Until this is fixed, arm64 keeps a **compile-time** stack budget. A budget larger
-than the process's real stack never fires, so arm64 SIGSEGVs (exit 139) under a
-reduced `ulimit -s` where x86-64 refuses with exit 2. Measured, at
-`ulimit -s 2048`, both depths:
+Until the startup-stub placement is fixed, arm64's `getrlimit` read stays in the
+guard's own prologue. **It works there, so this no longer costs a reduced-`ulimit`
+SIGSEGV.** The read used to park `getrlimit`'s RETURN value (0 on success) as the
+limit instead of loading `rlim_cur` out of the struct the call filled, which made
+every budget the compile-time 7.5 MiB cap and left the guard silent under a
+reduced `ulimit -s`; that is fixed (2026-10-08), so under `ulimit -s 2048` both
+backends refuse a too-deep recursion with exit 2 rather than arm64 dying of
+SIGSEGV. The two rows are the `reduced_stack_*` cases in `test_formal_run.py`,
+they run on BOTH backends (the arm64 DEFERRAL is gone), and the depth each names
+is the one its own frame makes meaningful — 128 KiB arm64 vs 16 KiB x86-64:
 
-| depth | x86-64 | arm64 |
+| depth (arm64) | before | now |
 |---|---|---|
-| 100 | prints 100, exit 0 | SIGSEGV (139) |
-| 5000 | message on stderr, exit 2 | SIGSEGV (139) |
+| 8 | prints 8, exit 0 | prints 8, exit 0 |
+| 5000 | SIGSEGV (139) | message on stderr, exit 2 |
 
-Those two rows are the `reduced_stack_*` cases in `test_formal_run.py`, and they
-are declared DEFERRED for arm64 in `_REDUCED_STACK_DEFERRED` with this doc as the
-reason — reported on screen, counted in neither PASS nor FAIL.
+What is left for this doc is the startup-stub placement alone, and it no longer
+gates the stack-floor read: the prologue is a working home for it.
 
 ## Expected
 
