@@ -1549,7 +1549,16 @@ def _emit_reflection_dispatch(self, parts):
         boxed = self.struct_boxed_fields.get(sn, set())
         bool_fields = self.struct_bool_fields.get(sn, set())
         nullable_containers = self.struct_nullable_container_fields.get(sn, set())
-        part_exprs = []
+        # Three PARALLEL lists of strings, not one list of `(name_lit, expr,
+        # owned)` triples: the self-hosted path boxes a tuple's slots to int64_t,
+        # so `for i, (name_lit, val_e, own) in enumerate(part_exprs)` handed the
+        # emitting f-strings three POINTERS and every compiled `_mojo_repr_<S>`
+        # came out as `mojo_str_cat_free(_buf, 516520174288);` -- not even valid
+        # C. `owned` is a code in the same spirit: 'T' the dump owns the string,
+        # 'F' a literal it must not free, 'I<cond>' owned only when <cond> holds.
+        pe_names: list = []
+        pe_vals: list = []
+        pe_owns: list = []
         # `owned` is the answer to ONE question per field: is the string this
         # field's expression produces a heap buffer the dump owns? It cannot be
         # derived from the emitted text afterwards, because the shapes differ in
@@ -1577,21 +1586,21 @@ def _emit_reflection_dispatch(self, parts):
             # through to the ordinary int repr.
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
-                owned = False
+                owned = 'F'
             elif fname in boxed and ftype in (
                     'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
-                owned = True
+                owned = 'T'
             elif ftype == 'char *':
                 val_expr = f'({fref} ? mojo_repr_str({fref}) : _mojo_repr_none())'
-                owned = True
+                owned = 'T'
             elif ftype == '_Bool':
                 val_expr = f'({fref} ? "True" : "False")'
-                owned = False
+                owned = 'F'
             elif ftype in ('double', 'float'):
                 val_expr = f'mojo_repr_float((double){fref})'
-                owned = True
+                owned = 'T'
             elif ftype == 'MojoList *':
                 if self._field_elem_types.get(sn, {}).get(fname) == 'double':
                     list_repr = f'mojo_repr_list_doubles({fref})'
@@ -1599,24 +1608,24 @@ def _emit_reflection_dispatch(self, parts):
                     list_repr = f'_mojo_repr_list({fref})'
                 if fname in nullable_containers:
                     val_expr = f'({fref} ? {list_repr} : _mojo_repr_none())'
-                    owned = True
+                    owned = 'T'
                 else:
                     val_expr = list_repr
                     # A null list renders as a LITERAL `"[]"`/`"()"` in every
                     # `mojo_repr_list_*` helper, so the dump owns this field's
                     # string only when the pointer is there to make it.
-                    owned = ('if', fref)
+                    owned = 'I' + fref
             elif ftype == 'MojoDict *':
                 if fname in nullable_containers:
                     val_expr = f'({fref} ? _mojo_repr_dict({fref}) : _mojo_repr_none())'
-                    owned = True
+                    owned = 'T'
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
-                    owned = ('if', fref)
+                    owned = 'I' + fref
             elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
-                owned = True
+                owned = 'T'
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
                 # reflected is rendered through that struct's ELEMENT REPR
@@ -1631,7 +1640,7 @@ def _emit_reflection_dispatch(self, parts):
                 if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
                                 f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
-                    owned = True
+                    owned = 'T'
                 else:
                     # `strdup` around the dispatch, and this is the same remedy
                     # `_mojo_repr_dict` applies to its two non-owned answers (and
@@ -1644,11 +1653,13 @@ def _emit_reflection_dispatch(self, parts):
                     # `repr()` site) also has no release point for.
                     val_expr = (f'({fref} ? strdup(_mojo_dispatch_repr((void *){fref}))'
                                 f' : _mojo_repr_none())')
-                    owned = True
+                    owned = 'T'
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
-                owned = True
-            part_exprs.append((f'"{fname}="', val_expr, owned))
+                owned = 'T'
+            pe_names.append(f'"{fname}="')
+            pe_vals.append(val_expr)
+            pe_owns.append(owned)
         # The body is STATEMENTS, not one nested `return`, whenever at least one
         # field's string is the dump's to release: GIMPLE has no comma operator,
         # so a per-field `free()` cannot live inside the expression that cats it,
@@ -1656,14 +1667,18 @@ def _emit_reflection_dispatch(self, parts):
         # `_mojo_repr_dict` and `_mojo_repr_list` already use for exactly this
         # reason. A struct with no owned field keeps the old single-expression
         # body, so nothing that cannot leak here is churned.
-        _any_owned = any(_o is not False for _n, _v, _o in part_exprs)
+        _any_owned = False
+        for _own_i in range(len(pe_owns)):
+            if _as_str(pe_owns[_own_i]) != 'F':
+                _any_owned = True
         if not _any_owned:
             cat_chain = f'strdup("{sn}(")'
-            for i, pe in enumerate(part_exprs):
+            for i in range(len(pe_names)):
                 sep = ', ' if i > 0 else ''
                 if sep:
                     cat_chain = f'mojo_str_cat_free({cat_chain}, ", ")'
-                name_lit, val_e, _own = pe
+                name_lit = _as_str(pe_names[i])
+                val_e = _as_str(pe_vals[i])
                 cat_chain = f'mojo_str_cat_free({cat_chain}, {name_lit})'
                 cat_chain = f'mojo_str_cat_free({cat_chain}, {val_e})'
             cat_chain = f'mojo_str_cat_free({cat_chain}, ")")'
@@ -1673,17 +1688,20 @@ def _emit_reflection_dispatch(self, parts):
             body_lines.append(f'  if (!obj) return strdup("None");')
             body_lines.append(f'  char *_buf = strdup("{sn}(");')
             body_lines.append('  char *_v;')
-            for i, (name_lit, val_e, own) in enumerate(part_exprs):
+            for i in range(len(pe_names)):
+                name_lit = _as_str(pe_names[i])
+                val_e = _as_str(pe_vals[i])
+                own = _as_str(pe_owns[i])
                 if i > 0:
                     body_lines.append(f'  _buf = mojo_str_cat_free(_buf, ", ");')
                 body_lines.append(f'  _buf = mojo_str_cat_free(_buf, {name_lit});')
                 body_lines.append(f'  _v = {val_e};')
                 body_lines.append('  _buf = mojo_str_cat_free(_buf, _v);')
-                if own is True:
+                if own == 'T':
                     body_lines.append('  free(_v);')
-                elif isinstance(own, tuple) and own and own[0] == 'if':
-                    body_lines.append(f'  if ({own[1]}) free(_v);')
-                elif own is False:
+                elif own.startswith('I'):
+                    body_lines.append(f'  if ({own[1:]}) free(_v);')
+                elif own == 'F':
                     # A LITERAL, and the only shape that is not ours to free.
                     # Its own answer, at the site that knows it.
                     body_lines.append('  /* a string literal: not ours to free */')
@@ -2801,8 +2819,7 @@ def gen_module_impl(self, stmts):
     # would emit its own copy -- which is the bug this fixes: a single-TU
     # closure carries ~160 modules, and 18 redefinitions of
     # `_mojo_gpu_kernel_count` failed `mojoc` and `selfhost` outright.
-    _mg_introspected = self.__dict__.setdefault(
-        '_mg_introspection_emitted', set())
+    _mg_introspected = self._mg_introspection_emitted
     _device_names = sorted(n for n, k in _device_kinds.items()
                            if k == _gmi_device_select.DEVICE)
     # The host-side marshalling signature of every device kernel, computed
@@ -4126,6 +4143,13 @@ def gen_module_impl(self, stmts):
         'param_defaults': 'MojoDict *',
         'kwonly': 'MojoList *',
         'comptime_params': 'MojoList *',
+        # The two bracket-parameter tables the dataclass grew AFTER this table
+        # was written. A field missing here is a field the compiled `repr` never
+        # prints (`comptime_param_defaults={}, comptime_param_annotations={}`),
+        # so every `.ast` the self-hosted binary wrote differed from the
+        # reference's at the first `FunctionDef`.
+        'comptime_param_defaults': 'MojoDict *',
+        'comptime_param_annotations': 'MojoDict *',
         'is_generator': '_Bool',
         'yield_bearing_node_ids': 'int64_t',
         'is_async': '_Bool',
@@ -7125,43 +7149,6 @@ def gen_module_impl(self, stmts):
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
-    # NAMES BOUND INSIDE A NESTED `def` OF A CALLER. `_calls_in_stmts` walks
-    # into nested function bodies and attributes every call it finds there to
-    # the ENCLOSING function, so an identifier argument of such a call was
-    # resolved against the enclosing function's locals -- but inside the nested
-    # body that name may be the nested function's own parameter or local, a
-    # different variable that merely shares the spelling. Real, and the cause of
-    # the self-hosted compiler dying on every input that defines a function:
-    # `gen_module_impl`'s nested `_mkrf(name, body, ...)` calls
-    # `_infer_multi_kind_return(self, body, ...)`, `gen_module_impl` has its own
-    # string local called `body`, and the observation "call site passes a
-    # `char *`" typed `_infer_multi_kind_return`'s list parameter `char *` --
-    # whereupon every call coerced the AST list through `mojo_cstr_or_int_str`
-    # into the text of its repr. An enclosing-scope answer for a shadowed name
-    # is not evidence about this call, so it contributes nothing. Keyed
-    # "<caller>\x1f<name>" rather than a dict of sets: the self-hosted path
-    # cannot type the inner container (see `_scalar_obs` below).
-    _nested_bound: dict = {}
-    _nested_bound_ready: dict = {}
-
-    def _nested_binds(caller_name, name) -> bool:
-        _nb_c = _as_str(caller_name)
-        if _nb_c not in _nested_bound_ready:
-            _nested_bound_ready[_nb_c] = True
-            for _nb_entry in _caller_bodies:
-                if _as_str(_nb_entry[0]) != _nb_c:
-                    continue
-                for _nb_node in _walk_ast(_nb_entry[1]):
-                    if not isinstance(_nb_node, FunctionDef):
-                        continue
-                    _nb_fd = _as_funcdef_node(_nb_node)
-                    for _nb_i in range(len(_nb_fd.params or [])):
-                        _nested_bound[_nb_c + '\x1f' + _as_str(_nb_fd.params[_nb_i][0])] = True
-                    for _nb_inner in _walk_ast(_nb_fd.body):
-                        if isinstance(_nb_inner, AssignStmt) and isinstance(_nb_inner.target, IdentExpr):
-                            _nested_bound[_nb_c + '\x1f' + _as_str(_nb_inner.target.name)] = True
-        return (_nb_c + '\x1f' + _as_str(name)) in _nested_bound
-
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
         """Observed scalar C type of one call argument, or None.
@@ -7213,8 +7200,6 @@ def gen_module_impl(self, stmts):
             # cross-call scalar contract never saw a caller local's type.
             _cn = _as_str(caller_name)
             _an = _as_str(a.name)
-            if _nested_binds(_cn, _an):
-                return None
             t = self._inferred_var_types.get(_cn, {}).get(_an)
             if prefer_refined_param:
                 _pt = self._inferred_param_types.get(_cn, {}).get(_an)
@@ -13780,12 +13765,12 @@ def gen_module_impl(self, stmts):
             ret_type = sym_info.get('return_type', 'int64_t')
             ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
             if ret_type == 'void':
-                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
+                _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
             else:
-                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
             _stub_only_guard = _stub_guard_name(cname)
             parts.append(f"#ifndef {_stub_only_guard}\n#define {_stub_only_guard}\n"
-                          f"{ret_type} {cname} () {body}  /* stub from {module} */\n#endif")
+                          f"{ret_type} {cname} () {_stub_body}  /* stub from {module} */\n#endif")
             continue
 
         safe = self._func_csym(_as_str(sym_name))
@@ -13856,12 +13841,12 @@ def gen_module_impl(self, stmts):
                     continue
                 self._emitted_unresolved_stub_syms.add(safe)
                 if ret_type == 'void':
-                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
+                    _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
                 else:
-                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                    _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
                 _unresolved_guard = _stub_guard_name(safe)
                 parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
-                              f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
+                              f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
             else:
                 parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
@@ -14803,7 +14788,12 @@ def gen_module_impl(self, stmts):
         # kernel-free module later in the closure emits EMPTY_SIDECAR and the
         # two collide. Measured: 2 definitions, `mojoc` and `selfhost` red.
         _mg_introspected.add('definitions')
-    elif not _mg_introspected:
+    elif len(_mg_introspected) == 0:
+        # `len(...) == 0`, not `not _mg_introspected`: the shared set arrives
+        # through an erased local on the self-hosted path, where a bare truth
+        # test is a pointer-nullity check -- true for an EMPTY set -- so the
+        # empty sidecar (the four weak `_mojo_gpu_*` introspection entry
+        # points) was never emitted and every stage2 `.ci` lost its tail.
         # No device code in this module -- an ordinary module, or one compiled
         # with `--no-gpu` and no marked kernels. Emit the introspection entry
         # points anyway, reporting 0. Without them a program that ASKS whether

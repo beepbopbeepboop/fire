@@ -1475,10 +1475,16 @@ def _struct_type_id(name: str) -> int:
     i = 0
     n = len(name)
     while i < n:
-        c = name[i]
-        if isinstance(c, str):
-            c = ord(c)
-        h = h * 31 + c & 2147483647
+        # Two names, not one rebound: `c = name[i]` is a `char *` and `c = ord(c)`
+        # an int, and the compiled path fixes a local's C type at its first
+        # binding -- so `h * 31 + c` was lowered as a STRING CONCATENATION
+        # (`mojo_str_cat (str(h*31), c)`) and every struct tag the self-hosted
+        # compiler computed differed from the reference's (`Point` = 77292912
+        # in CPython, 1025687760 compiled), which is why no stage2 `.ci`
+        # could ever equal stage1's.
+        _ch = name[i]
+        _code = ord(_ch)
+        h = h * 31 + _code & 2147483647
         i = i + 1
     return h
 

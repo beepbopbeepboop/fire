@@ -2432,31 +2432,12 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # tokenizer and the parser made `.tok`/`.ast` byte-identical and moved the
 # failure into the compiled codegen, where it is loud.
 #
-# `expect=` IS here, and it is COUNT-CHECKED, because this fanout is RED:
-# measured 2026-10-04, 43 of the 46 items exit non-zero (45 of them before
-# `mojo_id` closed the `TypeError` class) and only `mojo_failures.mojo`,
-# `t1.mojo` and `bootstrap_test_single_expr.mojo` pass. See the 2026-10-04 entry in the history block
-# above for why the "this fanout cannot see the class" reasoning that retired
-# the marker on 2026-10-03 stopped being true: the compiled binary no longer
-# writes a silent empty `.ci`, it fails. The count is what makes the marker a
-# claim rather than a category — as items go green this has to be updated (or
-# dropped, which the runner says out loud), and a NEW failure inside the
-# already-marked sweep is a FAILURE rather than an absorbed EXPECTED.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
-              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — all 40 '
-              'die on SIGSEGV/SIGABRT/SIGBUS with no diagnostic, which is the '
-              'whole of what is left (the loud classes are gone: no more '
-              '`TypeError: unhashable type: \'list\'`, no more `Unexpected '
-              'SEMICOLON`). Re-measured 2026-10-04: 45 of 46 before `mojo_id` '
-              'closed the TypeError class, 43 before the struct-tag read was '
-              'validated. See '
-              'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or

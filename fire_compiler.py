@@ -1458,6 +1458,16 @@ class Token:
     line: int = 0
     col: int = 0
 
+
+def format_token(tok: Token) -> str:
+    """One token's line in the `.tok` dump. A typed, top-level function (and
+    not a nested `def format_token(tok)` inside `fire.py`'s `--dump` handler):
+    with `tok` untyped, `tok.kind` was a dynamic read of a word, and the
+    self-hosted binary printed it as a DECIMAL (`Token(kind=4382844720, ...)`)
+    into every `.tok` it wrote, so no stage2 `.tok` could equal stage1's."""
+    val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
+    return f"Token(kind={tok.kind}, value={val_repr}, line={tok.line}, col={tok.col})"
+
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
     """Remove trailing # comment, respecting quoted strings (including backtick strings and f/r/b prefixes)."""

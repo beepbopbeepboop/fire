@@ -1975,6 +1975,15 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
+        # Which per-translation-unit device-introspection definitions have been
+        # emitted ('definitions' once the empty or full sidecar is out) -- shared
+        # by reference with every nested temp_gen (emit_resolve), exactly like
+        # `_emitted_ptr_helpers` just above. A declared field, NOT created on
+        # demand through `self.__dict__.setdefault(...)`: a compiled struct has no
+        # `__dict__`, so the self-hosted binary never saw the set, never emitted
+        # the four weak `_mojo_gpu_*` entry points, and every `.ci` it wrote lost
+        # its tail.
+        self._mg_introspection_emitted: set = set()
         # Same, for the device-side pack/unpack pairs. Initialised HERE, not
         # lazily, because `emit_resolve` reads it off the parent gen to share
         # it with each temp_gen -- a lazily-created attribute does not exist on
