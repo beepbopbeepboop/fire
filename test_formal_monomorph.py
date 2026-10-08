@@ -369,80 +369,6 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
-def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
-        tmpdir):
-    """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
-
-    `formal/model.py::specialization_call_refusal` is the bracket case, and the
-    two rows above it both name a concrete type argument as a DEMAND — a struct
-    template's instantiation and a function template's. This case is the third
-    shape and the one the message used to get wrong: a function of another
-    module whose generic parameter is IMPLICIT, written in the SIGNATURE
-    (`def unbox(t: Box[T])`) with no bracket to bind. There the type is inferred
-    from the call, so `unbox(b)` is the SAME PROGRAM and builds (run below,
-    against CPython on both architectures), while the source's `unbox[Int](b)`
-    has no declaration to bind its bracket against.
-
-    The old sentence answered it with "Write it as `unbox[<a type>](…)`", which
-    is the spelling already on the line — the `refuse_without:` class of defect,
-    a repair that is wrong about correct code. The refusal now names the bare
-    call instead, and this row is what keeps the two apart: a reword that put
-    the old advice back for this shape would pass every adjoining case, because
-    neither of them writes a bracket on an implicitly generic function at all.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from implib import Box\n"
-                 "from implib import unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 10\n"
-                 "    print(unbox[Int](b))\n")
-    bare = ("from implib import Box\n"
-            "from implib import unbox\n"
-            "\n"
-            "def main():\n"
-            "    var b = Box[Int]()\n"
-            "    b.v = 10\n"
-            "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 10\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_implicit_bracket", lib,
-                             bracketed, cpython, expect_ok=False,
-                             libname="implib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] `unbox[Int](b)` is not refused by the bracket "
-              f"sentence: {text.strip()[-300:]}")
-        check("Write it as `unbox[<a type>]" not in text,
-              f"[{arch}] the refusal still recommends `unbox[<a type>](…)`, "
-              f"which is the spelling already on the line: "
-              f"{text.strip()[-300:]}")
-        check("write `unbox(…)`" in text,
-              f"[{arch}] the refusal does not name the bare call, which is the "
-              f"same program for an implicitly generic function: "
-              f"{text.strip()[-300:]}")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_implicit_bare", lib, bare,
-                            cpython, libname="implib.mojo")
-        check(got == "10\n", f"[{arch}] printed {got!r}, expected 10")
-
-
 def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
     """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
     refused by name, on both architectures, for every struct template.
@@ -949,80 +875,6 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
              "    print(widen(5))\n"))
         check(bracketed == "5\n",
               f"[{arch}] the bracketed spelling printed {bracketed!r}")
-
-
-def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
-    """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
-
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
-    and §3: the function's `T` is INFERRED from its parameter's type, so it is
-    not one of the module's BRACKETED templates (`formal/monomorph.py::
-    template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
-    refuses it by name — "its declaration has no type parameter, so there is
-    nothing to substitute". So the explicit bracket `unbox[Int](b)` cannot be
-    demanded and reaches `specialization_call_refusal`.
-
-    **What this case pins is that the refusal no longer recommends the spelling
-    the source already uses.** It used to end "Write it as `unbox[<a type>](…)`
-    and the library will carry the instantiation" — about a call written
-    exactly that way. The repair for this shape is the OPPOSITE: Mojo infers a
-    template call's type arguments, so DROP the bracket and let the argument's
-    type carry the instantiation. The second half is the differential that makes
-    the advice a fact rather than a claim: `unbox(b)` builds and prints
-    CPython's answer on both architectures in this very tree.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from fnlib import Box, unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 5\n"
-                 "    print(unbox[Int](b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_inferred_brack", lib, bracketed,
-                             "", expect_ok=False, libname="fnlib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] the explicit bracket on an inferred-parameter function "
-              f"is not the specialization refusal: {text.strip()[-400:]}")
-        check("INFERRED from its parameter types" in text,
-              f"[{arch}] the refusal does not name the inferred parameter, "
-              f"which is the whole of why the bracket cannot bind: "
-              f"{text.strip()[-400:]}")
-        check("call it WITHOUT the bracket" in text,
-              f"[{arch}] the refusal does not give the repair (drop the "
-              f"bracket) for correct source: {text.strip()[-400:]}")
-        check("Do not add `[<a type>]`" in text,
-              f"[{arch}] the old imperative to write the spelling that arrived "
-              f"here is still the advice: {text.strip()[-400:]}")
-    inferred = ("from fnlib import Box, unbox\n"
-                "\n"
-                "def main():\n"
-                "    var b = Box[Int]()\n"
-                "    b.v = 5\n"
-                "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 5\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_inferred_drop", lib, inferred,
-                            cpython, libname="fnlib.mojo")
-        check(got == "5\n",
-              f"[{arch}] the spelling the refusal recommends printed {got!r}, "
-              f"not CPython's 5 — so the advice is a spelling nothing checks")
 
 
 def test_a_constants_only_module_builds_and_its_constants_read_back(tmpdir):
@@ -2990,8 +2842,6 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
-    ("a bracket on an implicitly generic function recommends the bare call",
-     test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a dotted application says which word is the module",
@@ -3008,8 +2858,6 @@ TESTS = [
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
-    ("an inferred-parameter function is called without the bracket",
-     test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",

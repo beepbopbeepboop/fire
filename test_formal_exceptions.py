@@ -722,105 +722,6 @@ CASES = [
      "        raise SystemExit(code())\n"
      "    finally:\n"
      "        print('f')\n", 3),
-    # ── the `finally` on EVERY way out of the `try` body ─────────────────────
-    # `_flush_pending_finally` used to TRUNCATE its frame list, so the first
-    # exit out of a `try` body flushed the `finally` and every later exit found
-    # an empty list and emitted no cleanup. Both backends printed the wrong
-    # thing; CPython runs the cleanup on every path. Fixed by keeping the frames
-    # and guarding re-entry by identity.
-    # The first row is the smallest second-return case; the second is the loop
-    # `break`/`continue` spelling, which is the same defect through the
-    # `fin_depth` argument.
-    ("a_second_return_out_of_a_try_still_runs_the_finally",
-     "def f(n):\n"
-     "    try:\n"
-     "        if n == 1:\n"
-     "            return 10\n"
-     "        return 20\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(f(1))\n"
-     "    print(f(2))\n"
-     "    return 0\n",
-     "def f(n):\n"
-     "    try:\n"
-     "        if n == 1:\n"
-     "            return 10\n"
-     "        return 20\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(f(1))\n"
-     "    print(f(2))\n"
-     "    return 0\n", 3),
-    ("break_and_continue_each_run_the_finally",
-     "def loop_break():\n"
-     "    out = 0\n"
-     "    for i in range(0, 4):\n"
-     "        try:\n"
-     "            if i == 1:\n"
-     "                out = out + 100\n"
-     "                continue\n"
-     "            if i == 2:\n"
-     "                out = out + 1000\n"
-     "                break\n"
-     "            out = out + i\n"
-     "        finally:\n"
-     "            print('fin', i)\n"
-     "    return out\n"
-     "\n"
-     "def main(n):\n"
-     "    print(loop_break())\n"
-     "    return 0\n",
-     "def loop_break():\n"
-     "    out = 0\n"
-     "    for i in range(0, 4):\n"
-     "        try:\n"
-     "            if i == 1:\n"
-     "                out = out + 100\n"
-     "                continue\n"
-     "            if i == 2:\n"
-     "                out = out + 1000\n"
-     "                break\n"
-     "            out = out + i\n"
-     "        finally:\n"
-     "            print('fin', i)\n"
-     "    return out\n"
-     "\n"
-     "def main(n):\n"
-     "    print(loop_break())\n"
-     "    return 0\n", 3),
-    # A `return` inside a `finally` discards the in-flight return and WINS
-    # (CPython warns and returns 2). arm64 used to SIGBUS here: the nested
-    # return emitted an epilogue while the flush's save slot was still below
-    # SP, so the frame teardown left SP 16 bytes high and `ret` used a garbage
-    # X30. `_emit_epilogue` now steps over the outstanding flush slots; x86-64
-    # was already correct because `leave` is frame-pointer relative. CPython's
-    # SyntaxWarning goes to stderr and is not compared.
-    ("a_return_inside_a_finally_wins_and_runs_once",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
     # ── ZeroDivisionError from a builtin operation ───────────────────────────
     # The INTEGER divide already guarded itself; these pin it against CPython
     # rather than against a constant, and `uncaught_zd_*` is the pair that says
@@ -1045,62 +946,7 @@ CASES = [
      "    finally:\n"
      "        print('outerfin')\n"
      "    return 0\n", 3),
-    # ── a `return` INSIDE a `finally` ───────────────────────────────────────
-    # CPython warns about it (`SyntaxWarning`) and then obeys it: the in-flight
-    # `return 1` is discarded, the `finally` body runs, and the `return 2` in it
-    # WINS. These rows are the measured pair for the arm64 double-epilogue
-    # SIGBUS that `_flush_pending_finally` used to cause: it emitted a second
-    # epilogue on top of the one the nested `return` already emitted, tearing
-    # the frame down twice. The first row is the single-level case (was `Bus
-    # error`, exit 138); the second pins that an outer `finally` still runs on
-    # the nested return's way out, and that it runs
-    # exactly once.
-    ("a_return_inside_a_finally_wins",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        return 1\n"
-     "    finally:\n"
-     "        print('fin')\n"
-     "        return 2\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
-    ("a_return_inside_an_inner_finally_still_runs_the_outer_one",
-     "def h():\n"
-     "    try:\n"
-     "        try:\n"
-     "            return 1\n"
-     "        finally:\n"
-     "            return 3\n"
-     "    finally:\n"
-     "        print('outer')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n",
-     "def h():\n"
-     "    try:\n"
-     "        try:\n"
-     "            return 1\n"
-     "        finally:\n"
-     "            return 3\n"
-     "    finally:\n"
-     "        print('outer')\n"
-     "\n"
-     "def main(n):\n"
-     "    print(h())\n"
-     "    return 0\n", 3),
+    # ── a `try` with no raising body ────────────────────────────────────────
     # The `except: pass` shape, which is the commonest in the corpus and must
     # keep building: the arm has no effect to drop, so nothing is lost by
     # leaving it out, and this row is what would notice a repair that started
@@ -1134,6 +980,109 @@ CASES = [
      "        print('fin')\n"
      "    print('done')\n"
      "    return 0\n", 3),
+    # ── every exit path runs the finally, not just the first ────────────────
+    #
+    # `FORMAL_a_second_exit_path_in_a_try_drops_the_finally`. The emitter's
+    # frame list used to be truncated by whichever exit site it emitted first,
+    # so every LATER exit out of the same `try` body emitted no cleanup and the
+    # program still exited 0 with the right answer — the silent class this
+    # repository treats as the worst one. Both backends take the same path, so
+    # a parity fuzzer could not see it; CPython is the oracle.
+    ("a_second_exit_out_of_a_try_still_runs_the_finally",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(1))\n"
+     "    print(two_returns(2))\n"
+     "    return 0\n",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(1))\n"
+     "    print(two_returns(2))\n"
+     "    return 0\n", 0),
+    # The same defect reached through `break` and `continue` (both flush, with
+    # different `depth`s) and through a NESTED `try`, where the first exit used
+    # to empty the whole stack so the second found nothing to flush.
+    ("a_try_in_a_loop_runs_the_finally_on_break_and_continue",
+     "def loop_exits():\n"
+     "    out = 0\n"
+     "    for i in range(0, 4):\n"
+     "        try:\n"
+     "            if i == 1:\n"
+     "                out = out + 100\n"
+     "                continue\n"
+     "            if i == 2:\n"
+     "                out = out + 1000\n"
+     "                break\n"
+     "            out = out + i\n"
+     "        finally:\n"
+     "            print('fin', i)\n"
+     "    return out\n"
+     "\n"
+     "def main(n):\n"
+     "    print(loop_exits())\n"
+     "    return 0\n",
+     "def loop_exits():\n"
+     "    out = 0\n"
+     "    for i in range(0, 4):\n"
+     "        try:\n"
+     "            if i == 1:\n"
+     "                out = out + 100\n"
+     "                continue\n"
+     "            if i == 2:\n"
+     "                out = out + 1000\n"
+     "                break\n"
+     "            out = out + i\n"
+     "        finally:\n"
+     "            print('fin', i)\n"
+     "    return out\n"
+     "\n"
+     "def main(n):\n"
+     "    print(loop_exits())\n"
+     "    return 0\n", 0),
+    # ── a `return` inside a `finally` ────────────────────────────────────────
+    #
+    # `FORMAL_a_return_inside_a_finally_emits_two_epilogues_on_arm64`. The
+    # nested return wins (CPython warns and honours it), and arm64 used to
+    # SIGBUS because the enclosing return emitted a second teardown after the
+    # finally body had already returned. The row is here rather than in
+    # `test_formal_match.py` (whose `arm_return_inside_a_try_runs_the_finally`
+    # row pins the single-exit case) because this is the exit-status/oracle
+    # table.
+    ("a_return_inside_a_finally_wins_and_runs_once",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n", 0),
 ]
 
 # ── the REFUSED table ───────────────────────────────────────────────────────

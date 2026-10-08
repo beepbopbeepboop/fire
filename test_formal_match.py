@@ -674,12 +674,10 @@ ROWS = [
     # see it. A lowering that built a separate function per arm, or that
     # lowered the arm body into a synthetic block, would skip the cleanup
     # entirely. CPython's order — the `finally` runs BEFORE the returned value
-    # reaches the caller — is what this row pins. The SECOND-exit shape that
-    # used to be separate (and was missing its `fin`) is now
-    # `second_exit_from_a_try_runs_the_finally` just below: it was pinned as a
-    # KNOWN-DEFECT row until the shared `_flush_pending_finally` stopped
-    # truncating its frame list (the second-exit path used to drop the
-    # `finally`).
+    # reaches the caller — is what this row pins. It is the single-exit case;
+    # the row below it is the second-exit case, which used to pin a wrong answer
+    # and no longer does (the `try`'s frame list is no longer consumed by the
+    # first exit, so every later exit runs the cleanup too).
     ("arm_return_inside_a_try_runs_the_finally", "def f(n):\n"
      "    try:\n"
      "        match n:\n"
@@ -696,12 +694,12 @@ ROWS = [
      "    print(f(1))\n"
      "    print('done')\n"
      "    return 0\n", ("cpython",), "module"),
-    # Every `return` out of a `try` body must run the `finally`, not only the
-    # first one the emitter happens to visit (source order). This is the row
-    # that used to carry the missing `fin` before `20`; the fix is that
-    # `_flush_pending_finally` keeps its frame list and guards re-entrancy by
-    # identity instead, so both exits emit the cleanup.
-    ("second_exit_from_a_try_runs_the_finally",
+    # The same `try` with a SECOND exit out of its body — `case _` returns too —
+    # which is the row that used to pin a wrong answer. The first exit flushed
+    # the pending `finally` and consumed the emitter's frame list, so the
+    # second emitted no cleanup; it is now a CPython row on both backends, and
+    # `KNOWN_DEFECT_ROWS` below is empty as a result.
+    ("second_exit_inside_a_try_runs_the_finally",
      "def f(n):\n"
      "    try:\n"
      "        match n:\n"
@@ -932,13 +930,14 @@ ROWS = [
 # behind.
 #
 # (name, body, the answer the image gives today, CPython's answer, the doc).
-#
-# EMPTY since 2026-10-05: the one row here
-# (`second_exit_from_a_try_drops_the_finally`) went green when the shared
-# `_flush_pending_finally` stopped truncating its frame list, and it moved to
-# `ROWS` as `second_exit_from_a_try_runs_the_finally` with a CPython oracle.
-# `judge_known_defect` stays so the next defect has a place to be pinned.
-KNOWN_DEFECT_ROWS = []
+KNOWN_DEFECT_ROWS = [
+    # EMPTY, deliberately. Its one row pinned the wrong answer for
+    # `FORMAL_a_second_exit_path_in_a_try_drops_the_finally`; that fix landed
+    # and the row moved to `ROWS` as `second_exit_inside_a_try_runs_the_finally`
+    # (verified against CPython on both backends). An empty table with this note
+    # is the honest state: leaving the row here would pin the answer a fix has
+    # already changed.
+]
 
 
 # ── the Lean model: is a `match` as PROVABLE as the `if` it lowers to? ─────────
@@ -1075,6 +1074,30 @@ def _want(want, backend):
         if isinstance(want, dict) else want
 
 
+def judge_known_defect(row, tmpdir):
+    """One KNOWN-DEFECT row: the image's CURRENT stdout, on both backends.
+
+    Deliberately not compared with an oracle. A row that pins a wrong answer
+    cannot be compared with the right one — that is the failure it documents —
+    so it states the wrong answer, and says so in a comment beside CPython's.
+    Both architectures must produce the SAME wrong answer, because the defect
+    is in the shared `_flush_pending_finally` and a per-backend difference here
+    would mean something else is also wrong.
+    """
+    name, body, want, cpython, doc = row
+    source = mod_prog(body)
+    for backend in BACKENDS:
+        res = build_run(tmpdir, name, source, backend)
+        tag = "[%s] %s" % (backend, name)
+        if res[0] == "BUILD-FAIL":
+            check(False, tag + " builds", res[1][-400:])
+            continue
+        check((res[1], res[2]) == (want, 0),
+              tag + " still prints the documented wrong answer (%s)" % doc,
+              "printed %r exit %d; the pinned answer is %r (CPython: %r)"
+              % (res[1], res[2], want, cpython))
+
+
 def judge(name, backend, res, want, tmpdir, source):
     tag = "[%s] %s" % (backend, name)
     if res[0] == "BUILD-FAIL":
@@ -1200,6 +1223,8 @@ def main():
         rows = [(i, r) for i, r in rows if i == args.only_row]
     if args.substring:
         rows = [(i, r) for i, r in rows if args.substring in r[0]]
+    if not args.substring and args.only_row is None:
+        rows += [(1000 + i, r) for i, r in enumerate(KNOWN_DEFECT_ROWS)]
 
     ready, why_not = (False, "--no-lean") if args.no_lean \
         else _lean_ready()
@@ -1215,6 +1240,9 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="formal-match-") as tmp:
         for i, row in rows:
+            if i >= 1000:
+                judge_known_defect(row, tmp)
+                continue
             name, want = row[0], row[2]
             source = row_source(row)
             for backend in BACKENDS:
@@ -1225,8 +1253,9 @@ def main():
         check_proofs(tmp, PROOF_PAIRS, ready and not args.no_lean)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
-    print("%d/%d verdicts passed over %d rows"
-          % (passed, len(RESULTS), len(rows)))
+    print("%d/%d verdicts passed over %d rows (%d of them pinning a known "
+          "wrong answer)"
+          % (passed, len(RESULTS), len(rows), len(KNOWN_DEFECT_ROWS)))
     return 0 if passed == len(RESULTS) else 1
 
 
