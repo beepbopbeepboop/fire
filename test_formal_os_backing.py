@@ -256,6 +256,25 @@ def main(n):
     {"a": "1000", "b": "2000", "c": "3000", "d": "0"},
 ))
 
+# A SIGNED pointee, so the load has to sign-extend rather than zero-extend. A
+# four-byte load into a one-word value has to choose, and `q[0] = -2`
+# zero-extended reads back as 4294967294: the same bytes, a different number.
+# `p.value()` has sign-extended through `_emit_dereference` all along; this is
+# the pin that `p[i]` does too, and the read and the store share one width.
+CASES.append(Case(
+    "pointer_subscript_i32_signed",
+    '''\
+def main(n):
+    var q: Pointer[Int32] = malloc(16)
+    q[0] = 0 - 2
+    q[1] = 2000000000
+    printf("a=%d@@", q[0])
+    printf("b=%d@@", q[1])
+    return 0
+''',
+    {"a": "-2", "b": "2000000000"},
+))
+
 CASES.append(Case(
     "pointer_subscript_i64",
     '''\
