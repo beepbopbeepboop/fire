@@ -14607,6 +14607,49 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _export_rule_for(module: str, name: str, link_line):
+    """Which `doc/ABI.md` export rule kept `name` off `module`'s boundary.
+
+    The answer a refusal about a bare call needs, and it is the SAME rule the
+    export table was built by (`reflect.export_exclusions`) rather than a
+    second statement of it: `_module_published_names` says the name is not
+    published, and this says WHY, from the defining module's own source.  The
+    source travels in the library's manifest and reaches here through
+    `dylib_export_lists` — the manifest records it for exactly this kind of
+    reader (`_imported_structs` reads a struct declaration back out of one).
+
+    Returns one of `reflect`'s `EXCL_*` constants, `model.EXPORT_RULE_DECLARED`
+    (the file names the declaration but no rule excluded it from the export set
+    — an alias, or a shape this path does not emit), `model.EXPORT_RULE_ABSENT`
+    (the file never names it), or `None` when the source cannot be consulted
+    (no library for `module`, or no `source` in its manifest), which is the
+    caller's cue to fall back to the unqualified sentence rather than invent a
+    rule.  `None` is the only "I could not look" answer; a looked-at file never
+    returns it.
+    """
+    if not link_line or not module:
+        return None
+    source = None
+    for lib in dylib_export_lists(link_line):
+        if lib.get("module") == module:
+            source = lib.get("source")
+            break
+    if not source:
+        return None
+    try:
+        with open(source, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    import reflect                              # lazy, as in _export_entries
+    excluded = reflect.export_exclusions(text)
+    if name in excluded:
+        return excluded[name]
+    if name in reflect.declared_names(text):
+        return M.EXPORT_RULE_DECLARED
+    return M.EXPORT_RULE_ABSENT
+
+
 def _module_published_variables(module: str, link_line) -> set:
     """The module-level names the library built for `module` treats as VARIABLES.
 
@@ -20430,6 +20473,7 @@ def dylib_export_lists(dylibs: list) -> list:
     which of the two shapes it is (`model.dylib_module_variables`,
     `model.dylib_module_containers`)."""
     return [{"module": d.get("module") or "",
+             "source": d.get("source"),
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},

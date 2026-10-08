@@ -232,7 +232,9 @@ the frame receiver), `globals` (module-level `__DATA` slots, read through a
 local and written by a helper through its own `global`), `generics` (`def
 f[T](x: T, …)` called at more than one type, which is what monomorphisation
 acts on), `environ` (`os.getenv` against a FIXED process environment,
-`FIXED_ENV`).
+`FIXED_ENV`, drawn through the operations the foreign bytes support — `print`,
+`==`/`!=` and `is None`; `len` of them is the byte-vs-character refusal, so it
+is deliberately not drawn).
 
 The value-model half: `strings` (binding, `len`, comparison, the byte
 subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
@@ -5453,6 +5455,14 @@ def classify(results, want_exit, want_out, args):
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
+        # Counted apart from the mismatches on purpose: `trapped` is the
+        # stack-floor guard refusing, and the guard bounds a BYTE budget
+        # (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`) against frames that are
+        # 128 KiB on arm64 and 16 KiB on x86-64 — so the same program runs 8x
+        # deeper on x86-64 (`model.stack_floor_depth`: 60 vs 480), and a pair
+        # where one machine answers and the other traps is that budget, not two
+        # backends disagreeing about the language. Reporting it as an ordinary
+        # parity finding would file the frame size on every sweep.
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend

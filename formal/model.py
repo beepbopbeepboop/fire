@@ -44923,26 +44923,22 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
             f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
-            f"A generic template's instantiations ARE compiled into that "
-            f"module's library when an importer asks for them "
-            f"(`formal/monomorph.py`), so this call is one that asked for "
-            f"none — it names no type argument, or names one that is a value "
-            f"rather than a type, or spells the template as `module.{name}`. "
-            f"**If the call names no type argument at all, the SOURCE is right "
-            f"and this path is short**: Mojo infers a template call's type "
-            f"arguments, so `{name}(…)` with no bracket is correct code — the "
-            f"stdlib's own `FormatStruct(writer, \"Allocation\")` is spelled that "
-            f"way — and this path does not infer them yet. Its demand pipeline "
-            f"reads type arguments off an explicit bracket, so a bare call "
-            f"arrives here with no instantiation to bind; the inference, the 123 "
-            f"measured files it is worth, and the shape of the missing piece are "
-            f"in "
-            f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
-            f"So write the operation in this module, or call a public function "
-            f"that does it — which is the same program with a definition this "
-            f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
-            f"instantiation, and is a workaround for this gap rather than a "
-            f"correction to your code")
+            + _generic_inference_tail(name))
+    if clause is not None:
+        return head + (
+            f"That module does not export it, and the reason is `doc/ABI.md`'s "
+            f"export rule rather than anything about this call: {clause}. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1.")
+    return head + (
+        f"That module does not export it, and the reason is `doc/ABI.md`'s "
+        f"export rule rather than anything about this call: a name with a "
+        f"leading `_` is private, a generic template is not one symbol but one "
+        f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
+        f"both at once), an overload has no single symbol, and a C library "
+        f"name like `exit` or `write` is provided by libSystem. The exclusion "
+        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
+        f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
@@ -45574,7 +45570,38 @@ class GlobalDataImage:
 # main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
 # program dies as it does today — no worse than the defect being fixed — while a
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
+#
+# **The depth this affords is PER-ARCHITECTURE, and that is the budget's shape
+# rather than a defect of the guard.** The budget is in BYTES because the thing
+# it bounds — the stack a runaway recursion may spend before it is refused — is
+# in bytes, and it is the SAME stack on both machines. But the frames are not
+# the same size: arm64's is `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is
+# `X86_64_CONTAINER_BUDGET` (16 KiB), so the one budget is 60 frames of arm64
+# and 480 of x86-64 — 8x, the frame ratio spelled out. A DEPTH budget instead
+# would either refuse x86-64 8x earlier than it needs to, or (if sized for
+# x86-64's depth) let arm64 spend 60 MiB of a 7.5 MiB stack and crash exactly as
+# it did before the guard existed. `stack_floor_depth(arch)` is the one place
+# the per-architecture figure is computed; a harness that compares the two
+# machines' recursion depth is measuring this budget, not the compiler.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
+
+
+def stack_floor_depth(arch: str) -> int:
+    """The recursion depth `STACK_FLOOR_BUDGET_BYTES` affords on `arch`.
+
+    One budget in BYTES, two frame sizes, so the depth is per-architecture and
+    this is the single place it is derived: arm64's frame is
+    `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is `X86_64_CONTAINER_BUDGET`
+    (16 KiB), giving 60 and 480 — the 8x that is exactly the frame ratio, and a
+    property of the byte policy rather than of the guard. The MEASURED edge is
+    one or two frames below the quotient (the real frame is at least the budget,
+    and the 256 KiB margin is a level), which is why `tools/formal_fuzz.py`
+    counts a one-machine `trapped` pair apart from a parity finding.
+    """
+    arch = str(arch).replace("-", "_")
+    frame = (ARM64_CONTAINER_BUDGET if arch in ("arm64", "aarch64")
+             else X86_64_CONTAINER_BUDGET)
+    return STACK_FLOOR_BUDGET_BYTES // frame
 
 
 # THE PART OF THE PROCESS'S STACK THIS COMPILER LEAVES ALONE, and the reason

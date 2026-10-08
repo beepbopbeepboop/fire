@@ -951,9 +951,8 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
           f"something other than the export rule, which is the fact that "
           f"decides it: {text.strip()[-300:]}")
     check("a name with a leading `_` is private" in text,
-          f"the refusal does not say WHICH of the four exclusions keeps this "
-          f"name off the boundary, and it is the private one: "
-          f"{text.strip()[-300:]}")
+          f"the refusal does not say WHICH exclusion keeps this name off the "
+          f"boundary, and it is the private one: {text.strip()[-300:]}")
     check("doc/ABI.md" in text or "export rule" in text,
           f"the refusal does not name the rule that keeps the name off the "
           f"boundary: {text.strip()[-300:]}")
