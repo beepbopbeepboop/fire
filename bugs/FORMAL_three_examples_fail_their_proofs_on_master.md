@@ -1,5 +1,88 @@
 # `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES`
 
+**RE-MEASURED 2026-10-08 (`work/formal206-docs`) on `master` at `3bc7d54b`, and
+the failure has MOVED AND GROWN.** The x30 frame read this doc was written about
+is still one of the diagnostics, but it is no longer the only one: the proofs
+now stop at **nine diagnostics**, and three of them are a defect in a *different*
+part of the generator that this doc never named — **the recursion contract's
+BASE CASE replays the STEP walk.** The inventory, from
+`python3 tools/memslot.py --gb 8 --label cnt -- python3 fire.py build --formal
+--backend=arm64 -o .tmp/count.aout formal/examples/count.mojo` (`pow2` fails at
+the corresponding sites, `pow2_proof.lean:6232`/`:6738`):
+
+```
+count_proof.lean:2767:74  native_decide: ¬909189220 >>> 5 &&& 16383 &&& 8192 = 0 is false
+count_proof.lean:2696:212 unsolved goals (hinsn : arm64_read_insn count_code 4294969200 = 909189220)
+count_proof.lean:3600:58  maximum recursion depth has been reached
+count_proof.lean:5904:185 decide proved a proposition false
+count_proof.lean:5909:18  rfl failed                                   <- THIS doc's x30 frame read
+count_proof.lean:5927:54  Unknown identifier `hk`                      <- new: inside hbase
+count_proof.lean:5935:103 hbnd : FrameBound 131152 st 0, expected `arg`<- new: frameBound_descend_le
+count_proof.lean:5939:19  Unknown identifier `ih`                      <- new: inside hbase
+count_proof.lean:6435:8   (kernel) excessive memory consumption detected
+```
+
+### The new defect: `count_contract`'s `hbase` bullet emits the step body
+
+The three new diagnostics are one defect and it is in the BASE case, not the
+step case. The theorem is emitted as
+
+```
+5817: theorem count_contract (fuel : Nat) (arg : UInt64) (st : Arm64State) … := by
+5823:   refine contract_sound count_prog mojo 83 83 131152 ?_ ?_ arg st fuel hfuel hpc hx0 hbnd hx30ret
+5824:   · intro fuel st hb hpc hx0 hbnd hx30ret         <- hbase's binders (fuel, st, then 5 hyps)
+      …   (the hbase body spans 5824-6177)
+5926:       have hbndsub_2 : FrameBound 131152 (… (arg - 1) := by
+5927:         have hargne0 : arg ≠ 0 := by intro h; rw [h] at hk; simp at hk   <- `hk`,`arg` are STEP-only
+5935:         have h := frameBound_descend_le 131152 32 (st) arg (arg - 1) … hargrel hPge hbnd
+5939:     have hsub_2 := ih (…) ((fuel - 83)) …              <- `ih` is STEP-only
+6178:   · intro k arg st fuel hk hb hpc hx0 hbnd hx30ret ih  <- hstep's binders
+```
+
+`hbase`'s signature (from `lib/Refine.lean::contract_sound`) is
+`∀ fuel st, BASE ≤ fuel → st.pc = entry → st.x0 = 0 → FrameBound stride st 0 →
+rets → Post … 0` — it has **no `arg`, no `hk`, no `ih` and no induction
+hypothesis at all** — which is exactly what Lean reports at 5935 (`hbnd has type
+FrameBound 131152 st 0`) and at 5927/5939. The base case is proving `arg = 0`
+and cannot recurse, yet the walk reached the program's `count(n-1)` call and
+emitted the recursion-descent body (the `frameBound_descend_le` application and
+the `hsub_n := {_ih} …` call) into it.
+
+Read off this tree, the generator does this at
+`formal/arm64_proof_gen.py:9193-9196`, which emits the `hbase` bullet with
+`_cbase = {"cbz_force": "fall"}` and `emit_runs(…, "0", …)`: only the source
+cbz's FALL edge is walked (`emit_runs` skips the taken edge when
+`cbz_force != "taken"`, :8518), and the recursion-descent emission at
+:8870-8911 (`frameBound_descend_le`, the `hargne0`/`hargrel`/`hPge` block,
+`have hsub_{n} := {_ih} …`) is guarded only by "this call is a self-call", not by
+"this walk is the step case". So **the base case is following the branch that
+leads to the recursion call.** Two candidate mechanisms, and the owner's
+measurement should pick one: (a) the `_cbase`/`_cstep` sense (:9195/:9200) is
+hardcoded and is inverted for `count`'s encoding — it belongs decided from the
+encoding, the way `_cbz_reg_const` (:8378-8381) already does for an internal cbz;
+or (b) the walk is choosing the wrong source conditional, since `count` now
+carries more prologue branches than it did when this contract was written (the
+stack-floor guard, `bfeec991`, puts a conditional in every entry —
+`FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+
+**The exact next step, and why it is not taken here:** dump the block table with
+the walk's own `ARMPROOF_DEBUG=1` (:8544) and read which block `cbz_force="fall"`
+lands in; if it reaches the `bl count`, the sense is inverted and belongs read
+off the encoding. The recursion-descent emission should also refuse under
+`_cbase`, because a base case that recurses is unprovable by construction, not a
+tactic failure. `formal/arm64_proof_gen.py` is the write set of a LIVE claim —
+`formal207-docs` (`FORMAL_dylib_export_loops_and_frame_bounds`, the
+recursion/loop contract) — so this is filed in the Status rather than fixed from
+here, per the same rule
+`bugs/DOCS_formal16_2_deleted_the_bit_test_doc_under_a_survey_another_worker_owns.md`
+records.
+
+**The 2026-10-04 status below is left in place and is still right about the x30
+site; its "FIVE errors at TWO sites" is the measurement of that date and is
+SUPERSEDED by the inventory above. Closing the x30 goal is necessary and no
+longer sufficient: three of the nine diagnostics are this base-case defect, and
+the two `native_decide`/decode ones point at a third.**
+
 **Area:** FORMAL, arm64 — `formal/arm64_proof_gen.py`'s frame-address goals and
 `lib/ProofLib.lean`'s address canonicalisation lemmas. **Status: the THREE reds
 are now DECLARED and PINNED (2026-10-04, `work/formal25-6`) and the diagnosis
