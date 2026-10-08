@@ -5,21 +5,75 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
+**Status: the FLAT-container half of the relocation has LANDED (2026-10-06) and
+a NESTED comprehension whose produced values are words is now materialised too
+(2026-10-08), on BOTH backends, and the runtime-blob-base half has not — but it
+is a smaller half than this document originally drew.** A comprehension whose
 element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
+sub-expression is materialised per iteration: the element's blob is copied into a
+slot of a `cap`-sized array indexed by the result count, so the aliasing is gone
+AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
 the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
 is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+copy (see "What landed 2026-10-06" below). **The document's own reproducer,
+`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, is no longer refused**: the
+inner result is a `[count][word…]` blob, so the SAME copy lands it per outer
+iteration and the nested case never needed the runtime blob base after all — see
+"What landed 2026-10-08" below, which corrects this document's "that is the whole
+of what is left" reading of the nested row. What is STILL refused is the element
+whose per-iteration copy is UNSOUND because it carries an ADDRESS: a list of
+lists, a nested comprehension whose own result holds containers, a slice, a
+constructor call. Read "What landed" first.
+
+## What landed 2026-10-08: a nested comprehension whose result is words, by the SAME copy
+
+**This document's "not a patch" reading of the nested row was wrong, and the
+measurement is the reproducer below.** The withdrawn implementation this
+document describes relocated the inner comprehension's own `res_offset` into the
+outer's element array, so its base stopped being a compile-time constant and
+every append recompute had to read a register — that is the "register holding a
+run-time address" of "That is the whole of what is left". **The copy-based
+materialisation that landed on 2026-10-06 removes the need for it.** A nested
+comprehension's result is reserved FIRST by `_emit_comprehension` (before its
+generators, so at the element site's own `before`), laid out `[count][word…]`,
+and left in X0/RAX on exit — exactly the shape `_materialize_compr_element`
+already copies. When the produced values are words the blob holds no nested
+address, so a byte copy of it per outer iteration gives each outer element its
+own list, and no base is relocated at all.
+
+`model._comprehension_result_is_flat` is the predicate extension: a
+`F.Comprehension` element is accepted when neither its `element` (nor, for a
+dict, its `value`) builds a container. It is the same recursion the literal case
+uses — the copy is sound iff no produced value is an address — one level up.
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused (was `93`, exit 1) | **`63`** |
+| `[{k: y for k in [1, 2]} for y in [10, 20]]`, sum `d[1]` | `30` | refused | **`30`** |
+| `[[x + z for x in [1, 2] for z in [10, 20]] for y in [1, 2, 3]]`, sum `v[0]` | `33` | refused | **`33`** |
+| `[[x + 1 for x in [*a]] for y in [1, 2, 3]]` (`a = [1, 2]`), sum `v[0]` | `6` | refused | **`6`** |
+| `[[[z] for z in [1, 2]] for y in [10, 20]]` (inner result holds a container) | — | refused | refused |
+| `[[[z for z in [1]] for x in [1, 2]] for y in [1, 2]]` (three deep) | `4` | refused | refused |
+
+The last two rows are the boundary: the inner result of the first holds a list
+literal `[z]`, so the copied words are an address of one shared scratch blob and
+the copy is unsound; the second's middle result holds pointers to its own inner
+lists, so the outer refuses at `_comprehension_result_is_flat` (the middle itself
+is materialised, since ITS element is a word-result comprehension). Both stay
+refused, which is why this is not a deletion: the runtime blob base is still
+needed for a slice, a constructor call, a list of lists, and a nested
+comprehension whose produced values are containers.
+
+**Pinned in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**:
+`a_nested_comprehension_whose_result_is_words_is_per_iteration` (0, `63`) and
+`a_nested_comprehension_whose_result_holds_containers_is_refused` (the
+`opens a container` needle), beside the three flat-literal rows and the
+list-of-lists refusal. Those rows run under `run_case` (arm64) like the rest of
+`COMPREHENSION_ELEMENT_CASES`; the four positive programs above were additionally
+built and run under `--backend=arm64` and `--backend=x86_64` on the same source
+(they are one shared predicate and one copy shape in each emitter, so the two
+architectures cannot disagree), with the answers in the table.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
