@@ -1016,6 +1016,11 @@ class Normalising(unittest.TestCase):
          ("@spec", "@require"), ()),
         ("@spec(\n    f_spec; f_spec 0 = 1)\ndef f(n):\n    return n\n",
          ("@spec",), ()),
+        # The refinement corpus's decorator: not valid Python without removal
+        # (`;` inside the parentheses), so it is the reason eleven examples were
+        # in the "CPython still declines it" bucket.
+        ("@refines(Specs.abs64; 64)\ndef absval(n):\n    return n\n",
+         ("@refines",), ()),
         ("def f(n):\n    var a = 1\n    return a + n\n",
          ("var ",), ("a = 1",)),
         ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
