@@ -1,5 +1,35 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
+**Status 2026-10-08 (`work/formal193-docs`): the RULE below is unchanged and
+still load-bearing; two of the three MEASUREMENTS under "What I ran" are stale,
+and the third has been fixed elsewhere. Read this before that section.**
+
+- **(a) a `raise` under a handler with a body is now REFUSED, not run.** The
+  program that printed nothing and exited 1 is now refused by NAME on both
+  backends — *"a bare `except:` is a handler arm with a body this path cannot
+  put in the image"* — which is the refusal this doc's rule argued for: the
+  arm's effects would be silently missing from the image. Pinned by
+  `test_formal_exceptions.py`'s three `an_except_..._is_refused_by_name` rows.
+- **(c) the same `try`/`except` with a body is refused too, whether or not
+  anything is raised**, so the program that measured "`try` is lowered and
+  works" no longer runs. The positive half survives in the same file as
+  `an_except_pass_arm_still_builds` and `else_runs_when_the_body_completed`.
+- **(d) the arm64 flush divergence is GONE.** `raise 7` after a `printf` now
+  prints `before@@` and exits 1 on arm64 as it always did on x86-64 — measured
+  this session on both backends — so the doc's pointer to
+  `bugs/FORMAL_raise_skips_the_stdio_flush.md` is that doc's and has been
+  fixed there. Every `raise` row in `test_formal_exceptions.py` compares stdout
+  to CPython, so a regression to the lost flush fails them.
+
+**So next step 3 ("pin the behaviour so a backend change cannot quietly alter
+it") is DONE, and by the exception work this rule predicted:**
+`test_formal_exceptions.py` is the test the closing paragraph below said was
+missing. It covers the uncaught contract, the `finally` contract and the
+refused-arm contract on both architectures. Steps 1 and 2 — one shared
+return-convention and an EH runtime — are unchanged and are not this update's.
+Read the rest of this file as the record of 2026-09-30, with the three
+measurements above corrected.
+
 **Status:** open, and it is a LIMIT OF THE TARGET rather than a defect — but it
 is load-bearing for every module under `formal/hostmods/`, and until it had a
 document `formal/hostmods/json.mojo` cited a file that did not exist. Found
@@ -180,10 +210,12 @@ Ordered by what unblocks the most:
    exception object is more than one 64-bit word). That is a real programme,
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.
-3. **Pin the behaviour so a backend change cannot quietly alter it.** There is
-   no test in the tree that raises on this path, which is why the arm64 flush
+3. **Pin the behaviour so a backend change cannot quietly alter it.** There was
+   no test in the tree that raised on this path, which is why the arm64 flush
    divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` sat unnoticed
-   through both backends and both host-module waves. A three-case group —
-   raise under a handler, `try` with nothing raised, and `return 1` — is enough,
-   and it belongs beside `test_formal_link_accounting.py`, which is the
-   gate-resident file that already owns "does the thing this claim names exist".
+   through both backends and both host-module waves. **DONE 2026-10-08**: the
+   three-case group is `test_formal_exceptions.py`, which raises on this path,
+   compares stdout to CPython and so pins the flush, and refuses a handler arm
+   with a body on both backends. The doc's old pointer to
+   `test_formal_link_accounting.py` was where the next test was expected; the
+   exception contract's own file is where it landed.
