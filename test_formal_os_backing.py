@@ -805,11 +805,29 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def device(v):
+        """`st_dev` in the backend's own domain.
+
+        `dev_t` is a 32-bit field, and the two sides render it differently when
+        its high bit is set.  `os/_syscalls.mojo`'s `fs_stat_field32` reads the
+        four bytes as an unsigned 32-bit word, so `/dev/null`'s raw `0xa8fb1a80`
+        is `2835028608`; CPython sign-extends it to 64 bits and renders it as an
+        UNSIGNED long, so the same bytes are `18446744072249612928`.  That value
+        is above `2**63`, outside the signed 64-bit range this backend keeps an
+        integer in (`printf("%d")` on a runtime negative prints it signed), so
+        NO value the image can produce prints as it.  The comparison is
+        therefore on the 32-bit device number both sides agree on.  `-1` is
+        `field`'s "no struct here" sentinel and is left alone, because the image
+        answers -1 for the same paths.  Measured 2026-10-07 on `/dev/null`,
+        both architectures.
+        """
+        return v if v < 0 else v & 0xFFFFFFFF
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), device(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
