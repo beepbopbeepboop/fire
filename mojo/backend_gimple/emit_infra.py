@@ -6084,9 +6084,12 @@ def _dedup_variadic_externs(parts: list) -> str:
                 return True
         return False
 
-    def _fragment_names(stmt: str) -> tuple:
+    def _fragment_names(stmt: str) -> list:
         """The extern name ONE `;`-delimited fragment contributes, as
-        `(concrete_name, variadic_name)` — either may be None, and a
+        `[concrete_name, variadic_name]` — either may be '' (none; a LIST of two
+        strings and not a tuple holding `None`s, because a tuple's slots box on the
+        self-hosted path and `c_name is not None` then held for a garbage word, which
+        `_str_hash` SIGSEGV'd on), and a
         fragment never contributes both (they are disjoint by construction).
 
         A name is `concrete` when its parameter list is neither `...` nor
@@ -6102,23 +6105,23 @@ def _dedup_variadic_externs(parts: list) -> str:
         per-fragment reading, one function, so the two cannot drift.
         """
         if not _is_extern_decl(stmt):
-            return (None, None)
+            return ['', '']
         paren = stmt.find('(')
         if paren < 0:
-            return (None, None)
+            return ['', '']
         close = stmt.rfind(')')
         if close < paren:
-            return (None, None)
+            return ['', '']
         params = stmt[paren + 1:close].strip()
         head_toks = stmt[:paren].strip().split()
         if not head_toks:
-            return (None, None)
+            return ['', '']
         name = head_toks[-1].lstrip('*')
         if params == '...':
-            return (None, name)
+            return ['', name]
         if params != '':
-            return (name, None)
-        return (None, None)
+            return [name, '']
+        return ['', '']
 
     def _parse_part(part: str) -> tuple:
         """One part's extern declarations, as (concrete, variadic) name lists.
@@ -6143,10 +6146,12 @@ def _dedup_variadic_externs(parts: list) -> str:
         concrete = []
         variadic = []
         for stmt in part.split(';'):
-            c_name, v_name = _fragment_names(stmt)
-            if c_name is not None:
+            _fnm = _fragment_names(stmt)
+            c_name = _as_str(_fnm[0])
+            v_name = _as_str(_fnm[1])
+            if c_name != '':
                 concrete.append(c_name)
-            if v_name is not None:
+            if v_name != '':
                 variadic.append(v_name)
         return concrete, variadic
 
@@ -6214,16 +6219,20 @@ def _dedup_variadic_externs(parts: list) -> str:
                 if 'extern' not in frag:
                     continue
                 any_extern = True
-                c_name, v_name = _fragment_names(frag)
-                if c_name is not None:
+                _fnm = _fragment_names(frag)
+                c_name = _as_str(_fnm[0])
+                v_name = _as_str(_fnm[1])
+                if c_name != '':
                     sides_c.append(c_name)
-                if v_name is not None:
+                if v_name != '':
                     sides_v.append(v_name)
             if any_extern:
                 merged = frags[0]
                 for k in range(1, len(frags)):
                     merged = merged + '\n' + frags[k]
-                m_c, m_v = _fragment_names(merged)
+                _mnm = _fragment_names(merged)
+                m_c = _as_str(_mnm[0])
+                m_v = _as_str(_mnm[1])
                 # EVERY piece's name must be exactly the merged
                 # fragment's, and a merged fragment with no name must have
                 # had none. Checking the first piece alone is not enough:
@@ -6232,7 +6241,7 @@ def _dedup_variadic_externs(parts: list) -> str:
                 # fragment whose `find('(')`/`rfind(')')` span all three,
                 # naming `a` and swallowing `b` — equal to the first piece,
                 # different from the union.
-                if m_c is None:
+                if m_c == '':
                     if len(sides_c) > 0:
                         return False
                 elif len(sides_c) == 0:
@@ -6241,7 +6250,7 @@ def _dedup_variadic_externs(parts: list) -> str:
                     for k in range(len(sides_c)):
                         if sides_c[k] != m_c:
                             return False
-                if m_v is None:
+                if m_v == '':
                     if len(sides_v) > 0:
                         return False
                 elif len(sides_v) == 0:
