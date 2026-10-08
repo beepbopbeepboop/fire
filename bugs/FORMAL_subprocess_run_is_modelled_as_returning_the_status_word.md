@@ -133,7 +133,7 @@ matching one and priced it at "a frame-allocated struct per `run`". The price is
 wrong for `CompletedProcess`: a ONE-field struct has no frame at all — its value
 IS its only field (`model.struct_is_framed` is False), so `.returncode` lowers to
 the identity and no block is reserved.** That is the same fact
-`formal/build.py::_one_word_field_map` states for `var b = Box()`.
+`_one_word_field_map` states for `var b = Box()`.
 
 **The real blocker was one layer below the model, and it was measured.** The
 backend could not read a field off a name bound from a CALL at all, whatever the
@@ -162,7 +162,7 @@ constructor the declaration names. So `r = subprocess.run(...); r.returncode`
 fails on the BINDING, not on any of the three options this document costed.
 
 **Fixed this session, as shared infrastructure rather than as this doc's fix.**
-`formal/build.py::_call_returns_one_word_struct` is a third source for both
+`_call_returns_one_word_struct` is a third source for both
 one-word tables, beside a construction and a declared parameter: a local bound
 from a callee whose declared `-> T` names a one-field struct of this image is
 that struct. Three shapes are refused rather than claimed (a type-constructor
