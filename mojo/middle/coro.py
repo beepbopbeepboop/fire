@@ -2741,7 +2741,7 @@ def _mark_coro_callable_param_fns(body_fd, fn):
     called inside a generator body got the homogenized `int64_t` box back
     from `mojo_fnptr_call_N` for a `char *`, and every consumer of it (`len`, a
     `for` loop, `print`) had nothing to dispatch on — exit 0 and no output.
-    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    That shape is fixed (2026-10-02); this is the generator half of it.
     """
     _fns = _callable_param_function_defaults(fn)
     if _fns:
@@ -4985,8 +4985,8 @@ def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
     the same treatment for the same reason: `def apply_to(items, _f=upper)`
     called inside a generator body got the homogenized `int64_t` box back
     from `mojo_fnptr_call_N` for a `char *`, and every consumer of it
-    (`len`, a `for` loop, `print`) then had nothing to dispatch on —
-    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    (`len`, a `for` loop, `print`) then had nothing to dispatch on — a shape
+    fixed 2026-10-02.
 
     A bare name only, for the reason
     `calls_shared._callable_param_ret_types` gives: the answer is then the
