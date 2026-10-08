@@ -69,9 +69,15 @@ $ echo $?
 
 No output at all, and exit 1. `before` was printed (see the control below), so
 the `except` arm did not run and `after` did not either. **The lost `before` is
-a separate defect with its own document** —
-`bugs/FORMAL_raise_skips_the_stdio_flush.md` — and it is why this program's
-output is empty rather than `before`.
+a separate defect, since fixed** — arm64's `raise` emitted the Darwin `exit`
+syscall inline and skipped libc's `stdout` flush, so every buffered byte was
+discarded; it is why this program's output was empty rather than `before`. It
+is closed on arm64 by `formal/arm64_codegen.py::_emit_exit`, the one method
+every exit on that backend now routes through (it calls `fflush(NULL)` before
+the trap, matching x86-64's `exit(status)` call), and pinned by
+`test_formal_x86_64_parity.py`'s
+`printed_output_survives_an_out_of_range_subscript` and the `print`-then-`raise`
+rows of `test_formal_exceptions.py`.
 
 **(b) the control — the same program with `return 1`, no raise:**
 
@@ -180,10 +186,13 @@ Ordered by what unblocks the most:
    exception object is more than one 64-bit word). That is a real programme,
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.
-3. **Pin the behaviour so a backend change cannot quietly alter it.** There is
-   no test in the tree that raises on this path, which is why the arm64 flush
-   divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` sat unnoticed
-   through both backends and both host-module waves. A three-case group —
+3. **Pin the behaviour so a backend change cannot quietly alter it.** At the
+   time, there was no test in the tree that raised on this path, which is why
+   the arm64 flush divergence (its `raise` made the raw `exit` syscall and
+   dropped buffered `stdout`, where x86-64 called libc's `exit`) sat unnoticed
+   through both backends and both host-module waves; it is now fixed and pinned
+   by `test_formal_exceptions.py`'s `raise_builtin_exception_*` rows, which
+   print before raising and assert the line survives. A three-case group —
    raise under a handler, `try` with nothing raised, and `return 1` — is enough,
    and it belongs beside `test_formal_link_accounting.py`, which is the
    gate-resident file that already owns "does the thing this claim names exist".
