@@ -61,8 +61,8 @@ DARWIN_SYS_EXIT = 1
 # stack the process may use — lives in `model.RLIMIT_STACK` rather than here:
 # both backends' startup stubs read it, and a copy in each module is how they
 # came to disagree about the arm64 threshold once already. See
-# `_emit_stack_floor_init` for the read and `model.STACK_FLOOR_MARGIN_BYTES` for
-# the measurement behind the budget.
+# `_emit_stack_floor_init` for the read and `model.STACK_FLOOR_MARGIN_BYTES`
+# for the measurement behind the budget.
 
 
 # ── IEEE-754 binary64 ─────────────────────────────────────────────────────
@@ -160,10 +160,7 @@ _SRET_LOCAL = "__sret_block"
 # exit (`model.receiver_writeback_name` is the rule).
 _RECV_CELL_LOCAL = "__receiver_cell"
 
-# The for/comprehension target tree parser is `model.for_target_tree`
-# (`fire_compiler.for_target_tree`), read as `M.for_target_tree` so the two
-# formal backends and the register allocator cannot disagree about how a
-# target's groups nest.
+
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in order of first assignment.
 
@@ -676,14 +673,15 @@ dylib_exports: list = None, globals_base: int = None,
         self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
-        # The ADDRESSES of the `BL fflush` this backend emits inside its own
-        # bounded stops, published as `info["compiler_traps"]` and subtracted by
+        # The ADDRESSES of the calls THIS BACKEND emits for itself, published as
+        # `info["compiler_traps"]` and subtracted by
         # `formal/arm64_proof_gen.py::_program_extern_calls` from the program's
-        # own extern calls.  The stack-floor guard's `getrlimit` is NOT here: it
-        # runs in the startup stub (`_emit_stack_floor_init`), below
-        # `func_offset`, and `_program_extern_calls` subtracts it by address
-        # instead.  See `_emit_exit` for why the subtraction is the difference
-        # between a proof and a `lean-rejected` row.
+        # own extern calls. Today the `BL fflush` inside every bounded stop
+        # (`_emit_trap_flush`); the startup stub's `getrlimit` is subtracted by
+        # ADDRESS against `func_offset` instead, because it is below the entry
+        # and a trap list carrying it would name a call no run test reaches. See
+        # `_emit_exit` for why the subtraction is the difference between a proof
+        # and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
         self._if_counter = 0
         self._while_counter = 0
@@ -1014,33 +1012,28 @@ dylib_exports: list = None, globals_base: int = None,
         first_func_name = functions[0].name
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
-            # **The stack floor is read ONCE, here in the startup stub — and
-            # AFTER the `stp` that saves X29/X30.** The read is a `getrlimit`
-            # CALL, and a `bl` clobbers X30 (the link register); emitting it
-            # before the save makes the stub's own `ret` jump back to just after
-            # the call and run the body forever (measured: `printf("hi")` in a
-            # non-terminating loop). After the `stp` the real link register is on
-            # the stack and the final `ldp` restores it, exactly as it already
-            # protects the `bl` to the entry function below.
+            # **The stack floor is read HERE, in the startup stub, and AFTER
+            # the `stp` that saves X29/X30.** Two ordering facts, both
+            # measured, and neither is visible in the emitted text:
             #
-            # It has to be here rather than in a guarded prologue because this is
-            # the only place a `call` can live that no path tree walks: a
-            # `getrlimit` inside a prologue is a call on a path a conditional
-            # selects, and `formal/arm64_proof_gen.py`'s universal theorem refuses
-            # that. It runs before the entry arguments are materialised because it
-            # needs X0/X1 and clobbers the caller-saved set. See
-            # `_emit_stack_floor_init`.
+            #   * AFTER the `stp`, because the read is a `getrlimit` CALL and
+            #     a `bl` clobbers X30 (the link register). Emitted before the
+            #     save, the stub's own `ret` jumps back to just after the call
+            #     and the body runs forever (measured: `printf("hi")` looping).
+            #     After the `stp` the real link register is on the stack and the
+            #     final `ldp` restores it, exactly as it already protects the
+            #     `bl` to the entry function below.
+            #   * HERE rather than in a guarded prologue, because this is the
+            #     only place a `call` can live that no path tree walks: a
+            #     `getrlimit` inside a prologue is a call on a path a
+            #     conditional selects, and `formal/arm64_proof_gen.py`'s
+            #     universal theorem refuses that, so every program in the
+            #     corpus was refused rather than proved. See
+            #     `_emit_stack_floor_init`.
+            #
+            # Before the entry arguments are materialised because it needs
+            # X0/X1 and clobbers the caller-saved set.
             self.asm.emit(encode_stp_sp_pre(29, 30))
-            # The stack floor is read here, before any entry argument is
-            # materialised: `getrlimit` needs X0/X1 and clobbers every
-            # caller-saved register, INCLUDING LR, and that is why the `stp`
-            # above comes first. Emitted before the save (as x86-64 does, where
-            # a `call` pushes its return address and cannot clobber LR) the
-            # init's `bl` would leave LR pointing at the instruction after it,
-            # so the stub's own `ret` would jump back into the init and call the
-            # entry again forever — measured: `def main(): printf("hi")` wrote
-            # "hi" without end. The read is a CALL and must also stay out of
-            # every function body; see `_emit_stack_floor_init`.
             self._emit_stack_floor_init()
             test_val = self.test_input
             # `_emit_mov_imm`, not a hand-rolled movz+movk pair: it is the one
@@ -1824,16 +1817,17 @@ dylib_exports: list = None, globals_base: int = None,
         """Read `RLIMIT_STACK` once and park the FLOOR in `__DATA`.
 
         Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
-        before the entry function is called and outside every function body —
-        and that placement is the whole reason this is its own method. The read
-        is a `getrlimit` CALL, and a call inside a guarded prologue is a `BL` on
-        a path `formal/arm64_proof_gen.py` WALKS: the walker cannot follow a call
-        out of the image, so with the read in the prologue it refused proof
-        generation for every guarded program in the corpus (measured: two
-        `getrlimit` call sites in one image, and "ONE halt address cannot
-        discharge them"). Moving it here puts it BELOW `func_offset`, where no
-        run test starts and no path tree walks; `_program_extern_calls` subtracts
-        it by address for the same reason x86-64's `_program_externs` does.
+        after the `stp` that saves X29/X30 and before the entry function is
+        called — and that placement is the whole reason this is its own method.
+        The read is a `getrlimit` CALL, and a call inside a guarded prologue is
+        a `BL` on a path `formal/arm64_proof_gen.py` WALKS: the walker cannot
+        follow a call out of the image, so with the read in the prologue it
+        refused proof generation for every guarded program in the corpus
+        (measured: an arm64 program with one source `if` refused because the
+        guard's `getrlimit` is "behind a CONDITIONAL"). Moving it here puts it
+        BELOW `func_offset`, where no run test starts and no path tree walks;
+        `_program_extern_calls` subtracts it by address for the same reason
+        x86-64's `_program_externs` does.
 
         The arithmetic is `model.stack_floor_budget_for_limit`:
         `budget = min(BUDGET, max(limit - MARGIN - frame, MIN))`, clamped with
@@ -1843,10 +1837,10 @@ dylib_exports: list = None, globals_base: int = None,
         `rlim_cur` is the FIRST word of `struct rlimit` on both targets this
         emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
         `unsigned long`); `rlim_max` says nothing about what the kernel enforces
-        and is not read. getrlimit's RETURN VALUE is a STATUS (0 or -1), not the
-        limit — caching the status instead made the budget the compile-time
-        `STACK_FLOOR_BUDGET_BYTES` on every process, which is the guard that
-        never fires under a reduced `ulimit -s`.
+        and is not read. getrlimit's RETURN VALUE in X0 is a STATUS (0 or -1),
+        not the limit — caching the status instead made the budget the
+        compile-time `STACK_FLOOR_BUDGET_BYTES` on every process, which is the
+        guard that never fires under a reduced `ulimit -s`.
         """
         if self._globals_base is None:
             # No `__DATA`, so no word to keep the floor in. `formal/build.py`
@@ -1860,7 +1854,9 @@ dylib_exports: list = None, globals_base: int = None,
         floor = M.stack_floor_address(self._globals_base)
         limit_word = M.stack_limit_address(self._globals_base)
         scratch = M.stack_scratch_address(self._globals_base)
-        # Already read? The cached limit word is zero until this fills it.
+        # Already read? The cached limit word is zero until this fills it, so a
+        # nonzero value is an earlier entry into this stub (the common case is
+        # that there is only one).
         self._adrp_add_abs(16, limit_word)
         self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
         self.asm.emit(encode_cbnz_xn(0, 16))
@@ -1876,8 +1872,8 @@ dylib_exports: list = None, globals_base: int = None,
         self._adrp_add_abs(1, scratch)
         self._emit_extern_call("getrlimit")
         # `rlim_cur`, LOADED from the struct — getrlimit's return value in X0 is
-        # a status, not the limit. X1 and X16 are caller-saved, so the scratch
-        # address is re-derived rather than reused.
+        # a status, not the limit. X1/X16/X17 are caller-saved, so the scratch
+        # and limit addresses are re-derived rather than reused.
         self._adrp_add_abs(16, scratch)
         self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
         self._adrp_add_abs(17, limit_word)
@@ -1897,7 +1893,10 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_mov_imm("X15", M.STACK_FLOOR_BUDGET_BYTES)
         self.asm.label(clamp_hi_label)
         # floor = SP - budget, with the frame already inside the budget
-        # (`stack_floor_budget_for_limit` subtracts it).
+        # (`stack_floor_budget_for_limit` subtracts it). The SP here is the
+        # STUB's, one `stp` below process entry — the shallowest SP any guard
+        # will compare against, so the absolute floor is measured from the top
+        # of the process's stack and every guarded prologue is deeper than it.
         self.asm.emit(encode_add_xd_xn_imm(16, 31, 0))
         self.asm.emit(encode_sub_xd_xn_xm(16, 16, 15))
         self._adrp_add_abs(17, floor)
@@ -1915,17 +1914,21 @@ dylib_exports: list = None, globals_base: int = None,
         one outcome this backend already has an idiom for and the one a caller
         can read.
 
-        The FLOOR is a `__DATA` word the STARTUP STUB filled once
-        (`_emit_stack_floor_init`), so the guard only LOADS it and compares:
+        The floor itself is computed and parked in `__DATA` by the STARTUP STUB
+        (`_emit_stack_floor_init`), so this is only a load and a compare:
 
             ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
             ADD X17, SP, #0 ; CMP X17, X16
             B.HS ok                                    SP >= floor: carry set
             <message> ; movz x0, 2 ; movz x16, 1 ; svc #0x80   SP < floor
+        ok:
 
-        There is **no call in this sequence**, and that is deliberate as well as
-        necessary: the `getrlimit` that fills `&limit` lives in the startup stub
-        (`_emit_stack_floor_init`), where no path tree walks it.
+        It is a load and a compare rather than the arithmetic it used to be,
+        because the `getrlimit` read it used to contain was a CALL inside every
+        guarded prologue — a `BL` on a path the proof layer walks, on a path a
+        conditional selects — and that refused a value theorem for the whole
+        arm64 corpus. See `_emit_stack_floor_init` for the read and for why the
+        arithmetic belongs where no path tree walks it.
 
 **Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way
@@ -1947,20 +1950,31 @@ dylib_exports: list = None, globals_base: int = None,
         argument has been moved to its home above this point.
         """
         if self._globals_base is None:
-            # No `__DATA`, so no word to compare against. See
-            # `_emit_stack_floor_init`, whose early return is the same case.
+            # No `__DATA`, so no word to keep the floor in, so nothing to
+            # compare against. `formal/build.py` always hands a base over — the
+            # data segment is unconditional since the floor word landed — so
+            # this is the `_emit_global_init` shape rather than a live case.
             return
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
         ok_label = f"{fn}_sf{sid}_ok"
         floor = M.stack_floor_address(self._globals_base)
-        # X16 = the floor word the startup stub wrote. The same ADRP/ADD pair
-        # and the same LDR the lazy global initializer uses, for the same
-        # reason: it is the addressing this backend already proves against a
-        # real dyld rather than a new one.
+        # X17 = the address of the floor word, X16 = the floor itself. The
+        # same ADRP/ADD pair and the same LDR the lazy global initializer uses,
+        # for the same reason: it is the addressing this backend already proves
+        # against a real dyld rather than a new one.
         self._adrp_add_abs(17, floor)
         self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
+        # X16 is now the FLOOR the startup stub computed and parked in
+        # `__DATA`. There is no call in this sequence and no clamp: the
+        # `getrlimit` read and the `min/max` arithmetic live in the startup stub
+        # (`_emit_stack_floor_init`), which is emitted before every function
+        # body and is not part of any path tree the proof layer walks. A
+        # `getrlimit` inside this prologue was a `BL` on a path a conditional
+        # selects, and that is what made every arm64 proof refused rather than
+        # generated.
+        #
         # SP into X17, then `SP - floor`. The stack grows DOWN, so having spent
         # the budget is `SP < floor`, which is the subtraction BORROWING and so
         # carry CLEAR. `B.HS` is the complement of that — "carry set", i.e.
@@ -1970,17 +1984,31 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_cmp_xn_xm(17, 16))
         self.asm.emit(encode_b_cond("hs", 12))
         self.asm.emit_label_rel(ok_label, here_offset=-4)
-        # The MESSAGE, before the exit — `model.stack_trap_message`, so a reader
-        # who hit this gets the bound it names rather than a bare status.
-        # **A raw `svc`, not `_emit_exit` and not `_emit_overflow_diagnostic`'s
-        # `call write`:** this trap is decoded from its own address by
-        # `lib/ProofLib.lean`, so it must contain no CALL, and it can fire
-        # before the program has produced any output, so there is nothing for a
-        # flush to push. Darwin arm64's `write` is syscall 4 in X16, the same
-        # `svc #0x80` the exit below uses for syscall 1, so the message costs no
-        # CALL and moves nothing the proof layer decodes. A `bl write` here would
-        # put an unfollowable call in front of every guard's trap and change what
-        # every arm64 theorem says about where the run stops.
+        # The trap is three instructions: `movz x0, <status>; movz x16, 1; svc
+        # #0x80` is Darwin arm64 `exit(status)`, and it is the same sequence
+        # with the same shape as the divide-by-zero arm of `_emit_div_shift_pow`.
+        # **The one exit on this backend that does NOT go through
+        # `_emit_exit`,** and it is the only deliberate exception: this trap can
+        # fire before the program has produced any output at all (it is the
+        # first thing a prologue does), so there is nothing for a flush to
+        # push, and `fflush` is a call — which would move the address this trap
+        # is decoded from. `lib/ProofLib.lean` reads that address out of
+        # `info["compiler_traps"]`, so a flush here would silently move the
+        # decoded trap under the proof layer.
+        # The MESSAGE, before the exit — `model.stack_trap_message`, the fourth
+        # member of the `*_message` family and the one that was missing, because
+        # this trap used to be the only bounded stop on the path that said
+        # nothing at all. A reader who hit it got a status and no sentence.
+        #
+        # **A raw `svc`, not `_emit_overflow_diagnostic`'s `call write`, and the
+        # reason is the one the comment above gives for the exit:** the trap is
+        # decoded from its own address, which `info["compiler_traps"]` records on
+        # the x86-64 half and `lib/ProofLib.lean` reads as an in-image `svc` here.
+        # Darwin arm64's `write` is syscall 4 in X16, the same `svc #0x80` the
+        # exit below uses for syscall 1, so the message costs no CALL and moves
+        # nothing the proof layer decodes. A `bl write` here would put an
+        # unfollowable call in front of every guard's trap and change what every
+        # arm64 theorem says about where the run stops.
         #
         # The two registers are set with `movz_xd` rather than `movz_wd`, which
         # is what the rest of this file uses for x0 and x16 and what
@@ -2599,15 +2627,6 @@ dylib_exports: list = None, globals_base: int = None,
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
                 else stmt.op
-            # The set operators are asked BEFORE the shared gate, for the same
-            # reason `_emit_binop` asks them first: `s -= {2}` is `s = s - {2}`
-            # and the gate refuses the operator for every blob. The binary form
-            # is where the lowering lives, so this is the desugaring the
-            # `aug_assign_operands_are_blobs` branch below already does for `+`
-            # and `|`, moved early for the three the gate still refuses.
-            if self._maybe_emit_set_binop(stmt.target, stmt.value, op):
-                self._store_var(name, 0)
-                return
             # The same refusal `_emit_binop` makes, asked HERE because an
             # augmented assignment is a separate emitter that never went
             # through it. That is not a hypothetical: `s += t` built, ran, and
@@ -2953,6 +2972,44 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(0, 31))
         return terminated
 
+    def _record_trap_addresses(self, symbol: str, before: int) -> None:
+        """Record every `BL` to `symbol` the emitter appended since `before`.
+
+        The recording is the point of `_emit_trap_flush`, and it cannot be done
+        by taking the assembler's position before the call: `_emit_call` emits
+        the ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`),
+        so that position is short of the `BL`. Reading the addresses the call
+        actually appended to `asm.extern_refs` is therefore the only way to name
+        the instruction, and naming it is what `info["compiler_traps"]` is for —
+        `formal/arm64_proof_gen.py::_program_extern_calls` subtracts these
+        addresses from the program's own extern calls, so a program whose only
+        unbound call is one of the compiler's gets its run tests back.
+
+        Filtered by SYMBOL as well as `kind` because a wrapper's evaluation can
+        reach a nested call of its own, and a nested program call is not a
+        compiler trap.
+        """
+        self._compiler_trap_addrs.update(
+            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
+            if kind == "bl" and sym == symbol)
+
+    def _emit_trap_flush(self) -> None:
+        """`fflush(NULL)`, and RECORD where the call landed.
+
+        The recording is the whole reason this is a method rather than a bare
+        `_emit_call`: `_emit_call` emits the ARGUMENT first, so the assembler's
+        position before the call is short of the `BL`, and an address that is in
+        no `extern_calls` entry subtracts nothing while publishing a list that
+        claims otherwise. Measured on `formal/examples/mod_by_var.mojo`: without
+        this the example is a `lean-rejected` row whose first diagnostic is a
+        false `run_pc_reached … = true`, and with it the example's ordinary run
+        test (`run_result_exit … = mojo 10`) is emitted and is true.
+        """
+        before = len(self.asm.extern_refs)
+        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                   args=[F.IntLiteral(0)]))
+        self._record_trap_addresses("fflush", before)
+
     def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
         raw Darwin trap.  Never returns, and nothing is emitted after it.
@@ -3048,35 +3105,6 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_movz_wd_imm(0, status))
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
-
-    def _emit_trap_flush(self) -> None:
-        """`fflush(NULL)`, and RECORD where the call landed.
-
-        The recording is the point of the method, and it could not be done by
-        taking the assembler's position before the call: `_emit_call` emits the
-        ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`), so
-        the position before the call is twelve bytes short of the `BL`. Reading
-        the addresses the call actually appended to `asm.extern_refs` is
-        therefore the only way to name the instruction, and naming it is what
-        `info["compiler_traps"]` is for — `formal/arm64_proof_gen.py::
-        _program_extern_calls` subtracts these addresses from the program's own
-        extern calls, so a program whose only unbound call is a trap the program
-        never takes gets its run tests back. Measured on
-        `formal/examples/mod_by_var.mojo`: without this the example is a
-        `lean-rejected` row whose first diagnostic is a false
-        `run_pc_reached … = true`, and with it the example's ordinary run test
-        (`run_result_exit … = mojo 10`) is emitted and is true.
-
-        Filtered to `fflush` rather than to "whatever the call added", because
-        `_emit_call` on a computed status can reach a nested call of its own and
-        a nested `exit(f())` is the PROGRAM's call, not a compiler trap.
-        """
-        before = len(self.asm.extern_refs)
-        self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
-                                   args=[F.IntLiteral(0)]))
-        self._compiler_trap_addrs.update(
-            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
-            if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.
@@ -4474,8 +4502,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
-            deref_kind=lambda e: M.pointer_deref_kind(
-                fn, e, self._structs, self._functions),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
@@ -5209,13 +5235,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are — which is what keeps a
-            # nested `(s & t) | u` from being refused as "the left is not
-            # established to be a set".
-            return (self._expr_is_set_like(e.left)
-                    and self._expr_is_set_like(e.right))
         return False
 
     def _is_dict_subscript(self, obj) -> bool:
@@ -6148,26 +6167,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
         if reason is not None:
             raise CodegenError(reason)
-        # `&`/`-`/`^` between two BLOBS are set algebra and the shared gate now
-        # DEFERS them, but a subscript TARGET is an element, not a whole set
-        # variable: there is no fresh-blob lowering to store back here, and
-        # without this the deferral would let `a[0] &= b` reach the integer ALU
-        # as two blob addresses — the exact wrong answer the gate exists for.
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(target))
-                or M.container_operand_is_blob(self._expr_str_kind(stmt.value))):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(target), M.spelled(stmt.value),
-                self._expr_is_set_like(target),
-                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
         self._emit_subscript_addr(target)
-        # The element's width and sign belong to the TARGET, and the RHS below
-        # can itself be a subscript (`q[0] += r[1]`) whose address computation
-        # overwrites `_sub_width`/`_sub_signed`. The store at the end would then
-        # write at the RHS's width — eight bytes into a `Pointer[Int32]` — so the
-        # two are captured here, after the target's address is decided and
-        # before anything else can run, and restored before the store.
-        width = self._sub_width
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
         self._emit_subscript_load(0, 9)           # X0 = old, at the element's width
@@ -6184,7 +6184,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        self._sub_width = width                   # the TARGET's, not the RHS's
         self._emit_subscript_store_at(9, 0)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -6478,20 +6477,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
-    def _printf_arg_container_kind(self, arg):
-        """The operand's own KIND, or None — the evidence `printf_container_
-        conversion_refusal` reads.
-
-        The fourth hook of `model.printf_format_refusal`, and the one fact it
-        needs that the model cannot derive: this function's `ValueKinds`. A
-        container's kind is what says its one word is a blob's ADDRESS, so the
-        decision about which conversions may not read it as a number is the
-        model's, and this method is the same two lines arm64 and x86-64 both
-        write. None when there is no `ValueKinds` to ask, which is the
-        permissive direction the other hooks take and never refuses.
-        """
-        return None if self._vkinds is None else self._vkinds.kind_of(arg)
-
     def _refuse_word_position_kind_mismatch(self, name, e: F.CallExpr) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -6557,7 +6542,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
+        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
         A no-op for every callee the model's set does not name, and for a call
         whose format is not a LITERAL: a format in a variable cannot be scanned.
@@ -6566,11 +6551,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         x86-64's copy of this method is two lines of delegation and the two
         cannot come apart.
 
-        The reasons are a `%s` conversion handed something that is not text, a
-        conversion with no argument behind it, a WIDTH on a non-ASCII `%s`, a
-        conversion whose class disagrees with its operand's kind, and a NUMBER
-        conversion handed a CONTAINER; which one is reported when more than one
-        could apply is `printf_format_refusal`'s decision too.
+        The two reasons are a `%s` conversion handed something that is not text,
+        and a conversion with no argument behind it; which one is reported when
+        both could apply is `printf_format_refusal`'s decision too.
 
         **The format text handed over is the DECODED one**, and that is not a
         tidiness: `fire_compiler.decoded_literal` is what `_intern_string` runs
@@ -6589,8 +6572,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class,
-            self._printf_arg_container_kind)
+            self._printf_arg_conversion_class)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -8031,10 +8013,6 @@ ctor_field_value=self._ctor_field_value_for(name),
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
-        # `&`, `^` and `-` between two SETS are lowered here; everything else
-        # with a blob operand goes to the shared gate below.
-        if self._maybe_emit_set_binop(e.left, e.right, op):
-            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -8072,26 +8050,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
-        # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
-        # now DEFERS them (see `model.SET_ALGEBRA_OPS`), so this is the site
-        # that decides.  Lowered here only for two SETS, which is what CPython
-        # defines them for; anything else is refused by name rather than
-        # reaching the integer ALU with two blob ADDRESSES, which is the
-        # measured bug the gate was widened for (`s & {2}` answered 2 on arm64
-        # and 163061056 on x86-64, `s - {2}` SIGSEGVed on both).  `-`, `&` and
-        # `^` are also ordinary integer operators, and the blob test is what
-        # keeps this off `a - b` for two words.
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(e.left))
-                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
-            left_set = self._expr_is_set_like(e.left)
-            right_set = self._expr_is_set_like(e.right)
-            if left_set and right_set:
-                self._emit_set_op(e.left, e.right, op)
-                return
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(e.left), M.spelled(e.right),
-                left_set, right_set, backend_has_emitter=True))
         # Comparisons
         cmp_conds = {
             "<=": ("ls", "le"),
@@ -10489,16 +10447,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `external_call["printf", Int32](fmt, n)` — which reaches this same
         # line with `name == "printf"` — is asked the same question.
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, each of which the format's conversions
-        # turn into TEXT.  A return-less call here is the same value this path
-        # cannot carry that `_print_call` refuses for `print`, at the other
-        # spelling of "render this word" — see
-        # `model.returnless_printf_argument_refusal` for why it is one reader and
-        # not a second copy of `_print_call`'s loop.
-        reason = M.returnless_printf_argument_refusal(
-            name, list(e.args or []), self._vkinds.no_value_callee_of)
-        if reason is not None:
-            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above and for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —
@@ -13329,192 +13277,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
         self._emit_b_to(ur)
         self.asm.label(urd)
-        self._emit_list_base(offset)
-        self.asm.emit(encode_mov_zr_xn(0, 9))
-
-    def _maybe_emit_set_binop(self, left, right, op: str) -> bool:
-        """Lower `left {op} right` when it is a set operation, else return False.
-
-        `&`, `^` and `-` between two SETS are set intersection, symmetric
-        difference and difference, and they are lowered rather than passed to the
-        shared `container_operator_refusal` gate that refuses them for every
-        other blob. Only two SETS qualify, so `[1] - [2]` still reaches the gate
-        and is refused with CPython's TypeError reason, and x86-64 — which has no
-        set emitter at all — keeps refusing all three.
-        `_expr_is_set_like` is the flow-sensitive reader `|` already uses, so the
-        two set operators cannot disagree about which name is a set.
-
-        ONE predicate for the binary and the augmented spelling, because they are
-        separate emitters and the augmented one used to reach the shared gate
-        first: `s -= {2}` and `s = s - {2}` are the same source operator and must
-        not get one answer from one path and a refusal from the other."""
-        if op not in ("&", "^", "-"):
-            return False
-        if not (M.container_operand_is_blob(self._expr_str_kind(left))
-                or M.container_operand_is_blob(self._expr_str_kind(right))):
-            return False
-        if not (self._expr_is_set_like(left) and self._expr_is_set_like(right)):
-            return False
-        self._emit_set_op(left, right, op)
-        return True
-
-    def _emit_set_filter_pass(self, offset: int, src: int, src_n: int,
-                              other: int, other_n: int,
-                              keep_present: bool) -> None:
-        """Append every `src[i]` whose membership in `other` matches the
-        predicate to the result blob at `offset`, whose count is X4.
-
-        This is the inner half of `_emit_set_union`'s second loop, factored out
-        because three operators are it with different predicates and one of them
-        runs it twice:
-
-            `a & b`   keep the left elements the right holds  (keep_present)
-            `a - b`   keep the left elements the right lacks  (not keep_present)
-            `a ^ b`   (a - b) then (b - a)                     (twice, swapped)
-
-        `src`/`other` are X-register numbers (7 for the left operand, 8 for the
-        right, as `_emit_set_op` loads them) and `src_n`/`other_n` the operand
-        count words (2 and 3). The count lives in X4 across BOTH passes of a
-        symmetric difference, which is why it is a parameter of the site rather
-        than reset here: the two passes append into one result.
-
-        The scan is over `other[0..other_n)`, and the element is read as a whole
-        8-byte slot, which is `_emit_set_union`'s dedup compare and the same
-        thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
-        the compare is a word compare."""
-        self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
-        self._while_counter += 1
-        lp = f"{self.func_name}_sfp{self._while_counter}"
-        lpd = f"{self.func_name}_sfd{self._while_counter}"
-        lk = f"{self.func_name}_sfk{self._while_counter}"
-        lkd = f"{self.func_name}_sfx{self._while_counter}"
-        lkf = f"{self.func_name}_sff{self._while_counter}"
-        lskip = f"{self.func_name}_sfs{self._while_counter}"
-        self.asm.label(lp)
-        self.asm.emit(encode_cmp_xn_xm(5, src_n))
-        self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 0))
-        self.asm.emit_label_rel(lpd, here_offset=-4)     # i >= n → done
-        # elem = src[i] → X6
-        self.asm.emit(encode_add_xd_xn_imm(0, src, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))
-        # present = 0 → X1
-        self.asm.emit(encode_movz_wd_imm(1, 0))
-        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
-        self.asm.label(lk)
-        self.asm.emit(encode_cmp_xn_xm(0, other_n))
-        self.asm.emit(encode_cset_xd_cond(10, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 10))
-        self.asm.emit_label_rel(lkd, here_offset=-4)     # k >= n → not found
-        self.asm.emit(encode_add_xd_xn_imm(10, other, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(10, 10, 0))
-        self.asm.emit(encode_cmp_xn_xm(10, 6))
-        self.asm.emit(encode_cset_xd_cond(10, "eq"))
-        self.asm.emit(encode_cbnz_xn(0, 10))
-        self.asm.emit_label_rel(lkf, here_offset=-4)     # equal → found
-        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
-        self._emit_b_to(lk)
-        self.asm.label(lkf)
-        self.asm.emit(encode_movz_wd_imm(1, 1))          # present = 1
-        self.asm.label(lkd)
-        # keep when present == keep_present
-        self.asm.emit(encode_movz_wd_imm(10, 1 if keep_present else 0))
-        self.asm.emit(encode_cmp_xn_xm(1, 10))
-        self.asm.emit(encode_cset_xd_cond(10, "eq"))
-        self.asm.emit(encode_cbz_xn(0, 10))
-        self.asm.emit_label_rel(lskip, here_offset=-4)   # not equal → skip
-        self._emit_list_base(offset)
-        self.asm.emit(encode_add_xd_xn_imm(10, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 4))
-        self.asm.emit(encode_str_xt_xn_imm(6, 10, 0))
-        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))     # count++
-        self._emit_list_base(offset)
-        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
-        self.asm.label(lskip)
-        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
-        self._emit_b_to(lp)
-        self.asm.label(lpd)
-
-    def _emit_set_op(self, left, right, op: str) -> None:
-        """`a & b`, `a - b` and `a ^ b` as set operations over list blobs.
-
-        Result is a fresh list blob in X0: the left's elements the right holds
-        (`&`), the left's the right lacks (`-`), or the elements exactly one side
-        holds (`^`). arm64 is the backend that lowers these; x86-64 has no set
-        emitter at all and refuses them, which is `BACKEND_ONLY` in
-        `test_formal_container_methods.py` and the same split `|` already has.
-
-        **The capacity and the guard are the union's, with one difference.**
-        An intersection or a difference can hold at most `nL` elements, so the
-        reservation is `_blob_est(left)` and the guard's total is `nL`; a
-        symmetric difference is the union of two disjoint differences and can
-        hold `nL + nR`, so its reservation and guard are the union's `nL + nR`.
-        Reserving `nL + nR` for all three would be safe but would spend the
-        frame's remaining blob area for nothing, and the frame is the resource
-        `frame_blob_refusal` exists to bound.
-
-        The elements are compared as whole 8-byte slots for the reason
-        `_emit_set_union`'s dedup gives: a set lowers as a list here, so an
-        element is a word and `1 in {1, 2}` is a word compare."""
-        symdiff = op == "^"
-        legacy = max(1, self._blob_est(left)
-                     + (self._blob_est(right) if symdiff else 0))
-        exact = max(1, self._blob_est(left, exact=True)
-                    + (self._blob_est(right, exact=True) if symdiff else 0))
-        want = self._blob_site_growth(legacy, exact, left, right)
-        avail = self._blob_cap - self._list_cursor
-        if avail < 8:
-            raise CodegenError(
-                "a set operation exceeds the formal frame "
-                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
-        cap = min(want, (avail - 8) // 8)
-        if cap < 1:
-            cap = 1
-        self._emit_expr(left)
-        self.asm.emit(encode_stp_sp_pre(0, 2))           # left
-        self._emit_expr(right)
-        self.asm.emit(encode_stp_sp_pre(0, 2))           # right, left
-        # Nested emits above may have advanced the cursor — re-clamp.
-        avail = self._blob_cap - self._list_cursor
-        if avail < 8:
-            raise CodegenError(
-                "a set operation exceeds the formal frame "
-                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
-        cap = min(want, (avail - 8) // 8)
-        if cap < 1:
-            cap = 1
-        nbytes = 8 + 8 * cap
-        offset = self._list_cursor
-        self._list_cursor += nbytes
-        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))    # right
-        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))   # left
-        self.asm.emit(encode_ldp_sp_post(0, 31))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
-        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))     # nL
-        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))     # nR
-        if symdiff:
-            self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))  # nL + nR
-            what = "a set symmetric difference"
-            tag = "ssd"
-        else:
-            self.asm.emit(encode_mov_zr_xn(4, 2))        # nL
-            what = "a set intersection" if op == "&" else "a set difference"
-            tag = "sin" if op == "&" else "sdf"
-        self._emit_blob_growth_guard(what, 4, cap, tag)
-        self._emit_list_base(offset)
-        self.asm.emit(encode_movz_wd_imm(4, 0))          # count = 0
-        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
-        if symdiff:
-            # (a - b) then (b - a); the two are disjoint by construction, so
-            # appending the second to the first is the whole of `^` and no
-            # dedup pass is needed.
-            self._emit_set_filter_pass(offset, 7, 2, 8, 3, False)
-            self._emit_set_filter_pass(offset, 8, 3, 7, 2, False)
-        else:
-            self._emit_set_filter_pass(offset, 7, 2, 8, 3, op == "&")
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
