@@ -9,6 +9,21 @@ now REFUSED whenever the build can fold the value. This is the half it cannot
 fold, stated rather than hidden, because the alternative was refusing a host
 module the corpus depends on.
 
+**Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself
+incomplete, and is now complete.** The gate's own docstring said the test was the
+folded VALUE's truthiness, but the code tested `isinstance(value, int)`, so a
+`__exit__` returning a non-empty STRING literal — a value `fold_literal_expr`
+folds to a str, not an int, and CPython reads as true — was not refused. Measured
+on both architectures: `return "yes"` built, printed `enter / body 7 / exit` and
+exited 1 where CPython exits 0, the identical wrong answer as `return True`. The
+test is now `if value`, i.e. CPython's own `bool(returned)` over every value this
+can fold, so `return "yes"` is refused and `return ""` (falsy, like `return 0`)
+still lowers. Pinned by `test_formal_with.py`'s
+`an_exit_returning_a_truthy_string_is_refused_for_the_same_reason` and its
+falsy pair `an_exit_returning_an_empty_string_still_runs_the_protocol`. **§2's
+computed case is untouched and is still the whole of what is left.**
+
+
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of
 the gate: `model.context_exit_returns_truthy` asks "does some `return` in
 `__exit__` fold to a truthy value", and `fold_literal_expr` answers None for

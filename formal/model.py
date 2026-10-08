@@ -48318,7 +48318,16 @@ def context_exit_returns_truthy(method) -> bool:
     `fold_literal_expr` answers a `return` whose value the build can decide —
     `return True`, `return 1`, `return 2` are all suppressions; a bare `return`,
     `return False`, `return None` and `return 0` are all not — and answers None
-    for anything computed.  So a COMPUTED return is not counted here and stays
+    for anything computed.  **The test is the folded value's TRUTHINESS and not
+    its being a non-zero integer**: CPython reads any true return as a
+    suppression, so a non-empty string literal (`return "yes"`) suppresses
+    exactly as `return 1` does and is refused here too, where an earlier wording
+    of this function checked `isinstance(value, int)` and let it through —
+    measured, both architectures: the image built, printed
+    `enter / body 7 / exit` and exited 1 where CPython exits 0, the same wrong
+    answer as the `return True` case above.  `return ""`, `return 0`, `return
+    False` and `return None` are all falsy in CPython and all still lower.  So a
+    COMPUTED return is not counted here and stays
     as it was: that is the remaining limit, it is cross-FIELD flow (`nullcontext`
     returns `self.exit_result`, and whether that is true depends on a constructor
     argument this function cannot see), and it is the same limit
@@ -48333,7 +48342,14 @@ def context_exit_returns_truthy(method) -> bool:
         if not isinstance(node, F.ReturnStmt):
             continue
         value = fold_literal_expr(getattr(node, "value", None))
-        if isinstance(value, int) and not isinstance(value, bool) and value:
+        # `value` is the folded VALUE, so the test is its TRUTHINESS rather
+        # than its type: `fold_literal_expr` answers an int for a number or a
+        # `bool`, a STRING for a string literal, and Python `None` for both a
+        # bare `return` and an unfoldable expression.  `if value` is therefore
+        # exactly CPython's own `bool(returned)` for every value this can fold,
+        # and `None` (unfoldable) is falsy, which is the refusal-to-decide
+        # direction this gate is deliberately one-sided in.
+        if value:
             return True
     return False
 
