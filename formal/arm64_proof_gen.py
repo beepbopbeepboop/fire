@@ -9916,10 +9916,11 @@ def _program_extern_calls(info: dict) -> list:
     """The extern calls the PROGRAM makes — `extern_calls` less this backend's own.
 
     `info["extern_calls"]` is every unbound `BL` the image carries, and
-    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted as
-    its own bounded stops: the `BL fflush` inside each `_emit_exit`. Subtracting
-    it here is what puts the run tests back for a program whose only unbound
-    call is one of those.
+    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted for
+    ITSELF: the `BL fflush` inside each `_emit_exit`, and the `getrlimit` the
+    stack-floor guard reads `RLIMIT_STACK` with in every guarded prologue.
+    Subtracting it here is what puts the run tests back for a program whose only
+    unbound calls are the compiler's.
 
     **Measured on `formal/examples/mod_by_var.mojo` (`n % d`, a variable
     divisor), and this is the whole reason the subtraction exists.** Its image

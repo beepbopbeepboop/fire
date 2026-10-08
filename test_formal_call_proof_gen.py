@@ -4447,26 +4447,35 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
             "with no traps published both exits are the program's")
 
     def test_arm64_needs_no_trap_list_and_keeps_its_run_tests(self):
-        """The other backend, and the reason the asymmetry was the bug.
+        """The stack-floor `svc` needs no trap entry; the guard's CALL does.
 
-        arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
-        decodes, so a program that emits no bounded stop has an empty
-        `extern_calls` and needs nothing subtracted. Nothing here may change
-        that, and the assertion that it has not is what makes the x86-64 fix a
-        fix rather than a lowering of the bar on both sides.
+        The name is the original claim and it still holds: arm64's STACK-FLOOR
+        trap is a raw `svc`, which `lib/ProofLib.lean` decodes, so there is no
+        `BL` in the trap for a trap list to name. What the row used to assert on
+        top of that — that `plain`'s `extern_calls` is EMPTY — stopped being true
+        when the stack-floor guard began reading the process's real `RLIMIT_STACK`
+        with a `getrlimit` CALL in every prologue. `plain` now carries that one
+        extern call, it is the COMPILER's, and the fact that matters is not that
+        the list is empty but that the PROGRAM's own list is — which is what
+        `_program_extern_calls` answers.
 
-        The name says "no trap list" and the assertion is `assertFalse`, so it
-        is worth being exact about what it does and does not claim: it claims
-        THIS program's list is empty, and arm64 DOES publish one for a program
-        with a bounded stop — see the two rows below, which are the other half
-        and which this row used to contradict.
+        The flush half of the same rule is the `divisor` row below.
         """
+        from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
-        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
-                         [], "arm64's guard trap is an `svc`, not a call")
-        self.assertFalse(info.get("compiler_traps"),
-                         "a program with no bounded trap published one, so "
-                         "something other than a stop is being recorded")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "a call the compiler makes for itself is still in the "
+                         "program's list, so its run tests are suppressed for a "
+                         "call the source never wrote")
+        by_addr = {e["addr"]: e["sym"]
+                   for e in (info.get("extern_calls") or ())}
+        traps = set(info.get("compiler_traps") or ())
+        self.assertTrue(traps,
+                        "the guard's `getrlimit` is a call in every prologue "
+                        "and must be published as a compiler trap")
+        self.assertTrue({by_addr[a] for a in traps if a in by_addr}
+                        <= {"fflush", "getrlimit"},
+                        "a PROGRAM call is published as a compiler trap")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
@@ -4474,11 +4483,19 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
         """arm64's own trap is a `BL fflush`, and it must be published as one.
 
-        Every published address must be an `fflush` in `extern_calls` — the
-        flush is a real call and has to stay accounted for on the link line —
-        and the list must not be empty for a program whose image contains a
-        bounded stop, because a generator with nothing to subtract puts
-        `_gen_extern_test` on a path the program never takes.
+        Every published address must be one of the two calls the compiler emits
+        for ITSELF in this image — the exit trap's `fflush` and the stack
+        guard's `getrlimit` — each a real call in `extern_calls` that has to stay
+        accounted for on the link line. The list must not be empty for a program
+        whose image contains a bounded stop, because a generator with nothing to
+        subtract puts `_gen_extern_test` on a path the program never takes.
+
+        `getrlimit` is in the allowed set and is not a loosening: this row was
+        written when arm64's guard was a raw `svc` and the only published symbol
+        could be `fflush`, and the guard now reads `RLIMIT_STACK` with a call.
+        The assertion that the program's own calls are NOT published is the row
+        above and the by-address test below; what this row pins is that the
+        `fflush` the divide-by-zero arm emits is among the published addresses.
         """
         info = self._info("arm64", "divisor")
         traps = info.get("compiler_traps")
@@ -4487,17 +4504,68 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                         "published, so its `fflush` is being read as a call "
                         "the program makes")
         by_addr = {e["addr"]: e["sym"]
-                   for e in (info.get("extern_calls") or [])}
+                   for e in (info.get("extern_calls") or ())}
         for addr in traps:
             self.assertIn(addr, by_addr,
                           f"{addr:#x} is published as a trap but is not an "
                           f"extern call at all, so the subtraction would "
                           f"silence nothing and the list is wrong")
-            self.assertEqual(by_addr[addr], "fflush",
-                             f"the trap at {addr:#x} is a "
-                             f"{by_addr[addr]!r} call, and subtracting a "
-                             f"program call is the defect the by-address rule "
-                             f"exists to prevent")
+            self.assertIn(by_addr[addr], ("fflush", "getrlimit"),
+                          f"the trap at {addr:#x} is a {by_addr[addr]!r} call, "
+                          f"which is neither the exit trap's `fflush` nor the "
+                          f"stack guard's `getrlimit`; subtracting a program "
+                          f"call is the defect the by-address rule exists to "
+                          f"prevent")
+        self.assertIn("fflush", {by_addr[a] for a in traps},
+                      "the divide-by-zero arm's flush is not among the "
+                      "published traps")
+
+    def test_arm64_records_its_own_calls_and_that_needs_no_proof(self):
+        """The recording itself, with `prove=False`, so this row is green alone.
+
+        Every other arm64 row here builds with `prove=True`, and that now
+        refuses for the `divisor` fixture: the universal walk cannot follow the
+        two calls the COMPILER emits for itself (the prologue's stack-floor
+        `getrlimit` and the divide-by-zero arm's `fflush`), so a generation-time
+        refusal stands between those rows and the `info` they read. The emitter
+        half is checkable without any of that, and it is the half that was
+        silently absent after the merge that dropped `_emit_trap_flush`
+        (`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_getrlimit_is_a_program_call.md`):
+        a published `compiler_traps` list that nothing filled.
+
+        So: build the image only, and require BOTH of the compiler's own calls to
+        be published, each at an address that is really a call in `extern_calls`
+        (so the subtraction matches something) and not the program's (`getrlimit`
+        is the compiler's read of `RLIMIT_STACK`; `fflush` is the exit trap's
+        flush, and this program writes no output).
+        """
+        import formal.build as fb
+        with tempfile.TemporaryDirectory(prefix="a2-trap-rec-") as tmp:
+            path = os.path.join(tmp, "rec.mojo")
+            with open(path, "w") as f:
+                f.write(self.DIVISOR)
+            r = fb.compile_formal(path, arch="arm64",
+                                  output=os.path.join(tmp, "rec.aout"),
+                                  prove=False)
+        info = r["info"]
+        traps = set(info.get("compiler_traps") or ())
+        by_addr = {e["addr"]: e["sym"]
+                   for e in (info.get("extern_calls") or ())}
+        self.assertTrue(
+            traps,
+            "arm64 published no compiler_traps at all, so the merge that "
+            "dropped `_emit_trap_flush` is back: `_program_extern_calls` "
+            "subtracts nothing and the program's own `getrlimit` and `fflush` "
+            "read as calls it makes")
+        for addr in traps:
+            self.assertIn(addr, by_addr,
+                          f"{addr:#x} is published as a trap but is not an "
+                          f"extern call, so the subtraction would match nothing")
+        self.assertEqual(
+            {by_addr[a] for a in traps}, {"fflush", "getrlimit"},
+            "the compiler's own calls are the exit trap's `fflush` and the "
+            "stack guard's `getrlimit`; a different symbol here means a PROGRAM "
+            "call is being subtracted")
 
     def test_a_recorded_trap_is_the_bl_and_not_the_instruction_before_it(self):
         """The recorded address must be the `BL`, which is NOT where the call
