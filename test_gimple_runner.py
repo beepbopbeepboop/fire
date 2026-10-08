@@ -5065,14 +5065,15 @@ main()
     # a second row rather than a variant of the one above: it was missing from
     # the table too, and leaked the whole formatted buffer per call.
     #
-    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter does not
-    # compile at all when `d` is a module-level global (a boxed `int64_t`
-    # reaching a `MojoDict *` parameter) and prints a two-character answer
-    # when it is a local. Both are filed as
-    # bugs/CODEGEN_percent_format_of_a_dict_is_a_different_bug.md, and a
-    # memory row pinned on a shape whose VALUE is wrong measures the wrong
-    # thing -- doc/MEMORY.html §8 is explicit that a slope is only evidence
-    # when the output is right.
+    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter used to not
+    # compile at all when `d` was a module-level global (a boxed `int64_t`
+    # reaching a `MojoDict *` parameter) and printed a two-character answer
+    # when it was a local. Both are FIXED now — the RHS is coerced to
+    # `MojoDict *`, and `_repr_value` re-types a boxed container through
+    # `_get_actual_type` — but the memory row stays on the keyed spelling
+    # because that is the shape whose per-call buffer the release covers.
+    # doc/MEMORY.html §8 is explicit that a slope is only evidence when the
+    # output is right.
     test_gimple_bounded_memory("gimple_percent_keyed_of_dict_repr_is_released", """\
 def main():
     d = {'k': 'v'}

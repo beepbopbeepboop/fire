@@ -3309,9 +3309,8 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     else:
         var_names = None
         # `for x, in gen():` binds ONE name and `var` is the literal string
-        # `'(x,)'`. A multi-slot target over a generator whose yield arity was
-        # never recorded is a different mismatch — filed as
-        # bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md.
+        # `'(x,)'`. A real multi-slot target over a generator whose yield
+        # arity was never recorded is a different mismatch, refused below.
         _one = _single_loop_target_name(var)
         if _one is not None:
             var = _one

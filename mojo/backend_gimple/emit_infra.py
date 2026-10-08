@@ -4685,9 +4685,10 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
     # trailing comma is a spelling rather than a second slot. Declaring the raw
     # string emitted `int64_t (x,);`, which is not a C declaration, so the
-    # comprehension did not compile. A multi-slot target over a generator whose
-    # yield arity was never recorded is the other mismatch and is filed
-    # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
+    # comprehension did not compile. A real MULTI-slot target over a generator
+    # whose yield arity is not a recorded tuple is the other mismatch and is
+    # refused by name in the non-tuple arm below, exactly as
+    # `_gen_for_generator_iter` refuses it.
     #
     # Read once, above the branch, because BOTH arms need it: the non-tuple arm
     # declares and binds it, and the `_compr_restore_target` call after the loop
@@ -4701,6 +4702,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
+        if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
+            raise RuntimeError(
+                "cannot compile a multi-slot comprehension target over a "
+                f"generator whose yield arity is not a tuple (`{gen0.target} "
+                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
+                "yields one value per resume, and unpacking that value needs a "
+                "runtime iterator protocol this scalar generator model does "
+                "not have")
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()

@@ -3684,6 +3684,17 @@ def main():
 main()
 """, "multi-slot `for` target over a generator whose yield arity is not a tuple")
 
+    # The same refusal for the COMPREHENSION consumer, which reaches
+    # `_compr_generator_loop` rather than `_gen_for_generator_iter`.
+    test_generator_refused("gen_multi_slot_comprehension_target_over_one_value_generator_refused", """\
+def g():
+    yield 1
+
+def main():
+    print([x for a, b in g()])
+main()
+""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
+
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a
