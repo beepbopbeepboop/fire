@@ -804,6 +804,15 @@ dylib_exports: list = None, globals_base: int = None,
         # Enclosing try-finally bodies, outermost first. Flushed before
         # return/break/continue so finally runs on those paths.
         self._pending_finally = []
+        # Identities (`id`) of the finally bodies currently being emitted by a
+        # flush. A `return` inside a finally must not re-enter the same body,
+        # and keying on the list object's identity is what survives `_emit_try`
+        # popping frames as a nested try unwinds. See `_flush_pending_finally`.
+        self._emitting_finally = set()
+        # How many flush save slots are pushed below the frame right now. A
+        # `return` inside a finally emits its epilogue while that slot is still
+        # on the stack, so `_emit_epilogue` steps over it as well as the scratch.
+        self._flush_depth = 0
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -1378,6 +1387,8 @@ dylib_exports: list = None, globals_base: int = None,
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._flush_depth = 0
         # Blocks for CONTAINERS this function RECEIVES from a callee that returns
         # one, and the COPY after each such call that fills them.  The third kind
         # of block in the same reserved region as the constructor frames and the
@@ -1681,7 +1692,15 @@ dylib_exports: list = None, globals_base: int = None,
         self._current_function = None
 
     def _emit_epilogue(self) -> None:
-        _emit_add_imm(self.asm, 31, 31, _SCRATCH)
+        # `_flush_depth` counts the save slots a `finally` flush has pushed
+        # below the frame (`_flush_pending_finally`). A `return` inside a
+        # `finally` emits its epilogue while that slot is still on the stack,
+        # so the frame teardown steps over it as well as the scratch — without
+        # this the first epilogue to RUN leaves SP 16 bytes high and the `ret`
+        # reads a garbage X30, which is the arm64 SIGBUS a `return` inside a
+        # `finally` used to cause. Zero on every ordinary return, so the emitted
+        # code is unchanged.
+        _emit_add_imm(self.asm, 31, 31, _SCRATCH + 16 * self._flush_depth)
         for i in reversed(range(self._npairs)):
             self.asm.emit(encode_ldp_sp_post(19 + 2 * i, 20 + 2 * i))
         self.asm.emit(encode_ldp_sp_post(29, 30))
@@ -3001,16 +3020,35 @@ dylib_exports: list = None, globals_base: int = None,
 
         `depth` is 0 for return (run every enclosing finally) and the
         loop's entry `fin_depth` for break/continue (only frames opened
-        inside that loop). The list is truncated first so a return inside
-        a finally does not re-enter the same body."""
-        if len(self._pending_finally) <= depth:
+        inside that loop).
+
+        **The frames are KEPT, and re-entry is prevented by identity, not by
+        truncation.** The list used to be truncated here, which was written so
+        that a `return` inside a finally did not re-enter the same body — but
+        truncation is per-COMPILE-TIME and the emitter visits exit sites in
+        source order, so the first exit out of a `try` body removed the frame
+        for every LATER exit site in the same body and the second exit emitted
+        no cleanup at all. That was the bug: a `with` lowered to `try`/`finally`
+        left its `__exit__` uncalled on the second way out.
+        `_emitting_finally` records which bodies are being emitted RIGHT NOW,
+        keyed on `id(fin)` so it survives a nested `_emit_try` popping frames as
+        it unwinds; a nested `return` skips only the body it is already inside
+        and still runs the frames outside it."""
+        frames = self._pending_finally[depth:]
+        if not frames:
             return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
         self.asm.emit(encode_stp_sp_pre(0, 31))
-        for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
+        self._flush_depth += 1
+        for fin in reversed(frames):
+            if id(fin) in self._emitting_finally:
+                continue
+            self._emitting_finally.add(id(fin))
+            try:
+                for s in fin:
+                    self._emit_stmt(s)
+            finally:
+                self._emitting_finally.discard(id(fin))
+        self._flush_depth -= 1
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
     def _emit_exit(self, status) -> None:
@@ -3258,7 +3296,7 @@ dylib_exports: list = None, globals_base: int = None,
         the process after flushing finallys). `else` runs on the success
         path (always, without EH). On fall-through the finally emits
         here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it and truncated the stack — so the pop below is
+        already ran it (without removing the frame) — so the pop below is
         stack bookkeeping and nothing else.
 
         **The fall-through copy is emitted even when an exit edge inside
