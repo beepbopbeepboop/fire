@@ -6633,6 +6633,7 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
             with open(src, "w", encoding="utf-8") as f:
                 f.write(source)
             r = _compile(src, os.path.join(cls.tmp, name + ".aout"), "arm64")
+            cls.infos[name] = r["info"]
             with open(r["proof_path"], encoding="utf-8") as f:
                 cls.proofs[name] = f.read()
             # The startup stub's `getrlimit` is an extern call BELOW
