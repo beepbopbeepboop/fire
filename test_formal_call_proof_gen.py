@@ -713,6 +713,60 @@ class TestGeneratorSource(unittest.TestCase):
                       "too, or the two right-hand sides disagree about the same "
                       "instruction")
 
+    def test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift(self):
+        """The two `arm64_step` defects of 2026-10-07, pinned at the table level.
+
+        `ADDS/SUBS Xd, Xn, Xm` with `Rd != 31` write `Rd` and set the flags; the
+        `CMN`/`CMP` spellings (`Rd = 31`) set the flags and write nothing. And
+        the `add`/`sub`/`cmp` immediate forms scale their 12-bit field by
+        `LSL #12` when the `sh` field is 1. Both are facts `_step_rhs` and
+        `_regs_written` must agree on with `lib/ProofLib.lean`'s `arm64_step`,
+        and the two spellings of each class are pinned TOGETHER so a fix that
+        made one right and left the other wrong fails here.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            return int.from_bytes(fn(*args), "little")
+
+        for w, writes, must in (
+                (word(A.encode_adds_xd_xn_xm, 0, 0, 1), {0},
+                 "arm64_set_reg 0"),
+                (word(A.encode_cmn_xn_xm, 1, 2), set(),
+                 "arm64_set_reg 31"),
+                (word(A.encode_subs_xd_xn_xm, 0, 0, 1), {0},
+                 "arm64_set_reg 0"),
+                (word(A.encode_cmp_xn_xm, 1, 2), set(),
+                 "arm64_set_reg 31")):
+            idx = G._step_branch_index(w)
+            with self.subTest(word=hex(w)):
+                self.assertIsNotNone(idx, "no step-table row for this word")
+                self.assertEqual(
+                    G._regs_written(w, idx), writes,
+                    "the registers a block certificate claims this step "
+                    "clobbered are wrong; the model and `_step_rhs` write Rd "
+                    "for the whole class, so this row must too")
+                self.assertIn(
+                    must, G._step_rhs(w, idx),
+                    "the right-hand side does not name the write the model "
+                    "performs")
+
+        for text, w, imm in (
+                ("add x12, x29, #1675, lsl #12",
+                 word(A.encode_add_xd_xn_imm_sh, 12, 29, 1675, 1), 1675 << 12),
+                ("sub x25, x14, #545, lsl #12",
+                 word(A.encode_sub_xd_xn_imm_sh, 25, 14, 545, 1), 545 << 12),
+                ("add x12, x29, #1675",
+                 word(A.encode_add_xd_xn_imm_sh, 12, 29, 1675, 0), 1675)):
+            idx = G._step_branch_index(w)
+            with self.subTest(text=text):
+                self.assertIsNotNone(idx, "no step-table row for this word")
+                self.assertIn(
+                    f"UInt64.ofNat {imm}", G._step_rhs(w, idx),
+                    "the immediate is not scaled by the sh field, or an "
+                    "unshifted one was scaled")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -5622,6 +5676,25 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # agreement about all four flag bits.
         ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
         ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
+        # `ADDS Xd, Xn, Xm` with `Rd ≠ 31`: the SAME `0xab000000` class the `cmn`
+        # row above is the `Rd = 31` spelling of, and the write to `Rd` is the
+        # whole difference. It is the instruction the backend emits for a signed
+        # `+` overflow check (`_emit_int_alu_checked`'s `encode_adds_xd_xn_xm(0,
+        # 0, 1)`), and the row is here rather than folded into `cmn` on purpose:
+        # `arm64_step` claimed the whole class while writing no register, so a
+        # fix that made ONE of the two spellings right and left the other wrong
+        # would pass a test that pinned either one alone.
+        ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
+        # The extended-immediate `sh` field (bits 23:22): `lsl #12` scales the
+        # 12-bit field by 4096, and `arm64_step` read the field and dropped the
+        # shift, so a large constant offset was stepped as if it were the raw
+        # `imm12`. The last row is the anti-rot that matters: a helper that
+        # ALWAYS shifted would pass the two scaled rows and fail this one.
+        ("add x12, x29, #1675, lsl #12",
+         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 1)),
+        ("sub x25, x14, #545, lsl #12",
+         lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
+        ("add x12, x29, #1675", lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 0)),
     )
 
     @classmethod

@@ -14,6 +14,30 @@ exists — was re-confirmed on this tree and still stands.
 all five goals quoted, and the next step is now PRICED — this one is NOT behind
 the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
 
+**RE-MEASURED 2026-10-07 (`work/formal108-docs`): the five named examples no
+longer reach this obligation, so the doc's subject is currently MASKED rather
+than fixed.** `count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
+GENERATION, before a proof is emitted, with the conditional-halt refusal added
+by `2b7e5ec8` (`formal/arm64_proof_gen.py::_reached_without_a_condition`):
+
+```
+$ python3 -c "…formal.build.compile_formal(…, prove=True, check=False)…"   # all five
+NotImplementedError: universal theorem: the call at 0x10000041c -> 0x10000086c
+is the halt address, and it is behind a CONDITIONAL, so whether the run reaches
+it is a fact about the test input rather than about the CFG. …
+```
+
+So the `hx30fr_N` `rfl` this doc quotes is no longer reached by any corpus
+example, and the generator defect it describes — the emitted theorem
+`(…).x30 = st.x30` is FALSE for the `st.sp` this doc computes — is unchanged
+and latent, not repaired. It will be reachable again the moment a call on a
+conditional path can be followed (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_
+call_on_a_conditional_path.md`, whose step 1 is a set-valued exit in
+`lib/ProofLib.lean`). The "cheapest of the arm64 model work left" ordering in
+the paragraph above should now be read through that dependency: this fix cannot
+be verified on today's tree, because the programs that exercise it never get as
+far as the proof.
+
 ```
 $ python3 tools/memslot.py --gb 8 --label lean -- python3 -c "…check_proof_cached…"
 count_p2.lean:2671:16: error: Tactic `rfl` failed: The left-hand side

@@ -9,6 +9,23 @@ own invocation — over a bounded worker's 8 GB ceiling, under the tree's
 not broken. (The `-T 0` trap that measurement has is written up in
 `bugs/FORMAL_contract_ladder_reach.md`.)
 
+**Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
+verification is what is still owed.** One helper,
+`arm64_ext_imm12 (insn : UInt32) : Nat`, decodes `imm12` AND its `sh` field
+(`((insn >>> 10) &&& 0xfff).toNat <<< (12 * ((insn >>> 22) &&& 0x1).toNat)`), and
+all five `add`/`sub`/`cmp` immediate arms call it — the two 32-bit and two
+64-bit ADD/SUB plus CMP — so the shift cannot be present in one and absent from
+another. `work_step_add_imm32/add_imm64/sub_imm32/sub_imm64/cmp_imm` state the
+same, and `formal/arm64_proof_gen.py`'s `_step_rhs` rows 9-13 emit the shifted
+value. `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` gained rows for
+`add x12, x29, #1675, lsl #12`, `sub x25, x14, #545, lsl #12` and an UNSHIFTED
+`add x12, x29, #1675`, the last one so a helper that always shifts fails. What
+is NOT done is the `lib/ProofLib.olean` rebuild that would show them green:
+measured on this tree 2026-10-07 it still breaches a bounded worker's 8 GB
+ceiling (`memcap: BREACH 8.0 GB`, `-j 4` and `-j 1` alike), so `prooflib` and
+`formal-call-proofgen` are the integrator's to run. The doc is kept until that
+run rather than `git rm`'d.
+
 ## 1. What I ran
 
 The same harness as the sibling doc — `tools/formal_model_fuzz.py`'s own

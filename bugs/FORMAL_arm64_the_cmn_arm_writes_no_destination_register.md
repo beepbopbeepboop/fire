@@ -14,6 +14,22 @@ over a bounded worker's 8 GB ceiling, under the tree's `LIBRARY_MEMORY_MB =
 point" cascade at 7.1 GB that looks exactly like an unbuildable library.
 `bugs/FORMAL_contract_ladder_reach.md` carries the full note.)
 
+**Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
+verification is what is still owed.** `arm64_step`'s `0xab000000` arm now reads
+`Rd` (`(insn &&& 0x1f).toNat`) and writes it through `arm64_set_reg`, so the
+class covers both `CMN` (`Rd = 31`, the identity) and `ADDS Xd, Xn, Xm` with
+`Rd ≠ 31`; `work_step_cmn` states the same result; `formal/arm64_proof_gen.py`'s
+`_step_rhs` and `_regs_written` rows for index 66 follow it; and
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` gained a CPU-vs-model
+row for `adds x11, x1, x15` beside the existing `cmn` row, so a model that fixed
+one spelling and left the other wrong fails the test. What is NOT done is the
+`lib/ProofLib.olean` rebuild that would show it green: measured on this tree
+2026-10-07 it still breaches a bounded worker's 8 GB ceiling (`memcap: BREACH
+8.0 GB`, at `-j 4` and `-j 1` alike), so `prooflib` and the
+`formal-call-proofgen` suite job are the integrator's to run. The doc is kept
+until that run rather than `git rm`'d: a fix whose proof has not typechecked is
+not yet a fix.
+
 ## 1. What I ran
 
 One instruction, run on the CPU and asked of `arm64_step`, through the FUZZER'S
