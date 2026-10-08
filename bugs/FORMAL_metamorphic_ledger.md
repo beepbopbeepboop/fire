@@ -4,6 +4,21 @@
 
 `bugs/FORMAL_fuzz_ledger.md` is the differential fuzzer's ledger and the two read together: `formal_fuzz` asks "does the image answer what CPython answers", this one asks "do two builds of the same meaning answer the same". See §3 for why the second question reaches a class the first cannot.
 
+**Status 2026-10-07 (`work/formal143-docs`): the suite was RED, for five reasons, and none of them had been seen because `test_formal_metamorph.py` is in no bucket — `python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_metamorph.py` was `FAILED (failures=5)` and is now `Ran 59 tests … OK`. Three were a stale MOCK and two were real.** Read this before §2a's coverage claims, which §5's rows and §6's list below predate.
+
+* **`reorder` was UNSOUND on an ALIASED pair, and this is the thirteenth defect in §5, not a new class.** The `refs` mix (index 0, `--stmts 8 14`) binds two names to one list (`A32 = h31.b23`) and then stores through one and reads through the other:
+
+      A32[0] = 46        # …A32 aliases h31.b23
+      w34 = A32[0]       # prints 62 in the original…
+      h31.b23[0] = 62
+
+  `reorder` swapped the store and the read. The two statements' names are disjoint (`{h31}` against `{A32, w34}`), which is all `t_reorder`'s independence test looked at, so the twin printed `46` where the original printed `62` — a real metamorphic violation manufactured by the harness, exactly the shape §5 warns about. **Fixed at the root**: `t_reorder` now merges the two statements' name sets through `_alias_classes`, a union-find over the function's direct aliasing assignments (`A32 = h31.b23`, `A35 = L20`, `A47 = A32`), before any of its conflict rules run. Only a DIRECT assignment whose value is an existing object establishes an alias; a call result is treated as fresh, and a name is merged even when the aliasing store and the use are on different paths — over-approximating can only refuse a swap. Measured: the reorder twin is sound over all 27 mixes × indexes 0-5, and the two hand-written rows are `ReorderAliasing`. The control (`c = [b[0], 4]`, a fresh list) is still swappable, so the rule refuses the alias and nothing else.
+* **Eleven examples were refused by CPython, and the cause was one decorator missing from the removal rule.** `@refines(Specs.factorial64; 20)` is a proof-layer annotation whose arguments are not Python at all; `normalise_mojo` removed `@spec`/`@require`/`@ensure` and not it, so every file carrying it died at line 11. Adding `refines` to `PROOF_DECORATOR_RE` moves the examples corpus from **79 of 93 driven to 90 of 93** — §6's item 3 and §2a's "before" numbers are now one corpus behind.
+* **The remaining 3 unmeasured examples are the documented `struct` decision and only that.** `wide_recv.mojo` was §6 item 1's single unmeasured file; `struct_point.mojo` and `struct_method.mojo` are the other two. `test_the_examples_corpus_is_mostly_measured` asserted `driven >= len(stems) - 1`, which the new struct files broke; it now asserts the REASON instead (every unmeasured stem must be unmeasured for the `struct` decision, never for a spelling the normaliser can remove), which is the same claim and does not rot as the corpus grows.
+* **Three driver tests were mocking a return shape that no longer exists** (`cpython_answer` returns `(OracleAnswer, reason)` since the `OracleAnswer` type landed, and the mock returned a bare `((0, ""), "")`), so `check_pair` read its own oracle as `not-answerable` and the three rows asserting `match`/`CROSS-MACHINE-REFUSAL` failed for a reason that had nothing to do with the tool. Updated to `F.OracleAnswer(0, "")`. That is a test defect, not a §5 tool defect, and is named here so the next reader does not go looking for a driver regression.
+
+**What this does NOT close:** §6's four items are unchanged — the `struct` decision (now named as the 3 stems above), the stdlib sweep, the two rare transforms, and the `int_only` lower bound. Nothing here is a new SWEEP; it is the suite going from red to green with the two real defects fixed.
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
