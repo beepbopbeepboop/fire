@@ -81,11 +81,25 @@ compile-time trip count, on BOTH backends, and `s.append(x)` in the same loop
 state built by filling 624 slots in a loop now works on both machines, as does a
 624-word literal.
 
-**What is still the only spelling of the module-level state that works is the
-LITERAL**, and that is a different shape from loop growth and was measured
-separately: `[0] * 624` at module level builds and then prints NOTHING on BOTH
-architectures, while the 624-word literal reads back correctly at every size
-tried (4, 65, 66, 128, 624).
+**FIXED 2026-10-08 (`work/formal187-docs`): the REPETITION spelling now works
+too.** `[0] * 624` at module level used to build and then print NOTHING on BOTH
+architectures while the 624-word literal read back correctly — the repetition
+was classified as neither a foldable constant nor a container literal, so
+`collect_global_slots` gave it no `__DATA` slot and `module_body` kept the store,
+which made `__module_body__` the entry point and skipped `main`. That is the
+failure `_is_image_initialized` records for `NUMS = [10, 20, 30]`, one spelling
+over. `formal/model.py::_repeated_container` / `_is_static_container` now ask
+the same static-storage question of `[e0, e1] * N` as of the literal, and
+`_static_container_words` expands it. Measured: `[0] * 3` and `[1, 2] * 3` at
+module level read back their elements on arm64 and x86-64 and agree with the
+interpreter, and a 624-word `[0] * 624` answers `len` 624 and its last element;
+pinned by `test_formal_globals.py`'s `repeat_list_global` and
+`repeat_multi_element_list_global`. So **the module-level state may now be
+spelled as a literal OR a repetition** whose count is a compile-time constant;
+loop growth was already fixed (`formal28-6`), so of the four spellings this
+paragraph once compared, the literal, the repetition and the loop-growth form
+all work. A repetition whose COUNT is not a compile-time constant is not static
+data and is not this fix's to claim.
 
 **Claim** `sweep20:hostmods-wave3` on `work/formal20-hostmods-wave3`. Written
 2026-10-04 after `formal/hostmods/glob.mojo` landed (commit `d2edb1aa`). The
