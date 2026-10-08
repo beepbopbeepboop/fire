@@ -686,6 +686,48 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # …and the FALSY end of the string case, which is the boundary the fix to
+    # `context_exit_returns_truthy` had to keep: CPython reads a return by its
+    # TRUTHINESS, so an EMPTY string is falsy and the exception still propagates,
+    # exactly as `return False` does.  This row and the refusal below are one
+    # pair, and without it a gate that refused every string return would pass the
+    # refusal row while breaking a program CPython runs.
+    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return ""') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the same boundary one type further out, where `fold_literal_expr`
+    # does not reach at all: a float literal. CPython reads `0.0`/`-0.0` as
+    # falsy, so a `return 0.0` does NOT suppress and the exception still
+    # propagates. `0.0` is the falsy end of the pair whose truthy end (`0.5`) is
+    # a refusal below, and the two exist together because a gate that refused
+    # every float return would pass the refusal while breaking this program.
+    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -971,6 +1013,39 @@ REFUSALS = [
     # on the token would let `return 1` through.
     ("an_exit_returning_one_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT_ONE + "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and a non-empty STRING, which is the same suppression one type over and
+    # the case the gate used to miss: `context_exit_returns_truthy` checked
+    # `isinstance(value, int)` while its docstring claimed the test was the
+    # folded VALUE's truthiness, so `return "yes"` built, printed the cleanup
+    # every other line CPython printed, and exited 1 where CPython exits 0 — the
+    # identical wrong answer as `return True`, reached through a value the gate
+    # had folded and then discarded for being the wrong shape.  Measured, both
+    # architectures; the FALSY sibling (`return ""`) is an ANSWERED row above.
+    ("an_exit_returning_a_truthy_string_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", 'return "yes"') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and a non-zero FLOAT, the literal kind `fold_literal_expr` has no arm
+    # for at all — so this case is not the string one one type over but the
+    # other reader (`_literal_return_truthiness`) doing its own job. CPython
+    # reads `0.5` as true and suppresses; this path built, printed
+    # `enter / body 7 / exit` and exited 1. `int(0.5)` is 0, which is why the
+    # word reader `fold_module_value` must not be reused here. `-0.5` is the
+    # same value behind a `UnaryOp` and is covered by the same reader.
+    ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 0.5") +
+     "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
      "        raise ValueError('m')\n"

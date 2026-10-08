@@ -369,6 +369,80 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
+def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
+        tmpdir):
+    """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
+
+    `formal/model.py::specialization_call_refusal` is the bracket case, and the
+    two rows above it both name a concrete type argument as a DEMAND — a struct
+    template's instantiation and a function template's. This case is the third
+    shape and the one the message used to get wrong: a function of another
+    module whose generic parameter is IMPLICIT, written in the SIGNATURE
+    (`def unbox(t: Box[T])`) with no bracket to bind. There the type is inferred
+    from the call, so `unbox(b)` is the SAME PROGRAM and builds (run below,
+    against CPython on both architectures), while the source's `unbox[Int](b)`
+    has no declaration to bind its bracket against.
+
+    The old sentence answered it with "Write it as `unbox[<a type>](…)`", which
+    is the spelling already on the line — the `refuse_without:` class of defect,
+    a repair that is wrong about correct code. The refusal now names the bare
+    call instead, and this row is what keeps the two apart: a reword that put
+    the old advice back for this shape would pass every adjoining case, because
+    neither of them writes a bracket on an implicitly generic function at all.
+    """
+    lib = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "def unbox(t: Box[T]) -> T:\n"
+           "    return t.v\n")
+    bracketed = ("from implib import Box\n"
+                 "from implib import unbox\n"
+                 "\n"
+                 "def main():\n"
+                 "    var b = Box[Int]()\n"
+                 "    b.v = 10\n"
+                 "    print(unbox[Int](b))\n")
+    bare = ("from implib import Box\n"
+            "from implib import unbox\n"
+            "\n"
+            "def main():\n"
+            "    var b = Box[Int]()\n"
+            "    b.v = 10\n"
+            "    print(unbox(b))\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "def unbox(t):\n"
+               "    return t.v\n"
+               "\n"
+               "def main():\n"
+               "    b = Box()\n"
+               "    b.v = 10\n"
+               "    print(unbox(b))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_implicit_bracket", lib,
+                             bracketed, cpython, expect_ok=False,
+                             libname="implib.mojo")
+        check("brackets cannot be bound" in text,
+              f"[{arch}] `unbox[Int](b)` is not refused by the bracket "
+              f"sentence: {text.strip()[-300:]}")
+        check("Write it as `unbox[<a type>]" not in text,
+              f"[{arch}] the refusal still recommends `unbox[<a type>](…)`, "
+              f"which is the spelling already on the line: "
+              f"{text.strip()[-300:]}")
+        check("write `unbox(…)`" in text,
+              f"[{arch}] the refusal does not name the bare call, which is the "
+              f"same program for an implicitly generic function: "
+              f"{text.strip()[-300:]}")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_implicit_bare", lib, bare,
+                            cpython, libname="implib.mojo")
+        check(got == "10\n", f"[{arch}] printed {got!r}, expected 10")
+
+
 def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
     """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
     refused by name, on both architectures, for every struct template.
@@ -2916,6 +2990,8 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
+    ("a bracket on an implicitly generic function recommends the bare call",
+     test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a dotted application says which word is the module",
