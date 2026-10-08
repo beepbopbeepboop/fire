@@ -50,6 +50,28 @@ is not fixable at its own site — its size IS the leak count.
 | round 3 (rejected) | 44.9 GB | root-level `os/` shadowed CPython's `os` |
 | round 5 (aborted) | 51.2 GB | `mojo/middle/coro.py` `_compute_no_wd_forward` |
 
+### The 2026-10-07 gate: a smaller number that is NOT a smaller footprint
+
+The full gate on master 8df5b273 (61 passed) measured `native-dumpfull` at **1.4 GB** and
+`selfhost-memory-fire` at **0.5 GB**, against 31.3 and 12.2 GB recorded. Neither is a saving.
+Running the binary directly (`./mojoc fire.py --dump-full`, 0.5 GB, exit 1) prints
+`Error generating --dump-full: TypeError: object is not iterable` and writes no `fire.ci`: the
+self-hosted compiler dies early, so the peak is how far it got, not what it needs.
+`native-dumpfull` fails ("produced NO fire.ci") for that reason, and `selfhost-memory-fire`
+PASSES because `test_selfhost_memory.py` asserts only the peak against its budget and never the
+exit code or the artifact, so it cannot see a binary that stopped early. Both keep their
+recorded class (`program`, `module`) and the 31.3 / 12.2 GB figures until a run in which
+`--dump-full` completes measures them again. `tools/suite.py --apply-peaks` refuses to believe
+a job that failed or ran under 2 s for exactly this reason. The next step for
+`selfhost-memory-fire` is to make it fail on a non-zero exit (blocked on the dump-full bug).
+
+The same gate re-measured the rest of the table; the classes that moved are in
+`tools/suite.py`'s `MEASURED_PEAK_GB`/`MEASURED_RUN`. Two jobs now measure OVER the 4 GB line
+and carry a `memwhy` pointing here: `mojoc` (4.9 GB, was 3.7) and `selfhost` (4.4 GB, was
+3.7), both `small`; the whole-closure self-compile grew about 20% between the two gates.
+To refresh the table after any gate: `python3 tools/suite.py --apply-peaks build/suite.log
+[--dry-run]`, then re-class what it names.
+
 So the landed state is ~28-34 GB and the excursions to 45-51 GB were regressions the gate
 caught. The regressions matter less than the baseline: a healthy 28 GB is 7-9x the standard.
 

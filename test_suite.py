@@ -930,7 +930,7 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
               f'class_shortfalls on a synthetic 9.9 GB modcache: '
               f'{suite.class_shortfalls({"modcache": 9.9})}')
         check('peak log: a peak the class covers produces no shortfall',
-              not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
+              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 7.9}),
               f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
     else:
         print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
@@ -5986,6 +5986,93 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
           not offenders, '; '.join(sorted(set(offenders))))
 
 
+def test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs():
+    """`--apply-peaks`: the log's peaks into MEASURED_PEAK_GB, minus the liars.
+
+    The table went 22x stale (`native-dumpfull`: 31.3 GB recorded, 1.4 GB in
+    the log of a run where it died early) because the drift report was a line
+    in a log and fixing it was an afternoon of reading. These checks pin the
+    tool's judgement on synthetic logs built by the runner's own line
+    formatter: a job that FAILED, or ran under the poll's resolution, is not a
+    measurement; a derived row yields to a direct one; a difference the log
+    cannot resolve is not a change.
+    """
+    def line(key, status, secs, peak):
+        job = suite.Job(suite.REGISTRY[key.split(':')[0]])
+        res = suite.Result(status, secs, peak_gb=peak)
+        return suite._line(job, res, 1, 5, 0)
+    synth = os.path.join(HERE, 'build', 'test-suite-applypeaks.log')
+    os.makedirs(os.path.dirname(synth), exist_ok=True)
+    with open(synth, 'w') as f:
+        f.write(line('gimple', suite.PASS, 30.0, 0.4) + '\n')
+        f.write(line('native-dumpfull', suite.FAIL, 178.0, 1.4) + '\n')
+        f.write(line('modcache', suite.PASS, 0.3, 9.0) + '\n')       # a replay
+        f.write(line('coro', suite.PASS, 5.0, 0.2) + '\n')
+        f.write(line('coro', suite.PASS, 6.0, 0.7) + '\n')           # worst wins
+        f.write(line('coro', suite.FAIL, 7.0, 3.0) + '\n')           # not believed
+    meas = suite.log_measurements(synth)
+    trusted = suite.trusted_peaks(meas)
+    check('apply-peaks: only passing, long-enough jobs are trusted, worst first',
+          trusted == {'gimple': 0.4, 'coro': 0.7}, f'{trusted}')
+    check('apply-peaks: peaks_from_log still reports the failed job (a class '
+          'must cover it)',
+          suite.peaks_from_log(synth).get('native-dumpfull') == 1.4,
+          f'{suite.peaks_from_log(synth)}')
+
+    rec = {'a': (3.7, 'measured'), 'b': (1.2, 'derived'),
+           'c': (0.04, 'measured'), 'd': (31.3, 'measured')}
+    saved = dict(suite.REGISTRY)
+    try:
+        for n in 'abcdn':
+            suite.REGISTRY[n] = suite.REGISTRY['gimple']
+        got = {n: (o, p) for n, o, p in suite.peak_changes(
+            {'a': 4.4, 'b': 0.1, 'c': 0.1, 'd': 1.4, 'n': 0.2,
+             'unregistered-zz': 5.0}, rec)}
+    finally:
+        suite.REGISTRY.clear()
+        suite.REGISTRY.update(saved)
+    check('apply-peaks: moved, derived-replaced and new rows change; a '
+          'sub-resolution difference and an unregistered name do not',
+          set(got) == {'a', 'b', 'd', 'n'}
+          and got['n'] == (None, 0.2) and got['b'] == ((1.2, 'derived'), 0.1),
+          f'{got}')
+
+    src = ("MEASURED_RUN = ('old run')\n\nMEASURED_PEAK_GB = {\n"
+           "    'a':   (3.7,  'measured'),   # keeps this comment\n"
+           "    'b':   (1.2, 'derived'),\n"
+           "}\n")
+    out = suite.apply_peaks_to_source(
+        src, [('a', (3.7, 'measured'), 4.4), ('b', (1.2, 'derived'), 0.1),
+              ('zz', None, 0.6)], 'a long run label ' * 6)
+    ns = {}
+    exec(out, ns)
+    check('apply-peaks: the rewritten table parses and holds the new numbers',
+          ns['MEASURED_PEAK_GB'] == {'a': (4.4, 'measured'),
+                                     'b': (0.1, 'measured'),
+                                     'zz': (0.6, 'measured')}, f'{ns}')
+    check('apply-peaks: ...MEASURED_RUN names the new run and comments survive',
+          ns['MEASURED_RUN'].startswith('a long run label')
+          and '# keeps this comment' in out and 'old run' not in out, out)
+
+    # The negative control: a job the ratchet would move IS named. 'gimple' is
+    # `tiny`, so a 30 GB peak for it must produce advice and 0.4 must not.
+    advice = {n: (c, w) for n, c, w in suite.reclass_advice(
+        [('gimple', None, 30.0), ('coro', None, 0.2)])}
+    check('apply-peaks: a class the ratchet would change is named, a correct '
+          'one is not',
+          advice == {'gimple': ('tiny', 'program')}, f'{advice}')
+
+    check('gate-end warning: silent when the table is current...',
+          suite.peak_warning_lines([], [], 'x.log') == [], '')
+    warn = suite.peak_warning_lines(
+        [('native-dumpfull', 1.4, 31.3)],
+        [('some-job', 0.5, 'module', 48.0)], 'build/suite.log')
+    text = '\n'.join(warn)
+    check('gate-end warning: ...and names drift, over-provisioning and the fix',
+          'native-dumpfull' in text and 'some-job 48x' in text
+          and '--apply-peaks build/suite.log' in text, text)
+
+
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
@@ -6051,6 +6138,7 @@ def main():
                test_a_job_class_covers_its_measured_peak,
                test_a_job_class_covers_the_peak_the_last_run_recorded,
                test_over_provisioned_classes_are_reported_not_silently_kept,
+               test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,

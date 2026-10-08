@@ -165,6 +165,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -318,8 +319,8 @@ GIMPLE_SOURCES = (
 #            keep covering the cheap end).
 #   small    8 GB. A mojoc run over a snippet-sized input, a pure-python check
 #            that compiles snippet-sized programs, and the whole-closure
-#            self-compile as it measures TODAY (`selfhost` 3.7 GB, `mojoc`
-#            3.7 GB). It is also the class a job that names nothing gets.
+#            self-compile as it measures TODAY (`selfhost` 4.4 GB, `mojoc`
+#            4.9 GB). It is also the class a job that names nothing gets.
 #   module   24 GB. One module of the compiler's own closure compiled by a
 #            compiler we did not measure here, plus the honest "we do not know
 #            how much of a compiler this runs" class: `prooflib` hands the job
@@ -331,7 +332,7 @@ GIMPLE_SOURCES = (
 #   stage    96 GB. Kept as the ceiling for a genuine whole-transitive-closure
 #            self-compile plus a `gcc -fgimple` over the resulting 40 MB
 #            translation unit. NO JOB IS IN THIS CLASS ANY MORE: the workloads
-#            it was written for measure 1.2-3.7 GB (below), which is 26-80x
+#            it was written for measure 1.4-4.9 GB (below), which is 20-70x
 #            under it. It stays because the number is the documented ceiling
 #            for that shape and MEMLIMIT_GB=96 has to mean something; it is a
 #            debt, and bugs/PERF_memory_over_4gb_is_a_bug.md says so.
@@ -400,8 +401,12 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('the last green full `gate`, 2026-09-30, master 86d862f, '
-                'build/suite.log\'s MEMORY: table')
+MEASURED_RUN = ('the full `gate` of 2026-10-07 on master 8df5b273 (61 passed), '
+                'build/suite.log per-job peaks, applied with --apply-peaks. '
+                'Rows that run did not move by more than the log\'s 0.1 GB '
+                'resolution, or that it could not trust (a job that failed or '
+                'ran under 2 s), keep their earlier measurement, as their '
+                'comments say.')
 
 # `measured`: read off that run for this job.
 # `derived`:  the same command over the same inputs by the same engine, so the
@@ -413,12 +418,12 @@ MEASURED_RUN = ('the last green full `gate`, 2026-09-30, master 86d862f, '
 MEASURED_PEAK_GB = {
     'native-dumpfull':             (31.3, 'measured'),
     'ab-native':                   (20.5, 'measured'),
-    'selfhost':                    (3.7,  'measured'),
-    'mojoc':                       (3.7,  'measured'),
+    'selfhost':                    (4.4, 'measured'),
+    'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    'sqliteruntime':               (1.3,  'measured'),
-    'bootstrap-stage1-transitive': (1.2,  'measured'),
-    'bootstrap-stage2-cc':         (1.2,  'measured'),
+    'sqliteruntime':               (2, 'measured'),
+    'bootstrap-stage1-transitive': (1.4, 'measured'),
+    'bootstrap-stage2-cc':         (1.9, 'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
@@ -426,10 +431,10 @@ MEASURED_PEAK_GB = {
     'interp-tokenizer-oracle':     (0.1,  'measured'),   # 67 texts, ~1 s
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
-    'bootstrap-stage1-dumps':      (1.2, 'derived'),    # from stage1-transitive
-    'bootstrap-stage2-transitive': (1.2, 'derived'),    # from stage1-transitive
+    'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
+    'bootstrap-stage2-transitive': (1.4, 'derived'),    # from stage1-transitive
     'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
-    'bootstrap-stage3-transitive': (1.2, 'derived'),    # from stage1-transitive
+    'bootstrap-stage3-transitive': (1.4, 'derived'),    # from stage1-transitive
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
     # is memcap's own poll of the whole process tree (`procrun.tree_rss`, the
@@ -678,6 +683,21 @@ MEASURED_PEAK_GB = {
     'formal-math':     (0.09, 'measured'),   # 18.7 s, 8 groups, 20204 isqrts
     'formal-shutil':   (0.09, 'measured'),   # 34.5 s, 9 groups
     'formal-stat':     (0.10, 'measured'),   # 10.4 s, 4 groups, 65547 modes
+    # Added by --apply-peaks (see MEASURED_RUN for the run).
+    'coro':                                   (0.2, 'measured'),
+    'coro-nested-capture':                    (0.2, 'measured'),
+    'formal-ast':                             (0.1, 'measured'),
+    'gimple':                                 (0.4, 'measured'),
+    'gimplegenerators':                       (0.2, 'measured'),
+    'gimplerunner':                           (0.2, 'measured'),
+    'interporacle':                           (0.1, 'measured'),
+    'linkmode':                               (0.1, 'measured'),
+    'nonlocal':                               (0.1, 'measured'),
+    'refusal-taxonomy':                       (0.2, 'measured'),
+    'runner':                                 (0.1, 'measured'),
+    'runtimedylib':                           (0.4, 'measured'),
+    'silentnoop':                             (0.2, 'measured'),
+    'suite-self-test':                        (0.6, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -738,8 +758,8 @@ def class_for_peak(peak_gb: float, classes=None) -> str:
 #
 # The alternative reading — keep it at 24 until every job has a measured peak —
 # was rejected for a reason that is not only about speed: 8 GB is 2.2x the
-# largest peak actually measured anywhere in this registry (`selfhost`/`mojoc`,
-# 3.7 GB — see MEASURED_PEAK_GB), and the checks in test_suite.py that would
+# largest peak actually measured anywhere in this registry (`mojoc`,
+# 4.9 GB — see MEASURED_PEAK_GB), and the checks in test_suite.py that would
 # notice a job that outgrew the class are the ones that fire when it does. So
 # the guess is bounded rather than hidden, and every job's peak is recorded
 # (`report`'s peak table) so the next real gate replaces the 57 rows of this
@@ -818,7 +838,7 @@ def memclass_for(spec) -> str:
 #
 #   * What the whole-budget reservation added was a claim about the whole
 #     MACHINE, sized by nothing. `mojoc` was marked exclusive while measuring
-#     3.7 GB (MEASURED_PEAK_GB), so a 3.7 GB job held 96 of the machine's 96
+#     3.7 GB (MEASURED_PEAK_GB when it was written; 4.9 GB today), so a 3.7 GB job held 96 of the machine's 96
 #     GB and every other job on the box — every other worktree's gate, every
 #     `smoke`, the developer's own test run — waited behind it. That is the
 #     reservation version of the same mistake this whole table was corrected
@@ -999,8 +1019,8 @@ def class_shortfalls(peaks):
 # test_suite.py because the format is this module's own: a second copy of it is
 # a second thing to forget to update when the line changes, and a parser that
 # silently matches nothing is worse than no parser.
-_JOB_LINE = re.compile(r'^\[\s*\d+/\d+\]\s+\S+\s+(\S+)\s+[0-9.]+s\s+'
-                        r'\(\d+ running\)(?:\s+\[([^\]]*)\])?')
+_JOB_LINE = re.compile(r'^\[\s*\d+/\d+\]\s+(\S+)\s+(\S+)\s+([0-9.]+)s\s+'
+                       r'\(\d+ running\)(?:\s+\[([^\]]*)\])?')
 _PEAK_IN_TAIL = re.compile(r'peak ([\d.]+) GB')
 
 
@@ -1011,22 +1031,198 @@ def peaks_from_log(path):
     same test name, and the class has to cover the worst of them, not the one
     that happened to finish first. Cached replays have no peak (they start no
     process), which is why a log is not a complete record of what a job needs:
-    it is a record of what the jobs that actually ran needed.
+    it is a record of what the jobs that actually ran needed. Status is NOT
+    filtered here (a class must cover a failed job's peak too); the table
+    update, which must not believe a job that died early, is `trusted_peaks`.
     """
     peaks = {}
+    for key, _status, _secs, peak in log_measurements(path):
+        peaks[key] = max(peaks.get(key, 0.0), peak)
+    return peaks
+
+
+# ── Applying a run's peaks to the table ──────────────────────────────────────
+# `peak_drift` says the table has gone stale; this is the half that fixes it, so
+# that "update the table" is one command rather than an afternoon of reading a
+# log by hand (which is why a 31.3 GB entry survived a run that measured 1.4).
+#
+# What is NOT trusted as a measurement, and why each is a rule and not a taste:
+#   * a job that did not PASS. `native-dumpfull` is `expect=` and died early:
+#     its 1.4 GB is how far it got, not what it needs (recorded 31.3 GB), and
+#     the stage2 `--dump` items exit 245 in under two seconds at 0.0-0.1 GB.
+#   * a job that ran for under MIN_MEASURED_SECS. The poll is 0.5 s, so a
+#     sub-2 s job is at most three samples, and a `checked_run.py` replay of a
+#     recorded PASS (which starts nothing) looks exactly like one.
+# The log prints peaks to one decimal, so a value within LOG_RESOLUTION_GB of
+# the recorded one is the same measurement, not a new one: without that rule an
+# apply would overwrite a two-decimal `0.04` with the log's `0.1` and lose
+# precision for no information.
+MIN_MEASURED_SECS = 2.0
+LOG_RESOLUTION_GB = 0.1
+
+_LOG_STATUS_PASS = 'ok'
+
+
+def log_measurements(path):
+    """`[(job key, status tag, secs, peak_gb)]` for every job line with a peak.
+
+    The one reader of the per-job line; `peaks_from_log` is a view of it.
+    """
+    out = []
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
             for line in f:
                 m = _JOB_LINE.match(line)
                 if not m:
                     continue
-                key, tail = m.group(1), m.group(2) or ''
-                p = _PEAK_IN_TAIL.search(tail)
+                p = _PEAK_IN_TAIL.search(m.group(4) or '')
                 if p:
-                    peaks[key] = max(peaks.get(key, 0.0), float(p.group(1)))
+                    out.append((m.group(2), m.group(1), float(m.group(3)),
+                                float(p.group(1))))
     except OSError:
-        return {}
-    return peaks
+        return []
+    return out
+
+
+def trusted_peaks(measurements):
+    """`{test name: peak_gb}`: the worst peak among jobs worth believing.
+
+    `measurements` is `log_measurements` output (or the same tuples built from a
+    live run). A fanout's items fold into their test's name, worst first, for
+    the same reason `peaks_from_log` keeps the worst: the class has to cover the
+    biggest item, not the first to finish.
+    """
+    out = {}
+    for key, status, secs, peak in measurements:
+        if status != _LOG_STATUS_PASS or secs < MIN_MEASURED_SECS or peak <= 0:
+            continue
+        name = key.split(':')[0]
+        out[name] = max(out.get(name, 0.0), peak)
+    return out
+
+
+def peak_changes(trusted, recorded=None):
+    """`[(name, old entry or None, new peak)]` an apply would make.
+
+    A name with no entry is added; a `derived` entry is replaced by a direct
+    measurement (the weaker claim never outlives the stronger one); a
+    `measured` entry moves only when the run differs by more than the log can
+    resolve. Names that are not registered tests are ignored.
+    """
+    recorded = MEASURED_PEAK_GB if recorded is None else recorded
+    out = []
+    for name, peak in sorted(trusted.items()):
+        if name not in REGISTRY:
+            continue
+        old = recorded.get(name)
+        if (old is None or old[1] == 'derived'
+                or round(abs(peak - old[0]), 6) > LOG_RESOLUTION_GB):
+            out.append((name, old, peak))
+    return out
+
+
+def apply_peaks_to_source(src, changes, run_label):
+    """`src` (suite.py's text) with `changes` written into MEASURED_PEAK_GB.
+
+    Text surgery on one dict literal, not a regenerate-the-file: the table
+    carries comments (what each row is, how it was measured) that a
+    pretty-printer would destroy. An existing row has its number and
+    provenance rewritten in place, keeping its trailing comment; a new row
+    goes in just before the dict's closing brace under a header naming the run.
+    `MEASURED_RUN` is replaced with `run_label` so the table never claims a run
+    it was not read from.
+    """
+    new_rows = []
+    for name, old, peak in changes:
+        row = re.compile(r"^(\s*'" + re.escape(name) + r"':\s*)\([0-9.]+,\s*"
+                         r"'(?:measured|derived)'\)", re.M)
+        if old is not None and row.search(src):
+            src = row.sub(lambda m: f"{m.group(1)}({peak:g}, 'measured')",
+                          src, count=1)
+        else:
+            new_rows.append((name, peak))
+    if new_rows:
+        end = re.search(r'^MEASURED_PEAK_GB = \{.*?^\}', src, re.M | re.S)
+        if end is None:
+            raise ValueError('MEASURED_PEAK_GB literal not found in suite.py')
+        body = ''.join(f"    {repr(n) + ':':<42}({p:g}, 'measured'),\n"
+                       for n, p in new_rows)
+        header = '    # Added by --apply-peaks (see MEASURED_RUN for the run).\n'
+        pos = end.end() - 1
+        src = src[:pos] + header + body + src[pos:]
+    label = re.compile(r"^MEASURED_RUN = \(.*?\)\n", re.M | re.S)
+    if not label.search(src):
+        raise ValueError('MEASURED_RUN not found in suite.py')
+    chunks = textwrap.wrap(run_label, 66) or ['']
+    lit = '\n                '.join(repr(c + (' ' if i < len(chunks) - 1 else ''))
+                                 for i, c in enumerate(chunks))
+    src = label.sub(lambda m: f"MEASURED_RUN = ({lit})\n", src, count=1)
+    return src
+
+
+def reclass_advice(changes):
+    """`[(name, current class, class the ratchet assigns)]` after `changes`.
+
+    What a human still has to do by hand: the table is rewritten by
+    `--apply-peaks`, the `mem=` on the registration is not (it carries a
+    `memwhy` that has to stay truthful).
+    """
+    out = []
+    for name, _old, peak in changes:
+        spec = REGISTRY.get(name)
+        if spec is None:
+            continue
+        cur, want = memclass_for(spec), class_for_peak(peak)
+        if cur != want:
+            out.append((name, cur, want))
+    return out
+
+
+def apply_peaks(log_path, dry_run=False, run_label=None, out=print):
+    """`--apply-peaks LOG`: write a run's trustworthy peaks into this file."""
+    meas = log_measurements(log_path)
+    if not meas:
+        out(f'suite: {log_path} records no per-job peaks; nothing to apply')
+        return 1
+    trusted = trusted_peaks(meas)
+    skipped = sorted({k.split(':')[0] for k, s, secs, p in meas
+                      if k.split(':')[0] not in trusted})
+    changes = peak_changes(trusted)
+    for name, old, peak in changes:
+        out(f'  {name:<34} {"new" if old is None else f"{old[0]:g} ({old[1]})":>16}'
+            f' -> {peak:g} GB measured')
+    out(f'suite: {len(changes)} table change(s) from {len(trusted)} trusted '
+        f'test(s); {len(skipped)} not trusted (failed, or under '
+        f'{MIN_MEASURED_SECS:g}s): ' + (', '.join(skipped) or 'none'))
+    for name, cur, want in reclass_advice(changes):
+        out(f'  RE-CLASS {name}: mem={cur!r} -> {want!r} (edit its registration '
+            f'and keep its memwhy truthful)')
+    if run_label is None:
+        head, when = '?', '?'
+        try:
+            with open(log_path, encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if line.startswith('  git HEAD'):
+                        head = line.split()[-1]
+                    elif line.startswith('  date'):
+                        when = ' '.join(line.split()[1:2])
+                    elif line.startswith('[') or line.startswith('plan:'):
+                        break
+        except OSError:
+            pass
+        run_label = (f'a full `gate`, {when}, master {head}, per-job peaks '
+                     f'from the run log (--apply-peaks)')
+    if dry_run or not changes:
+        return 0
+    path = os.path.abspath(__file__)
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+    new = apply_peaks_to_source(src, changes, run_label)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(new)
+    out(f'suite: wrote {path}; now re-class the jobs above and run '
+        f'test_suite.py')
+    return 0
 
 
 def peak_drift(measured):
@@ -1048,6 +1244,29 @@ def peak_drift(measured):
         old = recorded[0]
         if peak > old * (1 + PEAK_HEADROOM) or peak < old / (1 + PEAK_HEADROOM):
             out.append((name, peak, old))
+    return out
+
+
+def peak_warning_lines(drift, over, log_path):
+    """The gate-end screen warning: `[]` when the table is current.
+
+    Takes `peak_drift`'s and `over_provisioned`'s own output rather than
+    recomputing either, so the screen, `--list` and the tests read one
+    definition of "over-provisioned". Names the one command that fixes it.
+    """
+    if not drift and not over:
+        return []
+    out = ['']
+    if drift:
+        out.append(f'suite: {len(drift)} measured peak(s) have moved since '
+                   f'MEASURED_PEAK_GB was written: '
+                   + ', '.join(n for n, _p, _o in drift))
+    if over:
+        out.append(f'suite: {len(over)} job(s) reserve more than '
+                   f'{OVER_PROVISIONED_FACTOR}x their measured peak: '
+                   + ', '.join(f'{n} {f:.0f}x in {c}' for n, _p, c, f in over))
+    out.append(f'suite: python3 tools/suite.py --apply-peaks {log_path} '
+               f'rewrites the table from this run (then re-class what it names)')
     return out
 
 
@@ -1268,7 +1487,7 @@ def fanout(*a, **kw) -> Fanout:
 # Same membership as the old `check:` prerequisite list, kept deliberately:
 # adding a test to the default gate is a decision, not a side effect of
 # reorganising the runner. `gate` below is the wider one.
-test('gimple', [PY, 'test_gimple.py'], cache=True,
+test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
      desc='GIMPLE unit suite (python-interpreted codegen)')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
@@ -1283,7 +1502,7 @@ test('gimple', [PY, 'test_gimple.py'], cache=True,
 # Registered here as `gimplerunner`/`gimplegenerators` (below, with `runner`
 # and the rest) rather than right after `gimple` — see that comment for the
 # full rationale and the `extra` cache-invalidation list.
-test('runner', [PY, 'test_runner.py'], cache=True, timeout=1800,
+test('runner', [PY, 'test_runner.py'], cache=True, mem='tiny', timeout=1800,
      # `exec_budget.py` is imported by the test file, so it belongs in the key:
      # without it, raising a budget replays a recorded PASS and the change never
      # runs. The runner's cache is content-addressed over exactly `extra`.
@@ -1349,7 +1568,7 @@ test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
 # is what makes the coverage number honest, and `comptime` parity pins the one
 # cell where it is silently 0 — an instrument nothing runs is a claim.
 test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"')
 # ~275 s, because it builds and runs real programs on both paths. `proofs`, not
 # `check`: the everyday inner loop should not pay for it every time.
@@ -1386,15 +1605,20 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
 # whole-closure self-compile plus `gcc -O2 -fgimple` plus a link, so this job
 # used to take the class documented on the 55.8 GB self-compile and reserve 96
 # of the machine's 96 GB: the everyday `check` bucket serialised behind a job
-# measured at 3.7 GB, twelve times a second, on every other worker's runs too.
-# Measured peak 3.7 GB, so the ratchet assigns 5.55 and the smallest class that
-# covers it is `small`. What replaced the 55.8 GB figure is
+# measured at 3.7 GB (4.4 GB today), twelve times a second, on every other worker's runs too.
+# Measured peak 3.7 GB then (4.4 GB in the 2026-10-07 gate), so the ratchet
+# assigns 5.55 (now 6.6) and the smallest class that covers it is `small`. What replaced the 55.8 GB figure is
 # MEASURED_PEAK_GB, read off a run's log by the same wrapper that enforces the
 # ceiling — and note that the same measurement taken on 2026-09-29 for
 # `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
 # the 55.8/96 numbers are not this workload's RSS on this tree. A build that
 # genuinely needs more says so: MEMLIMIT_GB=96.
 test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
+     memwhy='measured 4.4 GB (2026-10-07 gate): `fire.build_executable` of '
+            'fire.py, the same whole-closure self-compile as `mojoc` plus the '
+            'link. 1.5x is 6.6 GB, so `small` (8) is the smallest class that '
+            'covers it. Over the 4 GB line and therefore a debt, not a fact — '
+            'see ' + MEM_DEBT_DOC,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
      desc='the compiler compiles itself to a linked binary, cleanly')
@@ -1444,7 +1668,7 @@ test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
           'the committed HTML is not stale')
-test('linkmode', [PY, 'test_link_mode.py'], cache=True,
+test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
      desc='the real driver.compile_program link-mode pipeline')
@@ -1508,7 +1732,7 @@ test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
 # the closure-capture pass (by-reference capture), and a regression in any one
 # of the three is a SILENT wrong answer rather than a build failure — the
 # compiled program used to exit 0 with the pre-`nonlocal` value.
-test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
+test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_nonlocal.py', 'myinterpreter.py',
                              'fire.py', 'fire_main.py', 'driver.py',
                              RUNTIME_SRC, RUNTIME_HDR],
@@ -1533,12 +1757,12 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # homonym, a list of structs built in an imported module). All of them are fixed
 # and the marker is gone: an `expect=` on this job would now be reported as a
 # FAILURE ("marked expect= ... but it PASSES"), which is the anti-rot working.
-test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
+test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
-test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
+test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
@@ -1576,7 +1800,7 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
 # core, i.e. the job is WAITING-bound (its subprocesses: gcc, the compiled
 # binaries), not computing. Making it cheaper is a separate project; the
 # registration is the thing that was wrong.
-test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True,
+test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True, mem='tiny',
      deps=['preflight'], timeout=1500,
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
                              RUNTIME_SRC, RUNTIME_HDR],
@@ -1590,7 +1814,7 @@ test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True,
 # exactly that reason: a `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all (the
 # compiled path ignored decorators too, so the diff was clean).
-test('interporacle', [PY, 'test_interp_oracle.py'], cache=True,
+test('interporacle', [PY, 'test_interp_oracle.py'], cache=True, mem='tiny',
      extra=['test_interp_oracle.py', 'fire_compiler.py', 'myinterpreter.py',
             'fire.py', 'fire_main.py'],
      desc='the interpreter oracle itself, diffed against CPython')
@@ -1790,7 +2014,7 @@ test('preflight', [PY, '-c',
 # `test_the_estate_check_is_in_a_gate_and_can_see_its_subject` asserts both
 # patterns are present and that the glob and the walk agree, so the two cannot
 # drift back apart.
-test('suite-self-test', [PY, 'test_suite.py'], cache=True,
+test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
             'test_memslot.py', 'tools/dangling_doc_refs.py'],
@@ -1809,10 +2033,10 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True,
 test('memslot', [PY, 'test_memslot.py'], cache=True,
      extra=['test_memslot.py', 'tools/memslot.py', 'tools/memcap.py'],
      desc='the machine-wide memory ledger: FIFO, budgets, crash, tree coverage')
-test('coro', [PY, 'test_coro_runtime.py'], cache=True,
+test('coro', [PY, 'test_coro_runtime.py'], cache=True, mem='tiny',
      extra=['test_coro_runtime.py'] + CORO_RUNTIME,
      desc='A3 stack-switch coroutine runtime, every backend at -O0 and -O2')
-test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=True,
+test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=True, mem='tiny',
      extra=['test_coro_nested_async_capture.py', 'gimple_codegen.py',
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
@@ -1931,7 +2155,8 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # whole-closure self-compile AND the `gcc -O2 -fgimple` over the resulting
 # 40 MB translation unit, and it used to be given the class documented on the
 # 55.8 GB self-compile, reserving the whole 96 GB machine budget. Measured
-# peak 3.7 GB (MEASURED_PEAK_GB), so the ratchet assigns 3.7 x 1.5 = 5.55 GB
+# peak 3.7 GB when written, 4.9 GB in the 2026-10-07 gate (MEASURED_PEAK_GB), so
+# the ratchet assigns 4.9 x 1.5 = 7.35 GB
 # and the smallest class covering it is `small`. The Makefile's recipe for this
 # target names the same class, which is not tidiness: a recipe asking for MORE
 # than the job reserved takes a second reservation inside a tree the first one
@@ -1943,6 +2168,11 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # nothing else may start while this runs. The reservation is the class, like
 # every other job's — see `reserved_gb`.
 test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
+     memwhy='measured 4.9 GB (2026-10-07 gate): the whole-closure self-compile '
+            'plus `gcc -O2 -fgimple` over the resulting translation unit. 1.5x '
+            'is 7.35 GB, so `small` (8) is the smallest class that covers it and '
+            'the headroom is thin. Over the 4 GB line and therefore a debt, not '
+            'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
@@ -2004,7 +2234,9 @@ test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
             'completes, for the same pre-pass (SELFHOST_TOKENIZE_BLOWUP). '
             '1.5x is 47 GB, so `program` is the class the ratchet assigns; the '
             'class is already correct and the reason is recorded because it is '
-            'over the 4 GB line — see ' + MEM_DEBT_DOC,
+            'over the 4 GB line — see ' + MEM_DEBT_DOC + '. The 2026-10-07 gate '
+            'measured 1.4 GB, but `mojoc --dump-full` died early (TypeError, no '
+            '.ci): how far it got, not what it needs, so 31.3 stays.',
      expect=SELFHOST_TOKENIZE_BLOWUP,
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 # Peak-memory budgets for the self-hosted binary, as numbers (see the module
@@ -2024,7 +2256,10 @@ test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='me
             '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
             'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
             'because at this size it is alone on the machine by arithmetic, not '
-            'by choice.',
+            'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
+            '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
+            'asserts the peak, not the exit code; 12.2 stays the last real '
+            'measurement.',
      desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -2052,7 +2287,7 @@ test('stdlib-dylib', [PY, '-c',
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
 
 # test_sqlite3_runtime.py was deliberately left unregistered because an
@@ -2085,15 +2320,15 @@ test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
 # Every step below runs a compiler, or the compiler over a whole closure, so
 # every step names a memclass — and every one of them is now `tiny` except the
 # artifacts, because the measurements say so (MEASURED_PEAK_GB: the whole
-# python closure dump 1.2 GB, each per-file dump 0.5 GB, the gcc -O0 over the
-# resulting 40 MB translation unit 1.2 GB). These are the classes the 2026-09-25
+# python closure dump 1.4 GB, each per-file dump 0.1-0.5 GB, the gcc -O0 over the
+# resulting 40 MB translation unit 1.9 GB). These are the classes the 2026-09-25
 # footprint probe put at 24/55/96, and the ledger turned those numbers into a
 # queue: a `stage` item reserved the whole 96 GB machine budget, and the three
 # fanouts of 45 items each ran four wide.
 test('bootstrap-clean', ['rm', '-rf', 'stage1', 'stage2', 'stage3'],
      desc='wipe the stage trees (see the Makefile note on stale artifacts)')
 
-# `tiny` (4), from `bootstrap-stage1-transitive`'s measured 1.2 GB (a per-file
+# `tiny` (4), from `bootstrap-stage1-transitive`'s measured 1.4 GB (a per-file
 # dump cannot cost more than the whole-closure dump of the same sources, which
 # is where the number comes from — MEASURED_PEAK_GB's 'derived' rows are exactly
 # this kind of transfer, and they are labelled so a reader can see which rows
@@ -2133,8 +2368,9 @@ test('bootstrap-stage1-transitive',
 #
 # `mem='tiny'` (4), down from `stage` (96) — the class that used to be
 # documented on exactly this workload, "the largest footprint ever observed
-# completing a self-compile". Measured peak 1.2 GB as the tree stands, so the
-# ratchet assigns 1.8 GB. The Makefile's own `stage2/mojo` rule names the same
+# completing a self-compile". Measured peak 1.9 GB as the tree stands (gcc -O0
+# over the translation unit, `bootstrap-stage2-cc`), so the ratchet assigns
+# 2.85 GB. The Makefile's own `stage2/mojo` rule names the same
 # class, so a hand-run `make stage2/mojo` and this step cannot disagree — and
 # they must not, because a recipe asking for more than the job reserved takes a
 # second reservation inside a tree the first already accounts for, which
@@ -2443,7 +2679,7 @@ test('formal-interop', [PY, 'test_formal_interop.py'],
 # bucket: `formal-link-accounting` says the NAME left the host set, this says
 # the module that replaced it is right.
 test('formal-ast', [PY, 'test_ast_formal.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='formal/hostmods/ast.mojo tokenizes and validates like CPython\'s')
 # No j=True: test_formal_sweep.py is a plain unittest.main() and has no -j of
 # its own, so forwarding one makes it exit 2 on "unrecognized arguments".
@@ -5285,15 +5521,33 @@ def report(names, state, results, wall, peak, opts, log: Log):
         # contradicts (the table in MEASURED_PEAK_GB is a snapshot, and a
         # snapshot that nobody compares to the next run is a rumour).
         short = class_shortfalls({k: p for p, k in measured})
-        drift = peak_drift({k: p for p, k in measured})
         for name, peak, cls, ceiling in short:
             log.line(f'  CLASS TOO SMALL: {name} peaked at {peak:.1f} GB and '
                      f'its {cls} class is {ceiling:.0f} GB — the next run will '
                      f'be RESOURCE-capped')
+        # Drift is judged on the jobs worth believing (`trusted_peaks`): a job
+        # that FAILED early peaks at how far it got, and reporting that as a
+        # "measurement" is what made native-dumpfull's 1.4 GB look like a 22x
+        # saving. Those are named separately instead of dropped silently.
+        trusted = trusted_peaks([(k, _TAG.get(r.status, r.status), r.secs,
+                                  r.peak_gb) for k, r in results.items()
+                                 if r.peak_gb is not None])
+        drift = peak_drift(trusted)
         for name, peak, old in drift:
             log.line(f'  PEAK DRIFT: {name} measured {peak:.1f} GB here, '
                      f'{old:.1f} GB in MEASURED_PEAK_GB — update the table (and '
                      f'the class with it)')
+        distrust = sorted({k.split(':')[0] for p, k in measured}
+                          - set(trusted))
+        if distrust:
+            log.line('  NOT TRUSTED as measurements (failed, or under '
+                     f'{MIN_MEASURED_SECS:g}s): ' + ', '.join(distrust))
+        # The two lists are the early warning that the registry is reserving
+        # more than it uses. On the SCREEN, not just in the log: the drift
+        # lines above sat in a log nobody opened until the table was 22x off.
+        for line in peak_warning_lines(drift, over_provisioned(),
+                                       log.path or 'build/suite.log'):
+            log.notice(line)
 
     # The test count is in the tail as well as the job count, because those are
     # the two numbers a reader adds up, and the job count alone is what made the
@@ -5547,10 +5801,19 @@ def main(argv=None):
                          'machine-wide budget and runs the job under memcap '
                          'at exactly what it reserved.')
     ap.add_argument('--dry-run', action='store_true',
-                    help='print the plan and its ordering, run nothing')
+                    help='print the plan and its ordering, run nothing (with '
+                         '--apply-peaks: print the table changes, write nothing)')
+    ap.add_argument('--apply-peaks', metavar='LOG',
+                    help='rewrite MEASURED_PEAK_GB and MEASURED_RUN in this '
+                         "file from a run log's per-job peaks, trusting only "
+                         'jobs that PASSED and ran >= %gs, then name the jobs '
+                         'whose class the ratchet now assigns differently. '
+                         'Run nothing else.' % MIN_MEASURED_SECS)
     opts = ap.parse_args(argv)
     if opts.jobs < 1:
         ap.error('-j must be >= 1')
+    if opts.apply_peaks:
+        return apply_peaks(opts.apply_peaks, dry_run=opts.dry_run)
     if opts.prefix:
         return print_wrapper_prefix(*opts.prefix)
     if opts.list:

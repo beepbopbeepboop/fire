@@ -139,6 +139,12 @@ plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
 every ceiling and is also the answer to a class that no longer fits;
 `MEMLIMIT_GB=0` removes them all and says so loudly.
 
+When a gate's log reports `PEAK DRIFT` (or the gate ends with the over-provisioned
+warning), the table is stale: `python3 tools/suite.py --apply-peaks build/suite.log`
+(`--dry-run` to preview) rewrites `MEASURED_PEAK_GB`/`MEASURED_RUN` from the log, trusting
+only jobs that PASSED and ran >= 2 s (a job that died early peaks at how far it got), and
+names the jobs to re-class by hand.
+
 A **reservation** is per machine, and it is not optional. A ceiling bounds one
 tree and says nothing about how many may run at once, which is not a bound at
 all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one

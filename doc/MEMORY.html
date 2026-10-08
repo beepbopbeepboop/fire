@@ -518,7 +518,7 @@ a "save, copy, mutate, restore" of a big dict takes its scratch from the pool, a
 <code>_lower_call</code> (~640 MB); every parsed module's AST kept to the end. The next fixes have the same shape: find the per-call copy or temporary, pool it, empty it,
 or give it an owner.</p>
 <p><b>Regression checks.</b> <code>gimple_char_scan_allocates_nothing_per_character</code> (4,377 MB before, 1.5 MB after) in test_gimple_runner.py;
-<code>test_selfhost_memory.py</code> (<code>selfhost-memory</code>: one <code>--dump-full</code> under 1.5 GB; <code>selfhost-memory-fire</code>: fire.py under 16 GB, a tripwire to ratchet down).</p>
+<code>test_selfhost_memory.py</code> (<code>selfhost-memory</code>: one <code>--dump-full</code> under 1.5 GB; <code>selfhost-memory-fire</code>: fire.py under 16 GB, a tripwire to ratchet down). As of the 2026-10-07 gate the <code>fire</code> case passes at 0.5 GB only because <code>mojoc --dump-full</code> now dies early with <code>TypeError: object is not iterable</code> (exit 1, no <code>.ci</code>); the test asserts the peak, not the exit code, so 0.5 GB is how far it got, not a new footprint, and the 12 GB above stays the last real measurement (see <code>bugs/PERF_memory_over_4gb_is_a_bug.md</code>).</p>
 <p><b>Bugs found on the way.</b> <code>bugs/CODEGEN_tuple_dict_key_hashed_by_address.md</code>, <code>bugs/CODEGEN_list_of_pairs_iterated_as_dict.md</code> (a heap overflow in
 <code>mojo_dict_order_indices</code> is fixed, the type confusion is not), <code>bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md</code>.</p>
 
