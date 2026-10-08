@@ -37,7 +37,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, target_slots
+from fire_compiler import for_target_is_tuple, target_slots, _as_list
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -6319,9 +6319,14 @@ def _dedup_variadic_externs(parts: list) -> str:
         if entry is None:
             entry = _parse_part(p)
             _DEDUP_EXTERN_PARTS_CACHE[p] = entry
-        part_concrete, part_variadic = entry
+        # Index, then `_as_list`: a cached `(concrete, variadic)` pair unpacked
+        # by `a, b = entry` boxes both slots on the self-hosted path, and
+        # `for name in part_concrete` was then "'for' loop over unsupported
+        # iterable type int64_t" -- the dedup silently never ran.
+        part_concrete = _as_list(entry[0])
+        part_variadic = _as_list(entry[1])
         for name in part_concrete:
-            concrete.add(name)
+            concrete.add(_as_str(name))
         variadic_by_part.append(part_variadic)
     if not concrete:
         out = '\n'.join(parts)
