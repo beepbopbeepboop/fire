@@ -6315,6 +6315,32 @@ ASSIGNED_TYPE_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var t = Tail()\n"
      "    return t.total()\n", 14, None),
+    # A `for` target nested more than one group deep. Found 2026-10-05 on
+    # `work/formal40-2` and fixed by giving x86-64 the SHARED target TREE
+    # (`model.for_target_tree`, which arm64 already had): x86-64 was flattening
+    # the target with `_lbn_target_names`, so it compared the outer blob's count
+    # of 2 against a leaf count of 3 (or 4 at depth two) and exited 1 with
+    # nothing printed, where arm64 and CPython both answer the sum. This row is
+    # the whole boundary: one level of unpacking was already fine on both
+    # backends, and two was not. The expected `s=10` is CPython's answer for the
+    # text (`1 + 2 + 3 + 4`), stated here rather than run because the drop-in
+    # `main()` signature is not a CPython module.
+    ("both_arch_a_nested_for_target_unpacks_each_group",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=10"),
+    # …and the SAME flattening lived in x86-64's comprehension generator, so a
+    # nested target there refused too. The element sums are 6 and 60, and the
+    # pair is printed together so a fix that mispaired the two positions would
+    # be visible rather than merely 66.
+    ("both_arch_a_nested_comprehension_target_unpacks_each_group",
+     "def main():\n"
+     "    var xs = [a + b + c for a, (b, c) in [(1, (2, 3)), (10, (20, 30))]]\n"
+     "    printf(\"n=%d s=%d\\n\", len(xs), xs[0] + xs[1])\n"
+     "    return 0\n", 0, "n=2 s=66"),
 ]
 
 # Positive cases built and RUN on BOTH backends, which is what

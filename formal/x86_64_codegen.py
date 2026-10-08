@@ -6488,6 +6488,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+            # The target as a TREE, not the flattened leaf list: a nested
+            # group is a second unpack against the element at that position,
+            # and comparing the outer blob's count against the number of
+            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
+            # and exit 1 with nothing printed, where arm64 and CPython answer
+            # 21. `M.for_target_tree` is the one builder both backends ask.
+            ttree = M.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
 
             self._while_counter += 1
             wid = self._while_counter
@@ -6554,9 +6566,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if len(tnames) == 1:
+                if isinstance(ttree, list) and not \
+                        M.for_target_tree_has_star(ttree):
+                    self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_flt{wid}")
+                elif len(tnames) == 1:
                     self._store_var(tnames[0], Reg.RAX)
                 else:
+                    # A starred target keeps the pre-tree flattened path (both
+                    # backends run it and exit 1 today; x86-64 has no rest-blob
+                    # arm), so this fix changes only the nested-group arity.
                     self._emit_for_unpack(tnames, Reg.RAX,
                                           f"{fn}_flt{wid}")
 
@@ -9157,7 +9175,19 @@ preference.
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if len(tnames) == 1:
+            # The same TREE the `for`-loop emitter asks, for the same reason:
+            # a nested group is a second unpack, and a flat leaf list makes the
+            # outer arity check compare against the leaves.
+            ttree = M.for_target_tree(gen.target) if isinstance(
+                gen.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple of "
+                    f"plain names (got {gen.target!r})")
+            if isinstance(ttree, list) and not \
+                    M.for_target_tree_has_star(ttree):
+                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
+            elif len(tnames) == 1:
                 self._store_var(tnames[0], Reg.RAX)
             else:
                 self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
