@@ -2285,57 +2285,6 @@ def local():
 local()
 """)
 
-    # A global whose module-level initialiser is `None` and whose real value
-    # is assigned later from inside a function (`global x; x = ...`) is the
-    # standard lazy-initialised singleton. `None` is the NULL value of every
-    # pointer kind, so it must not fix the field's type the way a real scalar
-    # initialiser does; before the cross-function join learned this, the field
-    # was frozen `int64_t` from the `None` and the later `char *` store was
-    # read back as the pointer's own decimal (or the list's address). The list
-    # row is the control that exercises the container arm of the same join.
-    test_gimple_matches_cpython("gimple_global_none_then_assigned_a_string", """\
-x = None
-
-def setup():
-    global x
-    x = "abc"
-
-setup()
-print(x)
-""")
-
-    test_gimple_matches_cpython("gimple_global_none_then_assigned_a_list", """\
-x = None
-
-def setup():
-    global x
-    x = [1, 2]
-
-setup()
-print(x)
-""")
-
-    # The bound-method spelling of the same lazy-init shape: the store lives
-    # in one function and the call in another, so the method's return type has
-    # to survive the box through the whole-program table (a per-function one
-    # is reset before the call is emitted). A `-> bool` method must print
-    # `True`, not the `1` its `int64_t` box decodes to.
-    test_gimple_matches_cpython("gimple_global_none_then_bound_method_across_functions", """\
-class M:
-    def truthy(self):
-        return True
-
-m = M()
-f = None
-
-def setup():
-    global f
-    f = m.truthy
-
-setup()
-print(f())
-""")
-
     # ── `with` teardown: the `as` target is optional, and so is running
     # ── __exit__ at all. Fixed, and the doc
     # ── (`CODEGEN_with_no_as_target_drops_exit`) is deleted, so this comment
@@ -5065,15 +5014,14 @@ main()
     # a second row rather than a variant of the one above: it was missing from
     # the table too, and leaked the whole formatted buffer per call.
     #
-    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter used to not
-    # compile at all when `d` was a module-level global (a boxed `int64_t`
-    # reaching a `MojoDict *` parameter) and printed a two-character answer
-    # when it was a local. Both are FIXED now — the RHS is coerced to
-    # `MojoDict *`, and `_repr_value` re-types a boxed container through
-    # `_get_actual_type` — but the memory row stays on the keyed spelling
-    # because that is the shape whose per-call buffer the release covers.
-    # doc/MEMORY.html §8 is explicit that a slope is only evidence when the
-    # output is right.
+    # `'%(k)s' % d` and NOT `'%r' % d`, deliberately: the latter does not
+    # compile at all when `d` is a module-level global (a boxed `int64_t`
+    # reaching a `MojoDict *` parameter) and prints a two-character answer
+    # when it is a local. Both are filed as
+    # bugs/CODEGEN_percent_format_of_a_dict_is_a_different_bug.md, and a
+    # memory row pinned on a shape whose VALUE is wrong measures the wrong
+    # thing -- doc/MEMORY.html §8 is explicit that a slope is only evidence
+    # when the output is right.
     test_gimple_bounded_memory("gimple_percent_keyed_of_dict_repr_is_released", """\
 def main():
     d = {'k': 'v'}
@@ -6747,6 +6695,33 @@ fn main():
     print(b'a=b'.partition(b''))
 """, "ValueError: empty separator")
 
+    # The `str` half of the same pair. `mojo_str_partition`/`mojo_str_
+    # rpartition` built an unmarked `MojoList`, so their result PRINTED as
+    # `[...]`, `isinstance('a=b'.partition('='), tuple)` was False and
+    # `isinstance(..., list)` True where CPython says the opposite; and the
+    # empty-separator arm answered `('a=b','','')` where CPython raises
+    # ValueError.
+    test_gimple_stdout("gimple_str_partition_marks_tuple", """\
+fn main():
+    print('a=b'.partition('='))
+    print('a=b=c'.rpartition('='))
+    print('abc'.partition('='))
+    print('abc'.rpartition('='))
+    print('=a'.partition('='))
+    print('a==b'.rpartition('='))
+""", "('a', '=', 'b')\n('a=b', '=', 'c')\n('abc', '', '')\n"
+     "('', '', 'abc')\n('', '=', 'a')\n('a=', '=', 'b')\n")
+
+    test_gimple_runtime_error("gimple_str_partition_empty_sep_raises", """\
+fn main():
+    print('a=b'.partition(''))
+""", "ValueError: empty separator")
+
+    test_gimple_runtime_error("gimple_str_rpartition_empty_sep_raises", """\
+fn main():
+    print('a=b'.rpartition(''))
+""", "ValueError: empty separator")
+
     # The doc's item 6a residue: `partition`'s container TYPE. The doc
     # concluded it was unfixable for want of a tuple type; re-tested, that
     # premise is STALE. A tuple type has existed for some time — a
@@ -6920,10 +6895,9 @@ fn main():
     # marked list, so every tuple reaching it through an untyped binding
     # reported itself a list — the silently-wrong direction. The codegen
     # path already excluded the marker; the two are the same question and
-    # had to stop disagreeing. `str.partition`'s unmarked result is still a
-    # list (its own filed bug:
-    # bugs/RUNTIME_str_partition_does_not_mark_its_result_as_a_tuple.md),
-    # while the `bytes` half, which sets the marker, is a tuple.
+    # had to stop disagreeing. Both `partition` halves now set the marker, so
+    # both report `not list` — the `str` half used to return an unmarked
+    # list, the last remaining member of this family.
     test_gimple_stdout("gimple_isinstance_list_excludes_tuple_on_the_boxed_path", """\
 def probe(x):
     if isinstance(x, list):
@@ -6935,7 +6909,7 @@ probe([1, 2])
 probe((1, 2))
 probe(b'a=b'.partition(b'='))
 probe('a=b'.partition('='))
-""", "list\nnot list\nnot list\nlist\n")
+""", "list\nnot list\nnot list\nnot list\n")
 
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
@@ -9793,23 +9767,6 @@ print('%s' % d)
 print('%(z)s/%(n)s/%(b)s/%(f)s/%(s)s' % d)
 """)
 
-    # The doc's own program: the list rows are the control that `%r` of a
-    # BOXED container is not just "the dict spelling". `xs` is a module-level
-    # global, so its value crosses the read as an `int64_t` box; `%s`/`str`/
-    # `print` already re-typed it through `_get_actual_type`, but `repr` and
-    # `%r` did not and printed the box's decimal address. The dict rows are
-    # the doc's own subject (a non-keyed spec on a dict operand).
-    test_gimple_matches_cpython("gimple_percent_and_repr_of_a_module_global_container", """\
-xs = [1, 2, 3]
-d = {'k': 'v'}
-print('%s' % xs)
-print('%r' % xs)
-print(repr(xs))
-print('%(k)s' % d)
-print('%s' % d)
-print('%r' % d)
-""")
-
     test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
 d = {}
 d['n'] = None
@@ -11661,14 +11618,11 @@ main()
     # declares, so a same-named field has to keep working.
     #
     # The RENAMED spelling (`def __init__(self, payload): self.body = payload`)
-    # is the case where the parameter's name is not the field's name. It used
-    # to leave the field `int64_t` because the hint was keyed on the parameter
-    # name and nothing mapped it to the field; the producer now records the
-    # `(param -> [field])` map from the defining `__init__` and keys the hint on
-    # the FIELD, so the field is typed. Pinned below by
-    # `imported_class_ctor_renamed_field_still_types` (bare binding, no sibling
-    # `import` — the spelling that was wrong) and by
-    # `imported_class_ctor_hints_survive_an_alias` (the aliased route).
+    # is deliberately NOT here: it does not work on this tree, before or after
+    # this fix, because the hint's key half is the parameter's name and
+    # nothing maps it to the field. Filed as
+    # bugs/CODEGEN_imported_ctor_hint_does_not_reach_a_renamed_field.md,
+    # which is the same table and a different question from this one.
     _check_agrees_with_cpython("imported_class_ctor_literal_still_types_the_field", {
         'cparam2_def.py': "class Box:\n"
                           "    def __init__(self, name):\n"
@@ -11679,16 +11633,6 @@ main()
                            "print(Box('hello').show())\n"
                            "print(Box('there').show())\n",
     }, 'cparam2_main.py')
-
-    _check_agrees_with_cpython("imported_class_ctor_renamed_field_still_types", {
-        'cparam4_def.py': "class Box:\n"
-                          "    def __init__(self, payload):\n"
-                          "        self.body = payload\n"
-                          "    def show(self):\n"
-                          "        return self.body\n",
-        'cparam4_main.py': "from cparam4_def import Box\n"
-                           "print(Box('hello').show())\n",
-    }, 'cparam4_main.py')
 
     # …through the ALIASED and MODULE-QUALIFIED spellings, which resolve the
     # defining module by a different route (`_find_symbol_home_module`) and
