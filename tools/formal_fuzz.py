@@ -1380,7 +1380,7 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+    "environ": (("environ_get", 4), ("environ_isnone", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2116,7 +2116,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+        elif kind in ("environ_get", "environ_isnone", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3050,10 +3050,22 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
+    #
+    # `len(os.getenv(k))` is NOT drawn, and its absence is deliberate: `len` of
+    # a KERNEL-supplied string is a documented REFUSAL on this path — a `strlen`
+    # counts bytes where CPython counts characters, and nothing in the source
+    # says which the kernel gave — so a family that drew it would be all
+    # refusals and measure nothing (`test_formal_fuzz.py`'s
+    # `environ_produced_no_answer` is exactly that check). It is pinned in
+    # `test_formal_os_backing.py`'s refusal half instead, and the byte count a
+    # program wants on purpose is spelled `os.str_len(...)`. What this family
+    # draws is the OPTIONAL the call actually returns: the value itself, its
+    # comparison against a literal, and `is None`, which is the test a program
+    # that wants the optional writes.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_len":
-            self.emit(indent, f"print(len(os.getenv({key!r})))")
+        if kind == "environ_isnone":
+            self.emit(indent, f"print(1 if os.getenv({key!r}) is None else 0)")
             return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
