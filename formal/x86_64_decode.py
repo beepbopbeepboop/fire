@@ -176,6 +176,17 @@ def decode_one(code: bytes, off: int) -> Insn:
         if byte(p) & 0xF0 == REX:
             rex = byte(p)
             p += 1
+    # The `0xF2` SIMD prefix, read the same way and for the same reason as
+    # `0x66`: it is not a REX byte (its high nibble is `F`, not `4`), so the
+    # optional REX of `cvtsi2sd`/`cvttsd2si` sits behind it and has to be read
+    # here or the operand bytes are one position off. Two prefixes rather than a
+    # loop, because `formal/x86_64.py` emits at most one of them.
+    op_f2 = byte(0) == 0xF2
+    if op_f2:
+        p += 1
+        if byte(p) & 0xF0 == REX:
+            rex = byte(p)
+            p += 1
     op = byte(p)
     w = bool(rex & W)
 
@@ -236,6 +247,67 @@ def decode_one(code: bytes, off: int) -> Insn:
         return insn(length, "movq_xmm_rm64", mod=mod,
                     xmm=(byte(p + 2) >> 3) & 7, reg=(byte(p + 2) >> 3) & 7,
                     rm=rm)
+    if op66 and op == 0x0F and byte(p + 1) == 0x7E and w:
+        # `66 REX.W 0F 7E /r` — `movq r64, xmm`, the SSE-to-GPR move
+        # (`encode_movq_r64_xmm`). The ModRM halves are the REVERSE of `0F 6E`'s
+        # and it is the instruction that decides it: `0F 7E` is `MOVQ r/m64,
+        # xmm`, so the XMM is `reg` (raw, no REX.R) and the GPR is `rm` (REX.B).
+        mod, _reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("movq r64, m64 with a memory operand is not emitted")
+        return insn(length, "movq_r64_xmm", mod=mod,
+                    xmm=(byte(p + 2) >> 3) & 7, reg=(byte(p + 2) >> 3) & 7,
+                    rm=rm)
+    if op66 and op == 0x0F and byte(p + 1) in (0x57, 0x2E):
+        # The two other `66 0F` forms this backend emits, and they differ only
+        # in the meaning of the result:
+        #   * `0x57` — `xorpd xmm, xmm` (`encode_xorpd_xmm`), the constant `0.0`;
+        #   * `0x2E` — `ucomisd dst, src` (`encode_ucomisd_xmm`), flags only.
+        # Neither carries a REX byte, so `p` is 1 and the ModRM is at `p + 2`.
+        op2 = byte(p + 1)
+        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("the scalar-double compare/xor form with a memory "
+                              "operand is not emitted")
+        if op2 == 0x57:
+            return insn(length, "xorpd_xmm", mod=mod, xmm=reg & 7, reg=reg & 7,
+                        rm=rm)
+        return insn(length, "ucomisd_xmm", mod=mod, xmm=reg & 7, reg=reg & 7,
+                    rm=rm)
+
+    # ── `F2`-prefixed scalar-double forms ─────────────────────────
+    if op_f2 and op == 0x0F and byte(p + 1) in (0x58, 0x5C, 0x59, 0x5E):
+        # `F2 0F 58/5C/59/5E /r` — `addsd`/`subsd`/`mulsd`/`divsd dst, src`,
+        # both operands XMM, `dst` in ModRM.reg and `src` in ModRM.rm, no REX.
+        name = {0x58: "addsd", 0x5C: "subsd", 0x59: "mulsd",
+                0x5E: "divsd"}[byte(p + 1)]
+        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("a scalar-double arithmetic form with a memory "
+                              "operand is not emitted")
+        return insn(length, "sse_fp:" + name, mod=mod, xmm=reg & 7, reg=reg & 7,
+                    rm=rm)
+    if op_f2 and op == 0x0F and byte(p + 1) == 0x2A and w:
+        # `F2 REX.W 0F 2A /r` — `cvtsi2sd xmm, r/m64`
+        # (`encode_cvtsi2sd_xmm_r64`). The XMM is `reg` with NO REX.R — there is
+        # no XMM8 — and the GPR is `rm` with REX.B.
+        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("cvtsi2sd with a memory operand is not emitted")
+        return insn(length, "cvtsi2sd_xmm_r64", mod=mod, xmm=reg & 7,
+                    reg=reg & 7, rm=rm)
+    if op_f2 and op == 0x0F and byte(p + 1) == 0x2C and w:
+        # `F2 REX.W 0F 2C /r` — `cvttsd2si r64, xmm`
+        # (`encode_cvttsd2si_r64_xmm`), the `double` truncated toward zero.
+        # The ModRM halves are the REVERSE of `cvtsi2sd`'s: the GPR is `reg`
+        # with REX.R and the XMM is `rm` with NO REX.B (there is no XMM8).  A
+        # decoder that shared `cvtsi2sd`'s reading would convert the XMM's
+        # number as if it were the GPR's.
+        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("cvttsd2si with a memory operand is not emitted")
+        return insn(length, "cvttsd2si_r64_xmm", mod=mod, xmm=rm & 7,
+                    reg=reg, rm=rm & 7)
 
     # ── REX-less forms the backend emits ──────────────────────────
     if op == 0x31 and not w:

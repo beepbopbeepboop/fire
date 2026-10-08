@@ -20,15 +20,16 @@ lambda, decorator and generator questions are made of; nothing here needs a
 `printf` spelling CPython cannot run.
 
 ONE divergence found while building this table is deliberately ABSENT from it,
-and is filed instead: a comprehension whose element is a container
-(`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) aliases every outer
-iteration's element to the LAST one and answers 93 where CPython answers 63, on
-both backends, with exit 0. An answered row would have to assert that number, and
-this file's premise is that an answered row EQUALS CPython's; a refusal row
-would have to be a refusal, and this is not one. See
-`bugs/FORMAL_a_comprehension_element_container_aliases_every_iteration.md` for the
-signature (it is not B1, B2 or B4 in `bugs/OPEN_WORK.md`) and for why pinning it
-here would be the wrong kind of test.
+and lives in `test_formal_run.py` instead: a comprehension whose element is a
+container (`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) used to alias every
+outer iteration's element to the LAST one and answer 93 where CPython answers 63,
+on both backends. It is not a closure/lambda/generator question, so its rows are
+`test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`: the flat-container literals
+are now materialised per-iteration (CPython's answer), and the nested / slice /
+list-of-lists shapes are refused rather than aliased. See
+`bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` for
+the remaining runtime-base work (the shape is not B1, B2 or B4 in
+`bugs/OPEN_WORK.md`).
 
     python3 test_formal_closures.py [-v] [case ...]
 

@@ -24,9 +24,10 @@ moved, which is this doc's subject happening again rather than a new bug:**
 ```
 $ python3 tools/dangling_doc_refs.py
 7 citations of 6 bugs/ docs that are not there, across 2 files
-     1  <the -b13 sweep map>            # spelled WITHOUT the `bugs/` prefix on
-         bugs/FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
-                                        # purpose: quoting a walk's own output
+     1  <the -b13 sweep map>            # both halves of this entry are spelled
+         FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
+                                        # BARE on purpose: quoting a walk's output
+                                        # must not itself become a citation
      1  NEVER_WRITTEN.md                # reproduces a citation, which is how
          test_suite.py:2653             # this measurement found itself, once
          test_suite.py:5216
@@ -38,7 +39,9 @@ quotes a walk that REPORTED that path, and writing it out with the prefix makes
 the quote itself a citation — the walk then reports eight instead of seven, and
 `--ratchet` fails on this file.  Measured, and it is the sharpest version of this
 doc's own subject: a document that names a missing doc in order to report it has
-to name it in a spelling the walk cannot see.)*
+to name it in a spelling the walk cannot see.  The citing doc — the one whose
+path stood at `:59` — was itself fixed and deleted on 2026-10-07, so its own
+name above is bare for the same reason and no longer resolves either.)*
 
 The seventh was the `-b13` sweep map, **deleted** when `-b14` replaced it, cited
 from one bug doc that predates the replacement.  **Fixed on this branch**: the

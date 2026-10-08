@@ -8237,7 +8237,7 @@ BOTH_ARCH_CASES = [
     # It was FOUR shapes and is three. The dict comprehension whose VALUES are
     # comprehensions is the one shape here whose ELEMENT opens a container, and
     # that is now refused — `model.comprehension_element_blob_refusal`, and the
-    # refusal rows `COMPREHENSION_ELEMENT_REFUSALS` carry the shape with a
+    # rows `COMPREHENSION_ELEMENT_CASES` carry the shape with a
     # stronger assertion than this row's would have given it. The other three
     # are the subject of this row (the `_ci{d}`/`_cb{d}` DEPTH agreement for a
     # comprehension reached through a generator's ITERABLE) and all three
@@ -8648,6 +8648,37 @@ BOTH_ARCH_CASES = [
      "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
      "    return 0\n", 0,
      "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
+    # ── A NESTED for-TARGET, ON BOTH MACHINES ──────────────────────────────
+    #
+    # x86-64's `_emit_for_list` / `_emit_compr_gen` read a tuple target through
+    # `_lbn_target_names`, which FLATTENS the groups, while the `_emit_for_unpack`
+    # they hand it expects the nesting: `for a, (b, c) in [(1, (2, 3))]` checked
+    # the element blob's count of 2 against the flattened arity of 3 and
+    # exited(1) with nothing printed, where arm64 and CPython both answer. The
+    # fix is one shared shape reader (`formal/model.py::for_target_tree`) both
+    # backends now use, which is why this row is in this group rather than in
+    # `CASES`: the subject is that the two machines agree.
+    #
+    # 49 = 21 (flat pair) + 6 (nested pair) + 10 (nested pair in a nested pair)
+    # + 6 (comprehension over a nested target) + 6 (a nested tuple TARGET on
+    # the left of `=`). Each shape contributes a distinct amount, so a lowering
+    # that silently skips one cannot land on the same total.
+    ("both_arch_a_nested_for_target_unpacks_like_arm64_and_cpython",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, b in [(1, 20)]:\n"
+     "        s = s + a + b\n"
+     "    for a, (b, c) in [(1, (2, 3))]:\n"
+     "        s = s + a + b + c\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    t = [a + b + c for a, (b, c) in [(1, (2, 3))]]\n"
+     "    for v in t:\n"
+     "        s = s + v\n"
+     "    a, (b, c) = 1, (2, 3)\n"
+     "    s = s + a + b + c\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "49"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -17144,31 +17175,51 @@ REPEAT_REFUSALS = [
      "refuse:multiplies two containers", None),
 ]
 
-COMPREHENSION_ELEMENT_REFUSALS = [
-    # A comprehension ELEMENT that opens a container. Before this it built, and
-    # the image's elements were all ONE object: the element site reserves
+COMPREHENSION_ELEMENT_CASES = [
+    # A comprehension ELEMENT that opens a container. The element site reserves
     # through the single frame ledger (`_reserve_blob` against `_list_cursor`)
     # ONCE at compile time, and the comprehension runs that same site once per
-    # iteration, so every iteration overwrote the last one's contents. Measured
-    # on both architectures against CPython 3.14:
+    # iteration — so a container built there was ONE object shared by every
+    # iteration. The first two rows are that shape, now materialised
+    # per-iteration: a FLAT container literal is copied into a slot of a
+    # `cap`-sized array indexed by the result count. Measured against CPython
+    # 3.14, before and after:
     #
-    #     [[y, y + 1] for y in [10, 20, 30]]       CPython 11 21 31   here 31 31 31
-    #     [[x + y for x in [1, 2]] for y in [10, 20, 30]], sum of v[0]
-    #                                              CPython 63          here 93, exit 1
+    #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
+    #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
-    # The second is the worse shape: the count word the third iteration writes
-    # lands one word past a blob sized for one element, so it is a wrong answer
-    # AND an exit 1. `model.comprehension_element_blob_refusal` has the rest,
-    # and the needles below are clauses only this message carries.
-    #
-    # The needle is the CONSTRUCT and not the remedy, so a refusal about
+    # The rows after them are the shapes whose per-iteration materialisation
+    # needs a runtime blob base and is still refused (see
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
+    # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
     # anything else fails the case.
-    ("a_comprehension_element_that_is_a_list_literal_is_refused",
+    #
+    # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
+    # last iteration and one element per iteration have the SAME COUNT — a
+    # suite that measured the count could not see a content defect at all.
+    ("a_comprehension_element_that_is_a_list_literal_is_per_iteration",
      "def main() -> Int:\n"
      "    var r = [[y, y + 1] for y in [10, 20, 30]]\n"
      "    printf(\"%d %d %d\", r[0][1], r[1][1], r[2][1])\n"
      "    return 0\n",
-     "refuse:the element `[y, y + 1]` opens a container", None),
+     0, "11 21 31"),
+    # A TUPLE literal, which lowers through the same path as a list and is the
+    # row a fix scoped to `ListExpr` alone would leave aliasing.
+    ("a_comprehension_element_that_is_a_tuple_literal_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [(y, y + 1) for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "10 20 30"),
+    # A SET literal in the element, which is the third allocating literal and
+    # the one a list-only reading of the rule would miss. A set lowers to a list
+    # blob here, so the element reads like the list above.
+    ("a_comprehension_element_that_is_a_set_literal_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "10 20 30"),
     # …and the NESTED one, which is the reproducer and the case the refusal
     # names as exiting 1 rather than merely answering wrongly.
     ("a_nested_comprehension_as_the_element_is_refused",
@@ -17189,14 +17240,15 @@ COMPREHENSION_ELEMENT_REFUSALS = [
      "    printf(\"%d\", len(d))\n"
      "    return 0\n",
      "refuse:opens a container", None),
-    # A SET literal in the element, which is the third allocating literal and
-    # the one a list-only reading of the rule would miss.
-    ("a_comprehension_element_that_is_a_set_literal_is_refused",
+    # A container built inside a container LITERAL is the shallow-copy boundary
+    # the flat predicate refuses: copying `[[y]]` per iteration would carry the
+    # INNER list's address and every iteration would share it.
+    ("a_list_of_lists_as_the_element_is_refused",
      "def main() -> Int:\n"
-     "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
-     "    printf(\"%d\", len(r))\n"
+     "    var r = [[[y]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
-     "refuse:the element `{y, y + 1}` opens a container", None),
+     "refuse:the element `[[y]]` opens a container", None),
     # ONE iteration, and this row is the other side of the rule rather than
     # tidiness: `_compr_cap` is an UPPER BOUND on the iteration count, so
     # `cap == 1` means the body runs at most once and one shared blob is then
@@ -23274,6 +23326,20 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # A TWO-CHARACTER prefix is a SET OF SPELLING FLAGS, not one character.
+        # The reader used to ask `spelled[1]`, which for `rf` is the `f`, and
+        # refused with "the character after the prefix is not a quote" — false
+        # about a token whose second character is the `f` of the prefix and
+        # whose third is the quote. Raw segmentation is prefix-independent (the
+        # brace rules do not change under `r`), so these compare against
+        # CPython's parse exactly like the rest.
+        'rf"a={n}b"',
+        'fr"a={n}b"',
+        'Rf"{x}"',              # upper case, one of each
+        'fR"pre{x}post"',       # flags in the other order
+        'rf"{{lit}}"',          # a raw f-string still honours the brace escape
+        'FR"{{lit}}"',          # upper case, and still no field
+        r'rf"^(\s*)from\s+{re.escape(old)}\s+import\s+"',   # the corpus's own
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23392,16 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # A widened prefix reader must not turn "unterminated
+                          # is a refusal" into text read as a body: a raw
+                          # f-string with no closing quote still refuses on the
+                          # DELIMITER test.
+                          ('rf"a={n}', "does not end with"),
+                          ('rf"a{b', "does not end with"),
+                          # …and a token whose prefix letters are not followed
+                          # by a quote has no knowable body.
+                          ('nof"quote', "no opening quote")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:
@@ -23529,7 +23604,7 @@ def check_interpolated_literal_census(verbose=False):
                 where.get(os.path.relpath(path, here), 0) + 1
         print(f"      interpolated census: {len(unquotable)} literal(s) "
               f"`is_interpolated_literal` admits that are not quoted tokens at "
-              f"all — the filed prefix-test defect, {where}")
+              f"all — a token with no defensible chunk boundary, {where}")
     return passed, failures
 
 
@@ -23878,6 +23953,28 @@ def check_stack_floor_decision(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: depth/{name}")
+    # The budget is BYTES and the frames are not, so the depth it affords is
+    # PER ARCHITECTURE — the asymmetry the budget docstring, `stack_trap_message`
+    # and `call_graph_depth` all record — pinned here as arithmetic rather than
+    # re-derived by running two deep recursions.
+    # 7.5 MiB against a 128 KiB arm64 frame is 59 levels; against a 16 KiB
+    # x86-64 frame it is 479 before the function's own spills, which is why the
+    # measured x86-64 edge is 471. Both numbers are in `call_graph_depth`'s
+    # docstring and the budget docstring, so a change that moved one without the
+    # others is caught here.
+    arm_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.ARM64_CONTAINER_BUDGET)
+                 // M.ARM64_CONTAINER_BUDGET)
+    x86_depth = ((M.STACK_FLOOR_BUDGET_BYTES - M.X86_64_CONTAINER_BUDGET)
+                 // M.X86_64_CONTAINER_BUDGET)
+    if (arm_depth, x86_depth) != (59, 479):
+        failures.append(
+            f"budget/depth: arm64 {arm_depth} x86-64 {x86_depth} "
+            f"(want 59, 479)")
+    else:
+        passed += 1
+        if verbose:
+            print("  PASS  stack-floor-decision: budget/depth arm64=59 "
+                  "x86-64=479")
     return passed, failures
 
 
@@ -24034,6 +24131,47 @@ def check_blob_growth_guards(verbose=False):
             print(f"  PASS  blob-growth-guard: {arch}/{tag} "
                   f"{[(g[0], g[1], g[3]) for g in mine]}")
     return passed, failures
+
+
+def check_comptime_nofold_is_rerun(verbose=False):
+    """A recorded `nofold` in the comptime CAS is RE-RUN, not replayed.
+
+    The build behind `formal/comptime_runner.py` can fail transiently — the
+    shared dylib path is briefly unsigned while another worker's `codesign`
+    runs on it — and caching that as "does not fold" turns a momentary race
+    into a permanent refusal no edit can clear, which is the caching rule
+    `CLAUDE.md` states for recorded failures. The probe publishes a `nofold`
+    for a foldable callee's own key and requires the runner to call `_run`
+    anyway and return its value; without the fix the published red is replayed
+    and the hook answers None.
+
+    `_run` is stubbed so the probe costs one CAS publish and no build, and the
+    callee name is unique so `_BUILT`'s process-wide memo cannot answer first.
+    """
+    from formal import comptime_runner as cr
+    import cas
+    src = "def ct_nofold_probe_9f3a(x):\n    return x * 2\n"
+    key = cr._key(src, "ct_nofold_probe_9f3a", (21,))
+    cas.publish(key, ".comptime", b"nofold\n")
+    calls = []
+    real_run = cr._run
+
+    def fake_run(source, fn_name, args):
+        calls.append((fn_name, args))
+        return 42
+
+    cr._run = fake_run
+    try:
+        got = cr.make_call_hook(src)("ct_nofold_probe_9f3a", [21])
+    finally:
+        cr._run = real_run
+    ok = got == 42 and calls == [("ct_nofold_probe_9f3a", (21,))]
+    if verbose and ok:
+        print("  PASS  comptime-nofold-rerun")
+    if ok:
+        return 1, []
+    return 0, [f"a recorded nofold was replayed instead of re-run: got "
+               f"{got!r}, _run calls {calls!r}"]
 
 
 # residual the guard cannot reach, and the number that decided
@@ -24551,7 +24689,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
-                  + REPEAT_REFUSALS + COMPREHENSION_ELEMENT_REFUSALS
+                  + REPEAT_REFUSALS + COMPREHENSION_ELEMENT_CASES
                   + SOLE_FIELD_CTOR_STORE_CASES
                   + SPREAD_CONSTRUCTION_CASES + SPREAD_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
@@ -24708,6 +24846,13 @@ def main():
           f"FAIL={len(bg_failures)}")
     passed += bg_passed
     failed += len(bg_failures)
+    nf_passed, nf_failures = check_comptime_nofold_is_rerun(args.verbose)
+    for detail in nf_failures:
+        print(f"  FAIL  comptime-nofold-rerun: {detail}")
+    print(f"formal run: comptime-nofold-rerun PASS={nf_passed} "
+          f"FAIL={len(nf_failures)}")
+    passed += nf_passed
+    failed += len(nf_failures)
     tg_passed, tg_failures = check_type_value_tag_generator(args.verbose)
     for detail in tg_failures:
         print(f"  FAIL  tag-generator: {detail}")

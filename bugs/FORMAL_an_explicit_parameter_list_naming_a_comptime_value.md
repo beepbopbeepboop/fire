@@ -1,12 +1,38 @@
 # FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
-messages a caller reaches when it does not fire). **Status:** OPEN, filed
-2026-10-05 on `work/formal27-5` at `7ac78995`, with every claim below measured
-on that tree. **Not a light worker's to close** and not this branch's claim: the
-monomorphisation area belongs to `bugs/FORMAL_generic_monomorph_scope.md` and
-`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`, and
-closing the wall needs the demand walk to bind a NON-TYPE parameter.
+messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
+MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
+wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
+`7ac78995`, with every claim below measured on that tree.
+
+**What changed 2026-10-07, and what did not.** §3 named two messages wrong about
+the source, and both are now about it:
+
+* **row 5 (the dotted application) was already fixed** by the time this branch
+  started: `formal/model.py::dotted_specialization_refusal` names the module, the
+  template and the reason (`comptime.specialization_name` answers `None` for a
+  dotted base by design) and offers the one spelling measured to work. §3's
+  expectation is met; the paragraph is kept because it is the measurement that
+  made it a whole function rather than a clause.
+* **row 3 is fixed here**: `specialization_call_refusal` no longer ends "Write it
+  as `name[<a type>](…)`", which is the spelling that arrived. It now names the
+  shape — a bracket that typed a function whose parameter is INFERRED from its
+  parameter types (`def unbox(t: Box[T]) -> T`) — and gives the repair that is
+  actually a repair: derive it, and DROP the bracket (`unbox(b)` with
+  `b: Box[Int]`). Pinned by
+  `test_formal_monomorph.py::test_an_inferred_parameter_function_is_called_without_the_bracket`,
+  which also runs the recommended spelling against CPython on both architectures
+  so the advice is a fact rather than a claim.
+
+**The wall is unchanged and is NOT a message.** `unbox[Int](b)` cannot be
+instantiated because `unbox`'s declaration has no bracket parameter to
+substitute: `formal/monomorph.py::instantiate` refuses it by name ("its
+declaration has no type parameter, so there is nothing to substitute"), and
+`template_names` reads the export rule's `EXCL_GENERIC` set, which a `def
+name(t: Box[T])` is not in. So §4.1 (substitute a comptime VALUE argument, and
+teach the demand walk to read the bracket) is untouched, and the two-message
+item §4.2 is closed.
 
 **Why it is filed rather than mentioned:** two of the sweep-scope docs asked for
 exactly this and could not do it themselves, because the shape is in neither of

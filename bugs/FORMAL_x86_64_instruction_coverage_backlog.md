@@ -8,6 +8,74 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
+
+This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed
+all the way rather than only modelled: a decoder arm, a model arm in
+`lib/X86.lean`, a `samples()` row, a `test_x86_64_decode.py` row and a
+fuzz-pool entry, and then `formal/x86_64_model_fuzz.py --census` compares the
+model's XMM file and flags against the hardware. **`addsd`, `subsd`, `mulsd`,
+`divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`, `cvtsi2sd` and `cvttsd2si` are all
+`yes yes yes` in the census now**, and every one AGREE against the CPU.
+
+The compare is the one the doc predicted would decide the other eight, and it
+did — but the defects it found were in the shared SEMANTICS, not in the
+per-instruction arms:
+
+| bug | what it was | found by |
+|---|---|---|
+| `lib/IEEE754.lean::key` flipped only the SIGN BIT | so two nonzero NEGATIVES ordered by MAGNITUDE, i.e. backwards: `-0.001 < -1e-118` was reported `false`. The standard transform flips ALL bits for a negative. A theorem pinned the two zeros and nothing pinned a nonzero negative | `ucomisd xmm3, xmm1` with xmm3 a tiny negative and xmm1 ~ -0.001: model CF=1, CPU CF=0 |
+| `lib/IEEE754.lean::comparable` excluded INFINITIES | `!isNaN b && !isInf b`, so every ordering reading was `false` for a `±inf` operand and `1.0 < +inf` disagreed with `UCOMISD` on CF. Its own docstring already said an infinity IS ordered | the same census, on an infinite operand |
+
+Both are fixed and pinned by new `native_decide` theorems
+(`negative_values_order_by_value_not_by_magnitude`, `an_infinity_is_ordered`).
+
+`cvttsd2si` is the one that needed a total function and not an arm: Lean's
+`Float` has no `Int` conversion and `ToIntBits` is a `Prop`, so
+`x86_cvttsd` is the bit-level truncate-toward-zero over all 2^64 patterns,
+including the integer indefinite `0x8000000000000000` for NaN, infinity and
+out-of-range. A random XMM mostly drives it out of range, so the fuzz compares
+the indefinite answer rather than only ordinary values.
+
+**`test_x86_64_decode.py` lost a REFUSAL that had gone false.** It asserted
+`0F 7E` "is not emitted and must not be inferred"; `encode_movq_r64_xmm` emits
+exactly that, so a decoder that kept refusing it left every `double`-valued
+program un-walkable. That is the census's own "a stale test is a coverage hole"
+shape, one file over.
+
+`tools/formal_isa_census.BACKLOG` loses all nine x86-64 SSE entries and the
+long-stale `encode_imul_r64_r64_imm` one (over-covered since `4a680153`, left
+by the previous pass as "another claim's write set"); the x86-64 backend now
+has **no `BACKLOG` row at all**, only the three `HARNESS_LIMITS`-attributed
+ones. `test_formal_isa_census.py`'s anti-rot half had been red on both.
+
+Measured: `formal/x86_64_model_coverage_test.py` **211 samples over 80 forms,
+all steppable**, all five checks green; `test_x86_64_decode.py` green;
+`test_x86_64_encoders.py` 152/152; `test_x86_64_model_fuzz.py` 12/12;
+`--census --per-form 4 --seed 11` **287 AGREE, 0 WRONG**.
+
+**What is left in this file, and it is now only shape 2's FUZZ column:**
+
+* `encode_call_r64` — the target is a register's contents, outside the harness's
+  one `MAP_FIXED` region; a permanent `HARNESS_LIMITS` reason, not work.
+* `encode_and_r8_r8` / `encode_or_r8_r8` — the RBP-operand anomaly, which turned
+  out to be this tree's own encoder omitting the REX prefix for SPL/BPL/SIL/DIL
+  rather than a hardware one, and which `x86-hw-fuzz` fixed with
+  `_byte_rex_required` (see "The byte-wise ALU class" below). Their LEAN and AS
+  columns are `yes`.
+* Two CENSUS-INSTRUMENT defects, reported rather than edited (the tool is
+  another claim's write set): the EX column matches a form by DISASSEMBLY
+  MNEMONIC, so two encodings of one instruction are indistinguishable; and the
+  EMITTED column's `call_sites` regex counts a DOCSTRING mention, which is why
+  `encode_cmov_r64_r64` reads as an unexplained gap — it is named in
+  `formal/x86_64_codegen.py`'s prose and called nowhere.
+* A fuzz-attribution hole the new pool draws exposed (`x86-hw-fuzz`'s file, not
+  fixed here): `_impossible_on_hardware` explains a flag difference only when
+  the program's LAST flag-writing instruction is a multiply or divide, so a flag
+  set by an `and` whose OPERAND was itself an anomalous `setcc` destination is
+  reported `WRONG`. Measured: `-n 16 --ninstr 6 --seed 5` now reports 1 such row
+  (it was 0 before only because the old pool never drew that shape).
+
 ## Status 2026-10-05 (`work/formal42-5`): SHAPE 2 is three of four done, and each row went all the way
 
 `encode_imul_r64_r64_imm`, `encode_call_r64`, `encode_and_r8_r8` and
@@ -47,11 +115,11 @@ reader's time:
   edited**: the row is now over-covered, and the only thing left about it is a
   sentence that says why it no longer needs to be in `BACKLOG`.
 
-### The class the byte-wise ALU found, and why it is not in the pool
+### The byte-wise ALU class, and how it turned out
 
-`formal/x86_64_model_fuzz.py` does not draw `and`/`or` yet, and the reason is
-that this harness disagrees about them on an **RBP operand** and the class is
-not characterised:
+`formal/x86_64_model_fuzz.py` did not draw `and`/`or` for a while because this
+harness disagreed about them on an RBP operand and the disagreement was
+attributed to `setcontext`-into-RWX rather than to the encoding:
 
 | one instruction, one fixed register file | this harness | exact |
 |---|---|---|
@@ -60,16 +128,13 @@ not characterised:
 | `and RAX, RBP` (`20 e8`) | `rax = efaeef4cddfebb00` | `…42` |
 | `and RCX, RBP` (`20 e9`) | `rcx = efaeef4cddfebb02` | `…42` |
 
-with RBP = `0xff` before and after, and a **statically linked binary answering
-all four correctly** — so it is this host's emulated region and not `and r/m8,
-r8`.  It is the same family as this repo's
-`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md` `HARNESS_SETCC_DESTS`
-(an RBP operand misbehaving under `setcontext`-into-RWX) with a different byte,
-and `and bpl, al` (ModRM `cd`, `rm` = rbp) behaves the same way, so it is not
-the `reg` field alone.  **The row is out of the pool rather than absorbed**,
-because a verdict class that cannot attribute a difference is worse than not
-running the row — the `HARNESS` verdict is excluded from the fuzzer's exit
-status, so a class in it must be an attribution.
+**It was this tree's encoder, and the CPU was right.** `encode_and_r8_r8` (and
+its `or` twin, and `_setcc`) omitted the REX prefix for SPL/BPL/SIL/DIL (values
+4-7), whose 8-bit encodings exist only WITH one: `20 e8` with no prefix is
+`andb %ch, %al` — the HIGH byte of RCX — not BPL. `_byte_rex_required` fixes all
+three and the rows are in the pool now: a 512-case census over every `rm`/`reg`
+pair agrees with exact arithmetic. `encode_setbe(R.RBP)` was the same defect,
+which is what the model-fuzz doc's `HARNESS_SETCC_DESTS` class turned out to be.
 
 **What is left in this file is shape 1** — the nine SSE2 scalar binary64
 encoders, each of which needs a decoder arm, a model arm, a sample and a pool

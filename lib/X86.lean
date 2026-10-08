@@ -1,6 +1,9 @@
 import ProofLib
+import IEEE754
 
 set_option autoImplicit false
+
+open IEEE754
 
 /-!
 # x86.lean — the x86-64 machine model
@@ -384,6 +387,16 @@ def x86_msb (v : UInt64) : Bool := v ≥ 0x8000000000000000
     result, CF and OF cleared. -/
 def x86_flags_logic (s : X86State) (res : UInt64) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := false, of_ := false }
+
+/-- The same flags for a BYTE-width logical result: `and`/`or` on `r/m8`, whose
+    result is one byte carried in a `UInt64`.  SF is the MSB of that BYTE — bit
+    7 — and not `x86_msb res`, which reads bit 63 and is therefore always false
+    for a value in 0..255.  A byte operation whose result has bit 7 set is the
+    case this exists for: `orb %bpl, %al` producing 0x80 sets SF on hardware,
+    and the model said clear until `formal/x86_64_model_fuzz.py`'s census put
+    the byte-wise forms in its pool. -/
+def x86_flags_logic8 (s : X86State) (res : UInt64) : X86State :=
+  { s with zf := res = 0, sf := res ≥ 0x80, cf := false, of_ := false }
 
 def x86_flags_add (s : X86State) (a b res : UInt64) : X86State :=
   { s with zf := res = 0, sf := x86_msb res, cf := res < a, of_ := x86_msb a == x86_msb b && (x86_msb res != x86_msb a) }
@@ -779,11 +792,27 @@ def x86_div128 (hi lo d : Nat) : Option (Nat × Nat) :=
     toward zero (Int.tdiv), not toward -inf as Int.ediv would.
 
     `none` on a zero divisor and on a quotient outside the signed 64-bit range,
-    for the reason `x86_div128` gives. -/
-def x86_idiv128 (hi lo d : Int) : Option (Int × Int) :=
+    for the reason `x86_div128` gives.
+
+    **`lo` is the UNSIGNED low word and `hi` the SIGNED high word**, and mixing
+    those up was a real defect: the reconstruction is
+    `n = hi * 2^64 + lo`, which is the two's-complement value of the RDX:RAX
+    pair only when `lo` is taken unsigned.  This took `lo : Int` and its caller
+    passed `x86_signed s.rax`, so a dividend whose LOW word had bit 63 set —
+    every dividend with a large-magnitude low half — was reconstructed as
+    `hi * 2^64 - |lo|` instead of `hi * 2^64 + |lo|`.  For `hi = -1` and a
+    negative low word the two differ by `2^64`, which moves the quotient by 1
+    and the remainder by the divisor: measured, `cqo ; idiv rcx` with
+    RAX = 0xc7fde805ec99108d and RCX = 0x73ab48767734d7c1 gave the model
+    quotient `-2` where the CPU and exact arithmetic both give `0` with the
+    dividend's own low word as the remainder.  The CPU was right and the model
+    was wrong; `formal/x86_64_model_fuzz.py` had mis-attributed the whole class
+    to this host and excluded it, and `divide_cases` could not see it because
+    the row's `n` was built with the same signed-low mistake. -/
+def x86_idiv128 (hi : Int) (lo : Nat) (d : Int) : Option (Int × Int) :=
   if d = 0 then none
   else
-    let n := hi * (x86_two64 : Int) + lo
+    let n := hi * (x86_two64 : Int) + (lo : Int)
     let q := Int.tdiv n d
     if x86_fits_int64 q then some (q, Int.tmod n d) else none
 
@@ -809,7 +838,9 @@ def x86_step_alu_r8 (s : X86State) (code : Nat → UInt8) (op : UInt8)
   let av := x86_get_reg s rm &&& 0xff
   let bv := x86_get_reg s reg &&& 0xff
   let res := if op = 0x20 then (av &&& bv) else (av ||| bv)
-  let f := x86_flags_logic s res
+  -- `x86_flags_logic8`, NOT `x86_flags_logic`: the result is a BYTE and its SF
+  -- is bit 7, while the 64-bit helper reads bit 63.  See the helper's docstring.
+  let f := x86_flags_logic8 s res
   some { x86_set_reg_narrow s rm 1 res with rip := endAddr, zf := f.zf, sf := f.sf, cf := f.cf, of_ := f.of_ }
 
 /-- REX-prefixed instruction forms. `op` is the byte after the prefix.
@@ -1122,7 +1153,7 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       -- non-negative dividend returned 0 rather than the negative quotient.
       -- Found by `formal/x86_64_model_fuzz.py --census`; `idiv_r64` was WRONG on
       -- two initial states out of three and the field that differed was RAX.
-      match x86_idiv128 (x86_signed s.rdx) (x86_signed s.rax) (x86_signed a) with
+      match x86_idiv128 (x86_signed s.rdx) s.rax.toNat (x86_signed a) with
       | some (q, rem) =>
         some { s with rax := x86_of_int q, rdx := x86_of_int rem, rip := rip + 3 }
       | none => none
@@ -1205,6 +1236,23 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
                with rip := endAddr }
       | none => none
     else none
+  else if op = 0xff && (code modrmPos).toNat >>> 6 = 3
+      && (code modrmPos).toNat >>> 3 &&& 7 = 2 then
+    -- `FF /2` with mod=11 — `call r64` WITH a REX prefix, i.e. a call through
+    -- R8-R15.  `x86_step_plain` has the arm for the low eight (`b0 = 0xff`),
+    -- this decoder did not, so `encode_call_r64(R.R11)` — the three bytes
+    -- `41 ff d3` — was a step the model REFUSED.  Found by
+    -- `formal/x86_64_model_coverage_test.py` once its generated file was made
+    -- to elaborate: `call R11` was one of five samples whose `x86_step` was
+    -- `none`, and the file had been failing to elaborate EVERY sample, so the
+    -- check reported "all steppable" without asking the model about any of
+    -- them.  Two bytes, not six: the target is the register's own contents, and
+    -- the pushed return address is `rip + 3` (REX + opcode + ModRM).
+    let target :=
+      (x86_get_reg s (((code modrmPos).toNat &&& 7) + x86_rex_b rex)).toNat
+    let rsp' := s.rsp - 8
+    let mem' := mem_write_bytes s.mem rsp'.toNat (UInt64.ofNat (rip + 3)) 8
+    some { s with rip := target, rsp := rsp', mem := mem' }
   else none
 
 /-! ### The `0x66` operand-size prefix
@@ -1264,6 +1312,159 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
       let k := (modrm.toNat >>> 3) &&& 7
       let r := (modrm.toNat &&& 7) + x86_rex_b rex
       some { x86_set_xmm s k (x86_get_reg s r) with rip := rip + 5 }
+  else if code (rip + 2) = 0x0f && code (rip + 3) = 0x7e && w then
+    -- `66 REX.W 0F 7E /r` — `movq r64, xmm`, the SSE-to-GPR move, the reverse
+    -- of the arm above.  `formal/x86_64.py::encode_movq_r64_xmm` emits it, and
+    -- the codegen's own contract makes it mandatory rather than optional: an
+    -- expression leaves its value in a GPR, so a `double`-valued expression
+    -- ends with this.  A run whose model cannot take this step stops at it, and
+    -- a stopped run reads as result 0 (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`).
+    --
+    -- The ModRM halves are the OPPOSITE of `0F 6E`'s and that is the instruction,
+    -- not a naming preference: `0F 7E` is `MOVQ r/m64, xmm` — the XMM is the
+    -- `reg` field (raw, no REX.R; there is no XMM8 in SysV) and the GPR is `rm`
+    -- (REX.B extends it), which is exactly the encoder's `_modrm(3, xmm, gpr)`.
+    let modrm := code (rip + 4)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let k := (modrm.toNat >>> 3) &&& 7
+      let r := (modrm.toNat &&& 7) + x86_rex_b rex
+      some { x86_set_reg s r (x86_get_xmm s k) with rip := rip + 5 }
+  else if code (rip + 1) = 0x0f && code (rip + 2) = 0x57 then
+    -- `66 0F 57 /r` — `xorpd xmm, xmm`, the constant `0.0` in one instruction
+    -- (`encode_xorpd_xmm`).  Bitwise, so XOR of a pattern with itself is zero
+    -- for EVERY pattern including NaN, which is why the encoder uses it rather
+    -- than a subtract.  Only the low 64 bits are modelled, which is what the
+    -- fuzz harness dumps and what a scalar `double` value occupies; the high
+    -- half of the XMM is not part of `X86State`.
+    --
+    -- NO REX byte: `encode_xorpd_xmm` emits `66 0F 57 /r`, so the opcode is at
+    -- `rip + 1` and the ModRM at `rip + 3` — one byte earlier than the `0F 6E`
+    -- arm above, which carries a REX.W.  Reading `code (rip + 4)` here put the
+    -- ModRM on the byte AFTER the instruction and declined every encoding.
+    let modrm := code (rip + 3)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let dst := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      some { x86_set_xmm s dst (x86_get_xmm s dst ^^^ x86_get_xmm s src)
+               with rip := rip + 4 }
+  else if code (rip + 1) = 0x0f && code (rip + 2) = 0x2e then
+    -- `66 0F 2E /r` — `ucomisd dst, src`, the flag-setting `double` compare
+    -- (`encode_ucomisd_xmm`).  Flags only, like the integer `CMP`.
+    --
+    -- **The unordered case is the whole reason this arm is written from the
+    -- IEEE functions and not as an integer compare.**  An ordered compare sets
+    -- `ZF = (dst = src)` and `CF = (dst < src)`; an UNORDERED one (either
+    -- operand a NaN) sets `ZF = CF = 1` so that neither `<`, `<=`, `>` nor `>=`
+    -- reads TRUE off it.  `lib/IEEE754.lean`'s `eqBits`/`ltBits`/`unordered`
+    -- are the definitions, and they are pure `UInt64` functions, so a model arm
+    -- built on them is decidable under `native_decide` where a raw `Float`
+    -- comparison would not be.  SF and OF are cleared by `UCOMISD`.
+    --
+    -- `X86State` has no `PF` field, so `PF` is not modelled; the four flags a
+    -- state DOES carry are set here, and both `x86_cond` (10/11) and the fuzz
+    -- comparison treat parity as out of scope (`X86State`'s own note).
+    let modrm := code (rip + 3)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let dst := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      let a := x86_get_xmm s dst
+      let b := x86_get_xmm s src
+      let u := unordered a b
+      some { s with rip := rip + 4, zf := eqBits a b || u,
+                    cf := ltBits a b || u, sf := false, of_ := false }
+  else none
+
+/-- `CVTTSD2SI`'s answer for one binary64 bit pattern: the value truncated
+    toward zero as a signed 64-bit integer.
+
+    This is a total function over all 2^64 patterns, which is what the arm
+    needs and is why it is written at the BIT level rather than through
+    `Float.toInt` (Lean's `Float` API has no `Int` conversion, and
+    `lib/IEEE754.lean`'s `ToIntBits` is a `Prop`).  The three cases are the
+    hardware's:
+
+      * a NaN or an infinity (exponent all ones) → `0x8000000000000000`, the
+        integer indefinite;
+      * a magnitude below 1 (exponent < 1023, bias) → `0`, truncated;
+      * an exponent at or above `1023 + 63` → out of range for `Int64`, the
+        same integer indefinite.  `-2^63` also lands on
+        `0x8000000000000000` and is the one in-range value that does, which
+        is why the bound is `≥ 63` and not `> 63`.
+
+    Below the bound the mantissa (with its implicit leading one) is shifted
+    into an integer and the sign applied by two's complement.  Truncation
+    toward zero, not flooring: `int(-2.9)` is `-2` and this is the `T` in
+    `CVTTSD2SI` (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+def x86_cvttsd (a : UInt64) : UInt64 :=
+  let sign := (a >>> 63) != 0
+  let exp := (a >>> 52) &&& 0x7ff
+  let mant := a &&& 0xfffffffffffff
+  if exp = 0x7ff then 0x8000000000000000
+  else if exp < 1023 then 0
+  else
+    let e := exp - 1023
+    if e ≥ 63 then 0x8000000000000000
+    else
+      let frac := mant ||| 0x10000000000000
+      let mag := if e ≤ 52 then frac >>> (52 - e) else frac <<< (e - 52)
+      if sign then (0 : UInt64) - mag else mag
+
+/-- The `F2`-prefixed scalar-double SSE2 forms `formal/x86_64.py` emits.
+
+`F2` is a SIMD prefix and not a REX byte, so `x86_step` routes it to the plain
+decoder; the REX that follows it on `cvtsi2sd` is read HERE, because it sits
+between the prefix and the `0F` escape and a caller that passed the opcode in
+would have to know that.  The five forms:
+
+  * `F2 0F 58/5C/59/5E /r` — `addsd`/`subsd`/`mulsd`/`divsd dst, src`, both XMM
+    operands, `dst` in ModRM.reg and `src` in ModRM.rm, no REX;
+  * `F2 REX.W 0F 2A /r` — `cvtsi2sd xmm, r64`, the int-to-double conversion.
+
+`xorpd` is `66`-prefixed and lives in `x86_step_op66`; the reverse conversion
+`cvttsd2si` is deliberately NOT here yet — see the coverage doc's Status. -/
+def x86_step_f2 (s : X86State) (code : Nat → UInt8) : Option X86State :=
+  let rip := s.rip
+  let rex := code (rip + 1)
+  let hasRex := x86_is_rex rex
+  let p := if hasRex then rip + 2 else rip + 1
+  let w := hasRex && x86_rex_w rex
+  if code p = 0x0f then
+    let op2 := code (p + 1)
+    let modrm := code (p + 2)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let reg := (modrm.toNat >>> 3) &&& 7
+      let src := modrm.toNat &&& 7
+      if op2 = 0x58 then
+        some { x86_set_xmm s reg (faddBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x5c then
+        some { x86_set_xmm s reg (fsubBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x59 then
+        some { x86_set_xmm s reg (fmulBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x5e then
+        some { x86_set_xmm s reg (fdivBits (x86_get_xmm s reg) (x86_get_xmm s src))
+                 with rip := p + 3 }
+      else if op2 = 0x2a && w then
+        -- `cvtsi2sd xmm, r/m64`: the signed 64-bit GPR as a double,
+        -- round-to-nearest-even (`fromIntBits`), which is what CPython's
+        -- `float()` answers.  The GPR is the `rm` field with REX.B.
+        let r := src + x86_rex_b rex
+        some { x86_set_xmm s reg
+                 (fromIntBits (x86_signed (x86_get_reg s r))) with rip := p + 3 }
+      else if op2 = 0x2c && w then
+        -- `cvttsd2si r64, xmm`: the `double` truncated toward zero into a
+        -- signed GPR.  The ModRM halves are the REVERSE of `cvtsi2sd`'s — the
+        -- GPR is the `reg` field (REX.R) and the XMM is `rm` — which is the
+        -- asymmetry `encode_cvttsd2si_r64_xmm`'s docstring pins against `as`.
+        let gpr := reg + x86_rex_r rex
+        some { x86_set_reg s gpr (x86_cvttsd (x86_get_xmm s src)) with rip := p + 3 }
+      else none
   else none
 
 /-- Instruction forms with no REX prefix, and the `0x66` operand-size
@@ -1411,6 +1612,12 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
                with rip := endAddr }
       | none => none
     else none
+  else if b0 = 0xf2 then
+    -- The `F2` SIMD prefix: `addsd`/`subsd`/`mulsd`/`divsd`/`cvtsi2sd`.  Like
+    -- `0x66` it is not a REX byte, so the plain decoder sees it, and the
+    -- optional REX that `cvtsi2sd` carries is read by `x86_step_f2` rather
+    -- than by a prefix dispatcher here — one place that knows the length.
+    x86_step_f2 s code
   else if b0 = 0x66 then
     -- The `0x66` OPERAND-SIZE prefix, and the only instruction behind it that
     -- this backend emits: `66 REX.W 0F 6E /r`, `movq xmm, r/m64`.
@@ -1551,16 +1758,16 @@ theorem x86_step_and_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some
       { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
         rip := m + 2,
-        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
-        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
-        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
-        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+        zf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) &&& ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
   -- No register parameters, for the reason `x86_step_call_r64` states: the
   -- conclusion quotes the model's own index expressions, so the two sides are
   -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
-        x86_rm_write, x86_flags_logic, x86_msb,
+        x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
         h_rip, h_b0, h_b1, h_mod]
 
 /-- `or r/m8, r8` (08 /r, mod=3): the `!=` half of `x86_step_and_r8_r8`'s
@@ -1574,16 +1781,16 @@ theorem x86_step_or_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some
       { x86_set_reg_narrow s (modrm.toNat &&& 7) 1 (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64))) with
         rip := m + 2,
-        zf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
-        sf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
-        cf := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
-        of_ := (x86_flags_logic s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
+        zf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).zf,
+        sf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).sf,
+        cf := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).cf,
+        of_ := (x86_flags_logic8 s (((x86_get_reg s (modrm.toNat &&& 7)) &&& (0xff : UInt64)) ||| ((x86_get_reg s ((modrm.toNat >>> 3) &&& 7)) &&& (0xff : UInt64)))).of_ } := by
   -- No register parameters, for the reason `x86_step_call_r64` states: the
   -- conclusion quotes the model's own index expressions, so the two sides are
   -- the same term and `x86_get_reg`'s `match` is never reduced on a variable.
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
-        x86_rm_write, x86_flags_logic, x86_msb,
+        x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
         h_rip, h_b0, h_b1, h_mod]
 
 /-- `imul r64, r/m64, imm8` (REX.W 6B /r ib): the three-operand form with a

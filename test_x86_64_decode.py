@@ -197,17 +197,33 @@ for xmm in range(8):
 check("movq xmm7,rsp", X.encode_movq_xmm_rm64(7, R.RSP), "movq_xmm_rm64",
       mod=3, xmm=7, reg=7, rm=R.RSP.value)
 
-# THE THREE SHAPES THAT MUST STILL BE REFUSED, and each for a stated reason.
-# Without these the decoder could accept `0F 7E` (the REVERSE move, which
-# assembles and links and quietly loads whatever was already in XMM0 into RDI)
-# or `0F 6E` without REX.W (`MOVD`, which drops all but the low 32 bits and so
-# moves a different VALUE rather than a different placement of the same one),
-# and both would then be proved against an instruction this backend cannot emit.
+# `movq r64, xmm` — the SSE-to-GPR move (`encode_movq_r64_xmm`, `0F 7E`), and
+# the direction the codegen ends every `double`-valued expression with.
+#
+# **This row used to be a REFUSAL, and that was correct when it was written
+# and false when `encode_movq_r64_xmm` landed.** The old row asserted that
+# `0F 7E` "is not emitted and must not be inferred"; it IS emitted now, so a
+# decoder that kept refusing it left every `double`-valued program un-walkable.
+# The direction is what the two opcodes disagree about: `0F 6E` is `xmm <- rm`
+# (XMM in `reg`, GPR in `rm`) and `0F 7E` is `rm <- xmm` (XMM in `reg`, GPR in
+# `rm`, but the WRITE is the GPR). Pinned at both index extensions for the same
+# reason the `0F 6E` block above is.
+for xmm in range(8):
+    for gpr in (R.RAX, R.R9, R.RDI, R.R12, R.R8):
+        check(f"movq {gpr.name},xmm{xmm}",
+              X.encode_movq_r64_xmm(gpr, xmm), "movq_r64_xmm",
+              mod=3, xmm=xmm, rm=gpr.value)
+check("movq rax,xmm0", X.encode_movq_r64_xmm(R.RAX, 0), "movq_r64_xmm",
+      mod=3, xmm=0, reg=0, rm=R.RAX.value)
+
+# THE TWO SHAPES THAT MUST STILL BE REFUSED, and each for a stated reason.
+# `0F 7E` is deliberately NOT in this list any more — it is an emitted form
+# (above). What remains refused is a memory operand (no emit path produces one)
+# and `0F 6E` without REX.W (that is `MOVD`, which drops all but the low 32
+# bits and so moves a different VALUE rather than a different placement).
 for label, raw, why in (
         ("movq xmm,m64 (memory operand)", bytes([0x66, 0x48, 0x0F, 0x6E, 0x00]),
          "mod=0 is a memory operand, which no emit path produces"),
-        ("0F 7E (the reverse move)", bytes([0x66, 0x48, 0x0F, 0x7E, 0xC0]),
-         "the reverse direction is not emitted and must not be inferred"),
         ("MOVD, no REX.W", bytes([0x66, 0x0F, 0x6E, 0xC0]),
          "without REX.W this is MOVD, a different value"),
         ("0F 6E with no 0x66 prefix", bytes([0x48, 0x0F, 0x6E, 0xC0]),
@@ -217,6 +233,32 @@ for label, raw, why in (
         FAILURES.append(f"{label}: decoded as {got.form!r} — {why}")
     except D.DecodeError:
         pass
+
+# The SSE2 scalar-`double` forms: the four arithmetic ops, the flag-setting
+# compare, the zeroing XOR and the int-to-double conversion. `formal/x86_64_codegen.py`
+# emits all of them and the decoder named none — see
+# `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+for enc, name in ((X.encode_addsd_xmm, "addsd"), (X.encode_subsd_xmm, "subsd"),
+                  (X.encode_mulsd_xmm, "mulsd"), (X.encode_divsd_xmm, "divsd")):
+    for dst, src in ((0, 1), (7, 2)):
+        check(f"{name} xmm{dst},xmm{src}", enc(dst, src), "sse_fp:" + name,
+              mod=3, xmm=dst, reg=dst, rm=src)
+for enc, form in ((X.encode_ucomisd_xmm, "ucomisd_xmm"),
+                  (X.encode_xorpd_xmm, "xorpd_xmm")):
+    for dst, src in ((0, 1), (3, 5)):
+        check(f"{form} xmm{dst},xmm{src}", enc(dst, src), form,
+              mod=3, xmm=dst, reg=dst, rm=src)
+for xmm, gpr in ((0, R.RAX), (3, R.R12)):
+    check(f"cvtsi2sd xmm{xmm},{gpr.name}",
+          X.encode_cvtsi2sd_xmm_r64(xmm, gpr), "cvtsi2sd_xmm_r64",
+          mod=3, xmm=xmm, reg=xmm, rm=gpr.value)
+    # The reverse direction is a DIFFERENT instruction and its ModRM halves are
+    # swapped: `cvttsd2si r64, xmm` has the GPR in `reg` (REX.R) and the XMM in
+    # `rm`, which is exactly the opposite of `cvtsi2sd`. Sharing the reading
+    # converts the XMM's number as if it were the GPR's.
+    check(f"cvttsd2si {gpr.name},xmm{xmm}",
+          X.encode_cvttsd2si_r64_xmm(gpr, xmm), "cvttsd2si_r64_xmm",
+          mod=3, xmm=xmm, reg=gpr.value, rm=xmm)
 
 # ALU reg/reg
 for enc, name in ((X.encode_add_r64_r64, "add"), (X.encode_or_r64_r64, "or"),
@@ -288,6 +330,12 @@ for enc, name in ((X.encode_sete, "sete"), (X.encode_setne, "setne"),
                   (X.encode_seta, "seta"), (X.encode_setae, "setae")):
     check(f"{name} al", enc(R.RAX), "setcc", mod=3, rm=R.RAX.value)
     check(f"{name} r11b", enc(R.R11), "setcc", mod=3, rm=R.R11.value)
+# SPL/BPL/SIL/DIL carry a null REX (`40`) and must decode to the same register:
+# the byte is a different length from the `al`/`r11b` forms above, and a decoder
+# that did not step over the prefix would name the wrong instruction entirely.
+for enc, name in ((X.encode_sete, "sete"), (X.encode_setbe, "setbe")):
+    for reg in (R.RSP, R.RBP, R.RSI, R.RDI):
+        check(f"{name} {reg.name}", enc(reg), "setcc", mod=3, rm=reg.value)
 
 # branches and calls
 for cc in (0, 1, 2, 4, 5, 6, 7, 10):
@@ -316,6 +364,12 @@ for enc, name in ((X.encode_and_r8_r8, "and"), (X.encode_or_r8_r8, "or")):
           mod=3, reg=R.RCX.value, rm=R.RAX.value)
     check(f"{name} r11b,r10b", enc(R.R11, R.R10), f"alu_rr8:{name}",
           mod=3, reg=R.R10.value, rm=R.R11.value)
+    # The SPL/BPL/SIL/DIL operands, which force the null REX in whichever half
+    # they occupy; the decoder must step over it and name the same register.
+    check(f"{name} al,bpl", enc(R.RAX, R.RBP), f"alu_rr8:{name}",
+          mod=3, reg=R.RBP.value, rm=R.RAX.value)
+    check(f"{name} sil,al", enc(R.RSI, R.RAX), f"alu_rr8:{name}",
+          mod=3, reg=R.RAX.value, rm=R.RSI.value)
 
 # A back-to-back stream decodes as a sequence, not just instruction by
 # instruction: boundaries are the whole point of the decoder.

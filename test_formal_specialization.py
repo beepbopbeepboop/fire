@@ -330,6 +330,28 @@ def main(n: Int) -> Int32:
     return f(n)
 """
 
+# A module global whose module-level value is a FUNCTION, called BY NAME. The
+# `__DATA` slot holds the entry address the module body stored, so `g(...)` has
+# to branch through that word. `callee_is_a_bound_value` deliberately excludes a
+# `global` name (`global f; f()` is a call to the module's function), so before
+# `model.callee_is_a_module_slot_function` this emitted a `BL g` against a symbol
+# nothing provides — refused by the bind audit four stages later, while
+# `fire.py run` answers 42. The top-level `main()` is required: the module has a
+# body, so the body is the entry and `main` runs only because the source calls it.
+MODULE_GLOBAL_FUNCTION_CALLED = """\
+def dbl(x: Int) -> Int:
+    return x * 2
+
+var g = dbl
+
+def main() -> Int32:
+    global g
+    print(g(21))
+    return 0
+
+main()
+"""
+
 # §5b's site shapes: the three ways a statement writes a value into a name (or
 # into the container the name holds) that the reader did not see, plus the two
 # it saw but read backwards. Each was a wrong answer on both architectures
@@ -1558,6 +1580,30 @@ def test_a_list_of_functions_is_still_an_address_to_subscript(tmpdir):
               f"OF FUNCTIONS stopped reaching the function")
 
 
+def test_a_module_global_holding_a_function_is_called_through_its_slot(tmpdir):
+    """`var g = dbl` + `global g` + `g(21)`: builds, runs, answers 42.
+
+    A module global holding a FUNCTION, called by name. `callee_is_a_bound_value`
+    subtracts a `global` name on purpose (`global f; f()` is a call to the
+    module's function), so `g(21)` took the extern path and emitted a call
+    against a symbol named `g` that nothing provides. The second reader,
+    `model.callee_is_a_module_slot_function`, claims the call when the slot's
+    OWN module-level statement binds the name to a function of this unit, and
+    then the callee is loaded out of the `__DATA` slot and branched through.
+    The oracle is `fire.py run`, which answers 42 on the same text.
+    """
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"gvfn_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"prog.mojo": MODULE_GLOBAL_FUNCTION_CALLED})
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 0, f"[{arch}] the image exited {code}: {out[:300]}")
+        check(out == "42",
+              f"[{arch}] printed {out!r}, not '42' — a module global holding a "
+              f"function stopped being callable by name")
+
+
 def test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see(tmpdir):
     """A store INTO a container, and a `global` slot: BOTH answers, both arches.
 
@@ -1599,15 +1645,15 @@ def test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see(tmpdir):
     which is what says the reader reads the values and not the spelling.
 
     **The `global` row is here for the integer slot and NOT for the function
-    one, and the reason is a defect of its own.** `var g = dbl` at module level
-    with `global g` in `main` builds, runs, and prints NOTHING where
-    `fire.py run` prints 6 — measured on both architectures — so a module global
-    does not read back as the address of a function value. That is the
-    `__DATA` slot's initializer for a function value rather than anything this
-    reader decides, it is filed as
-    `bugs/FORMAL_a_module_global_holding_a_function_reads_back_as_zero.md`, and
-    putting a row here that asserted 6 would be asserting a build this path does
-    not do.
+    one, and the function one is now a passing case of its own.** `var g = dbl`
+    at module level with `global g` in `main` gives `g` a `__DATA` slot; a READ
+    of it as a value is the address the MODULE BODY stored, which the
+    `passing/element-store`-style rows below already cover, and a direct `g(21)`
+    was refused by the bind audit until `model.callee_is_a_module_slot_function`
+    claimed it — see
+    `test_a_module_global_holding_a_function_is_called_through_its_slot` below.
+    The integer slot stays here because `apply_arg(3, g)` on it is still the
+    passing-end refusal this table exists to pin.
     """
     for label, src in NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME:
         root = os.path.join(tmpdir, f"wtan_{label.replace('/', '_')}")
@@ -1768,6 +1814,8 @@ TESTS = [
      test_a_word_the_source_says_is_not_an_address_is_refused),
     ("…and a list of FUNCTIONS is still one, on both",
      test_a_list_of_functions_is_still_an_address_to_subscript),
+    ("a module global holding a function is called through its slot, on both",
+     test_a_module_global_holding_a_function_is_called_through_its_slot),
     ("a write THROUGH a name is a site, on both",
      test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see),
     ("a two-name cycle is an answer, not a hang",

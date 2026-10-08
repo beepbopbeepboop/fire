@@ -31,7 +31,6 @@ from formal import model as M
 from formal import monomorph
 from mojo.middle.boundnames import (
     bound_names_in_order, _lbn_target_names,
-    _lbn_split_commas,
 )
 
 # Fixed per-function scratch above the saved-pair area. 8160 = 2×4080
@@ -163,45 +162,6 @@ _SRET_LOCAL = "__sret_block"
 # pointer to the cell holding it, and the two are read in that order at each
 # exit (`model.receiver_writeback_name` is the rule).
 _RECV_CELL_LOCAL = "__receiver_cell"
-
-
-def _for_target_tree(target: str):
-    """Parse a for/comprehension target string into a leaf name or nested list.
-
-    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; `'a, b'` (the comprehension
-    Generator.target spelling, no surrounding parens) → `['a', 'b']`;
-    `'(a, (b, c))'` → `['a', ['b', 'c']]`. Returns None when a leaf is not
-    a plain identifier. Uses the shared top-level comma split (naive
-    `.split(',')` tears nested groups)."""
-    t = target.strip()
-    if t.startswith("(") and t.endswith(")"):
-        parts = _lbn_split_commas(t[1:-1])
-        tree = []
-        for p in parts:
-            child = _for_target_tree(p)
-            if child is None:
-                return None
-            tree.append(child)
-        return tree if tree else None
-    # Bare comma form (comprehension targets): 'a, b' / 'a, b, c'
-    if "," in t:
-        parts = _lbn_split_commas(t)
-        if len(parts) > 1:
-            tree = []
-            for p in parts:
-                child = _for_target_tree(p)
-                if child is None:
-                    return None
-                tree.append(child)
-            return tree if tree else None
-    if t.startswith("*"):
-        rest = t[1:].strip()
-        if rest.isidentifier():
-            return "*" + rest
-        return None
-    if t.isidentifier():
-        return t
-    return None
 
 
 def _collect_var_names(f: F.FunctionDef) -> list:
@@ -804,6 +764,19 @@ dylib_exports: list = None, globals_base: int = None,
         # Enclosing try-finally bodies, outermost first. Flushed before
         # return/break/continue so finally runs on those paths.
         self._pending_finally = []
+        # The `fin` lists currently being emitted by a flush. A `return` inside
+        # such a body must not re-enter the same body — the old truncation of
+        # `_pending_finally` bought that by DESTROYING the frames, which is what
+        # dropped the cleanup on every later exit site of the same `try`
+        # (the second-exit-path bug fixed here; pinned by
+        # `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        # Identity, not an index: `_emit_try` pops frames as it unwinds, so an
+        # index-based marker shifts under a nested `try` and an id does not.
+        self._emitting_finally = set()
+        # Frames already emitted for the exit path being unwound, so a nested
+        # flush (a `return` inside a `finally`) does not emit an inner body the
+        # outer flush already ran.
+        self._finished_finally = set()
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -930,6 +903,12 @@ dylib_exports: list = None, globals_base: int = None,
         # disagree. Defaulted here because a stale value from a previous
         # subscript in the same function would silently pick a width.
         self._sub_width = 8
+        # …and whether that element is SIGNED, which decides between `LDRSB`
+        # and `LDRB` (and their 2- and 4-byte twins) for a sub-word load.
+        # `_emit_subscript_addr` sets it from the same tuple that gives the
+        # width, so an `Int32` element sign-extends and a `UInt32` does not.
+        # Defaulted `True` because width 8 has no extension to choose.
+        self._sub_signed = True
         # {function name: model.ValueKinds}, for the whole module. `_functions`
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
@@ -1378,6 +1357,8 @@ dylib_exports: list = None, globals_base: int = None,
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # Blocks for CONTAINERS this function RECEIVES from a callee that returns
         # one, and the COPY after each such call that fills them.  The third kind
         # of block in the same reserved region as the constructor frames and the
@@ -2526,8 +2507,8 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-            self._flush_pending_finally()
-            self._emit_epilogue()
+            if not self._flush_pending_finally():
+                self._emit_epilogue()
             return
 
         if isinstance(stmt, F.IfStmt):
@@ -2995,23 +2976,71 @@ dylib_exports: list = None, globals_base: int = None,
             f"unsupported statement {type(stmt).__name__} on the formal "
             f"arm64 path")
 
-    def _flush_pending_finally(self, depth: int = 0) -> None:
+    def _flush_pending_finally(self, depth: int = 0) -> bool:
         """Emit pending try-finally frames with index >= depth (innermost
         first), X0 saved across them.
 
         `depth` is 0 for return (run every enclosing finally) and the
         loop's entry `fin_depth` for break/continue (only frames opened
-        inside that loop). The list is truncated first so a return inside
-        a finally does not re-enter the same body."""
-        if len(self._pending_finally) <= depth:
-            return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
-        self.asm.emit(encode_stp_sp_pre(0, 31))
+        inside that loop).
+
+        Returns whether the flushed bodies ENDED the path (an unconditional
+        `return` inside one of them), so the caller knows not to emit a second
+        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
+        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+
+        **The frames are KEPT, and that is the fix.** This used to
+        `del self._pending_finally[depth:]` first, to stop a `return` inside a
+        `finally` from re-entering the same body; but the truncation removed the
+        frame for every LATER exit site in the same `try` too, so the second
+        `return` reached here with an empty list and emitted no cleanup at all
+        (pinned by
+        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        Re-entrancy is an identity question — is THIS body already being
+        emitted — and `_emitting_finally`/`_finished_finally` answer it without
+        destroying anything.
+        """
+        # A flush started from a statement (not from inside a finally) unwinds
+        # a fresh exit path; a nested one (a return/raise inside a finally) is
+        # part of the same unwinding and must remember what already ran.
+        if not self._emitting_finally:
+            self._finished_finally = set()
+        fins = [f for f in self._pending_finally[depth:]
+                if id(f) not in self._emitting_finally
+                and id(f) not in self._finished_finally]
+        if not fins:
+            return False
+        # An unconditional `return` inside a body transfers control out of the
+        # image, so every frame OUTER to it is dead code and this path needs no
+        # epilogue from the caller. `run` is therefore the frames that actually
+        # execute, innermost first, and `terminated` says one of them ends the
+        # path.
+        run = []
+        terminated = False
         for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
-        self.asm.emit(encode_ldp_sp_post(0, 31))
+            run.append(fin)
+            if _always_returns(fin):
+                terminated = True
+                break
+        # **X0 is saved only when the path FALLS THROUGH.** A body that returns
+        # supplies its own value, and the `stp`/`ldp` pair would leave SP 16
+        # bytes low when that body's `_emit_epilogue` does its own
+        # `add sp, #_SCRATCH` — the second half of the arm64 double-epilogue
+        # SIGBUS (`test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+        saved = not terminated
+        if saved:
+            self.asm.emit(encode_stp_sp_pre(0, 31))
+        for fin in run:
+            self._emitting_finally.add(id(fin))
+            try:
+                for s in fin:
+                    self._emit_stmt(s)
+            finally:
+                self._emitting_finally.discard(id(fin))
+            self._finished_finally.add(id(fin))
+        if saved:
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+        return terminated
 
     def _emit_exit(self, status) -> None:
         """Leave the machine with `status`: flush every open stream, then the
@@ -3258,8 +3287,8 @@ dylib_exports: list = None, globals_base: int = None,
         the process after flushing finallys). `else` runs on the success
         path (always, without EH). On fall-through the finally emits
         here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it and truncated the stack — so the pop below is
-        stack bookkeeping and nothing else.
+        already ran it — the frame stays on `_pending_finally` (the flush
+        no longer truncates), so the pop below removes it exactly once.
 
         **The fall-through copy is emitted even when an exit edge inside
         the body already flushed this frame**, and that is a fix rather than
@@ -3687,7 +3716,7 @@ dylib_exports: list = None, globals_base: int = None,
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of "
                     f"plain names (got {stmt.target!r})")
-            ttree = _for_target_tree(stmt.target) if isinstance(
+            ttree = M.for_target_tree(stmt.target) if isinstance(
                 stmt.target, str) else stmt.target
             if ttree is None:
                 raise CodegenError(
@@ -5324,16 +5353,50 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         ONE place, because the read, the store's own read-modify and the
         augmented assignment each used to spell this choice separately and the
-        pointer route made a third width possible. A one-byte element is
-        zero-extended by `LDRB`, which is what a `UInt8` read is; anything
-        wider is the full 64-bit load, and the sub-word widths the pointee
-        table can return (2 and 4) are the same two instructions
-        `_emit_dereference` uses for them.
+        pointer route made a third width possible. The four loads are the four
+        `_emit_dereference` uses, chosen by the element's WIDTH and its
+        SIGNEDNESS — both of which `_emit_subscript_addr` set from the same
+        `pointee` tuple, so the address and the load cannot disagree.
+
+        **`_sub_width == 1` used to be the whole of this test, and it read the
+        SUB-WORD widths (2 and 4) with a full 64-bit `LDR`.** A
+        `Pointer[Int32]` element is four bytes; an eight-byte load walked into
+        the next element (or the next object), so `q[0]` read `q[1]`'s bytes as
+        its own high half and `q[0] += 5` stored eight bytes over a four-byte
+        slot. The parity differential's `aug_through_int32_pointer` case is the
+        one that found it, on BOTH backends, once Rosetta could run the x86-64
+        half.
         """
         if self._sub_width == 1:
-            self.asm.emit(encode_ldrb_wd_wn(reg, base, 0))
+            self.asm.emit(encode_ldrsb_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldrb_wd_wn(reg, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_ldrsh_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldrh_wt_wn_imm(reg, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_ldrsw_xt_xn_imm(reg, base, 0) if self._sub_signed
+                          else encode_ldr_wt_wn_imm(reg, base, 0))
         else:
             self.asm.emit(encode_ldr_xt_xn_imm(reg, base, 0))
+
+    def _emit_subscript_store_at(self, base: int, value: int) -> None:
+        """Store the low `_sub_width` bytes of X{value} at [X{base}].
+
+        The store half of `_emit_subscript_load`, and the same bug lived here:
+        `_sub_width == 1` was the whole test, so a 2- or 4-byte element was
+        written with a full 64-bit `STR` and clobbered the bytes after it. It is
+        a silent corruption rather than a fault on a `malloc`'d buffer, which is
+        why it needs a case that reads the NEXT element back. A store has no
+        signedness to consult — it truncates to the width.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_strb_wd_wn(value, base, 0))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_strh_wt_wn_imm(value, base, 0))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_str_wt_wn_imm(value, base, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(value, base, 0))
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """Stack-allocate a dict pair-blob: [count_pairs][k0][v0][k1][v1]…
@@ -5855,6 +5918,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # default here is the word because it is the answer for the two that
         # reach their own branch and set it before returning.
         self._sub_width = 8
+        self._sub_signed = True
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -5916,6 +5980,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if why is not None:
                 raise CodegenError(why)
             self._sub_width = 1
+            self._sub_signed = False          # a string byte is a UInt8
             self._emit_expr(e.obj)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.index, "X1")
@@ -5933,7 +5998,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # is its first FIELD, so `w.d[0]` read `w.d` as a container and
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
-        shape, width, _signed, sub_why = M.subscript_base_lowering(
+        shape, width, signed, sub_why = M.subscript_base_lowering(
             self._cur_fn, e.obj, self._structs, self._functions, self._structs)
         if shape is None:
             raise CodegenError(sub_why)
@@ -5949,6 +6014,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count and
             # `model.subscript_base_lowering`, which owns the decision.
             self._sub_width = width
+            self._sub_signed = signed
             self._emit_expr(e.obj)                    # X0 = the address
             self.asm.emit(encode_stp_sp_pre(0, 2))    # save it
             self._emit_expr_to(e.index, "X1")         # X1 = index
@@ -6021,6 +6087,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         obj_kind = self._expr_str_kind(e.obj)
         stride = M.blob_elem_stride(obj_kind)
         self._sub_width = stride
+        # A byte blob's element is a `UInt8` (hence `LDRB`), and a word blob's
+        # width is 8 where the extension choice does not arise.
+        self._sub_signed = False
         self.asm.emit(encode_add_xd_xn_imm(4, 9, M.BLOB_HEADER_BYTES))
         if stride == 1:
             self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))
@@ -6095,10 +6164,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # nothing is emitted between the load and the store. The value is at
         # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(5, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self._emit_subscript_store_at(9, 5)
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop addr
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
@@ -6151,10 +6217,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        if self._sub_width == 1:
-            self.asm.emit(encode_strb_wd_wn(0, 9, 0))
-        else:
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
+        self._emit_subscript_store_at(9, 0)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
@@ -10303,7 +10366,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # ambiguous shape — a bracketed callee, which is a specialization or an
         # index and only the parameter's declared type can say.
         through_value = (not is_extern_call and name not in self._functions
-                         and M.callee_is_a_bound_value(self._cur_fn, name))
+                         and (M.callee_is_a_bound_value(self._cur_fn, name)
+                              or M.callee_is_a_module_slot_function(
+                                  name, self._functions)))
         # …and the name has to be a BARE one. `_callee_symbol` flattens a
         # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
         # and `a[i](x)` as `a`; only the first of those is a name the function
@@ -10989,6 +11054,51 @@ ctor_field_value=self._ctor_field_value_for(name),
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
+    def _materialize_compr_element(self, element, res_offset: int, cap: int,
+                                   before: int) -> None:
+        """Give the element its OWN container per iteration, or refuse.
+
+        X0 on entry holds the element's blob (the scratch the element site
+        reserved), and on exit holds the per-iteration copy that
+        `_compr_append_elem` appends. The two outcomes:
+
+          * a FLAT container literal (`M.comprehension_element_is_flat_container`)
+            gets a `cap`-slot array beside its scratch, and iteration `i`'s copy
+            lands at slot `i` — `i` is the result blob's count word, which is the
+            number of elements appended so far, so the append that follows stores
+            the copy and not the scratch. The copy is `memcpy`, which returns the
+            destination in X0 for free.
+          * anything else that allocated keeps `_refuse_an_element_blob`, whose
+            message names the construct and the explicit-loop remedy.
+
+        `before` is `_list_cursor` as the element's emission began, so
+        `bytes_ = _list_cursor - before` is the element's own footprint — the
+        ledger delta the refusal is asked of, measured BEFORE the array below
+        steps the same ledger.
+        """
+        bytes_ = self._list_cursor - before
+        if not bytes_ or cap <= 1:
+            return
+        if not M.comprehension_element_is_flat_container(element):
+            raise CodegenError(M.comprehension_element_blob_refusal(
+                f"a comprehension in {self.func_name or '<module>'}", element,
+                cap, bytes_))
+        array_off = self._reserve_blob(cap * bytes_,
+                                       "comprehension element array")
+        # count = result element count so far (= this iteration's ordinal).
+        self._emit_list_base(res_offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(10, 9, 0))
+        # dest = array_base + count * bytes_
+        self._emit_list_base(array_off)
+        self._emit_mov_imm("X11", bytes_)
+        self.asm.emit(encode_mul_xd_xn_xm(11, 10, 11))
+        self.asm.emit(encode_add_xd_xn_xm(11, 9, 11))
+        # memcpy(dest, src, bytes_): X0=dest, X1=src, X2=n.
+        self.asm.emit(encode_mov_zr_xn(1, 0))       # X1 = scratch (source)
+        self.asm.emit(encode_mov_zr_xn(0, 11))      # X0 = destination
+        self._emit_mov_imm("X2", bytes_)
+        self._emit_extern_call("memcpy", 3)         # returns dest in X0
+
     # ── how many times the code being emitted runs ────────────────────
     #
     # A blob's reservation is made ONCE per site, so a site inside a loop has
@@ -11233,8 +11343,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
+                self._materialize_compr_element(
+                    expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
             return
 
@@ -11315,7 +11425,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple "
                     f"of plain names (got {gen.target!r})")
-            ttree = _for_target_tree(gen.target) if isinstance(
+            ttree = M.for_target_tree(gen.target) if isinstance(
                 gen.target, str) else gen.target
             if ttree is None:
                 raise CodegenError(

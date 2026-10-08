@@ -6999,9 +6999,19 @@ def specialization_call_refusal(name: str) -> str:
         f"ones an importer asks for — `formal/monomorph.py` compiles each into "
         f"that module's own library and rewrites the call to the mangled name — "
         f"so a call arriving here asked for none: its brackets named no type "
-        f"argument or named a value rather than a type. Write it as "
-        f"`{name}[<a type>](…)` and the library will carry the instantiation; "
-        f"the ways this can still be reached are in "
+        f"argument, or named a value rather than a type (`plain[3](5)`, where "
+        f"the bracket is an argument and not a slot), or named a TYPE ARGUMENT "
+        f"on a function whose type parameter is INFERRED from its parameter "
+        f"types — `def {name}(t: Box[T]) -> T` called as `{name}[Int](b)` — "
+        f"which this path reads off the ARGUMENTS rather than off a bracketed "
+        f"declaration, so no boundary symbol is emitted for it. That last shape "
+        f"is CORRECT SOURCE and this path is short: Mojo infers a template "
+        f"call's type arguments, so call it WITHOUT the bracket — `{name}(b)` "
+        f"with `b: Box[Int]` — which is the same program and is lowered (for "
+        f"that shape the bracketed call is refused and the inferred one builds "
+        f"and answers CPython on both architectures). **Do not add `[<a type>]` "
+        f"— that is the spelling that arrived here.** The ways this can still "
+        f"be reached, with the spelling that works for each, are in "
         f"bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
         f"an ordinary value then the brackets are a subscript, which is not a "
         f"call this path can name at all. Refused rather than emitted with the "
@@ -7079,6 +7089,39 @@ def dotted_specialization_refusal(name: str) -> str:
         f"number the source never wrote, with nothing on the link line to catch "
         f"it"
     )
+
+
+def callee_is_a_module_slot_function(name: str, function_names) -> bool:
+    """True when `name(...)` is a call through a module global's slot word.
+
+    The second shape of "a callee this unit has no symbol for", beside
+    `callee_is_a_bound_value`'s parameter-or-local. A module-level
+    `var g = dbl` with `global g` in a function gives `g` a `__DATA` slot
+    (`collect_global_slots`), and the slot's word is the function's entry
+    address — the module body stores it, and a read of `g` as a value already
+    lowers to a load of that slot. But `callee_is_a_bound_value` deliberately
+    subtracts `global_names_bound_in`, so a `global` name is NOT a bound value
+    and `g(21)` took the extern path and emitted a `BL g` against a symbol
+    nothing provides — refused four stages later by the bind audit with a
+    message about the link line rather than about the call. Measured, both
+    architectures: `fire.py run` answers 42 and the image refused to build.
+
+    The evidence is the slot's OWN module-level statement, because that is the
+    only place the value's shape is stated: `GlobalSlot.site` is the statement
+    and its `value` is what the module binds the name to. A function NAME there
+    is a code address; anything else (an integer, a call, a container) is not
+    this predicate's business and is left to the extern path, so an
+    integer-valued global called as a function keeps its refusal rather than
+    becoming a branch through a number. `function_names` is the unit's own
+    definitions — the same table `name not in self._functions` reads — so a
+    name bound to something this unit does not compile is not claimed here.
+    """
+    slot = module_slot(name)
+    if slot is None:
+        return False
+    value = getattr(getattr(slot, "site", None), "value", None)
+    return (isinstance(value, F.IdentExpr)
+            and value.name in (function_names or ()))
 
 
 def callee_is_a_bound_value(fn, name: str) -> bool:
@@ -11232,6 +11275,46 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+def _is_string_prefix_letter(c: str) -> bool:
+    """True for a character a Python string prefix may be spelled with.
+
+    Explicit `==` comparisons rather than `c in 'fFrR…'`, for the reason
+    `fire_compiler.py::_string_prefix_start` gives in full: this codegen's
+    compiled `in`-for-char*-against-char* is a documented stub that always
+    returns False, so under self-hosting an `in`-based check here would never
+    advance and every prefixed literal would go unread.
+    """
+    return (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+            or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+            or c == 't' or c == 'T')
+
+
+def interpolated_literal_quote_start(spelled: str) -> int:
+    """Where the opening QUOTE of an interpolated literal's token begins.
+
+    The prefix is a SET OF SPELLING FLAGS, not one character: `f`, `t`, `r`,
+    `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
+    open their quote at index **2** while `f"…"` opens it at 1. The reader below
+    used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
+    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
+    reader_assumes_a_one_character_prefix.md`. The lexer above it
+    (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
+    known the prefix width since 2026-10-05; this is the one answer the reader
+    was missing, and it is a function rather than an index so the two layers
+    name the same fact.
+
+    **Two, not more, because that is what the language allows** and what
+    `fire_compiler.py::_string_prefix_start` scans for: a legal prefix is one
+    of `r`/`u`/`b`/`f`/`t` or a pair. The scan stops at the first character
+    that is not a prefix letter — which is the quote — so a body that begins
+    with `f` cannot be over-consumed.
+    """
+    i = 0
+    while i < 2 and i < len(spelled) and _is_string_prefix_letter(spelled[i]):
+        i += 1
+    return i
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11349,27 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
+    # The prefix is a SET OF SPELLING FLAGS, not one character — `rf"…"` and
+    # `fr"…"` are two letters, and the quote is at index `quote_at`, not 1.
+    # `interpolated_literal_quote_start` is the one reader of that width (the
+    # lexer's own is `fire_compiler.py::_string_prefix_start`).
+    quote_at = interpolated_literal_quote_start(spelled)
+    quote = spelled[quote_at] if quote_at < len(spelled) else ""
+    if quote != '"' and quote != "'":
         raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
+            f"cannot read an interpolated literal from {spelled!r}: it has no "
+            f"opening quote after its prefix, so where its text starts is not "
+            f"knowable from the token")
+    if spelled[quote_at:quote_at + 3] == quote * 3:
         term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
     else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
-    if not spelled.endswith(term):
+        term = quote
+    if not spelled.endswith(term) or len(spelled) < quote_at + 2 * len(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[quote_at + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)
@@ -11410,7 +11492,17 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    is_t = spelled[:1] in ("t", "T")
+    #
+    # The `t` is looked for across the WHOLE prefix rather than at index 0: a
+    # t-string's prefix may be `tr`/`rt`, so `spelled[:1] in ("t", "T")` called
+    # a `rt"…"` "an f-string". The prefix letters are read with the same helper
+    # `interpolated_literal_segments` now uses, so both spell the width once.
+    _prefix_end = (interpolated_literal_quote_start(spelled)
+                   if isinstance(spelled, str) else 0)
+    is_t = False
+    for _ch in spelled[:_prefix_end]:
+        if _ch == 't' or _ch == 'T':
+            is_t = True
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:
@@ -26505,6 +26597,51 @@ def _target_names(target):
     return _lbn_target_names(target) if isinstance(target, str) else []
 
 
+def for_target_tree(target):
+    """Parse a for/comprehension target string into a leaf name or nested list.
+
+    `'i'` -> `'i'`; `'(a, b)'` -> `['a', 'b']`; `'a, b'` (the comprehension
+    `Generator.target` spelling, no surrounding parens) -> `['a', 'b']`;
+    `'(a, (b, c))'` -> `['a', ['b', 'c']]`. Returns None when a leaf is not a
+    plain identifier (a `*name` star leaf stays, as `'*name'`, because the
+    binding rules for it are the unpacker's and not this reader's).
+
+    This is the recursive SHAPE reader — `fire_compiler.for_target_names` is the
+    recursive FLATTENING of the same text, and a lowering that needs to unpack a
+    nested group has to have the nesting, or it unpacks the inner group's names
+    against the OUTER element and its arity check fires. That was one bug on
+    x86-64 (`a, (b, c)` checked a two-element tuple against a three-name
+    target) and this is the one reader both backends now share.
+
+    Uses the parser's own top-level split (`fire_compiler.target_slots`, which
+    drops the empty slot a 1-tuple target's trailing comma leaves) and its own
+    group peel, so `'d[a, b]'` — a SUBSCRIPT target, one name whose brackets
+    contain a comma — is not torn into two.
+    """
+    if not isinstance(target, str):
+        return None
+    t = target.strip()
+    inner = F._target_group_inner(t)
+    if inner is not None:
+        parts = F.target_slots(inner)
+    else:
+        parts = F.target_slots(t)
+        # `'(a)'` normalizes in the parser to `'a'`, so a group-less text with
+        # no top-level comma is a single leaf and not a one-element tree.
+        if len(parts) <= 1:
+            if t.startswith("*"):
+                rest = t[1:].strip()
+                return "*" + rest if rest.isidentifier() else None
+            return t if t.isidentifier() else None
+    tree = []
+    for p in parts:
+        child = for_target_tree(p)
+        if child is None:
+            return None
+        tree.append(child)
+    return tree if tree else None
+
+
 def _comprehension_target_names(target) -> list:
     """The names ONE generator target binds, in source order.
 
@@ -30173,6 +30310,86 @@ def struct_parameter_not_bound_refusal(struct_name: str, spelling: str,
             f"from a value this path cannot compute, and the two have different "
             f"next steps: this one is closed by binding the parameter values at "
             f"the instantiation site, not by editing the expression")
+
+
+#: The expression nodes that BUILD a frame container. A comprehension ELEMENT
+#: that is a container literal can be materialised per-iteration only when
+#: nothing inside it builds ANOTHER container: the per-iteration storage is a
+#: byte copy of the element's own blob, so a nested container's ADDRESS would be
+#: copied rather than the container and every iteration would share it. A CALL
+#: is in the set because a constructor such as `List()` allocates too, and a
+#: SLICE because it builds a new blob from an old one.
+_CONTAINER_BUILDING_NODES = (
+    F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr, F.Comprehension,
+    F.SliceExpr, F.CallExpr,
+)
+
+
+def _expr_builds_a_container(e) -> bool:
+    """True when `e` is, or contains, an expression that builds a container."""
+    if e is None or isinstance(e, str):
+        return False
+    if isinstance(e, _CONTAINER_BUILDING_NODES):
+        return True
+    if isinstance(e, F.UnaryOp):
+        return _expr_builds_a_container(e.operand)
+    if isinstance(e, F.BinaryOp):
+        return (_expr_builds_a_container(e.left)
+                or _expr_builds_a_container(e.right))
+    if isinstance(e, F.TernaryExpr):
+        return (_expr_builds_a_container(e.condition)
+                or _expr_builds_a_container(e.then_val)
+                or _expr_builds_a_container(e.else_val))
+    if isinstance(e, F.CompareChain):
+        return any(_expr_builds_a_container(o) for o in e.operands)
+    if isinstance(e, F.MemberExpr):
+        return _expr_builds_a_container(e.obj)
+    if isinstance(e, F.SubscriptExpr):
+        return (_expr_builds_a_container(e.obj)
+                or _expr_builds_a_container(e.index))
+    if isinstance(e, F.WalrusExpr):
+        return _expr_builds_a_container(e.value)
+    return False
+
+
+def comprehension_element_is_flat_container(element) -> bool:
+    """True when a comprehension element is a container a byte copy can make
+    per-iteration.
+
+    THE predicate both emitters ask before materialising an element per
+    iteration, and it is here rather than in either backend so the two
+    architectures cannot disagree about which elements are representable — a
+    comprehension that built on one machine and was refused on the other is the
+    divergence this whole path is built to prevent.
+
+    The element's container is stored per-iteration by copying its own blob into
+    a slot of a `cap`-sized array (see the emitters' `_materialize_compr_element`),
+    and a SHALLOW copy is sound only when nothing inside the element built a
+    second container: the copy would carry the nested container's ADDRESS, so
+    every iteration's outer container would still point at one inner object.
+    That is the same aliasing defect one level down, and it is why the predicate
+    recurses rather than looking at the element's node type alone.
+
+    A NAME is deliberately NOT a container here, and that is correctness rather
+    than a narrowing: `[a, b]` where `a` and `b` are outer lists copies the outer
+    list per iteration and shares `a`/`b`, which is exactly what CPython does —
+    distinct outer lists over the same elements. Only a container the element
+    position itself BUILDS is the defect.
+
+    The shapes that return False keep `comprehension_element_blob_refusal`:
+    a nested comprehension, a list of lists, a slice, a constructor call, and
+    every non-literal expression. Those are the cases whose per-iteration
+    materialisation needs the runtime blob base the refusal's own document
+    describes.
+    """
+    if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
+                                F.DictExpr)):
+        return False
+    if isinstance(element, F.DictExpr):
+        children = [x for pair in element.pairs for x in pair]
+    else:
+        children = list(element.elements)
+    return not any(_expr_builds_a_container(c) for c in children)
 
 
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
@@ -45179,9 +45396,19 @@ def call_graph_depth(edges: dict) -> int:
     The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
-    sixty levels deep spends the same stack as a recursion sixty deep. Every
-    formal frame is at least 128 KiB, so the depth that matters is
-    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+    sixty levels deep spends the same stack as a recursion sixty deep.
+
+    **The depth the budget affords is PER ARCHITECTURE, because the budget is
+    bytes and the frame is not.** `STACK_FLOOR_BUDGET_BYTES` is one 7.5 MiB
+    constant on both machines, but `(BUDGET - frame) // frame` — what
+    `stack_floor_charge` measures — is 59 on arm64 against a 128 KiB frame
+    (`ARM64_CONTAINER_BUDGET`) and 479 on x86-64 against a 16 KiB one
+    (`X86_64_CONTAINER_BUDGET`) before the function's own spills, which is why
+    the measured x86-64 edge is 471 and not 479 (`tools/formal_recursion_depth.py`,
+    measured, not estimated). So the same recursion is refused at a different
+    depth on each machine by design: 59 is the ARM64 figure, and a reader on
+    x86-64 must not take it as a fact about x86-64. The budget docstring above
+    and `stack_trap_message` say the same thing where an operator meets it.
 
     **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
     The exact figure is the longest SIMPLE path, which is NP-hard in general, so
@@ -48253,11 +48480,17 @@ def struct_is_context_manager(struct_def) -> bool:
         the one-word value model and it is stated rather than hidden: CPython's
         own `TemporaryDirectory` and `nullcontext` both keep more than one
         attribute, so the honest mirror of either is representable.
-      * neither dunder takes an argument other than the receiver, and `__enter__`
-        RETURNS a value.  `__exit__`'s three exception arguments are a question
-        about the unwinder this path does not have (see
+      * `__enter__` takes no argument other than the receiver and RETURNS a
+        value.  `__exit__` takes either the receiver alone or CPython's own
+        `(self, exc_type, exc_val, tb)` — and the four-parameter spelling is
+        accepted ONLY when the method never reads its last three words
+        (`context_exit_ignores_its_exception_words`).  Those three words are a
+        question about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
-        `__exit__` that wanted them could not act on them anyway.
+        `__exit__` that acted on them could not act on a value this path
+        invented.  A `__exit__` that IGNORES them is the cleanup-only shape every
+        temporary-directory and redirect class writes, and it lowers with the
+        receiver plus three words it never looks at.
       * `__exit__` does not RETURN a value CPython would read as SUPPRESSING the
         exception (`context_exit_returns_truthy`).  The same missing unwinder,
         seen from the other side: a `raise` in the body exits the process, so a
@@ -48269,11 +48502,24 @@ def struct_is_context_manager(struct_def) -> bool:
     if struct_def is None or not struct_is_framed(struct_def):
         return False
     methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
-    for name in (CONTEXT_ENTER, CONTEXT_EXIT):
-        m = methods.get(name)
-        if m is None or _dunder_receiver_params(m) != 1:
-            return False
-    return not context_exit_returns_truthy(methods[CONTEXT_EXIT])
+    enter = methods.get(CONTEXT_ENTER)
+    if enter is None or _dunder_receiver_params(enter) != 1:
+        return False
+    exit_ = methods.get(CONTEXT_EXIT)
+    if exit_ is None:
+        return False
+    params = _dunder_receiver_params(exit_)
+    # `__exit__` may take CPython's own three exception words — but only when it
+    # does not READ them.  The words have nowhere to come from (there is no
+    # unwinder), so passing a made-up value to a method that looks at it would be
+    # a lie; a method that ignores them is the cleanup-only shape and lowers
+    # with the receiver alone plus three words it never looks at.  See
+    # `context_exit_ignores_its_exception_words`.
+    if params not in (1, 4):
+        return False
+    if params == 4 and not context_exit_ignores_its_exception_words(exit_):
+        return False
+    return not context_exit_returns_truthy(exit_)
 
 
 def context_exit_returns_truthy(method) -> bool:
@@ -48337,6 +48583,75 @@ def _dunder_receiver_params(method) -> int:
     if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
         return -1
     return len(params)
+
+
+def _param_names(params) -> list:
+    """The NAME of each parameter, in order — `(name, annotation)` tuples on
+    this front end, with `getattr(p, "name", p)` as the fallback for a node
+    shape that carries the name itself.  `None` for an entry nothing names."""
+    out = []
+    for p in (params or ()):
+        if isinstance(p, (list, tuple)):
+            out.append(p[0] if p and isinstance(p[0], str) else None)
+        else:
+            name = getattr(p, "name", None)
+            out.append(name if isinstance(name, str) else None)
+    return out
+
+
+def context_exit_ignores_its_exception_words(method) -> bool:
+    """True when a FOUR-parameter `__exit__` never reads its last three words.
+
+    CPython's own signature is `__exit__(self, exc_type, exc_val, tb)`, and the
+    backend has no unwinder to supply them — but the common cleanup-only manager
+    (every temporary-directory and redirect class in the wild) ignores them
+    entirely, and for that shape the signature is not a question about the
+    unwinder at all.  This is the predicate that tells the two apart.
+
+    **Non-use, and not "returns falsy".**  `context_exit_returns_truthy` decides
+    the return half, which is a suppression this path cannot perform; this
+    decides the ARGUMENT half, which is whether the values this path would pass
+    are ever looked at.  A method that ignores them cannot be acted on by them,
+    so passing the receiver plus three zeros is faithful; a method that reads any
+    one of them would be acting on a lie and stays refused.  The three names are
+    read from the method's own parameters, so a manager that spells them
+    `(self, kind, value, backtrace)` is accepted on exactly the same evidence.
+
+    The check is over the whole method body through `iter_nodes`, so a read in a
+    nested `def`, in a closure, or through `getattr`-free attribute access
+    (`exc_type.__name__`) is an occurrence of the name and refuses.  A name that
+    appears only as an assignment TARGET is also an occurrence, which is the
+    conservative direction: it is not a read, and refusing it costs a shape no
+    real context manager writes.
+    """
+    params = list(getattr(method, "params", None) or ())
+    if len(params) != 4 or getattr(method, "vararg", None) or \
+            getattr(method, "kwarg", None):
+        return False
+    names = set(_param_names(params[1:]))
+    if len(names) != 3 or None in names:
+        return False
+    for node in iter_nodes(getattr(method, "body", None) or ()):
+        if isinstance(node, F.IdentExpr) and getattr(node, "name", None) in names:
+            return False
+    return True
+
+
+def context_exit_arity(struct_def) -> int:
+    """How many arguments `__exit__` takes, receiver included: 1 or 4.
+
+    The ONE reader of "what does the exit call pass", for the lowering that
+    builds the call (`formal/build.py::_one_with_item`).  It answers from the
+    same `_dunder_receiver_params` the gate does, so the call and the gate cannot
+    disagree; a receiver-only `__exit__` is 1 and CPython's own three-word
+    spelling is 4.  A struct that is not a context manager this path lowers gets
+    the receiver-only answer, which is the shape the resource arm
+    (`open`) uses and the only one its `close` builtin takes.
+    """
+    for m in struct_methods(struct_def):
+        if getattr(m, "name", None) == CONTEXT_EXIT:
+            return 4 if _dunder_receiver_params(m) > 1 else 1
+    return 1
 
 
 def with_alias_bare_name(item):
@@ -48499,6 +48814,24 @@ def with_context_manager_defect(struct_def) -> str:
                     f"(`*args`/`**kwargs`), which cannot be counted from the "
                     f"tree — so this path refuses it rather than assume it "
                     f"takes the receiver and nothing else")
+        if name == CONTEXT_EXIT and params == 4:
+            # CPython's own signature, and it is refused ONLY because the method
+            # READS one of the three words.  The gate accepts this arity when the
+            # words are ignored (`context_exit_ignores_its_exception_words`), so
+            # reaching here means at least one of them is used — and a value this
+            # path invented for it would be a lie, which is the whole reason the
+            # three words are a question about the missing unwinder rather than a
+            # parameter-count rule.
+            return (
+                f"it declares both dunders, but its `{CONTEXT_EXIT}` takes "
+                f"CPython's three exception words and READS them. Those three "
+                f"words are a question about an UNWINDER this backend does not "
+                f"have: there is no exception value, no traceback and no type "
+                f"word to pass, so any value this path supplied would be a lie "
+                f"the method then acted on. Drop the reads (or the parameters): a "
+                f"`{CONTEXT_EXIT}` that IGNORES them is the cleanup-only shape, "
+                f"it is what `formal/hostmods/tempfile.mojo`'s "
+                f"`TemporaryDirectory` declares, and it lowers")
         if name == CONTEXT_EXIT:
             return (
                 f"it declares both dunders, but its `{CONTEXT_EXIT}` takes "

@@ -581,6 +581,22 @@ def _binds_name(target, name: str) -> bool:
     return False
 
 
+def _for_tree_leaves(tree) -> list:
+    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
+
+    A star leaf keeps its `*`, so the caller's identifier check refuses it —
+    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
+    the reason the for-loop's target validation is a leaf walk rather than
+    `_lbn_target_names` (which strips the star and would pass a `*rest`
+    through to a store under a name nothing allocated)."""
+    if isinstance(tree, list):
+        out = []
+        for child in tree:
+            out.extend(_for_tree_leaves(child))
+        return out
+    return [tree]
+
+
 def _dotted(func) -> str:
     """`recv.method` as written, for a diagnostic that quotes the source."""
     name = _callee_symbol(func)
@@ -730,6 +746,11 @@ class X86_64Codegen:
         # the arm64 backend's `_sub_width`, and the decision is
         # `model.subscript_base_lowering` so the two cannot drift.
         self._sub_width = 8
+        # …and whether that element is SIGNED, which picks the extending load
+        # (`MOVSX`/`MOVSXD` versus `MOVZX`/`MOV r32`) for a sub-word element.
+        # Set from the same tuple that gives the width; defaulted `True` because
+        # width 8 has no extension to choose.
+        self._sub_signed = True
         self._while_counter = 0
         self._var_regs = {}
         self._var_spills = {}
@@ -829,6 +850,12 @@ class X86_64Codegen:
         # Enclosing try-finally bodies, outermost first. Flushed before a
         # return/break/continue so the finally runs on those paths too.
         self._pending_finally = []
+        # The `fin` lists currently being emitted by a flush, and those already
+        # emitted for the exit path being unwound. Identity-keyed re-entrancy
+        # guards that replace the old destructive truncation (see
+        # `_flush_pending_finally`; the same fix on arm64).
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1394,6 +1421,8 @@ class X86_64Codegen:
         self._comptime_vals: dict = {}
         self._comptime_list_asts: dict = {}
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._finished_finally = set()
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
@@ -2183,8 +2212,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_expr(stmt.value)
                 if self._recv_ref_receiver is not None:
                     self._emit_receiver_writeback()
-            self._flush_pending_finally()
-            self._emit_epilogue()
+            if not self._flush_pending_finally():
+                self._emit_epilogue()
             return
 
         if isinstance(stmt, F.ExprStmt):
@@ -2487,7 +2516,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # condition did not fold, and this backend then emits the ordinary
             # runtime branch — the same degradation the gimple path makes, so
             # all three agree on the observable behaviour.
-            which = comptime_eval.resolve_if(stmt, self._comptime_vals)
+            which = comptime_eval.resolve_if(
+                stmt, self._comptime_vals, call_hook=self._comptime_hook)
             if which == "then":
                 for s in stmt.then_body:
                     self._emit_stmt(s)
@@ -2570,9 +2600,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         one that named a shape the author never wrote. Sharing the resolver
         removes the drift by construction rather than by keeping the two
         wordings in step by hand.
+
+        **The `call_hook` is part of sharing it, and omitting it was the same
+        drift one argument in.** arm64 passed `self._comptime_hook`; x86-64 did
+        not, so `comptime var a = square(6)` folded on arm64 and was refused here
+        — and the same omission was in `resolve_if` and `_comptime_iterable`.
+        All three now pass it. `test_formal_x86_64_parity.py`'s
+        `comptime_binding_initialized_by_a_call` is the row.
         """
         name = stmt.target
-        resolved = comptime_eval.resolve_var(stmt, self._comptime_vals)
+        resolved = comptime_eval.resolve_var(
+            stmt, self._comptime_vals, self._comptime_hook)
         if resolved is None:
             raise CodegenError(M.comptime_fold_refusal(name))
         kind, val = resolved
@@ -2607,7 +2645,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         at compile time, else None (→ emit the ordinary runtime loop)."""
         return comptime_eval.resolve_for_iterable(
             iterable, self._comptime_vals, self._comptime_list_asts,
-            self.COMPTIME_UNROLL_CAP)
+            self.COMPTIME_UNROLL_CAP, self._comptime_hook)
 
     def _emit_comptime_target(self, target, value) -> None:
         """Bind a `comptime for` target for one iteration, as an ordinary local
@@ -2656,23 +2694,57 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._str_intern[s] = label
         return label
 
-    def _flush_pending_finally(self, depth: int = 0) -> None:
+    def _flush_pending_finally(self, depth: int = 0) -> bool:
         """Emit the pending try-finally frames from `depth` inward.
 
         `depth` is 0 for a return (every enclosing finally runs) and the
         enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). The list is truncated first, so a return
-        inside a finally does not re-enter the same body. RAX (the return
-        value being built) is saved across the flush in a 16-byte slot."""
-        if len(self._pending_finally) <= depth:
-            return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
-        self._push_slot(Reg.RAX)
+        opened INSIDE that loop). RAX (the return value being built) is saved
+        across the flush in a 16-byte slot.
+
+        Returns whether the flushed bodies ENDED the path (an unconditional
+        `return` inside one of them), so the caller does not emit a second
+        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
+        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+
+        The frames are KEPT. The old code `del`'d them to stop a `return` in a
+        `finally` re-entering its own body, but that also removed the frame for
+        every LATER exit site in the same `try`, so a second `return` emitted no
+        cleanup at all (pinned by
+        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        Re-entrancy is an identity question, answered by
+        `_emitting_finally`/`_finished_finally` without destroying the stack.
+        x86-64 never crashed on the double epilogue, but it was right by
+        accident rather than by design; the same fix applies.
+        """
+        if not self._emitting_finally:
+            self._finished_finally = set()
+        fins = [f for f in self._pending_finally[depth:]
+                if id(f) not in self._emitting_finally
+                and id(f) not in self._finished_finally]
+        if not fins:
+            return False
+        run = []
+        terminated = False
         for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
-        self._pop_slot(Reg.RAX)
+            run.append(fin)
+            if _always_returns(fin):
+                terminated = True
+                break
+        saved = not terminated
+        if saved:
+            self._push_slot(Reg.RAX)
+        for fin in run:
+            self._emitting_finally.add(id(fin))
+            try:
+                for s in fin:
+                    self._emit_stmt(s)
+            finally:
+                self._emitting_finally.discard(id(fin))
+            self._finished_finally.add(id(fin))
+        if saved:
+            self._pop_slot(Reg.RAX)
+        return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.
@@ -3554,6 +3626,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.comprehension_element_blob_refusal(
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
+
+    def _materialize_compr_element(self, element, res_offset: int, cap: int,
+                                   before: int) -> None:
+        """Give the element its OWN container per iteration, or refuse.
+
+        The x86-64 twin of arm64's method over the same shared predicate
+        (`M.comprehension_element_is_flat_container`) and the same message, so
+        the two architectures cannot materialise — or refuse — an element
+        differently. RAX on entry holds the element's blob and on exit the
+        per-iteration copy `_compr_append_elem` appends.
+
+        `i` is the result blob's count word (elements appended so far), the
+        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
+        which returns the destination in RAX for free. `before` is the ledger
+        position as the element's emission began, so `bytes_` is the element's
+        own footprint, measured BEFORE the array below steps the same ledger.
+        """
+        bytes_ = self._list_cursor - before
+        if not bytes_ or cap <= 1:
+            return
+        if not M.comprehension_element_is_flat_container(element):
+            raise CodegenError(M.comprehension_element_blob_refusal(
+                f"a comprehension in {self.func_name or '<module>'}", element,
+                cap, bytes_))
+        array_off = self._reserve_blob(cap * bytes_,
+                                       "comprehension element array")
+        # count = result element count so far (= this iteration's ordinal).
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # dest = array_base + count * bytes_
+        self._emit_blob_base(array_off, Reg.R11)
+        self._emit_mov_imm(Reg.RDI, bytes_)
+        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
+        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
+        self._emit_mov_imm(Reg.RDX, bytes_)
+        self._emit_extern_call("memcpy")            # returns dest in RAX
 
     # ── how many times the code being emitted runs ────────────────────
     #
@@ -5830,6 +5941,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._refuse_scalar_container_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
+        self._sub_signed = True
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
             # has no parent, so `M.multi_index_refusal_for` cannot tell a
@@ -5908,6 +6020,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # first would compute base+base.
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             self._sub_width = 1
+            self._sub_signed = False          # a string byte is a UInt8
             return
         # A FRAME-valued FIELD, asked HERE — after the dict and string readings
         # above and before `subscript_base_lowering`'s blob fallback, which is
@@ -5931,6 +6044,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # `base + 8 + 8*count`.  See
             # FORMAL_subscript_of_a_pointer_reads_a_blob_count.
             self._sub_width = width
+            self._sub_signed = signed
             if width != 1:
                 # The scale is emitted rather than assumed: `base + i` is right
                 # for a one-byte element and is the SECOND element for any
@@ -5961,6 +6075,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # come from one line rather than from two decisions.
         stride = M.blob_elem_stride(obj_kind)
         self._sub_width = stride
+        # A byte blob's element is a `UInt8`; a word blob's width is 8, where
+        # the extension choice does not arise.
+        self._sub_signed = False
         self._emit_elem_addr(Reg.R10, Reg.RAX, Reg.RAX,
                              header=M.BLOB_HEADER_BYTES,
                              scale=M.walk_shift(False, stride))
@@ -6022,16 +6139,53 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                    e.index.step)
             return
         self._emit_subscript_addr(e)
-        # The address is in RAX; the element has to be LOADED before any
-        # extension — MOVZX of the address itself would yield the low byte of a
-        # pointer.
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
+        self._emit_subscript_load(Reg.RAX)
+
+    def _emit_subscript_load(self, dst: Reg) -> None:
+        """Load one element through X{dst}-as-address into `dst`, at
+        `_sub_width` and `_sub_signed`.
+
+        ONE place, because the read, the augmented assignment's own read and
+        the store's read-modify each used to spell this choice separately. The
+        four loads mirror arm64's `_emit_subscript_load` and
+        `_emit_dereference`'s table, so the two backends read an element the
+        same width and with the same extension.
+
+        **`_sub_width == 1` used to be the whole of this test after an
+        unconditional 64-bit `MOV`.** A `Pointer[Int32]` element is four bytes,
+        so `q[0]` read `q[1]`'s bytes as its high half; the write side of
+        `aug_through_int32_pointer` clobbered the next element. Both backends
+        had it and neither gate could see it until Rosetta ran the x86-64 half
+        of the parity differential.
+        """
         if self._sub_width == 1:
-            # Unsigned: a `UInt8` element is a byte, and a formal value is one
-            # 64-bit word holding an integer, so `200` has to read back as 200.
-            # The signed form is the same two-instruction pair with a different
-            # mnemonic, chosen from the pointee the model established.
-            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+            self.asm.emit((encode_movsx_r64_rm8 if self._sub_signed
+                           else encode_movzx_r64_rm8)(dst, dst, 0))
+        elif self._sub_width == 2:
+            self.asm.emit((encode_movsx_r64_rm16 if self._sub_signed
+                           else encode_movzx_r64_rm16)(dst, dst, 0))
+        elif self._sub_width == 4:
+            self.asm.emit((encode_movsx_r64_rm32 if self._sub_signed
+                           else encode_mov_r32_rm32)(dst, dst, 0))
+        else:
+            self.asm.emit(encode_mov_r64_rm64(dst, dst, 0))
+
+    def _emit_subscript_store_at(self, base: Reg, value: Reg) -> None:
+        """Store the low `_sub_width` bytes of `value` at [base].
+
+        The store half, and the same bug lived here: `_sub_width == 1` was the
+        whole test, so a 2- or 4-byte element was written with a full 64-bit
+        `MOV` and the bytes after it were overwritten. A store has no
+        signedness to consult — it truncates to the width.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_mov_rm8_r8(base, 0, value))
+        elif self._sub_width == 2:
+            self.asm.emit(encode_mov_rm16_r16(base, 0, value))
+        elif self._sub_width == 4:
+            self.asm.emit(encode_mov_rm32_r32(base, 0, value))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(base, 0, value))
 
     def _blob_est(self, e, exact: bool = False) -> int:
         """Static upper bound on a blob expression's element count.
@@ -6481,10 +6635,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_frame_slot_element("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
-            from mojo.middle.boundnames import _lbn_target_names
-            tnames = _lbn_target_names(stmt.target) \
-                if isinstance(stmt.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
+            # The SHAPE, not the flattened names: a nested group is itself a
+            # blob, and `_emit_for_unpack` has to unpack it as one. Passing
+            # `_lbn_target_names` (leaves flattened) checked the OUTER blob's
+            # count against the flattened arity, so `for a, (b, c) in [(1, (2,
+            # 3))]` compared an element count of 2 against a target count of 3
+            # and exited(1) with nothing printed, where arm64 and CPython both
+            # answer. arm64 reads the same tree through the same `M` reader.
+            ttree = M.for_target_tree(stmt.target) \
+                if isinstance(stmt.target, str) else None
+            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -6554,10 +6715,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # a `UInt8` pointee use. A word load here would bind the
                     # loop variable to seven bytes of the next element.
                     self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-                if len(tnames) == 1:
-                    self._store_var(tnames[0], Reg.RAX)
+                if isinstance(ttree, str):
+                    self._store_var(ttree, Reg.RAX)
                 else:
-                    self._emit_for_unpack(tnames, Reg.RAX,
+                    self._emit_for_unpack(ttree, Reg.RAX,
                                           f"{fn}_flt{wid}")
 
                 for s in stmt.body:
@@ -8278,20 +8439,14 @@ preference.
             return
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
-        if self._sub_width == 1:
-            # A BYTE store, and this used to be a full 64-bit store into a
-            # one-byte element: both branches of the old `if` were the same
-            # instruction, so `p[0] = 65` on a `Pointer[UInt8]` overwrote the
-            # seven bytes after it. It was unreachable over a POINTER (the
-            # subscript took the blob path and exited 1 first) and reachable
-            # over a `char *` in a string literal, which is a read-only
-            # __TEXT page, so nothing noticed. Widening `_sub_width` to the
-            # pointee made it reachable over a `malloc`'d buffer, where the
-            # overwrite is a silent corruption rather than a fault, so the two
-            # branches have to differ.
-            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
-        else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+        # A width-aware store, and the two-branch form it replaces had one bug
+        # twice: both branches of the old `if` were a 64-bit `MOV` for anything
+        # but a one-BYTE element, so `p[0] = 65` on a `Pointer[UInt8]` and
+        # `q[0] += 5` on a `Pointer[Int32]` both overwrote the bytes after the
+        # element. It was unreachable over a POINTER until `_sub_width` followed
+        # the pointee, so the overwrite became a silent corruption of a
+        # `malloc`'d buffer rather than a fault on a read-only `__TEXT` page.
+        self._emit_subscript_store_at(Reg.RAX, Reg.R11)
 
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
@@ -8337,9 +8492,7 @@ preference.
         target = stmt.target
         self._emit_subscript_addr(target)             # RAX = address
         self._push_slot(Reg.RAX)                      # [rsp] = address
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # old element
-        if self._sub_width == 1:
-            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+        self._emit_subscript_load(Reg.RAX)            # old element, at its width
         self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
         self._emit_expr(stmt.value)                   # RAX = value
         self._pop_slot(Reg.R11)                       # R11 = old
@@ -8373,10 +8526,7 @@ preference.
         # happens, the function returns, and the damage only shows up as a
         # number that is a pointer. arm64's twin uses X9 for the same reason.
         self._pop_slot(Reg.R10)                       # R10 = address
-        if self._sub_width == 1:
-            self.asm.emit(encode_mov_rm8_r8(Reg.R10, 0, Reg.RAX))
-        else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 0, Reg.RAX))
+        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
         # The same construct arm64 lowers as a SAME-LENGTH in-place replace,
@@ -9097,8 +9247,8 @@ preference.
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
-                self._refuse_an_element_blob(expr.element, cap,
-                                             self._list_cursor - _before)
+                self._materialize_compr_element(
+                    expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
             return
 
@@ -9150,17 +9300,20 @@ preference.
                                      self._is_dict_subscript(gen.iterable)))
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
 
-            from mojo.middle.boundnames import _lbn_target_names
-            tnames = _lbn_target_names(gen.target) \
-                if isinstance(gen.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
+            # The SHAPE, not the flattened names, for the same reason the
+            # for-loop asks for it — arm64's `_emit_compr_gen` reads the same
+            # `M.for_target_tree`.
+            ttree = M.for_target_tree(gen.target) \
+                if isinstance(gen.target, str) else None
+            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
-            if len(tnames) == 1:
-                self._store_var(tnames[0], Reg.RAX)
+            if isinstance(ttree, str):
+                self._store_var(ttree, Reg.RAX)
             else:
-                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
+                self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next
@@ -10205,7 +10358,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # itself are the same code either way, and the call is `CALL r64`
         # through R11 instead of `CALL rel32` through a label.
         through_value = (not is_extern_call and name not in self._functions
-                         and M.callee_is_a_bound_value(self._cur_fn, name))
+                         and (M.callee_is_a_bound_value(self._cur_fn, name)
+                              or M.callee_is_a_module_slot_function(
+                                  name, self._functions)))
         # …and the name has to be a BARE one. `_callee_symbol` flattens a
         # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
         # and `a[i](x)` as `a`; only the first of those is a name the function

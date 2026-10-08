@@ -412,7 +412,7 @@ implementation its `--min 1` table is):
 | `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is `Self.keys`, a PARAMETER of `TypeDict` | **stdlib**; a parameter's value belongs to an instantiation, and there is no monomorphizer here |
 | `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
 | `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is this image's ENTRY, whose caller is the C runtime | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
-| **`tools/wave2_extract_shared.py`** | **`cannot read an interpolated literal from 'rf"…"': the character after the prefix is not a quote`** | **a real defect in `formal/model.py::interpolated_literal_segments`** — see below |
+| **`tools/wave2_extract_shared.py`** | **`cannot read an interpolated literal from 'rf"…"': the character after the prefix is not a quote`** | **FIXED 2026-10-07 (`work/formal106-docs`): the reader took `spelled[1]` as the quote, so a two-letter `rf`/`fr` prefix read the `f` as the quote. `formal/model.py::interpolated_literal_quote_start` is now the one reader of the prefix width, and the false sentence and its doc are gone — see below |
 
 **`other refusal` is 7 → 5 and the arithmetic is worth stating**: of the seven at
 `-13`, `-13`'s own branch fixed one (a lexer rule, `test_formal_libc_symbol.py`)
@@ -429,11 +429,17 @@ rf"^(\\s*)from\\s+{re.escape(old)}\\s+import\\s+"
 ```
 
 — a **raw** f-string, i.e. a two-character prefix. `interpolated_literal_segments`
-assumes the prefix is **one** character (`quote = spelled[1]`, with a comment
-saying so), so every `rf`/`fr` f-string is refused with a sentence that is FALSE
+assumed the prefix was **one** character (`quote = spelled[1]`, with a comment
+saying so), so every `rf`/`fr` f-string was refused with a sentence that was FALSE
 about the source: the character after `rf` *is* a quote. `fire_compiler.py` grew
 the PEP 701 prefix spellings on 2026-10-05 (`_prefix_is_interpolated`), and this
-reader one layer down did not follow. **It is filed, not fixed** — see §4.
+reader one layer down did not follow. **FIXED 2026-10-07 (`work/formal106-docs`)**:
+`formal/model.py::interpolated_literal_quote_start` scans the prefix letters (up
+to two) and is now the one answer to where the quote begins, the `rf"…"` token
+reads into its one field and two chunks, and the file's refusal is the string
+composition it always was. The two new oracle rows in
+`test_formal_run.py::check_interpolated_segments_against_cpython` are the pin;
+the doc filed for the defect is deleted with the fix.
 
 * **method call on a value receiver** (2) — `std/collections/binary_heap.mojo`'s
   own `self.clear()` and `std/format/repr.mojo`'s: one stdlib file's own source
@@ -964,9 +970,13 @@ measured it three rounds ago. The exceptions are named:
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
 * `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
-  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
-  own document for the reason above: the measurement is here (§1.11) and the fix
-  has a question to answer first that belongs with the fix.
+  `b14` §1.11's `rf"…"` row, filed by that round and **FIXED and deleted
+  2026-10-07** (`work/formal106-docs`): the reader took the prefix to be one
+  character, so a two-letter `rf`/`fr` prefix was read as a missing quote. The
+  fix is `formal/model.py::interpolated_literal_quote_start`, pinned by the two
+  new raw-prefix rows in `test_formal_run.py`'s interpolated-segment oracle. It
+  was kept as its own document only while it was open; §1.11 above carries the
+  measurement.
 
 **The per-slice rounds also fixed things and recorded the pins**, and so did
 `b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the
