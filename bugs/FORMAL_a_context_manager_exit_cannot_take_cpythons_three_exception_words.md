@@ -1,66 +1,17 @@
 # A context manager's `__exit__` cannot take CPython's own three exception
 # words, so every context manager written the way CPython writes one is refused
 
-**Status 2026-10-07 (`work/formal104-docs`): the COMMON CASE is FIXED — a
-`__exit__(self, exc_type, exc_val, tb)` whose body IGNORES the three words is
-now a context manager this path lowers, so the most common `with` in real code
-compiles verbatim. What remains is the narrow half that genuinely needs the
-unwinder: a `__exit__` that READS any of the three words is still refused, by
-name, because there is no exception value to pass and a fabricated one would be
-a lie the method then acted on.**
-
-**What landed, and why it is not the signature change §3 warns against.** The
-three words still have nowhere to come from; the fix does not invent them. It
-distinguishes the shape that USES them from the shape that does not, and lowers
-the second — the cleanup-only manager every temporary-directory and redirect
-class writes. `formal/model.py`:
-
-* `context_exit_ignores_its_exception_words(method)` — true for a four-parameter
-  `__exit__` none of whose last three parameter names occurs anywhere in its
-  body (walked with `iter_nodes`, so a read inside a nested `def` counts, and an
-  assignment target counts too — the conservative direction).
-* `struct_is_context_manager` accepts `__exit__` arity 4 exactly when that
-  predicate holds, and is still the one gate.
-* `context_exit_arity(struct_def)` — the ONE reader of "how many arguments the
-  exit call passes" (1 or 4), so the gate and the call cannot disagree.
-* `with_context_manager_defect`'s four-parameter arm now says the words are
-  READ (the old wording, "this path calls it with the receiver alone", stopped
-  being true once the ignoring shape lowered).
-
-`formal/build.py::_one_with_item` passes the receiver plus three zeros for the
-four-parameter shape, which is CPython's `None, None, None` on a normal exit
-spelled as the only value this word-based model has for "nothing" — and nothing
-in the callee looks at them.
-
-**Measured, both architectures.** `python3 test_formal_with.py` — **352 checks,
-PASS=352 FAIL=0** (was 336). Three new ANSWERED rows run CPython's own spelling
-verbatim (the base protocol, a `return` out of the block, and a `raise` leaving
-it, the last comparing exit status too), and the REFUSED row is now the READING
-shape (`an_exit_that_reads_cpythons_three_words_is_refused_by_name`). The
-in-process `check_the_exit_word_gate_is_about_reading_not_arity` pins the gate
-and `context_exit_arity` directly, so a future edit cannot move the boundary
-while the builds keep passing for an unrelated reason. `test_formal_run.py`'s
-six `with` rows still pass, as do `test_formal_core_hostmods.py ctx`
-(`nullcontext`) and `test_formal_tempfile.py`'s arm64 half.
-
-**What is still not fixed, and it is §3's unwinder.** A `__exit__` that reads
-`exc_type`/`exc_val`/`tb`, and a computed return value CPython reads as a
-suppression (`FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md`), still
-need steps 1-3 below. This change is the "drop the exception arguments"
-workaround §3 points the reader at, applied by the COMPILER instead of by the
-reader, and it is safe precisely because the arguments are provably unused.
-
 **Area:** FORMAL, context managers. Claim `project:with-statements`, measured
-2026-10-05 on `work/formal56-with-statements`. **PARTIAL: the §4 alias-dispatch
-limit is CLOSED (2026-10-07, `work/formal118-docs`); the three-exception-word
-signature below is still OPEN**, because it needs the unwinder. One of three
-limits this project measured and did not close; the other two are
+2026-10-05 on `work/formal56-with-statements`. **OPEN.** One of three limits
+this project measured and did not close; the other two are
 `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` (the narrow half of
 the same missing unwinder, which IS now refused when the value is foldable) and
-the alias-dispatch note in §4, which is no longer one of them.
+the alias-dispatch note in §4.
 
-**Read this before planning the rest of the work.** What is left is the
-unwinder, and §3 is why the same missing unwinder is
+**Read this before planning the work.** The refusal is CORRECT and its message
+says why, so nothing here is a wrong answer — the cost is that the most common
+`with` in real code does not compile at all. What closing it needs is not a
+signature change: it is an unwinder, and §3 is why the same missing unwinder is
 the stated reason `try`/`except` arms are refused too
 (`FORMAL_a_try_handler_arm_is_still_never_emitted.md`, which measures that half
 as worth **zero files in this repository**).
@@ -99,19 +50,11 @@ DECLARES, through the one reader a field access already uses
 | `with self.mgr as v:` for `var mgr: Ctx` | the field's declared type | **refused** |
 | `def use(c: Ctx): with c as v:` | the parameter's annotation | **refused** |
 
-**ANSWERED since 2026-10-07, and this is what the fix added** — the shape the
-document is named for, when the body does not read the words:
-
-| construct | evidence |
-|---|---|
-| `__exit__(self, exc_type, exc_val, tb)` that ignores them | no read of any of the three parameter names in the body |
-
-**REFUSED, and this is what is left** — the same signature when the body READS
-a word:
+**REFUSED, and this document is about it** — one shape:
 
 | construct | the refusal |
 |---|---|
-| `__exit__(self, exc_type, exc_val, tb)` whose body reads `exc_type`/`exc_val`/`tb` | "its `__exit__` takes CPython's three exception words and READS them … there is no exception value, no traceback and no type word to pass, so any value this path supplied would be a lie the method then acted on" |
+| `__exit__(self, exc_type, exc_val, tb)` | "it declares both dunders, but its `__exit__` takes 3 parameters after the receiver — CPython's own signature is `__exit__(self, exc_type, exc_val, tb)` — and this path calls it with the receiver alone" |
 
 The wording is itself part of what this branch fixed: until 2026-10-05 the same
 program was told "**it declares no `__enter__`**", which is FALSE about a class
@@ -139,13 +82,8 @@ is what every context manager in the wild writes.
         print('after')
         return 0
 
-CPython: `enter / body 7 / exit / after`, exit 0. This path **now answers the
-same thing, exit 0**, on arm64 and on x86-64 — this is the exact reproduction
-the ANSWERED row `an_exit_that_ignores_cpythons_three_words_runs_the_protocol`
-in `test_formal_with.py` runs, CPython's own spelling verbatim. Before
-2026-10-07 it was **exit 1** with the refusal above, on both architectures
-identically; adding a single read of `exc_val` to the body still restores that
-refusal, by name.
+CPython: `enter / body 7 / exit / after`, exit 0. This path: **exit 1**, with
+the refusal above, on arm64 and on x86-64, identically.
 
 ## 3. What closing it needs, and why it is not a signature
 
@@ -197,32 +135,18 @@ second is the same missing unwinder seen through a narrower door:
     dropped on the floor). See
     `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` for the
     remaining half of that;
-  * ~~a method call through the alias whose NAME a second struct also declares.~~
-    **CLOSED 2026-10-07 (`work/formal118-docs`).** The alias's struct is now
-    published into `formal/build.py`'s frame-holder table — the alias is bound to
-    `S.__enter__(tmp)`, and when `__enter__` returns its receiver that call is a
-    frame-returning call, so the holder fixpoint already knows the alias is an
-    `S` (which is why `b.tag` lowered while `c.tag` for an `__enter__` that
-    returns a field still refuses). `_rewrite_holder_method_calls` runs beside
-    `_rewrite_nested_method_calls` against the same `by_name` table and lifts the
-    bare-name receiver the name-only dispatch declined, with
-    `_derived_overrides`'s guard copied so a child that overrides the member is
-    still refused. `test_formal_with.py`'s
-    `a_method_through_the_alias_with_a_rival_owner_is_answered` is the row (it
-    moved from the REFUSED table to the DECLARED one, against CPython on both
-    architectures), and `test_formal_run.py`'s
-    `ambiguous_name_a_derived_struct_also_declares_is_still_refused` still pins
-    the one clause that must not be waived. The context-manager-to-a-value
-    spelling and the `__enter__`-returns-a-word spelling both stay refused, which
-    is what keeps a wrong layout unreachable.
+  * a method call through the alias whose NAME a second struct also declares. The
+    alias holds one word with no declared type, so dispatch is by name, and
+    `_method_owners` pops a name two structs declare on purpose. It is REFUSED,
+    not picked — but a *fix* here is available and cheap: publish the alias's
+    struct from `__enter__`'s declared return type (or from the receiver round
+    trip `_returned_frame_construction` already recognises), the same way a
+    `with`'s CONTEXT is now published, and the ambiguity disappears for every
+    manager that annotates `__enter__`.
 
 ## 5. The reproduce line for the whole table
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py
 
-338 checks, both architectures (measured 2026-10-07). §1's "ANSWERED" rows are
-its 28 ANSWERED + 7 DECLARED + 3 resource rows; §4's remaining shapes are among
-its 16 REFUSED rows. The former two-owner alias row is now the seventh DECLARED
-row (`a_method_through_the_alias_with_a_rival_owner_is_answered`), not a
-refusal: its alias's `Box` receiver is published by the holder analysis, so the
-ambiguity the name-only dispatch declines is settled by the binding.
+336 checks, both architectures. §1's "ANSWERED" rows are its 28 ANSWERED + 6
+DECLARED + 3 resource rows; §4's three shapes are three of its 17 REFUSED rows.

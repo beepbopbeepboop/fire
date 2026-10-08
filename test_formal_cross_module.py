@@ -971,6 +971,37 @@ def main(k):
     return 0
 """
 
+# The dropped-argument SIDE EFFECT. `take(head, *rest)` never reads `rest`, so
+# the arguments past `head` have no register home and are dropped from the
+# argument slots — but CPython still EVALUATES every argument expression before
+# the call, so `tick(5)` has to run even though `take` discards 5. Before the
+# fix the extra arguments were dropped WITHOUT being evaluated: the image
+# printed `tail=4@` with no `tick` line and exited 0. `swallow(head, **kw)` is
+# the same defect on the keyword half — the value is dropped by `**kwargs` and
+# was likewise never evaluated.
+VARIADIC_SIDE_LIB = """\
+def tick(c):
+    print('tick')
+    return c
+
+
+def take(head, *rest):
+    return head
+
+
+def swallow(head, **kw):
+    return head
+"""
+
+VARIADIC_SIDE_PROG = """\
+from vsidelib import take, swallow, tick
+
+def main(k):
+    printf("tail=%d@", take(4, tick(5)))
+    printf("kw=%d@@", swallow(6, a=tick(7)))
+    return 0
+"""
+
 
 def test_every_argument_count_and_a_variadic_agree_with_cpython(tmpdir, _):
     """Defaults at both ends of the list, and `*rest`, across the boundary.
@@ -980,7 +1011,10 @@ def test_every_argument_count_and_a_variadic_agree_with_cpython(tmpdir, _):
     "materialize the defaults" could have gone on to invent register space for
     a variadic. It does not: `bind_call_arguments` drops what follows the
     variadic's position, and `check_module_symbols` refuses a body that reads
-    its variadic parameter, so the drop cannot be a silent loss.
+    its variadic parameter. The dropped argument is nonetheless EVALUATED, so
+    that it is not a silent loss either — the arguments here are literals, and
+    `test_a_dropped_variadic_argument_is_still_evaluated` is the row that makes
+    the evaluation observable.
     """
     fresh_cas()
     root = os.path.join(tmpdir, "variadic")
@@ -988,6 +1022,27 @@ def test_every_argument_count_and_a_variadic_agree_with_cpython(tmpdir, _):
     write_tree(root, {"varlib.mojo": VAR_LIB, "prog.mojo": VAR_PROG})
     agrees_with_cpython(tmpdir, "defaults at every count + variadic", root,
                         "prog.aout", expect_exit=0)
+
+
+def test_a_dropped_variadic_argument_is_still_evaluated(tmpdir, _):
+    """A variadic tail and a `**kwargs` swallow run their expressions.
+
+    The VALUE of a dropped argument is unobservable (a body that reads its
+    variadic parameter is refused earlier), but its EVALUATION is not: CPython
+    evaluates every argument expression before the call. Dropping `tick(5)`
+    unrun is a wrong-but-exit-0 answer, so this row compares the whole stdout —
+    BOTH `tick` lines — with CPython's, rather than only the returned numbers.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "variadic_side")
+    os.makedirs(root)
+    write_tree(root, {"vsidelib.mojo": VARIADIC_SIDE_LIB,
+                      "prog.mojo": VARIADIC_SIDE_PROG})
+    text, rc = agrees_with_cpython(
+        tmpdir, "a dropped variadic argument is still evaluated", root,
+        "prog.aout", expect_exit=0)
+    check(text.count("tick") == 2,
+          f"a dropped argument was not evaluated: {text!r}")
 
 
 def test_a_local_default_and_a_cross_module_default_agree(tmpdir, _):
@@ -2005,6 +2060,8 @@ TESTS = [
      test_too_few_arguments_to_a_re_exported_callee_is_refused),
     ("every argument count and a variadic agree with CPython",
      test_every_argument_count_and_a_variadic_agree_with_cpython),
+    ("a dropped variadic argument is still evaluated",
+     test_a_dropped_variadic_argument_is_still_evaluated),
     ("a local default and a cross-module default agree",
      test_a_local_default_and_a_cross_module_default_agree),
     ("a linked dylib's struct is usable with no import",
