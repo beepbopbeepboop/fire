@@ -6,7 +6,16 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 from __future__ import annotations
 import re
 import sys
-import unicodedata
+try:
+    # Only `\N{NAME}` needs this, and only the interpreter and the formal
+    # backends reach that arm: the compiled path hands a literal's body to a C
+    # compiler and has no Unicode name database, so the import is guarded and
+    # `lookup` is asked defensively below. A plain `import unicodedata` here
+    # would be a hard dependency this file's C-compilation must satisfy for a
+    # capability it never uses.
+    import unicodedata
+except ImportError:  # pragma: no cover
+    unicodedata = None
 import dataclasses
 from dataclasses import dataclass, field
 
@@ -1810,7 +1819,11 @@ def decode_c_escapes(s: str) -> str:
     **`\N{…}` on an unknown name is an error, not a passthrough.** CPython
     refuses the source there, and a decoder that returned the spelling would be
     a second wrong answer, so `unicodedata.lookup`'s `KeyError` becomes a
-    `SyntaxError` naming the name.
+    `SyntaxError` naming the name. `\N{…}` is the one escape that needs a
+    database, and the compiled path has none — it hands a literal's body to a C
+    compiler, which has no `\N` either — so a path whose `unicodedata` is
+    absent, or whose `lookup` is unimplemented, keeps the escape verbatim
+    instead of crashing.
 
     **A `\u`/`\U` escape naming a lone SURROGATE stays verbatim**, because a
     surrogate is a character CPython's `str` can hold and no UTF-8 encoder can
@@ -1865,15 +1878,21 @@ def decode_c_escapes(s: str) -> str:
             # falls through to the permissive arm; an UNKNOWN name is an error.
             if nxt == 'N' and i + 2 < n and s[i + 2] == '{':
                 close = s.find('}', i + 3)
-                if close > i + 3:
+                if close > i + 3 and unicodedata is not None:
                     name = s[i + 3:close]
                     try:
-                        out.append(unicodedata.lookup(name))
+                        ch = unicodedata.lookup(name)
                     except KeyError:
                         raise SyntaxError(
                             f"unknown Unicode character name in \\N{{...}}: "
                             f"{name!r}") from None
-                    i = close + 1; continue
+                    except NotImplementedError:
+                        # The compiled path has no Unicode name database (it
+                        # hands literals to a C compiler, which has no `\N`
+                        # either); keep the escape verbatim rather than crash.
+                        ch = None
+                    if ch is not None:
+                        out.append(ch); i = close + 1; continue
             # An octal run of one to three digits (`\0` is the one-digit case).
             if nxt in '01234567':
                 j = i + 1
