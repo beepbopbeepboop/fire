@@ -8020,6 +8020,22 @@ ctor_field_value=self._ctor_field_value_for(name),
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
+        # `-`, `&` and `^` on two SETS are difference/intersection/symmetric
+        # difference, and this backend lowers all three.  The gate is asked here
+        # for the same reason the `|` one is — `container_operator_refusal`
+        # cannot see set-ness, so it leaves these three out and this is the site
+        # that knows both the kinds and the flow-sensitive set facts.
+        if (op in M.SET_ALGEBRA_OPS and (M.container_operand_is_blob(
+                self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right)))):
+            reason = M.container_set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
+            if reason is not None:
+                raise CodegenError(reason)
+            self._emit_set_algebra(op, e.left, e.right)
+            return
         # Comparisons
         cmp_conds = {
             "<=": ("ls", "le"),
@@ -13200,6 +13216,150 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
         self._emit_b_to(ur)
         self.asm.label(urd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_blob_word_scan(self, base_reg: int, count_reg: int,
+                             word_reg: int) -> None:
+        """Emit a scan of `blob[base_reg, 0..count_reg)` for `word_reg`.
+
+        Leaves 0/1 in X4 (1 = present).  Clobbers X0 and X1, so the caller's
+        `base_reg`, `count_reg` and `word_reg` must be none of X0/X1/X4 — the
+        set-algebra caller keeps its bases in X7/X8, its counts in X2/X3 and its
+        element in X6, which is why the three share this one loop rather than
+        each writing its own copy of the same compare.
+        """
+        self.asm.emit(encode_movz_wd_imm(4, 0))          # found = 0
+        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
+        self._while_counter += 1
+        loop = f"{self.func_name}_sas{self._while_counter}"
+        done = f"{self.func_name}_sad{self._while_counter}"
+        hit = f"{self.func_name}_sah{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(0, count_reg))    # k vs count
+        self.asm.emit(encode_cset_xd_cond(1, "ge"))      # X1 = k >= count
+        self.asm.emit(encode_cbnz_xn(0, 1))
+        self.asm.emit_label_rel(done, here_offset=-4)    # -> done if X1 != 0
+        self.asm.emit(encode_add_xd_xn_imm(1, base_reg, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 1, 0))     # X1 = blob[k]
+        self.asm.emit(encode_cmp_xn_xm(1, word_reg))
+        self.asm.emit(encode_cset_xd_cond(1, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 1))
+        self.asm.emit_label_rel(hit, here_offset=-4)     # -> hit if equal
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))     # k++
+        self._emit_b_to(loop)
+        self.asm.label(hit)
+        self.asm.emit(encode_movz_wd_imm(4, 1))          # found = 1
+        self.asm.label(done)
+
+    def _emit_set_pass(self, offset: int, src_reg: int, src_count: int,
+                       other_reg: int, other_count: int,
+                       want_found: bool) -> None:
+        """Append every `src[i]` whose presence in `other` matches `want_found`.
+
+        One pass of the three set-algebra operators, so the difference,
+        intersection and symmetric-difference emitters share one loop and differ
+        only in `want_found` and in how many passes they make — which is what
+        makes this three emitters' worth of behaviour one implementation.
+        Result base is `_emit_list_base(offset)` in X9 and its count is X10,
+        which the append below keeps live across iterations.
+        """
+        self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
+        self._while_counter += 1
+        loop = f"{self.func_name}_sal{self._while_counter}"
+        cont = f"{self.func_name}_sac{self._while_counter}"
+        app = f"{self.func_name}_sap{self._while_counter}"
+        done = f"{self.func_name}_sae{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(5, src_count))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)    # i >= n -> done
+        self.asm.emit(encode_add_xd_xn_imm(6, src_reg, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 6, 0))     # X6 = src[i]
+        self._emit_blob_word_scan(other_reg, other_count, 6)  # X4 = present
+        if want_found:
+            self.asm.emit(encode_cbnz_xn(0, 4))          # present -> append
+        else:
+            self.asm.emit(encode_cbz_xn(0, 4))           # absent -> append
+        self.asm.emit_label_rel(app, here_offset=-4)
+        self._emit_b_to(cont)
+        self.asm.label(app)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 10))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))     # result[count] = elem
+        self.asm.emit(encode_add_xd_xn_imm(10, 10, 1))
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))    # count++
+        self.asm.label(cont)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+
+    def _emit_set_algebra(self, op, left, right) -> None:
+        """`a & b`, `a - b` and `a ^ b` as set operations over list blobs.
+
+        The three operators CPython defines for two SETS and for nothing else,
+        lowered over the same `[count][element]…` word blobs `_emit_set_union`
+        handles, with word equality as the element test — exact for the integer
+        sets this path builds, and the same comparison the union's dedup makes.
+        `&` keeps a left element the right also holds, `-` keeps one the right
+        does not, and `^` keeps the elements exactly one side holds (a pass over
+        each side against the other).  The result is a fresh list blob in X0.
+
+        `container_set_algebra_refusal` has already established that both
+        operands are sets, so this is reached only for the rows CPython answers.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                    + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))           # left
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))           # right, left
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        nbytes = 8 + 8 * cap
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))    # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))   # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))     # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))     # nR
+        # The reservation is the worst case for each operator: a difference and
+        # an intersection hold at most nL, a symmetric difference at most nL+nR.
+        if op == "^":
+            self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))
+        else:
+            self.asm.emit(encode_mov_zr_xn(4, 2))
+        self._emit_blob_growth_guard("a set operation", 4, cap, "salg")
+        self.asm.emit(encode_movz_wd_imm(10, 0))         # count = 0
+        self._emit_list_base(offset)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+        # `&` keeps a left element present in the right; `-` keeps one absent.
+        # `^` is both passes, each keeping the element the OTHER side lacks.
+        self._emit_set_pass(offset, 7, 2, 8, 3, want_found=(op == "&"))
+        if op == "^":
+            self._emit_set_pass(offset, 8, 3, 7, 2, want_found=False)
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 

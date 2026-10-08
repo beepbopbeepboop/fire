@@ -1,10 +1,34 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
-that stand in for them are landed.** `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green; this doc
-is about the rows in it that are green *as refusals*, which is a different thing
-from green as answers.
+**Status 2026-10-07 (`work/formal149-docs`): item 3 — SET ALGEBRA — is FIXED on
+arm64, which is the landing order this doc prescribes ("arm64 only, then
+x86-64").** `_emit_set_algebra` in `formal/arm64_codegen.py` lowers `&`, `-`
+and `^` between two sets over the same `[count][element]…` word blobs
+`_emit_set_union` already handles, with one shared inner scan
+(`_emit_blob_word_scan`) and one shared pass (`_emit_set_pass`) for the three
+operators; the augmented forms (`s &= {2}`, `s -= {2}`) route through the same
+emitter via the existing `aug_assign_operands_are_blobs` desugaring. The gate
+moved: `model.CONTAINER_GATED_OPS` no longer holds the three, and the new
+`model.container_set_algebra_refusal` (asked beside `container_union_refusal` at
+the `|` site) refuses every pair that is NOT two sets — `[1, 2] & [3, 4]` is a
+`TypeError` in CPython and still a refusal here — while `model.SET_ALGEBRA_OPS`
+is the one spelling of the set. x86-64 has no emitter for any of the three (it
+has none for `|` either), so `model.set_algebra_backend_refusal` names it and
+the five set-group cases plus `o_and`/`o_xor` are `BACKEND_ONLY` there.
+Measured: `test_formal_container_methods.py` `set`+`operator` groups green on
+both architectures, `{1,2,3,4,5} & {2,4,9}` = `{2,4}`, `{1,2,3}-{9}` = all
+three, `{1,2}^{3,4}` = `{1,2,3,4}`, and the loop cases hold their counts.
+
+**What is still open, and it is items 1, 2 and 4 of "What to do, in order"
+below:** `==`/`!=` between two containers (item 1), ordering (item 2), and a
+length-changing slice store (item 4). None is touched by the set-algebra change
+and all three are still refused exactly as measured below.
+
+**The original status: NOT FIXED — four lowerings, one shared obstacle, and the
+refusals that stand in for them are landed.** `test_formal_container_methods.py`
+measures the whole surface against CPython on both architectures and is green;
+this doc is about the rows in it that are green *as refusals*, which is a
+different thing from green as answers.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
@@ -79,14 +103,17 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3). arm64 only, then x86-64; both
-   already have `_set_vars` and `container_union_refusal` to gate on, so the
-   gate narrows from "refuse" to "lower" without new machinery. Each row in
-   `test_formal_container_methods.py`'s `set` group
-   (`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r`,
-   `s_andassign_r`) becomes an answer case, and `container_operator_refusal`
-   loses that operator from `CONTAINER_GATED_OPS` — the table is the only place
-   the operator set is written, which is why widening it was one line.
+1. ~~**`&`, `^`, `-` between two sets** (item 3).~~ **DONE on arm64
+   2026-10-07 (`work/formal149-docs`); x86-64 still refuses.** arm64 lowers all
+   three over the union's blob shape, with the augmented forms desugared onto
+   the same emitter; each row in `test_formal_container_methods.py`'s `set`
+   group (`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r`,
+   `s_andassign_r`) and the two in `operator` (`o_and`, `o_xor`) became answer
+   cases, and the three left `model.CONTAINER_GATED_OPS` for the new
+   `model.container_set_algebra_refusal`. x86-64 has no union emitter to build
+   on, so it refuses a set operation by name
+   (`model.set_algebra_backend_refusal`) and those seven cases are
+   `BACKEND_ONLY` there — that backend is the remaining half of this item.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and

@@ -624,21 +624,25 @@ SET_CASES = [
     ("s_union_ior", ["s = {1, 2}", "s |= {3}"], "len(s)",
      "the AUGMENTED union, which reached the integer ALU before the desugaring: "
      "it answered 1 on arm64 and 0 on x86-64 where CPython answers 3"),
-    ("s_intersection_r", ["s = {1, 2}", "t = s & {2}"], None,
-     "`&` is INTERSECTION and needs a per-element membership scan per element. "
-     "Measured before the operator gate: 2 on arm64 and 163061056 on x86-64 "
-     "where CPython answers 1"),
-    ("s_difference_r", ["s = {1, 2}", "t = s - {2}"], None,
-     "`-` is SET DIFFERENCE. Measured before the gate: SIGSEGV on both "
-     "architectures, no output, because the result is a word nowhere near a "
-     "blob and `len` read a count out of it"),
-    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^` is SYMMETRIC DIFFERENCE. Measured before the gate: SIGSEGV on both"),
-    ("s_sub_r", ["s = {1, 2}", "s -= {2}"], None,
+    ("s_intersection_r", ["s = {1, 2}", "t = s & {2}"], "len(t)",
+     "`&` is INTERSECTION and arm64 now lowers it: a per-element membership "
+     "scan per element. Measured before the lowering and the gate: 2 on arm64 "
+     "and 163061056 on x86-64 where CPython answers 1. x86-64 still has no "
+     "emitter, so it stays a BACKEND_ONLY refusal"),
+    ("s_difference_r", ["s = {1, 2}", "t = s - {2}"], "len(t)",
+     "`-` is SET DIFFERENCE, lowered on arm64. Measured before the gate: "
+     "SIGSEGV on both architectures, no output, because the result is a word "
+     "nowhere near a blob and `len` read a count out of it"),
+    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}"], "len(t)",
+     "`^` is SYMMETRIC DIFFERENCE, lowered on arm64. Measured before the gate: "
+     "SIGSEGV on both"),
+    ("s_sub_r", ["s = {1, 2}", "s -= {2}"], "len(s)",
      "the augmented difference, which is where the SIGSEGV was reproduced "
-     "through the SECOND emitter as well"),
-    ("s_andassign_r", ["s = {1, 2}", "s &= {2}"], None,
-     "the augmented intersection: 2 on arm64 and garbage on x86-64"),
+     "through the SECOND emitter as well; the desugaring now routes it to the "
+     "lowered binary form on arm64"),
+    ("s_andassign_r", ["s = {1, 2}", "s &= {2}"], "len(s)",
+     "the augmented intersection: 2 on arm64 and garbage on x86-64 before the "
+     "gate, now lowered on arm64"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
@@ -777,12 +781,12 @@ OPERATOR_CASES = [
     ("o_sub", ["a = [1, 2]", "t = a - [2]"], None,
      "`-` between two containers: a TypeError in CPython, and measured as a "
      "SIGSEGV here before the gate"),
-    ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate"),
-    ("o_and", ["s = {1, 2}", "t = s & {2}"], None,
-     "`&`: INTERSECTION, measured as 2 on arm64 and 163061056 on x86-64 where "
-     "CPython answers 1 — the two architectures disagreeing is the clearest "
-     "possible sign that neither computed a set"),
+    ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], "len(t)",
+     "`^`: SYMMETRIC DIFFERENCE between two sets, lowered on arm64 — measured "
+     "as a SIGSEGV before the gate"),
+    ("o_and", ["s = {1, 2}", "t = s & {2}"], "len(t)",
+     "`&`: INTERSECTION between two sets, lowered on arm64 — measured as 2 on "
+     "arm64 and 163061056 on x86-64 where CPython answers 1"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -857,6 +861,17 @@ BACKEND_ONLY = {
     "s_union_elems": "x86_64",
     "s_union_str": "x86_64",
     "s_union_ior": "x86_64",
+    # The three set-algebra operators are arm64's too: x86-64 has no emitter
+    # for `&`, `-` or `^` on sets, so it refuses them by name. The refusal is a
+    # CLAIM about that backend rather than a wrong answer, which is why the
+    # cases are excluded there rather than asserted to fail.
+    "s_intersection_r": "x86_64",
+    "s_difference_r": "x86_64",
+    "s_symdiff_r": "x86_64",
+    "s_sub_r": "x86_64",
+    "s_andassign_r": "x86_64",
+    "o_xor": "x86_64",
+    "o_and": "x86_64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

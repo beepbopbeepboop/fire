@@ -7308,6 +7308,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
+        # `-`, `&` and `^` on two SETS are difference/intersection/symmetric
+        # difference.  The gate is asked here for the same reason the `|` one is
+        # — `container_operator_refusal` cannot see set-ness, so it leaves these
+        # three out and this is the site that knows the flow-sensitive facts.
+        # This backend has no emitter for any of them (it has none for `|`
+        # either), so a set operation is refused BY NAME rather than reaching
+        # the integer ALU with the blobs' addresses.
+        if (op in M.SET_ALGEBRA_OPS and (M.container_operand_is_blob(
+                self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right)))):
+            reason = M.container_set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
+            if reason is None:
+                reason = M.set_algebra_backend_refusal(
+                    op, M.spelled(e.left), M.spelled(e.right))
+            raise CodegenError(reason)
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide

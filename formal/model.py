@@ -13770,7 +13770,18 @@ CONTAINER_OP_MEANING = {
 #: literals are two distinct blocks and so two distinct addresses, which is
 #: what identity is.  `==`/`!=` on a blob and the ordering operators are the
 #: same defect wearing different operators, so they belong in one gate.
-CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
+#:
+#: `-`, `&` and `^` are absent too, and for a reason of their own: they are the
+#: three operators whose CPython answer IS a lowering on this path when BOTH
+#: operands are SETS.  Set-ness is a flow-sensitive question each backend
+#: answers with its own `_set_vars`/`is_set_expr`, so this table — which sees
+#: only KINDS — cannot ask it; `container_set_algebra_refusal` below is the gate
+#: that does, asked beside this one exactly as `container_union_refusal` is
+#: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
+#: message quotes the same table.
+SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
@@ -13816,6 +13827,13 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
+
+    `-`, `&` and `^` are NOT in this gate.  Their CPython answer is a real
+    lowering when BOTH operands are sets, and set-ness is flow-sensitive, so
+    they have their own gate — `container_set_algebra_refusal` below — asked at
+    the same site, exactly as `container_union_refusal` is asked for `|`.  The
+    numbers quoted above for `s - {2}`, `s ^ {2}` and `s & {2}` are that gate's
+    measurements.
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
@@ -13868,6 +13886,68 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 #: would be the parallel implementation `CLAUDE.md` rules out, and its name
 #: would go on describing four operators out of fourteen.
 container_relational_refusal = container_operator_refusal
+
+
+def container_set_algebra_refusal(op: str, left: str, right: str,
+                                  left_kind, right_kind, left_is_set: bool,
+                                  right_is_set: bool) -> str | None:
+    """Why `a {op} b` is not a SET operation on this path, or None when it is.
+
+    The gate for `-`, `&` and `^`, the three operators
+    `container_operator_refusal` above deliberately leaves out because their
+    CPython answer IS a lowering here when BOTH operands are SETS and only then.
+    Set-ness is flow-sensitive — `is_set_expr` for a literal, a backend's own
+    `_set_vars` for a NAME — so it is a SEPARATE question asked at the same site
+    as the generic gate, exactly as `container_union_refusal` is asked for `|`.
+
+    Python defines `-`, `&` and `^` on two SETS and on nothing else:
+
+    | operands | CPython | this path before the gate |
+    |---|---|---|
+    | set OP set | difference / intersection / symmetric difference | arithmetic on two ADDRESSES (a SIGSEGV or a wrong number) |
+    | list OP list | `TypeError` | the same |
+    | dict OP dict | `TypeError` | the same |
+    | set OP list | `TypeError` | the same |
+
+    so only the first row is a lowering, and every other row is refused here.
+    None is returned for the first row AND for an operand that is not a
+    container at all — `a - b` on two integers, `a & b`, `a ^ b` are the
+    integer ALU's and must stay there.
+    """
+    if not (container_operand_is_blob(left_kind)
+            or container_operand_is_blob(right_kind)):
+        return None
+    if left_is_set and right_is_set:
+        return None
+    which = ("the left operand" if container_operand_is_blob(left_kind)
+             else "the right operand")
+    return (
+        f"{left} {op} {right} is refused when {which} is a list, tuple, set or "
+        f"dict that is not one of TWO SETS. Python defines `{op}` on two SETS "
+        f"and on nothing else — `[1, 2] {op} [3, 4]` raises `TypeError` there — "
+        f"and `{op}` is {CONTAINER_OP_MEANING[op]}, which this path lowers only "
+        f"when both operands are sets. A blob here is a fixed block of the "
+        f"frame, so the operator otherwise reaches the integer ALU holding its "
+        f"ADDRESS: measured before the gate, `s = {{1, 2}}` then `s - {{2}}` "
+        f"and `s ^ {{2}}` both died with SIGSEGV and no output, and `s & {{2}}` "
+        f"answered 2 on arm64 and 163061056 on x86-64 where CPython answers 1. "
+        f"Write the operation over two sets, or spell the element test out")
+
+
+def set_algebra_backend_refusal(op: str, left: str, right: str) -> str:
+    """Why `set OP set` is not lowered on the backend that asks.
+
+    The SECOND question, asked only once `container_set_algebra_refusal` above
+    has said the operator really is a set operation between two sets: it is
+    CPython's difference/intersection/symmetric difference, and this backend has
+    no emitter for it.  The message names the backend that does, because "not
+    supported" sends a reader looking for a spec when the answer is an emitter.
+    """
+    return (
+        f"{left} {op} {right} is a set operation and is not lowered on this "
+        f"path on the x86-64 backend: it would reach the integer ALU holding "
+        f"the two blobs' ADDRESSES rather than their elements. arm64 lowers it; "
+        f"build for that backend, or spell the element test out")
 
 
 def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
