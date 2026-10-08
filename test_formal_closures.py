@@ -20,16 +20,15 @@ lambda, decorator and generator questions are made of; nothing here needs a
 `printf` spelling CPython cannot run.
 
 ONE divergence found while building this table is deliberately ABSENT from it,
-and lives in `test_formal_run.py` instead: a comprehension whose element is a
-container (`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) used to alias every
-outer iteration's element to the LAST one and answer 93 where CPython answers 63,
-on both backends. It is not a closure/lambda/generator question, so its rows are
-`test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`: the flat-container literals
-are now materialised per-iteration (CPython's answer), and the nested / slice /
-list-of-lists shapes are refused rather than aliased. See
-`bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` for
-the remaining runtime-base work (the shape is not B1, B2 or B4 in
-`bugs/OPEN_WORK.md`).
+and is filed instead: a comprehension whose element is a container
+(`[[x + y for x in [1, 2]] for y in [10, 20, 30]]`) aliases every outer
+iteration's element to the LAST one and answers 93 where CPython answers 63, on
+both backends, with exit 0. An answered row would have to assert that number, and
+this file's premise is that an answered row EQUALS CPython's; a refusal row
+would have to be a refusal, and this is not one. See
+`bugs/FORMAL_a_comprehension_element_container_aliases_every_iteration.md` for the
+signature (it is not B1, B2 or B4 in `bugs/OPEN_WORK.md`) and for why pinning it
+here would be the wrong kind of test.
 
     python3 test_formal_closures.py [-v] [case ...]
 
@@ -166,16 +165,16 @@ CASES = [
     # arm spelled for the single-identifier form would leave the capture filter
     # dropping `k`, and this case would be refused with `'k' has no home`.
     #
-    # **NESTED groups (`for a, (b, c) in …`) are a row below.** They used to be
-    # absent, because a separate x86-64 defect in the UNPACK itself — not in the
-    # capture — made the shape print nothing and exit 1 there while arm64
-    # answered; a closure row on it would have gone red for a reason its own
-    # name did not say. That defect is FIXED (both backends now unpack
-    # `fire_compiler.for_target_tree`; see `test_formal_run.py`'s
-    # `both_arch_a_for_target_nested_two_groups_deep`), so the row is here and
-    # it is a capture row again: `loop_target_names` flattens nested groups
-    # through `for_target_names`, and this is what says a leaf two groups deep
-    # is captured.
+    # **NESTED groups (`for a, (b, c) in …`) are deliberately NOT a row here,
+    # and the reason is a separate x86-64 defect in the UNPACK itself rather
+    # than in the capture.** Measured on this tree: `for a, (b, c) in [(1, (20,
+    # 300))]: s = s + b + a` — a program with NO nested `def` in it at all —
+    # prints 21 on arm64 and prints NOTHING and exits 1 on x86-64, with
+    # `loop_target_names` forced to return `[]` (i.e. with this change's arm
+    # neutralised back to master's behaviour), so it is not a regression from
+    # it. `bugs/FORMAL_x86_64_a_nested_for_target_unpack_prints_nothing.md`.
+    # A closure row on that shape would be measuring the unpack, not the
+    # capture, and would go red for a reason its own name does not say.
     ("a_nested_def_capturing_an_unpacked_loop_target",
      "def outer():\n"
      "    s = 0\n"
@@ -183,32 +182,6 @@ CASES = [
      "        def get():\n"
      "            return k\n"
      "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    # The leaf is two groups deep — `b` inside `(b, (c, d))` inside the outer
-    # target — and it is `b` and not `a`/`c`/`d` because only `b` is read, so a
-    # reader that captured the wrong leaf (or none of the nested ones) would
-    # answer a different number or refuse with `'b' has no home`.
-    ("a_nested_def_capturing_a_leaf_two_groups_deep_in_a_for_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, (c, d)) in [(1, (20, (300, 4000)))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    ("a_nested_def_capturing_a_nested_group_loop_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, c) in [(1, (20, 300))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get() + a\n"
      "    return s\n"
      "def main():\n"
      "    print(outer())\n"
