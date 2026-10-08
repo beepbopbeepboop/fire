@@ -3713,18 +3713,18 @@ def _step_rhs_generic(idx: int):
     if idx == 8:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ^^^ arm64_reg {_RM} s))"
     if idx == 9:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat (arm64_ext_imm12 w)))"
     if idx == 10:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat (arm64_ext_imm12 w) }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat (arm64_ext_imm12 w)))")
     if idx == 11:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat (arm64_ext_imm12 w)))"
     if idx == 12:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat (arm64_ext_imm12 w) }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat (arm64_ext_imm12 w)))")
     if idx == 13:
         return (f"some {{ s with nzcv := arm64_subs_flags (arm64_reg {_RN} s) "
-                f"(UInt64.ofNat {_I12}) }}")
+                f"(UInt64.ofNat (arm64_ext_imm12 w)) }}")
     if idx == 14:
         return f"some {{ s with pc := (UInt64.ofNat s.pc + {_OFF26} * 4).toNat }}"
     if idx == 15:
@@ -3805,8 +3805,9 @@ def _step_rhs_generic(idx: int):
     if idx == 35:
         return "some s"
     if idx == 66:
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
-                f"(arm64_reg {_RM} s) }}")
+        return (f"some (arm64_set_reg {_RD} {{ s with nzcv := arm64_adds_flags "
+                f"(arm64_reg {_RN} s) (arm64_reg {_RM} s) }} "
+                f"(arm64_reg {_RN} s + arm64_reg {_RM} s))")
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
@@ -4726,6 +4727,17 @@ def _regs_written(w: int, idx: int):
     # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
     # membership states, and a second row saying the same thing is how
     # `_regs_written` and the model's arm drift apart.
+    #
+    # 6 (CMP/SUBS register) and 66 (CMN/ADDS) are here for the same reason 2/3
+    # are: the classes also carry their register-writing spellings
+    # (`encode_subs_xd_xn_xm`, `encode_adds_xd_xn_xm`), and the model writes
+    # `Rd` for both.  When the compare spelling is the one encoded, `Rd = 31`
+    # and `arm64_set_reg 31` is the identity — so the write set is EMPTY there
+    # and `{rd}` otherwise.  `_written_expr` cannot read register 31 (there is
+    # no `arm64_reg 31`), which is why the conditional is needed rather than
+    # the plain `{rd}` the register-arithmetic rows use.
+    if idx in (6, 66):
+        return {rd} if rd != 31 else set()
     if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
         return {rd}
     if idx in (9, 10, 11, 12):

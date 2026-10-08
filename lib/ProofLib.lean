@@ -2082,7 +2082,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val2 := arm64_reg xm s
     let result := val1 ^^^ val2
     some (arm64_set_reg rd s result)
-  -- ADD Xd, Xn, #imm12: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  -- ADD Xd, Xn, #imm12{, lsl #12}: 0x11000000 (32-bit) / 0x91000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x11000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2094,12 +2094,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
+      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat (arm64_ext_imm12 insn)
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
-  -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
+      some (arm64_set_reg rd s (base + UInt64.ofNat (arm64_ext_imm12 insn)))
+  -- SUB Xd, Xn, #imm12{, lsl #12}: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x51000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2111,12 +2111,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
+      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat (arm64_ext_imm12 insn)
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
-  -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+      some (arm64_set_reg rd s (base - UInt64.ofNat (arm64_ext_imm12 insn)))
+  -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
   -- literal floor.

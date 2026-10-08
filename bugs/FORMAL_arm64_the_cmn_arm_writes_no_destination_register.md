@@ -1,6 +1,25 @@
 # The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm`
 # with `Rd ≠ 31` writes NO register
 
+**Status update 2026-10-07 (`work/formal125-docs`): FIXED IN SOURCE; the
+`lib/ProofLib.lean` build is still owed to the integrator.** The `0xab000000`
+arm now reads `Rd` and writes it
+(`arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s)`),
+`work_step_cmn` states BOTH facts, `_step_rhs`/`_step_rhs_generic` for index 66
+mirror it, and `_regs_written` for index 66 is `{rd}` when `rd ≠ 31` and `set()`
+for the `CMN` spelling (which also corrects the same staleness for index 6,
+whose `SUBS Xd` spelling the model already wrote). The CPU-vs-model row
+`adds x11, x1, x15`, pinned beside the existing `cmn`, is in
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`. **What this worker
+could not do is rebuild `lib/ProofLib.olean`** — measured here with
+`ensure_library`'s own invocation it breaches the 8 GB worker ceiling (the
+sibling doc has the measurement) — so the library build and the CPU-vs-model
+test are the integrator's. The model change itself was verified in ISOLATION,
+which is the part a bounded worker can do: a scratch file importing the served
+`ProofLib.olean` and carrying the modified `arm64_step` + `work_step_cmn`
+elaborates (rc=0, 1.4 GB) and `#eval`s `adds x11,x1,x15 → 7` and
+`cmn x1,x15 → x11 unchanged (0)`.
+
 **Area:** FORMAL (the arm64 machine model's flag-setting-compare arm).
 **Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
 incompleteness — `arm64_step` returns a state that is not the machine's.** Not
