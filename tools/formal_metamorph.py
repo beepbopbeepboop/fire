@@ -1726,7 +1726,8 @@ class _Info:
     """Reads, writes, closure-visible names, control transfer and OBSERVABILITY
     of a statement — everything `t_reorder`'s independence test reads."""
 
-    __slots__ = ("reads", "writes", "escapes", "terminal", "effectful")
+    __slots__ = ("reads", "writes", "escapes", "terminal", "effectful",
+                 "mutates")
 
     def __init__(self):
         self.reads = set()
@@ -1734,6 +1735,11 @@ class _Info:
         self.escapes = set()
         self.terminal = False
         self.effectful = False
+        #: The base names this statement MUTATES through a subscript or
+        #: attribute STORE (`o.v[0] = 1`, `o.v = 1`).  A subset of `writes`,
+        #: kept apart because the ALIAS rule below has to know whether the
+        #: statement changes a container rather than binds a fresh local.
+        self.mutates = set()
 
 
 def _info(node, out=None, in_block=False):
@@ -1797,6 +1803,7 @@ def _info(node, out=None, in_block=False):
         # `mmsound:2` of the `lists` mix: the oracle caught the swap as
         # `transform-invalid`.
         out.writes |= _names_in(node.value)
+        out.mutates |= _names_in(node.value)
     if isinstance(node, ast.Call):
         # OBSERVABLE.  A call is the program's output channel — `print`, a
         # `read`, anything that reaches the outside world — and two observable
@@ -1866,6 +1873,97 @@ def _reachable_by_a_call(an, fn):
     return set(an.module_bindings) | _captured_names(fn)
 
 
+def _function_aliases(fn):
+    """`{name: every name a value bound to it may be the SAME OBJECT as}`.
+
+    `_info`'s independence test is a NAME-level test, and an object's CONTENTS
+    are not in a name: `a = o.v` binds `a` to the very list `o.v` is, so
+    `o.v[0] = 62` and `w = a[0]` are a store and the read that observes it — and
+    a name-level test sees `{o}` against `{a}`, disjoint, and swaps them.
+    Measured on `refs:0` of `formal_fuzz`'s `refs` mix: the swap moved the store
+    past the read and changed the printed value from `62` to `46`.
+
+    So every assignment `x = <expr>` where `<expr>` names anything contributes an
+    edge between `x` and each name in `<expr>` (and the relation is closed
+    transitively). That is deliberately an OVER-approximation — `x = y + 1`
+    claims the integers `x` and `y` are the same object, which they are not — and
+    it is the sound direction: a false entry can only refuse a swap, never
+    license an unsound one. `t_reorder` consults it and only consults it when one
+    of the two statements MUTATES a container, so a swap of two pure-int
+    statements (the corpus `reorder` exists for) is untouched.
+
+    Nested scopes are skipped: a name bound inside a `def`/`class` body is that
+    scope's own local and cannot alias one of this function's.
+    """
+    edges = {}
+
+    def _bind(target, value):
+        names = _names_in(value)
+        if not names:
+            return
+        targets = [t.id for t in ast.walk(target) if isinstance(t, ast.Name)]
+        for t in targets:
+            edges.setdefault(t, set()).update(names)
+
+    def scan(body):
+        for s in body:
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+                continue
+            if isinstance(s, ast.Assign):
+                for t in s.targets:
+                    _bind(t, s.value)
+            elif isinstance(s, ast.AnnAssign) and s.value is not None:
+                _bind(s.target, s.value)
+            elif isinstance(s, (ast.For, ast.AsyncFor)):
+                _bind(s.target, s.iter)
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                for item in s.items:
+                    if item.optional_vars is not None:
+                        _bind(item.optional_vars, item.context_expr)
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(s, field, None)
+                if isinstance(inner, list):
+                    scan(inner)
+
+    scan(fn.body)
+    # Closure under the union: if `x` may be `y` and `y` may be `z`, all three are
+    # one group. The merge is a small union-find over the few container names a
+    # generated function has, so the quadratic form is not worth a rank table.
+    groups = {}
+
+    def _group(name):
+        return groups.setdefault(name, {name})
+
+    for x, names in edges.items():
+        for n in names:
+            gx, gn = _group(x), _group(n)
+            if gx is gn:
+                continue
+            merged = gx | gn
+            for m in merged:
+                groups[m] = merged
+    return {name: groups[name] for name in groups}
+
+
+def _mutates_through_an_alias(mutator, other, groups):
+    """Whether `mutator` mutates something `other` reads or writes by another name.
+
+    The question `_function_aliases` exists to answer, asked of one ordered pair:
+    `mutator` changes a container reached through `mutator.mutates`, and `other`
+    mentions (reads or writes) a name that may be the same object as one of them.
+    """
+    if not mutator.mutates:
+        return False
+    mentioned = other.reads | other.writes
+    if not mentioned:
+        return False
+    for base in mutator.mutates:
+        if groups.get(base, {base}) & mentioned:
+            return True
+    return False
+
+
 def t_reorder(module, an, rng):
     """Swap two adjacent statements of a function body that cannot interact.
 
@@ -1879,6 +1977,11 @@ def t_reorder(module, an, rng):
         `break`/`continue` not inside a loop or `try` of its own);
       * they are not BOTH observable — two statements that each print cannot be
         exchanged, because exchanging them exchanges two lines of output;
+      * a statement that MUTATES a container (`o.v[0] = …`, `o.v = …`) is not
+        exchanged with a statement that mentions any name the mutated base may be
+        the SAME OBJECT as (`_function_aliases`) — `a = o.v` and then a store
+        through `o.v` beside a read of `a`.  This is the rule the NAME-level test
+        cannot state, because the shared object is not a shared name;
       * a statement that WRITES a name a call from this function can reach
         (`_reachable_by_a_call` — a module-level binding, or a name a nested
         scope captures) is not exchanged with a statement that calls anything.
@@ -1889,16 +1992,19 @@ def t_reorder(module, an, rng):
     checks the RESULT — but the predicate is the transform, and the oracle is the
     net under it.  A predicate that were wrong would show up as
     `transform-invalid`, which is reported as loudly as a backend bug, so the two
-    checks cannot be confused.  Measured, all four of the rules above having been
-    wrong at least once: 13 programs whose adjacent pair was two `print`s, two
-    whose pair was `x = 0` beside `xs[0] = 1`, one closure program whose pair was
-    `c = 9` beside the call that reads the cell, and two `globals` programs whose
-    pair was `G = 57` beside a call that mutates `G` from another function.
+    checks cannot be confused.  Measured, every rule above having been wrong at
+    least once: 13 programs whose adjacent pair was two `print`s, two whose pair
+    was `x = 0` beside `xs[0] = 1`, one closure program whose pair was `c = 9`
+    beside the call that reads the cell, two `globals` programs whose pair was
+    `G = 57` beside a call that mutates `G` from another function, and — the
+    ALIAS rule, found by the CPython gate on `refs:0` of the `refs` mix — one
+    program whose pair was `o.v[0] = 62` beside `w = a[0]` where `a = o.v`.
     """
     pairs = []
     for fn in an.functions:
         infos = [_info(s) for s in fn.body]
         reach = _reachable_by_a_call(an, fn)
+        aliases = _function_aliases(fn)
         for i in range(len(fn.body) - 1):
             a, b = infos[i], infos[i + 1]
             if a.terminal or b.terminal:
@@ -1917,6 +2023,17 @@ def t_reorder(module, an, rng):
                 # `self.<field> = …` assignments it is made of.  Measured: the
                 # refusal names the shape, and it fires for anything else.
                 continue
+            # The ALIAS rule is about a CONTAINER's CONTENTS, and a
+            # `self.<field> = …` store BINDS a field rather than mutating
+            # contents — so inside a constructor, where the branch above has
+            # already restricted the pair to two field binds, it is the one
+            # false positive and is skipped.  The name rules below still refuse
+            # a same-field or same-read pair (`self.a = self.b`).
+            if not _is_constructor(an, fn):
+                if _mutates_through_an_alias(a, b, aliases):
+                    continue
+                if _mutates_through_an_alias(b, a, aliases):
+                    continue
             if a.writes & (b.reads | b.writes):
                 continue
             if b.writes & (a.reads | a.writes):
@@ -2195,15 +2312,21 @@ TRANSFORM_WHY = {
 #
 # Each rule, and why removing it changes nothing a run can observe:
 #
-#   PROOF_DECORATORS  `@spec(…)`, `@require(…)`, `@ensure(…)` are read by the
-#                     PROOF layer; the run-time path never sees them.  They have
-#                     to be REMOVED rather than merely made parseable, because
-#                     CPython would execute them and raise NameError on
-#                     `spec`/`require`/`ensure` — so keeping them would trade a
-#                     coverage hole for an oracle that cannot answer.  Measured:
-#                     `count.mojo` built VERBATIM answers `0` on both backends,
-#                     and so does the same file with its three annotation lines
-#                     gone.
+#   PROOF_DECORATORS  `@spec(…)`, `@require(…)`, `@ensure(…)` and `@refines(…)`
+#                     are read by the PROOF layer; the run-time path never sees
+#                     them.  They have to be REMOVED rather than merely made
+#                     parseable, because CPython would execute them and raise
+#                     NameError on `spec`/`require`/`ensure`/`refines` — and
+#                     `@refines(Specs.abs64; 64)` is not even valid Python (the
+#                     `;` inside the parentheses is a SyntaxError), so leaving it
+#                     in is a file CPython declines outright.  Keeping them would
+#                     trade a coverage hole for an oracle that cannot answer.
+#                     Measured: `count.mojo` built VERBATIM answers `0` on both
+#                     backends, and so does the same file with its three
+#                     annotation lines gone; the eleven `@refines` examples
+#                     (`absval`, `bigconst`, `bitops`, `chain`, `fact`, …) were
+#                     unmeasured for the `;` alone before this rule named
+#                     `refines`.
 #   VAR_DECL          `var x = e` and `x = e` are one construct on this path.
 #                     `formal/examples/vardecl.mojo` exists BECAUSE the two
 #                     spellings behave identically here: its own comment calls
@@ -2228,7 +2351,7 @@ TRANSFORM_WHY = {
 #: STATEMENT and a comment may contain the word: `vardecl.mojo`'s own first line
 #: is a comment whose text is "`var a = 1` is a `VarDecl`", and a rule that
 #: rewrote inside it would corrupt prose into code.
-PROOF_DECORATOR_RE = re.compile(r"^[ \t]*@(spec|require|ensure)\s*\(")
+PROOF_DECORATOR_RE = re.compile(r"^[ \t]*@(spec|require|ensure|refines)\s*\(")
 VAR_DECL_RE = re.compile(r"^([ \t]*)var[ \t]+", re.MULTILINE)
 FN_DECL_RE = re.compile(r"^([ \t]*)fn[ \t]+", re.MULTILINE)
 
@@ -2237,7 +2360,7 @@ FN_DECL_RE = re.compile(r"^([ \t]*)fn[ \t]+", re.MULTILINE)
 #: parenthesis depth: `@spec(` opens one, and the line ends at the one that
 #: closes it — whichever line that is.
 def _drop_proof_decorators(lines):
-    """`lines` without the `@spec`/`@require`/`@ensure` lines; `(kept, count)`."""
+    """`lines` without the proof-decorator lines; `(kept, count)`."""
     kept, depth, n = [], 0, 0
     for line in lines:
         if depth == 0 and PROOF_DECORATOR_RE.match(line):

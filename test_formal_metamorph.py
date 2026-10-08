@@ -350,6 +350,34 @@ class TransformSoundness(unittest.TestCase):
                                      f"{tname} is not deterministic, so a "
                                      f"finding cannot be re-run")
 
+    def test_reorder_does_not_swap_a_store_past_a_read_through_an_alias(self):
+        """`a = o.v` makes `o.v[0] = 62` and `a[0]` the SAME object.
+
+        The name-level independence test sees `{o}` against `{a}`, disjoint, and
+        swaps them — moving the store past the read that observes it.  The
+        oracle caught it on `refs:0` of `formal_fuzz`'s `refs` mix (the printed
+        value moved 62 -> 46); this is the minimised program.
+
+        The dependent pair is the only swappable one here, so the correct answer
+        is that `reorder` declines the program outright (`NotApplicable`, not an
+        unsound twin).  Asserted directly rather than through a corpus run
+        because the transform chooses a pair at random: a regression would only
+        fire on the seeds that happened to pick the dependent pair.
+        """
+        src = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = [0]\n"
+               "def main() -> Int32:\n"
+               "    o = Box()\n"
+               "    a = o.v\n"
+               "    o.v[0] = 62\n"
+               "    w = a[0]\n"
+               "    print(w)\n"
+               "    return 0\n")
+        tree = ast.parse(src)
+        with self.assertRaises(M.NotApplicable):
+            M.TRANSFORMS["reorder"](tree, M.Analysis(tree), random.Random("t"))
+
 
 class ScopeResolution(unittest.TestCase):
     """The predicates `Analysis` computes, one case each.
@@ -673,7 +701,7 @@ class TheDriver(unittest.TestCase):
                 "verbatim": None, "driver_args": "", "test_input": None,
                 "notes": (), "reason": None}
         with mock.patch.object(F, "cpython_answer",
-                               return_value=((0, ""), "")), \
+                               return_value=(F.OracleAnswer(0, ""), "")), \
              mock.patch.object(M.F, "run_on",
                                lambda b, t, d, n, test_input=None:
                                base_by_backend[b]):
@@ -1181,21 +1209,42 @@ class Normalising(unittest.TestCase):
 
         41 of 52 was the state this normaliser was written for, and the 11 that
         were not measured were all refused for a spelling rather than for a
-        semantics.  Asserting a floor rather than 52 keeps the assertion honest
-        when a future example adds a construct — the point is that the tool
-        measures the corpus, not that it measures every file in it.
+        semantics.  The point is that the tool measures the corpus, not that it
+        measures every file in it.
+
+        **The one construct it does NOT rewrite is a `struct`, and that exclusion
+        is checked rather than counted.**  A numeric floor ("all but one") is
+        both weaker and more brittle than the question that matters: is every
+        UNMEASURED file unmeasured for the documented reason, or did a rule stop
+        working?  `wide_recv` was the only `struct` file when the rule was
+        written; `struct_point` and `struct_method` have joined it since, and a
+        floor would have had to be loosened for them — which is how a real
+        regression gets absorbed.  The reason check cannot absorb one: any other
+        reason is a failure.  The 90 % floor above it catches a broad break
+        (every example losing its driver at once) that the reason check would
+        happily explain away as `struct`.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
         stems = [f for f in os.listdir(EXAMPLES) if f.endswith(".mojo")]
-        driven = 0
+        driven, unexplained = 0, []
         for stem in stems:
             with open(os.path.join(EXAMPLES, stem)) as f:
-                if M.example_program(f.read())["text"] is not None:
-                    driven += 1
-        self.assertGreaterEqual(driven, len(stems) - 1,
-                                f"{len(stems) - driven} of {len(stems)} examples "
-                                f"are not measured")
+                prog = M.example_program(f.read())
+            if prog["text"] is not None:
+                driven += 1
+            elif prog["reason"] and "'struct'" in prog["reason"]:
+                continue
+            else:
+                unexplained.append(f"{stem}: {prog['reason']}")
+        self.assertEqual(unexplained, [],
+                         "an example is unmeasured and not for the documented "
+                         "`struct` exclusion — a normalising rule that stopped "
+                         "working, or a new construct nobody taught it:\n  "
+                         + "\n  ".join(unexplained[:8]))
+        self.assertGreaterEqual(driven, len(stems) * 9 // 10,
+                                f"only {driven} of {len(stems)} examples are "
+                                f"measured; the corpus is mostly unmeasurable")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(
