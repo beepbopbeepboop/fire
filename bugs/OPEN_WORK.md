@@ -48,7 +48,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | `formal160-docs` | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal165-docs` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 13 documents, 9 claimed
+### `formal/arm64_codegen` — 14 documents, 10 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -58,6 +58,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | `formal163-docs` | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal178-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | `formal164-docs` | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
+| `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | `formal164-docs` | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal176-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | `formal160-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | `formal163-docs` | every arm64 program that calls a C function now refuses the universal theorem |
@@ -133,7 +134,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | `formal180-docs` | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | `formal180-docs` | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 15 documents, 12 claimed
+### `formal/lean` — 14 documents, 11 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -142,7 +143,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md` | `formal171-docs` | A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone |
 | `FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_contract.md` | `formal173-docs` | 8 of the 44 examples added to `formal/examples` on 2026-10-05, and the model it used to emit for them was a diverging `partial def` |
 | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` | `formal164-docs` | 20 of 78 functions, the largest cause in the proof-breadth census |
-| `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | `formal164-docs` | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_contract_ladder_reach.md` | `formal176-docs` | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | `formal176-docs` | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
 | `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `formal179-docs` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
