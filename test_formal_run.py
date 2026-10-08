@@ -23274,6 +23274,17 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # Two-character prefixes: the reader used to take `spelled[1]` for the
+        # quote, so every `rf`/`fr`/`Rf` spelling was refused with a sentence
+        # that was false about the source ("the character after the prefix is
+        # not a quote"). The prefix is a set of flags, not one character.
+        'rf"a={n}b"',
+        'fr"a={n}b"',
+        'Rf"a={n}b"',
+        'rF"pre{x}"',
+        'rf"""a{n}b"""',        # a raw f-string that is also triple-quoted
+        'rf"a\\n{n}"',          # rawness changes `\\n`'s MEANING, not the split
+        "rf\"{d['k']}\"",
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23337,13 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # …and that widening the prefix reader did not turn
+                          # "no quote at all" into a body: a token with no quote
+                          # is refused, and so is one whose pre-quote characters
+                          # are not string flags at all.
+                          ('frabc', "no quote in it"),
+                          ('fx"a{n}"', "not a string prefix flag")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:

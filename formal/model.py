@@ -11232,6 +11232,76 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+def interpolated_literal_delimiters(spelled: str) -> tuple:
+    """`(quote, term, body_start, raw)` — an interpolated literal's delimiters.
+
+    **THE prefix is a SET OF SPELLING FLAGS, not one character.** `f`, `t`,
+    `r`, `b` and `u` may appear in any order and any combination CPython
+    accepts, so `rf"…"`, `fr"…"` and `Rb"…"` all put the quote at an index the
+    caller cannot guess from the token's length — which is exactly the guess
+    (`spelled[1]`) that made this reader refuse every two-character prefix. The
+    boundary is the LEXER's — `fire_compiler._string_prefix_start`, the reader
+    `replace_multiline_strings` and `_process_nested_tstrings` already share —
+    so this reader and the tokenizer cannot disagree about what a prefix is.
+    A reader that took its own guess is the shape `string_operand_is_string`'s
+    docstring calls "two answers that can drift".
+
+    `term` is the opening delimiter as a string (one `"`/`'`, or a triple of
+    either) and `body_start` is the index just past it, so the body is
+    `spelled[body_start:-len(term)]` once the token is known to end with
+    `term`.
+
+    `raw` records whether an `r`/`R` flag is present. **Raw-ness does not
+    change the SEGMENTATION** — a raw string changes what `\\s` MEANS, not
+    where the literal's chunks and `{…}` fields are, and the brace rules are
+    prefix-independent in both spellings — so the segment reader ignores it.
+    It is returned because a caller that later wants a chunk's VALUE rather
+    than its spelling has to know whether it is looking at `\\s` or at `s`.
+    """
+    if not isinstance(spelled, str):
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: it is not "
+            f"a string token at all")
+    n = len(spelled)
+    qpos = 0
+    while qpos < n:
+        c = spelled[qpos]
+        if c == '"' or c == "'":
+            break
+        qpos += 1
+    if qpos >= n:
+        raise CodegenError(
+            f"cannot read an interpolated literal from {spelled!r}: there is "
+            f"no quote in it, so its body has nowhere to begin")
+    # Explicit `==` comparisons rather than `c in 'fFrRbBuUtT'`: this module is
+    # compiled by the self-hosted backend, whose `in`-for-char* path is a
+    # documented stub that always returns False (`_string_prefix_start` gives
+    # the same reason for the same reason).
+    for c in spelled[:qpos]:
+        is_flag = (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+                   or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+                   or c == 't' or c == 'T')
+        if not is_flag:
+            raise CodegenError(
+                f"cannot read an interpolated literal from {spelled!r}: {c!r} "
+                f"before the quote is not a string prefix flag")
+    quote = spelled[qpos]
+    # The prefix boundary is the lexer's, not this function's (see the
+    # docstring). `_string_prefix_start` returns `qpos` itself when there is no
+    # prefix — e.g. for the empty prefix of a token that was flagged
+    # interpolated by some other route.
+    pstart = F._string_prefix_start(spelled, qpos)
+    raw = False
+    for c in spelled[pstart:qpos]:
+        if c == 'r' or c == 'R':
+            raw = True
+    if spelled[qpos:qpos + 3] == quote * 3:
+        term = quote * 3
+    else:
+        term = quote
+    return quote, term, qpos + len(term), raw
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11336,13 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: the "
-            f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
-        term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
-    else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
+    quote, term, body_start, _raw = interpolated_literal_delimiters(spelled)
     if not spelled.endswith(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[body_start:-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)

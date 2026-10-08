@@ -963,10 +963,15 @@ measured it three rounds ago. The exceptions are named:
 * `FORMAL_known_limits.md` — the audit of which refusals in the residue are
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
-* `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
-  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
-  own document for the reason above: the measurement is here (§1.11) and the fix
-  has a question to answer first that belongs with the fix.
+* The interpolated-literal reader's one-character-prefix assumption — `b14`
+  §1.11's `rf"…"` row, filed by that round and **now FIXED**. The reader takes
+  its prefix boundary from the lexer's `_string_prefix_start` instead of
+  `spelled[1]`, so `rf`/`fr`/`Rf` spellings are segmented rather than refused
+  with a sentence that was false about the source ("the character after the
+  prefix is not a quote"), and the document is deleted with the fix. Kept as a
+  bullet for the reason above: the measurement is here (§1.11), and the fix's
+  one open question — whether rawness changes the SEGMENTATION, and it does
+  not — is answered in `interpolated_literal_delimiters`.
 
 **The per-slice rounds also fixed things and recorded the pins**, and so did
 `b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the
