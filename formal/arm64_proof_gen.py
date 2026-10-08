@@ -9916,10 +9916,32 @@ def _program_extern_calls(info: dict) -> list:
     An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
     predates the key — is read as having none, which is the conservative
     direction: nothing is subtracted and the refusal stands.
+
+    **And a call BELOW the entry function is not the program's either.** The
+    startup stub runs before the entry function is called and reads
+    `RLIMIT_STACK` once (`formal/arm64_codegen.py::_emit_stack_floor_init`), so
+    its `bl getrlimit` is in the image, in `extern_calls`, and on NO path the
+    run tests walk: they start at `info["func_offset"]`, by which time the stub
+    has finished. Counting it as a program call suppresses every run test on
+    this backend for every program, and `getrlimit` is not a trap at all (it
+    returns, and the budget the guard derives is whatever it left in `__DATA`).
+    The subtraction is by ADDRESS against `func_offset` rather than by symbol,
+    for the same reason as above: a program can call `getrlimit` itself, and
+    dropping the symbol would drop that call too. This is the arm64 twin of
+    `formal/x86_64_proof_gen.py::_program_externs`, which has subtracted the
+    stub's call since the limit read moved there.
     """
     traps = set(info.get("compiler_traps") or ())
-    return [c for c in (info.get("extern_calls") or ())
-            if c.get("addr") not in traps]
+    entry = info.get("func_offset")
+    out = []
+    for c in (info.get("extern_calls") or ()):
+        addr = c.get("addr")
+        if addr in traps:
+            continue
+        if entry is not None and addr is not None and addr < entry:
+            continue
+        out.append(c)
+    return out
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,

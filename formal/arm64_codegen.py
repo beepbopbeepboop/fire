@@ -58,15 +58,12 @@ _SCRATCH_CHUNK = 4080
 DARWIN_SYS_WRITE = 4
 DARWIN_SYS_EXIT = 1
 
-# `RLIMIT_STACK`, the resource whose soft limit is how much stack the process
-# may use. It is a `getrlimit(2)` SELECTOR rather than a constant this backend
-# subtracts anything from, so it is one number with two consumers — the
-# selector in the guard, and `model.STACK_FLOOR_MARGIN_BYTES`'s docstring, which
-# quotes the measurement it comes from. It is 3 on Darwin (`sys/resource.h`) and
-# on Linux (`RLIMIT_STACK` in `bits/resource.h`), and those are the two targets
-# this path emits for; a third would need its own value here rather than a
-# silent reuse of this one.
-_RLIMIT_STACK = 3
+# `RLIMIT_STACK` — the `getrlimit(2)` SELECTOR whose soft limit is how much
+# stack the process may use — lives in `model.RLIMIT_STACK` rather than here:
+# both backends' startup stubs read it, and a copy in each module is how they
+# came to disagree about the arm64 threshold once already. See
+# `_emit_stack_floor_init` for the read and `model.STACK_FLOOR_MARGIN_BYTES` for
+# the measurement behind the budget.
 
 
 # ── IEEE-754 binary64 ─────────────────────────────────────────────────────
@@ -1032,7 +1029,24 @@ dylib_exports: list = None, globals_base: int = None,
         first_func_name = functions[0].name
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
+            # **The stack floor is read ONCE, here in the startup stub — and
+            # AFTER the `stp` that saves X29/X30.** The read is a `getrlimit`
+            # CALL, and a `bl` clobbers X30 (the link register); emitting it
+            # before the save makes the stub's own `ret` jump back to just after
+            # the call and run the body forever (measured: `printf("hi")` in a
+            # non-terminating loop). After the `stp` the real link register is on
+            # the stack and the final `ldp` restores it, exactly as it already
+            # protects the `bl` to the entry function below.
+            #
+            # It has to be here rather than in a guarded prologue because this is
+            # the only place a `call` can live that no path tree walks: a
+            # `getrlimit` inside a prologue is a call on a path a conditional
+            # selects, and `formal/arm64_proof_gen.py`'s universal theorem refuses
+            # that. It runs before the entry arguments are materialised because it
+            # needs X0/X1 and clobbers the caller-saved set. See
+            # `_emit_stack_floor_init`.
             self.asm.emit(encode_stp_sp_pre(29, 30))
+            self._emit_stack_floor_init()
             test_val = self.test_input
             # `_emit_mov_imm`, not a hand-rolled movz+movk pair: it is the one
             # materializer on this backend, it covers the whole 64-bit word
@@ -1809,6 +1823,68 @@ dylib_exports: list = None, globals_base: int = None,
             return
         raise CodegenError(self._no_home(name))
 
+    def _emit_stack_floor_init(self) -> None:
+        """Read `RLIMIT_STACK` once and park it in `__DATA`.
+
+        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
+        before the entry function is called and outside every function body —
+        and that placement is the whole reason this is its own method. See the
+        note at the call site and `_emit_stack_floor_guard`'s: a `getrlimit`
+        inside a guarded prologue is a call on a path a conditional selects, and
+        `formal/arm64_proof_gen.py`'s universal theorem refuses that, so every
+        program in the corpus was refused rather than proved. The startup stub
+        is emitted before every function body and no path tree walks it, which
+        is the same place x86-64 reads its limit
+        (`x86_64_codegen.py::_emit_stack_floor_init`).
+
+        What it stores is the raw LIMIT, not the floor: the floor is
+        `SP - budget` and the guard is the one that knows the `SP` (one frame
+        below the entry the budget is defined against), so the guard still does
+        the clamp and the subtraction — without a call. `rlim_cur` is the FIRST
+        word of the `struct rlimit` on both targets this path emits for
+        (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both `unsigned long`), and
+        `rlim_max` is not read. The 16-byte struct goes in `__DATA` and not in a
+        stack slot: `model.GlobalDataImage.stack_scratch_offset` has the
+        measurements for why every stack answer corrupts the program.
+
+        **The previous version of this read was wrong and is why it moved**: it
+        stored `getrlimit`'s RETURN CODE (always 0) instead of `rlim_cur`, so
+        the cached word stayed zero, every guarded prologue re-called, and the
+        budget clamped to the compile-time constant — a guard that never fires
+        under a reduced `ulimit -s`, which is the SIGSEGV this whole mechanism
+        exists to replace. The `LDR` after the call is the load that was
+        missing.
+        """
+        if self._globals_base is None:
+            return
+        scratch = M.stack_scratch_address(self._globals_base)
+        limit_word = M.stack_limit_address(self._globals_base)
+        done_label = "sfinit_done"
+        # Already read on a previous entry? The word is zero-initialised and
+        # written exactly once, so a non-zero value means an earlier caller did
+        # it. (A library image has no startup stub and never runs this; its
+        # guarded prologues read the zero word and fall back to the compile-time
+        # budget, which is what they did before this method existed.)
+        self._adrp_add_abs(16, limit_word)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self.asm.emit(encode_cbnz_xn(0, 16))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        # `getrlimit(RLIMIT_STACK, &rlim)`: X0 = the resource, X1 = the address
+        # of the struct. `_emit_extern_call`, not `_emit_call`: the argument in
+        # X1 is an ADDRESS this method computed, and `_emit_call` would EVALUATE
+        # its args into X0.. and overwrite it.
+        self.asm.emit(encode_movz_xd_imm(0, M.RLIMIT_STACK))
+        self._adrp_add_abs(1, scratch)
+        self._emit_extern_call("getrlimit")
+        # X0 is the return CODE, and `rlim_cur` is the first word of the struct
+        # at `scratch`. Reading X0 here is the bug the docstring records; the
+        # scratch address is reloaded because the call may have clobbered X1.
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self._adrp_add_abs(17, limit_word)
+        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        self.asm.label(done_label)
+
     def _emit_stack_floor_guard(self) -> None:
         """Refuse instead of dying when the frame just taken crosses the floor.
 
@@ -1825,13 +1901,19 @@ dylib_exports: list = None, globals_base: int = None,
 
             ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
             CBNZ X16, done                             already stored
-            ADD X16, SP, #0 ; SUB X16, X16, #BUDGET    the first caller sets it
-            STR X16, [X17]
+            ADRP+ADD X16, &limit ; LDR X16, [X16]      the limit the stub read
+            SUB X15, X16, #(MARGIN + FRAME) ; clamp    the budget
+            ADD X16, SP, #0 ; SUB X16, X16, X15        floor = SP - budget
+            ADRP+ADD X17, &floor ; STR X16, [X17]
         done:
             ADD X17, SP, #0 ; CMP X17, X16
             B.HS ok                                    SP >= floor: carry set
             movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
         ok:
+
+        There is **no call in this sequence**, and that is deliberate as well as
+        necessary: the `getrlimit` that fills `&limit` lives in the startup stub
+        (`_emit_stack_floor_init`), where no path tree walks it.
 
 **Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way
@@ -1862,15 +1944,11 @@ dylib_exports: list = None, globals_base: int = None,
         sid = self._if_counter
         fn = self.func_name
         done_label = f"{fn}_sf{sid}_done"
-        set_label = f"{fn}_sf{sid}_set"
-        ret_label = f"{fn}_sf{sid}_ret"
-        trap_label = f"{fn}_sf{sid}_trap"
         ok_label = f"{fn}_sf{sid}_ok"
         clamp_lo_label = f"{fn}_sf{sid}_cl"
         clamp_hi_label = f"{fn}_sf{sid}_ch"
         floor = M.stack_floor_address(self._globals_base)
         limit_word = M.stack_limit_address(self._globals_base)
-        scratch = M.stack_scratch_address(self._globals_base)
         # X17 = the address of the floor word, X16 = the floor itself. The
         # same ADRP/ADD pair and the same LDR the lazy global initializer uses,
         # for the same reason: it is the addressing this backend already proves
@@ -1879,118 +1957,30 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
         self.asm.emit(encode_cbnz_xn(0, 16))
         self.asm.emit_label_rel(done_label, here_offset=-4)
-        # ── FIRST CALLER: read the process's REAL stack limit ────────────
+        # ── FIRST CALLER: derive the floor from the process's REAL stack limit.
         #
-        # This whole block runs ONCE per process — the `CBNZ` above skips it on
-        # every other call — so the `getrlimit` in it costs one call per process
-        # rather than one per call, and the answer is CACHED in a `__DATA` word
-        # so a second guarded prologue does not repeat it.
+        # The limit was read ONCE by the startup stub
+        # (`_emit_stack_floor_init`) and parked in `limit_word`; this block only
+        # LOADS it. **The `getrlimit` call used to be here**, inside the first
+        # guarded prologue, and moving it to the startup stub is what makes the
+        # prologue walkable: `formal/arm64_proof_gen.py`'s universal theorem
+        # refuses a call on a path a conditional selects, and the `CBNZ` cache
+        # test above is exactly such a path — so every program in the corpus was
+        # refused rather than proved (measured: `test_formal_call_proof_gen.py`
+        # reports 37 refusals naming "the halt address, and it is behind a
+        # CONDITIONAL", all of them this call). The startup stub is emitted
+        # before every function body and no path tree walks it, which is the
+        # same reason x86-64 reads the limit there
+        # (`x86_64_codegen.py::_emit_stack_floor_init`).
         #
-        # Why the limit has to be read at all, measured: with the budget as the
-        # compile-time constant it was, the same binary at the same depth gives
+        # Why the limit has to be read at all, measured: with the budget as a
+        # compile-time constant, the same binary at the same depth gives
         # `exit 2` under the default `ulimit -s 8176` and `exit 139` — a SIGSEGV
         # with no output — under `ulimit -s 2048`. A budget larger than the real
         # stack is a guard that never fires, and what it leaves behind is the
         # silent crash the guard exists to replace.
-        self.asm.label(set_label)
-        # The cached word, or straight to `getrlimit` when it is still zero.
         self._adrp_add_abs(16, limit_word)
         self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
-        self.asm.emit(encode_cbnz_xn(0, 16))
-        self.asm.emit_label_rel(ret_label, here_offset=-4)
-        # `getrlimit(RLIMIT_STACK, &rlim)`: X0 = the resource, X1 = the address
-        # of a `struct rlimit`.
-        #
-        # **X1 is a `__DATA` word, and every stack answer was measured to
-        # corrupt the program.** `model.GlobalDataImage.stack_scratch_offset` has
-        # the full account; the short version, because it is the reason this line
-        # is an ADRP/ADD rather than the `ADD X1, SP, #0` it looks like it should
-        # be:
-        #
-        #   * `sub sp, #16` around the call, with a matching `add` after it: SP is
-        #     16 bytes lower across an extern call, and the C library reads
-        #     SP-relative state across that boundary. Measured as a hang or a
-        #     SIGSEGV on EVERY program — `def helper(x): return x + 1` with a
-        #     `main` that calls it, no recursion, no output, correct emitted text
-        #     instruction by instruction. Leaving the 16 claimed instead of
-        #     restoring it did not help either, because the offset the rest of the
-        #     prologue computes from SP is then wrong by 16 in a different place.
-        #   * the caller's red zone at `[sp, #16)`: that is the caller's own
-        #     frame, and a 16-byte store over it hangs immediately.
-        #   * `[sp, #0..#16)` after `sub sp, #_SCRATCH`, the guard's ORIGINAL
-        #     placement: inside the reserved BLOB region, which is where a
-        #     RECEIVER FRAME lives (`struct_constructor_sites`), so a store there
-        #     corrupts the struct the call was handed.
-        #
-        # `__DATA` is writable, already addressed by the ADRP/ADD pair two
-        # instructions above, outlives every frame, and has exactly one writer —
-        # this, on a path the `CBNZ` runs once per process.
-        #
-        # `_emit_extern_call`, NOT `_emit_call`: the argument here is an ADDRESS
-        # this method has just computed into X1, and `_emit_call` EVALUATES its
-        # `args` into X0.. — which would overwrite both registers with whatever a
-        # `CallExpr` spelling had to carry, and the call would then ask for the
-        # wrong resource and write into the wrong address. It built, ran, and
-        # segfaulted at every depth under a reduced `ulimit -s`, which is the
-        # failure this comment is the record of. The same reason
-        # `_emit_global_init` sets its own registers rather than spelling a call.
-        #
-        # (X0 is a plain `movz` and X1 is this ADRP/ADD — neither reads SP, so
-        # the `Rn`-of-31 trap `_emit_stack_floor_guard`'s docstring names, where
-        # `encode_mov_zr_xn(1, 31)` reads XZR instead of SP and sends
-        # `getrlimit` to address 0, cannot arise on this call.)
-        # X0 and X1, NOT the argument registers: the guard is emitted before the
-        # prologue's `MOV X19, X0` and the `add x19, x0, #0` that saves argument 0
-        # into its callee-saved home, so X0 still holds the CALLER's argument at
-        # this point. Writing the resource number into it made `main(k)` read a
-        # `deep(k)` whose `k` was 3 — `printf("d=%d", deep(7))` printed `d=0` on
-        # every depth and the guard never fired, because the program under test
-        # was not the one being run. X15/X16/X17 are the guard's own scratch (the
-        # budget is built in X15 and the floor in X16) and neither is an argument
-        # register, so the pair below is free.
-        self.asm.emit(encode_movz_xd_imm(15, _RLIMIT_STACK))
-        self._adrp_add_abs(16, scratch)
-        # Argument 0 is parked in X14 BEFORE X0 is used for the call, because
-        # `getrlimit` CLOBBERS X0 with its own return value and this code runs
-        # before the prologue's `add x19, x0, #0` has saved it. Measured as
-        # `printf("d=%d", deep(7))` printing `d=0` at every depth — the program
-        # under test was not the one being run, because `deep` was called with
-        # `getrlimit`'s return value instead of 7.
-        self.asm.emit(encode_mov_zr_xn(14, 0))
-        self.asm.emit(encode_mov_zr_xn(0, 15))
-        self.asm.emit(encode_mov_zr_xn(1, 16))
-        self._emit_extern_call("getrlimit")
-        # `rlim_cur` is the FIRST word of the struct on both targets this path
-        # emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
-        # `unsigned long`), and `rlim_max` — which the kernel will not let an
-        # unprivileged process raise, and which says nothing about what it
-        # enforces — is not read.
-        #
-        # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
-        # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
-        # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
-        # …and argument 0 goes back, from X14.
-        self.asm.emit(encode_mov_zr_xn(0, 14))
-        # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value
-        # has to be moved into it before the cache store. Storing X16 directly
-        # wrote the scratch's own address into the limit word, and the next
-        # guarded prologue then read an address in `__DATA` as a byte count —
-        # `address - 262144` is still enormous, so neither clamp caught it.
-        self.asm.emit(encode_mov_zr_xn(16, 13))
-        self._adrp_add_abs(17, limit_word)
-        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
-        if False:
-            # exit((limit >> 20) & 0x7f): distinct for 8176/4096/2048/1024
-            self.asm.emit(encode_movz_xd_imm(17, 20))
-            self.asm.emit(encode_lslv_xd_xn_xm(0, 16, 17))
-            self.asm.emit(encode_movz_xd_imm(17, 0x7f))
-            self.asm.emit(encode_and_xd_xn_xm(0, 0, 17))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
-        self.asm.label(ret_label)
         # budget = min(STACK_FLOOR_BUDGET_BYTES, max(limit - MARGIN, MIN)).
         # X16 = the limit in, X15 = the budget out.
         _emit_sub_imm(self.asm, 15, 16, M.STACK_FLOOR_MARGIN_BYTES + _SCRATCH)
@@ -2030,24 +2020,15 @@ dylib_exports: list = None, globals_base: int = None,
         # and the placement bug it fixes.
         #
         # **X17 is reloaded with the FLOOR's address here, and that reload is
-        # load-bearing rather than redundant.** The `getrlimit` half above uses
-        # X17 to address the CACHED LIMIT word (`&limit`), and it is still live
-        # on the path that skipped the call (`cbnz` at the cached-word test jumps
-        # straight to `ret_label`), so on the first-caller path X17 arrives here
-        # holding `&limit` and on every later one it holds `&limit` too. Storing
-        # the floor through it wrote the floor INTO THE LIMIT WORD. Measured, and
-        # the symptom was not a wrong answer but a hang or a crash in whatever
-        # ran next: the second guarded function read the floor as though it were
-        # the limit, treated a stack ADDRESS as a byte count, computed a budget
-        # of roughly 2^64, and recursed until the kernel killed it — SIGKILL at
-        # every depth including a two-function program with no recursion and no
-        # output. An address in `__DATA` is around 0x100400000, so
-        # `address - MARGIN` is still enormous and no clamp catches it.
-        #
-        # So every store states the word it addresses. The alternative — keeping
-        # the floor's address in a register the limit half does not touch — needs
-        # a fourth scratch register in a prologue that has none to spare, and
-        # would leave the same trap for the next instruction that clobbers one.
+        # load-bearing rather than redundant.** The stored floor must never be
+        # written through an address that names the LIMIT word: the second
+        # guarded function then reads the floor as though it were the limit,
+        # treats a stack ADDRESS as a byte count, computes a budget of roughly
+        # 2^64, and recurses until the kernel kills it — SIGKILL at every depth
+        # including a two-function program with no recursion and no output. An
+        # address in `__DATA` is around 0x100400000, so `address - MARGIN` is
+        # still enormous and no clamp catches it. So every store states the word
+        # it addresses rather than reusing the register the last load left.
         #
         # A REGISTER subtraction, not the immediate form the frame subtraction
         # uses, because the charge is a computed value (the budget came from

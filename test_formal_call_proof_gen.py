@@ -4396,20 +4396,40 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         """The other backend, and the reason the asymmetry was the bug.
 
         arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
-        decodes, so a program that emits no bounded stop has an empty
-        `extern_calls` and needs nothing subtracted. Nothing here may change
-        that, and the assertion that it has not is what makes the x86-64 fix a
-        fix rather than a lowering of the bar on both sides.
+        decodes, so a program that emits no bounded stop publishes no
+        `compiler_traps` and needs nothing subtracted for one. Nothing here may
+        change that, and the assertion that it has not is what makes the x86-64
+        fix a fix rather than a lowering of the bar on both sides.
+
+        **The one unbound call a plain arm64 image DOES carry is the startup
+        stub's `getrlimit`**, which `_emit_stack_floor_init` emits before the
+        entry function and which no run test walks. It is therefore subtracted
+        by ADDRESS against `func_offset` — the same rule x86-64 uses — and this
+        row asserts both halves: the call is present in `extern_calls`, below the
+        entry, and `_program_extern_calls` reports an empty program-call list.
+        Asserting `extern_calls` itself is empty was the pre-fix shape, when the
+        limit read was a compile-time constant and there was no stub call; the
+        name still holds because no `compiler_traps` list is needed for the svc.
 
         The name says "no trap list" and the assertion is `assertFalse`, so it
         is worth being exact about what it does and does not claim: it claims
-        THIS program's list is empty, and arm64 DOES publish one for a program
-        with a bounded stop — see the two rows below, which are the other half
-        and which this row used to contradict.
+        THIS program publishes no trap list, and arm64 DOES publish one for a
+        program with a bounded stop — see the two rows below, which are the other
+        half and which this row used to contradict.
         """
+        from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
-        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
-                         [], "arm64's guard trap is an `svc`, not a call")
+        entry = info.get("func_offset")
+        calls = info.get("extern_calls") or []
+        self.assertEqual([e["sym"] for e in calls], ["getrlimit"],
+                         "a plain arm64 image carries exactly the startup "
+                         "stub's `getrlimit`, and nothing else")
+        self.assertLess(calls[0]["addr"], entry,
+                        "the stub's `getrlimit` must be BELOW the entry, or no "
+                        "run test can subtract it by address")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the stub's `getrlimit` is not being subtracted, so "
+                         "every run test on this backend is suppressed")
         self.assertFalse(info.get("compiler_traps"),
                          "a program with no bounded trap published one, so "
                          "something other than a stop is being recorded")

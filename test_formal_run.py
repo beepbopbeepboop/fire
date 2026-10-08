@@ -15431,7 +15431,13 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
 #: whose budget exceeds the process's real stack never fires, and the process
 #: runs off the end of it.
 _REDUCED_STACK_SOURCES = (
-    # name, program, the depth that must still ANSWER, the depth that must refuse
+    # name, program (with `@DEPTH@` where the recursion depth goes), and the
+    # depth per architecture. The depths are PER ARCH because a call frame is:
+    # 16 KiB on x86-64 and 128 KiB on arm64, so under the one `ulimit -s 2048`
+    # these rows all run at, a depth that still ANSWERS on one backend is past
+    # the other's whole budget. 100 frames fit x86-64's ~1.8 MiB budget and are
+    # 12.5 MiB on arm64, where the budget is ~1.6 MiB and only ~11 frames fit;
+    # 8 is safely inside it. The deep case is past both, so it refuses on both.
     ("reduced_stack_a_shallow_recursion_still_answers",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15439,8 +15445,9 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\\n\", deep(100))\n"
-     "    return 0\n", 100),
+     "    printf(\"%d\\n\", deep(@DEPTH@))\n"
+     "    return 0\n",
+     {"x86_64": 100, "arm64": 8}),
     ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15448,30 +15455,21 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    return deep(5000)\n", 5000),
+     "    return deep(@DEPTH@)\n",
+     {"x86_64": 5000, "arm64": 5000}),
 )
 
 
-#: Architectures this group does NOT yet cover, and why — a DECLARED per-arch
-#: gap, not a skip, and per architecture rather than per row because the whole
-#: group is one defect.
-#:
-#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
-#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
-#: `call getrlimit` there is exactly what
-#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
-#: moved without first fixing the extern-stub layout: an extern call emitted
-#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
-#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
-#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
-#:
-#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
-#: than the process's real stack never fires — so under a reduced `ulimit -s` it
-#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
-#: next step.
-_REDUCED_STACK_DEFERRED = {
-    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
-}
+#: Architectures this group does NOT cover, and why — a DECLARED per-arch gap,
+#: not a skip. **Empty since 2026-10-07**: arm64 used to be here because it read
+#: `RLIMIT_STACK` in the guard's own prologue, where the `call getrlimit` was
+#: refused by `formal/arm64_proof_gen.py` (a call on a path a conditional
+#: selects), and moving it to the startup stub was blocked by the extern-stub
+#: layout. Both are fixed — `arm64_codegen.py::_emit_stack_floor_init` now reads
+#: the limit once in the startup stub, whose `getrlimit` is subtracted by address
+#: below the entry — so the rows run on both backends. A future gap goes back
+#: here with its doc, rather than as a silent skip.
+_REDUCED_STACK_DEFERRED: dict = {}
 
 
 def reduced_stack_cases(tmpdir, verbose=False):
@@ -15483,10 +15481,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
     written that way.
     """
     out_rows = []
-    for name, src, depth in _REDUCED_STACK_SOURCES:
-        path = os.path.join(tmpdir, name + ".mojo")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(src + "\n")
+    for name, src_tmpl, depths in _REDUCED_STACK_SOURCES:
         for arch in ("x86_64", "arm64"):
             if arch in _REDUCED_STACK_DEFERRED:
                 out_rows.append((
@@ -15494,6 +15489,10 @@ def reduced_stack_cases(tmpdir, verbose=False):
                     "DEFERRED on %s — see %s"
                     % (arch, _REDUCED_STACK_DEFERRED[arch])))
                 continue
+            depth = depths[arch]
+            path = os.path.join(tmpdir, "%s_%s.mojo" % (name, arch))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src_tmpl.replace("@DEPTH@", str(depth)) + "\n")
             out = os.path.join(tmpdir, "%s_%s" % (name, arch))
             rc, text = build_formal(path, out, backend=arch)
             if rc != 0 or not os.path.isfile(out):
@@ -15528,9 +15527,10 @@ def reduced_stack_cases(tmpdir, verbose=False):
                 else:
                     out_rows.append((name, arch, True, ""))
             else:
-                if "100" not in run.stdout:
+                if str(depth) not in run.stdout:
                     out_rows.append((name, arch, False,
-                                     "stdout %r does not answer" % run.stdout[:80]))
+                                     "stdout %r does not answer %d"
+                                     % (run.stdout[:80], depth)))
                 else:
                     out_rows.append((name, arch, True, ""))
     return out_rows
