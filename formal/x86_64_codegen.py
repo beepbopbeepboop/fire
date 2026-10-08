@@ -10565,6 +10565,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `is_extern_call`, so `external_call["printf", Int32](fmt, n)` is asked
         # the same question.
         self._refuse_unusable_printf_format(name, e)
+        # …and the same call's VARARGS, each of which the format's conversions
+        # turn into TEXT.  A return-less call here is the same value this path
+        # cannot carry that `_print_call` refuses for `print`, at the other
+        # spelling of "render this word" — see
+        # `model.returnless_printf_argument_refusal` for why it is one reader and
+        # not a second copy of `_print_call`'s loop.
+        reason = M.returnless_printf_argument_refusal(
+            name, list(e.args or []), self._vkinds.no_value_callee_of)
+        if reason is not None:
+            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —
