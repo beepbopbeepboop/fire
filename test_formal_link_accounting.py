@@ -1356,6 +1356,62 @@ def test_hostmod_cross_references():
           'behind it', '; '.join(dangling[:8]))
 
 
+def test_raise_flushes_stdout():
+    """A program that printed and then took an error exit keeps its stdout.
+
+    The arm64 `raise` used to leave the process through the raw `SYS_exit`
+    trap, which does not touch stdio, so stdout — block-buffered whenever it is
+    not a terminal, which is every case a harness creates — was discarded and
+    the image printed NOTHING while x86-64 printed everything. `_emit_exit`
+    now flushes through the same `fflush(NULL)` the `flush=True` path already
+    emits, before the trap, and every error stop shares it. This is the
+    gate-resident pin the fix's own write-up asked for: the parity file that
+    already carries the shape (`test_formal_x86_64_parity.py`'s
+    `FAILING_CASES`) is in no bucket.
+
+    Both halves are asserted: the `raise` path (the defect) and the `return`
+    control (the path that always flushed, so a rule that only moved the flush
+    around would still pass the first and fail the second). One source, both
+    backends, so a re-divergence is a diff rather than a discovery.
+    """
+    import shutil
+    import subprocess
+    d = tempfile.mkdtemp(prefix='raiseflush_')
+    try:
+        src = os.path.join(d, 'r.mojo')
+        with open(src, 'w') as f:
+            f.write('def main() -> Int:\n'
+                    '    printf("before@@")\n'
+                    '    raise 7\n')
+        ctl = os.path.join(d, 'c.mojo')
+        with open(ctl, 'w') as f:
+            f.write('def main() -> Int:\n'
+                    '    printf("before@@")\n'
+                    '    return 1\n')
+        for backend in ('arm64', 'x86_64'):
+            for name, program in (('raise', src), ('return', ctl)):
+                out = os.path.join(d, f'{name}.{backend}')
+                r = subprocess.run(
+                    [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
+                     '--formal', '--no-prove', f'--backend={backend}',
+                     '-o', out, program],
+                    capture_output=True, text=True, timeout=600, cwd=REPO)
+                check(r.returncode == 0,
+                      f'{name} builds on {backend}', (r.stdout + r.stderr)[-300:])
+                if r.returncode != 0:
+                    continue
+                run = subprocess.run([out], capture_output=True, text=True,
+                                     timeout=60)
+                check(run.stdout == 'before@@',
+                      f'a `{name}` on {backend} keeps the bytes it printed '
+                      f'(got {run.stdout!r})', run.stdout)
+                check(run.returncode == 1,
+                      f'a `{name}` on {backend} still exits 1',
+                      str(run.returncode))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     test_relative_imports()
     test_host_tiers()
@@ -1365,6 +1421,7 @@ def main():
     test_sorry_note()
     test_hostmods_are_invisible_to_every_other_resolver()
     test_hostmod_cross_references()
+    test_raise_flushes_stdout()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")
