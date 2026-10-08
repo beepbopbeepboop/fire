@@ -1,35 +1,36 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
 **Status: PARTIALLY FIXED 2026-10-08 — item 3 (the set algebra) is LANDED ON
-ARM64; the other three lowerings and the x86-64 half of item 3 are still open.**
-`formal/arm64_codegen.py::_emit_set_algebra` now lowers `&`, `-` and `^` between
-two sets as the per-element membership scan item 3 prescribed, and the five rows
-in `test_formal_container_methods.py`'s `set` group (`s_intersection`,
+BOTH BACKENDS; items 1, 2 and 4 are still open.**
+`formal/arm64_codegen.py::_emit_set_algebra` / `_emit_set_filter` and the
+x86-64 twin of the same two methods now lower `&`, `-` and `^` between two sets
+as the per-element membership scan item 3 prescribed, and the five rows in
+`test_formal_container_methods.py`'s `set` group (`s_intersection`,
 `s_difference`, `s_symdiff`, `s_sub`, `s_andassign`, plus the operator-matrix
 rows `o_and`/`o_xor`) moved from `probe=None` to answer probes measured against
-CPython on arm64.  **x86-64 has no set emitter at all, so it still refuses them
-through `container_operator_refusal` and the rows are `BACKEND_ONLY` on that
-backend** — the same shape the `|` union rows already had.  The gate's own
-docstring and the `CONTAINER_GATED_OPS` comment now say so; the operator set was
-NOT narrowed, because the refusal is still correct for a list/tuple/dict operand
-and for everything the set test does not take.  Items 1 (`==`/`!=`), 2
-(ordering) and 4 (a length-changing slice store) are unchanged and still open;
-so is the x86-64 port of item 3.  The rest of this document is the 2026-10-06
-analysis and stands as written.
+CPython on BOTH architectures — no `BACKEND_ONLY` rows remain for them.  The
+`|` union rows are still `BACKEND_ONLY` on x86-64 (a separate gap: x86-64 has
+no union emitter), but item 3 is not about `|`.  The gate's own docstring and
+the `CONTAINER_GATED_OPS` comment now say that arm64 and x86-64 intercept before
+`container_operator_refusal` for two sets and that the operator set is NOT
+narrowed, because the refusal is still correct for a list/tuple/dict operand and
+for everything the set test does not take.  Items 1 (`==`/`!=`), 2 (ordering)
+and 4 (a length-changing slice store) are unchanged and still open.  The rest of
+this document is the 2026-10-06 analysis and stands as written.
 
 ## The set algebra as landed (`_emit_set_algebra`)
 
 The one algorithm item 3 named — "copy the left, then for each right-hand
 element scan the result and append it if it is absent" — is now written as a
-generic `_emit_set_filter(offset, src, scount, other, ocount, keep_found)`: the
-outer loop walks the source blob, the inner loop scans the other blob for the
-element, and `keep_found` picks INTERSECTION (keep the present ones) from
-DIFFERENCE (keep the absent ones).  Symmetric difference is the two differences
-appended to one result blob.  The result starts EMPTY and grows one append at a
-time, unlike `_emit_set_union`, which starts by copying the left operand; the
-reservation is `nL + nR` for all three (a symmetric difference can hold every
-element of both sides) and goes through the same `_emit_blob_growth_guard` the
-union, concatenation and repetition sites use.
+generic `_emit_set_filter(offset, src, scount, other, ocount, keep_found)` on
+each backend: the outer loop walks the source blob, the inner loop scans the
+other blob for the element, and `keep_found` picks INTERSECTION (keep the
+present ones) from DIFFERENCE (keep the absent ones).  Symmetric difference is
+the two differences appended to one result blob.  The result starts EMPTY and
+grows one append at a time, unlike `_emit_set_union`, which starts by copying
+the left operand; the reservation is `nL + nR` for all three (a symmetric
+difference can hold every element of both sides) and goes through the same
+`_emit_blob_growth_guard` the union, concatenation and repetition sites use.
 
 **Elements are compared as words**, so a set of `char *` compares addresses
 exactly as `_emit_set_union`'s dedup does — the divergence
@@ -37,10 +38,11 @@ exactly as `_emit_set_union`'s dedup does — the divergence
 reason the landed cases use integer elements.  A recursive/content compare is
 item 1's value-model question, not this one's.
 
-**Measured, arm64, against CPython** (`test_formal_container_methods.py set`
-and `operator`, green; `s = {1, 2}`): `s & {2}` → sum 2 len 1, `s - {2}` → sum 1
-len 1, `s ^ {2}` → sum 1 len 1, `s -= {2}` → sum 1 len 1, `s &= {2}` → sum 2
-len 1.  The 2026-10-06 "before" table below is unchanged history.
+**Measured, both architectures, against CPython**
+(`test_formal_container_methods.py set` and `operator`, green; `s = {1, 2}`):
+`s & {2}` → sum 2 len 1, `s - {2}` → sum 1 len 1, `s ^ {2}` → sum 1 len 1,
+`s -= {2}` → sum 1 len 1, `s &= {2}` → sum 2 len 1.  The 2026-10-06 "before"
+table below is unchanged history.
 
 ## What was wrong, and what landed instead
 
@@ -111,18 +113,21 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3). **DONE ON ARM64 2026-10-08** —
-   `formal/arm64_codegen.py::_emit_set_algebra` / `_emit_set_filter`, with the
-   five `set`-group rows and the two operator-matrix rows moved to answer probes
-   and `BACKEND_ONLY` on x86-64. **Still open: the x86-64 port**, which has no
-   set emitter at all (not even `|`). The original plan was "arm64 only, then
-   x86-64; both already have `_set_vars` and `container_union_refusal` to gate
-   on", but the shared `container_operator_refusal` is asked by both backends,
-   so arm64 intercepts before it with `_expr_is_set_like` on both operands and
-   x86-64 keeps reaching the gate. Each row in
-   `test_formal_container_methods.py`'s `set` group
-   (`s_intersection`, `s_difference`, `s_symdiff`, `s_sub`, `s_andassign`) is now
-   an answer case on arm64 and a `BACKEND_ONLY` refusal on x86-64.
+1. **`&`, `^`, `-` between two sets** (item 3). **DONE ON BOTH BACKENDS
+   2026-10-08** — `formal/arm64_codegen.py::_emit_set_algebra` /
+   `_emit_set_filter` and the x86-64 twins of both, with the five `set`-group
+   rows and the two operator-matrix rows moved to answer probes measured against
+   CPython on both architectures and NO `BACKEND_ONLY` row for them. The
+   original plan was "arm64 only, then x86-64; both already have `_set_vars` and
+   `container_union_refusal` to gate on", but the shared
+   `container_operator_refusal` is asked by both backends, so each backend
+   intercepts before it with `_expr_is_set_like` on both operands. The x86-64
+   port is not a line-for-line translation — its register plan follows
+   `_emit_list_concat` and the counts become end pointers in
+   `_emit_set_filter` — but it is the same two loops and the same
+   `keep_found` predicate. Each row in `test_formal_container_methods.py`'s
+   `set` group (`s_intersection`, `s_difference`, `s_symdiff`, `s_sub`,
+   `s_andassign`) is now an answer case on both backends.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
