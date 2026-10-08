@@ -82,6 +82,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1073,7 +1074,11 @@ def check_escape_decoding(verbose):
     failures = []
     for name, body, cpy_lit in rows:
         got = F.decode_c_escapes(body)
-        want = eval(cpy_lit)          # noqa: S307 - the CPython oracle
+        # `eval` of a literal with `\777`/`\q` raises CPython's own
+        # SyntaxWarning; the oracle value is what is wanted, not the warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', SyntaxWarning)
+            want = eval(cpy_lit)      # noqa: S307 - the CPython oracle
         if got != want:
             failures.append(
                 f"escape {name}: decode_c_escapes({body!r}) == {got!r} "
