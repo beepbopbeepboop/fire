@@ -9,6 +9,51 @@ integer case and this is why. **NOT FIXED.** Filed rather than fixed: the
 mechanism is `_static_initializer`, which is
 `bugs/FORMAL_module_state_no_storage.md`'s subject and a project.
 
+## Re-measured 2026-10-07: the FIRST spelling is a DIFFERENT bug, and `g` is not zero
+
+**The first reproduction below does not read `g` as zero on this tree.** It
+prints nothing because **`main` is never called**: `var g = dbl` is a top-level
+store that `model.module_body` does not exempt, so it becomes
+`__module_body__`, which `model.entry_function` puts FIRST and the startup stub
+branches to — and the module body does not call `main`. Measured, both
+architectures, on the first program below with an explicit `main()` appended at
+file level:
+
+    $ python3 fire.py build --formal --no-prove --backend=arm64 -o p1c p1c.mojo
+    $ ./p1c
+    6
+
+So `g` holds the address of `dbl` correctly; what is missing is the call to
+`main`. The same shape needs no function value at all:
+
+```python
+def compute() -> Int:
+    return 5
+
+G = compute()
+
+def main() -> Int32:
+    print('hi', G)
+    return 0
+```
+
+The formal image prints NOTHING; `python3 fire.py run` prints `hi 5`. And
+`collect_global_slots` on the build's rewritten statements reports
+`filled_by_body=True` (not `False` as §"The root cause, measured on the slot
+table" records), which is why `static_initializer_refusal_reason` answers `None`
+and the read is not refused.
+
+**So the real root cause is `FORMAL_module_state_no_storage.md`'s** — "the
+module body IS the entry point, so a leftover store meant `main` was never
+called" (its own §on the `NUMS = [10, 20, 30]` case) — and that document is a
+**live claim** (`python3 tools/control.py claims` puts it on `formal112-docs`),
+so this worker did not edit it. §"The exact next step" step 1 (refuse a module
+global read as a value) is not applicable as written: the slot is
+`filled_by_body=True`, and its two conjuncts do not separate a function-valued
+binding from `G = compute()`, which §"What has to change" explicitly says must
+NOT be refused. The direct-call spelling (`g(21)`) is still refused, by the link
+audit, unchanged.
+
 ## What was run
 
 Two spellings of the same fact — a module-level name bound to a function, read
