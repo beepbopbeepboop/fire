@@ -9,6 +9,47 @@ integer case and this is why. **NOT FIXED.** Filed rather than fixed: the
 mechanism is `_static_initializer`, which is
 `bugs/FORMAL_module_state_no_storage.md`'s subject and a project.
 
+## 0. Re-diagnosed 2026-10-07: the silent zero is NOT the slot, and the live defect is the direct-call spelling
+
+This round was given the doc and measured it on the current tree instead of
+re-deriving §"The root cause". **The title's claim — that `g` "reads back as 0"
+— is not reproducible**, and the observations below move the defect to a
+different mechanism. Both architectures, `--no-prove`:
+
+* **spelling 1 (read as a value) is CORRECT once the entry runs.**
+  `var g = dbl` + `print(apply_arg(3, g))` prints `6` on arm64 and on x86_64
+  (`fire.py run` prints `6` too). The doc's "printed NOTHING" is not the slot:
+  a module with a NON-FOLDABLE module-level store (`var g = dbl` does not fold,
+  so `model.module_body` keeps the store) gets the synthetic module BODY as its
+  entry (`model.entry_function` rule 1), and that body does NOT call `main`
+  unless the source does — so `main` never runs and nothing is printed. Appending
+  `main()` to the source makes both backends print `6`. A control that isolates
+  the same convention with no function value at all, `var counter = 0` (which
+  FOLDS, so the body is dropped and `main` is the entry), prints normally.
+* **spelling 2 (direct call `g(21)`) is the live defect, and it is a refusal,
+  not a zero.** `global g; print(g(21))` refuses on BOTH backends with
+  "the image would bind 1 symbol(s) that nothing provides ... `g`", because the
+  call lowers to `BL g` instead of loading the slot's word and branching through
+  it. CPython (and `fire.py run`) answer `42`.
+
+**The slot itself fills correctly, which is what rules out this doc's stated
+cause.** The module body stores `dbl`'s own code address: `_load_var`'s last
+home for a function name is `ADRP`+`ADD` of its label, and the emitted image
+shows `adrp x0; add x0, #0x650; str x0, [<slot>]` (disassembled from the
+`apply_arg` program). So `_static_initializer` never has to produce an address
+here, and the "address-valued `init` kind" §"What has to change" asks for is not
+needed for this program.
+
+**The exact next step is in `_emit_call`, not in `_static_initializer`.** Extend
+the existing `through_value` path (evaluate the callee word, push it under the
+arguments, pop into `X16`, `BLR X16`; the x86-64 analogue) to a bare callee that
+names a module-global SLOT whose initializer site is a FUNCTION of this image
+(`getattr(slot.site, "value", None)` an `IdentExpr` in `self._functions`).
+That gate keeps `g = 5` (`("int", …)`) and `g = compute()` (a `CallExpr`) on
+their current, correct paths, and it is narrower than `self._module_global(name)
+is not None` — which would `BLR` an integer global and crash where CPython
+raises. Everything below is kept as the original record.
+
 ## What was run
 
 Two spellings of the same fact — a module-level name bound to a function, read
