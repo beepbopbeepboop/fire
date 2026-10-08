@@ -5,8 +5,8 @@
 `formal/model.py::multi_index_refusal`'s `MULTI_INDEX_COMPTIME_PARAMS` arm, over
 `../new-modular/Mojo/stdlib/std/sys/arg.mojo:51`). **Status: PARTIAL, and §5 is
 what landed 2026-10-05 — the SENTENCE half, in BOTH branches. The refusal is
-CORRECT and stays; what is still not fixed is LINK 1, which is
-`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`'s area and
+CORRECT and stays; what is still not fixed is LINK 1, which is the MLIR
+dialect-refusal area and
 not this doc's.** Read §5 before the rest: this document's own recommendation
 ("a name in the sentence, not a new rule") has landed, and **§5 also records the
 measurement that shows the recommendation CANNOT reach the case it was written
@@ -135,8 +135,8 @@ ImmStaticOrigin              a name with no WORD to bind
 Span[StaticString, ImmStaticOrigin]()      ← link 2, the refusal as reported
 ```
 
-Link 1 is `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`'s
-area (`formal19-4`), and it is the same wall the chain walk measures at its
+Link 1 is the MLIR dialect-refusal area (`formal19-4`), and it is the same wall
+the chain walk measures at its
 eighth link on the same scope (`reflect.mojo: the module-level comptime binding
 '_field_types_of' is initialized from an MLIR attribute template`). **Link 2 is
 this doc's, and it is not a monomorphisation question**: the instantiation
