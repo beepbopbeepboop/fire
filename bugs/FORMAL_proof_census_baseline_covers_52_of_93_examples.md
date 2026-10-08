@@ -1,5 +1,31 @@
 # `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus
 
+**Status 2026-10-08 (`work/formal193-docs`): the HEADLINE BUG IS FIXED — the
+arm64 baseline is now 93/93 — and the tool is still RED for two OTHER reasons
+that this doc did not name. Read this before the sections below.**
+
+- `tools/formal_proof_census_baseline.json` now says `"examples": 93` and holds
+  a record per corpus member; `test_every_example_has_a_row_and_every_row_a_status`
+  passes. So the "41 of the corpus has no baseline row" claim below is stale.
+- **The tool is still red, and for two reasons that are not this doc's.** On
+  this tree `python3 test_formal_proof_census.py` is 59/2:
+  * `TestCommittedBaseline.test_each_row_is_tied_to_the_example_it_measured`
+    fires on **`fact.mojo`**: the example's bytes changed after the row was
+    written (`66e21e6a…` in the baseline, `b2bbaf51…` on disk), so the ratchet is
+    doing its job and the fix is a Lean re-seed of that one example
+    (`--only fact --write-baseline`, ~222 s), which is a Lean run and the
+    integrator's/heavy.
+  * `TestCacheReport.test_a_missing_olean_is_reported_as_unmeasured_rather_than_as_a_miss`
+    fails on a COLD worktree because `lib/*.olean` (`IEEE754`, `ProofLib`,
+    `X86`, `work`, `Refine`, `Contracts`, `Peephole`, `Specs`) do not exist; the
+    test's registration (`deps=['preflight']`) does not build them. This is
+    environment-shaped rather than a wrong answer, and it is filed here rather
+    than as its own doc because it is the same tool.
+- **The x86-64 half is still open, exactly as the sections below say**: there is
+  no `tools/formal_proof_census_baseline_x86_64.json`, so that architecture's
+  ratchet has still never run. That is the one part of this doc's subject that
+  is unchanged, and it is a real Lean measurement.
+
 **Claim** `project:loop-invariants` on `work/formal66-loop-invariants`.  **Not
 mine**: this is the census's file and its tool, and nothing on this branch
 touches either.  **Measured** on `master` @ `cd2a1678` on 2026-10-06, and it is
