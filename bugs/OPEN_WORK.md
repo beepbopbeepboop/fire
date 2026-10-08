@@ -197,7 +197,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_optional_needs_a_representation.md` | `formal114-docs` | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
 | `FORMAL_string_composition_has_no_buffer.md` | `formal115-docs` | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
 | `FORMAL_sweep_singles_second_half.md` | `formal115-docs` | four of §3.2's eight remaining single-file causes are not patches, measured |
-| `FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md` | `formal116-docs` | FORMAL_the_stack_floor_budget_is_in_BYTES_so_x86_64_allows_8x_the_recursion_depth_arm64_does |
+
 | `CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md` | **unclaimed** | The parser DISCARDS a `comptime` FUNCTION-TYPE alias, and silently erases a `comptime` call whose bracket mixes a keyword with a later positional |
 | `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | **unclaimed** | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | **unclaimed** | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
