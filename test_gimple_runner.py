@@ -11661,11 +11661,14 @@ main()
     # declares, so a same-named field has to keep working.
     #
     # The RENAMED spelling (`def __init__(self, payload): self.body = payload`)
-    # is deliberately NOT here: it does not work on this tree, before or after
-    # this fix, because the hint's key half is the parameter's name and
-    # nothing maps it to the field. Filed as
-    # bugs/CODEGEN_imported_ctor_hint_does_not_reach_a_renamed_field.md,
-    # which is the same table and a different question from this one.
+    # is the case where the parameter's name is not the field's name. It used
+    # to leave the field `int64_t` because the hint was keyed on the parameter
+    # name and nothing mapped it to the field; the producer now records the
+    # `(param -> [field])` map from the defining `__init__` and keys the hint on
+    # the FIELD, so the field is typed. Pinned below by
+    # `imported_class_ctor_renamed_field_still_types` (bare binding, no sibling
+    # `import` — the spelling that was wrong) and by
+    # `imported_class_ctor_hints_survive_an_alias` (the aliased route).
     _check_agrees_with_cpython("imported_class_ctor_literal_still_types_the_field", {
         'cparam2_def.py': "class Box:\n"
                           "    def __init__(self, name):\n"
@@ -11676,6 +11679,16 @@ main()
                            "print(Box('hello').show())\n"
                            "print(Box('there').show())\n",
     }, 'cparam2_main.py')
+
+    _check_agrees_with_cpython("imported_class_ctor_renamed_field_still_types", {
+        'cparam4_def.py': "class Box:\n"
+                          "    def __init__(self, payload):\n"
+                          "        self.body = payload\n"
+                          "    def show(self):\n"
+                          "        return self.body\n",
+        'cparam4_main.py': "from cparam4_def import Box\n"
+                           "print(Box('hello').show())\n",
+    }, 'cparam4_main.py')
 
     # …through the ALIASED and MODULE-QUALIFIED spellings, which resolve the
     # defining module by a different route (`_find_symbol_home_module`) and
