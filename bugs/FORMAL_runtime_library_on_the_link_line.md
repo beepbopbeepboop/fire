@@ -108,14 +108,15 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
-206 exported / 166 reachable where the same census measures 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
-exactly that. Pre-existing, measured on this document's base, and filed as
-`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
-fixed here: `FORMAL.md`'s figure sweep is another branch's project
-(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
-have nothing to do with the link line.
+**`FORMAL.md` §2.2/§6's published figures are now current.** This paragraph
+used to record that it published 206 exported / 166 reachable where the census
+measures 216 / 176, and that `test_formal_doc_truth.py` and
+`test_formal_runtime_link.py` were both red on exactly that. That sweep
+landed on 2026-10-08 (this document's §0.1 table already reads 272 / 216 / 176 /
+40): `FORMAL.md` §2.2 and §6 phase 2 publish 683 / 272 / 411 / 216 / 176, and
+both tests are green. The remaining figures the sweep touched — `fire_runtime.c`
+524 KB, the 411 non-word restatements, and the 93-example corpus — moved in the
+same pass.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
@@ -727,18 +728,21 @@ identical and a reader should be able to see that rather than take it:
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label ceil -- python3 .tmp/ceilings.py
 python3 tools/memslot.py --gb 8 --label t -- \
-    python3 test_formal_runtime_link.py            # 159 passed, 4 failed
+    python3 test_formal_runtime_link.py            # recorded 159 passed, 4 figure-drift failed
 python3 tools/memslot.py --gb 8 --label t -- \
     python3 -c "import test_formal_runtime_link as T; \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py`'s **4 failures were pre-existing and were not this
+document's**: they compared the live count against `FORMAL.md` §6 phase 2's
+published `206`/`166`, which the tree had outgrown (`1dd68a48` published them on
+2026-10-04). `test_formal_doc_truth.py` was red on the same drift (8 checks, 7
+of them the same figures). Both are green now that the figure sweep landed
+(2026-10-08): §6 phase 2 publishes 272 / 216 / 176, and the census half —
+`test_link_line_is_the_dylibs_exports`, which is the one that builds the dylib —
+measures exactly those, so the counted run is the `159 passed, 4 failed` above
+minus the four. `.tmp/ceilings.py` is scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as
