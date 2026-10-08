@@ -453,19 +453,21 @@ def gen_flagged_alu(rng, free):
     to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
     it).
 
-    **`TST` is NOT here and its absence is a gap of its own**, which is this
-    pool's version of the "a lowering no fuzz case draws is not a lowering"
-    question: `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`
-    since 2026-10-05, `arm64_step` has had `work_step_tst` for weeks, and the
-    census's FUZZ column still reads `NO` because nothing in this file spells
-    it — so `tools/formal_isa_census.py`'s
-    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` is red on
-    that row today. Filed as `bugs/FORMAL_the_flagged_fuzz_pool_does_not_draw_
-    tst.md`; not fixed here because the pool is another claim's area.
+    **`TST` is the LOGICAL flag test and is drawn here**, which closes the last
+    hole of the same shape as `SMULH`: `encode_tst_xn_xm` is emitted by
+    `_emit_branch_unless_and_test` (twice, `if x & y:` and `not (x & y)`),
+    `arm64_step` has had `work_step_tst` for weeks (`arm64_logic_flags (Xn &&&
+    Xm)` with C and V clear), and `as` checks it — but until now no generator
+    in this file spelled it, so the census's FUZZ column read `NO` and
+    `tools/formal_isa_census.py`'s
+    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` was red on
+    that row.  `CMN` shares `work_step_*` entry 66 with `ADDS` and is drawn by
+    `gen_flags` in the `branch` mix, so its census column already read `yes`;
+    `TST` is the only one this pool was missing.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
-    k = rng.randrange(6)
+    k = rng.randrange(7)
     if k == 0:
         return "adds x%d, x%d, x%d" % (d, n, m), A.encode_adds_xd_xn_xm(d, n, m)
     if k == 1:
@@ -480,8 +482,10 @@ def gen_flagged_alu(rng, free):
     if k == 4:
         return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
-    return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
-            A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
+    if k == 5:
+        return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
+                A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
+    return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
 
 
 def gen_select(rng, free):

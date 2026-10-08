@@ -246,18 +246,30 @@ def encoder_names(arch):
 
 
 def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only."""
-    for rel in LEVER_ROOTS[arch]:
-        blob = _read(os.path.join(ROOT, rel))
+    """{encoder: [(file, count)]} over the emitter files only.
+
+    A reference is an AST `Name`/`Attribute` load and not a text match.  The
+    emitter's own prose names encoders it does NOT call — `encode_cmov_r64_r64`
+    is discussed at the stack-floor clamp and deliberately not emitted, and a
+    text match reported that one form as an instruction every image can contain,
+    which is exactly the "an encoder nothing calls reads as an instruction"
+    failure this census exists to prevent, one file in from where LEVER_ROOTS
+    states it.  Both encoder modules are reached with `from formal.<arch>
+    import *`, so a bare-name call is the only spelling and an explicit
+    `from ... import (...)` line (as `macho_linker.py` uses) names its encoders
+    as `ast.alias`, which is not an `ast.Name` and does not count.
+    """
+    names = set(encoder_names(arch))
     out = {}
-    for name in encoder_names(arch):
-        hits = []
-        for rel in LEVER_ROOTS[arch]:
-            n = len(re.findall(r"\b%s\b" % re.escape(name),
-                               _read(os.path.join(ROOT, rel))))
-            if n:
-                hits.append((os.path.basename(rel), n))
-        out[name] = hits
+    for rel in LEVER_ROOTS[arch]:
+        counts = {}
+        for node in ast.walk(ast.parse(_read(os.path.join(ROOT, rel)))):
+            if isinstance(node, ast.Name) and node.id in names:
+                counts[node.id] = counts.get(node.id, 0) + 1
+            elif isinstance(node, ast.Attribute) and node.attr in names:
+                counts[node.attr] = counts.get(node.attr, 0) + 1
+        for name, n in counts.items():
+            out.setdefault(name, []).append((os.path.basename(rel), n))
     return out
 
 
@@ -576,10 +588,6 @@ BACKLOG = {
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: the forms the harness cannot even NAME ───────────────────
-    "encode_imul_r64_r64_imm": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`69 /r id`: no decoder arm (only `0F AF` is decoded) and no pool or "
-        "coverage entry"),
     "encode_call_r64": (
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`FF /2` with mod=11, the call through a function VALUE; the decoder "
