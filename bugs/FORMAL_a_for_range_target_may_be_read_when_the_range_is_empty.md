@@ -11,7 +11,10 @@ reads the preheader's literals, and `_build_cfg` seeds the body's first block
 with the target). What is left is the case whose emptiness is a RUN-TIME fact
 and cannot be one by any build-time decision — a range bound a PARAMETER, which
 is §"What is left" and which now carries the measurement that closes option 1
-below.**
+below.** *Re-measured 2026-10-08 (`work/formal156-docs`): the residual is the
+EMPTY case only — `n >= 1` restored the counter and printed CPython's value on
+both backends; §"What is wrong"'s old `n = 3` row was a transcription error and
+is corrected there.*
 
 Found 2026-10-03 while fixing the empty-range counter bug (that doc is deleted
 with its fix, `0340e4fc`), whose fix moved the loop's store so that an empty
@@ -91,18 +94,28 @@ def main(n):
     return 0
 ```
 
-| | `n = 0` | `n = 3` |
-|---|---|---|
-| CPython 3.14 | `UnboundLocalError` | `0` / `2` |
-| arm64 | **`9`** | **`9`** |
-| x86-64 | **`9`** | **`9`** |
+| | `n = 0` | `n = 1` | `n = 3` |
+|---|---|---|---|
+| CPython 3.14 | `UnboundLocalError` | `0` | `2` |
+| arm64 | **garbage** (measured `8617574784` on one build) | `0` | `2` |
+| x86-64 | **garbage** (measured `8641869592` on one build) | `0` | `2` |
 
-`9` is whatever the caller left in the register the allocator handed `q`, so the
-answer changes with the build and is not a number the source wrote — which is
-the exact failure the "Read before store" section of `formal/model.py` exists
-to refuse, and it is the answer this path gave before the fix too (it printed
-`0`, the stored `start`, which is wrong in the other direction: CPython raises
-rather than answering).
+**Re-measured 2026-10-08 (`work/formal156-docs`): the divergence is the EMPTY
+case and nothing else.** This table used to say `n = 3` printed `9` on both
+backends as well, and that is wrong: for `n >= 1` the loop runs, the counter is
+restored, and both backends print CPython's value (`0` for `n = 1`, `2` for
+`n = 3`). `9` in the old row was one build's leftover, copied to the `n = 3`
+column as well. The difference matters for the next step: the defect is exactly
+"the range may be empty", not "the counter is not restored", so the emitter's
+counter layout (the thing §0 and the old empty-range counter fix settled) is
+already right and only the run-time emptiness is unhandled.
+
+The garbage is whatever the caller left in the register the allocator handed
+`q`, so the answer changes with the build and is not a number the source wrote —
+which is the exact failure the "Read before store" section of `formal/model.py`
+exists to refuse, and it is the answer this path gave before the fix too (it
+printed `0`, the stored `start`, which is wrong in the other direction: CPython
+raises rather than answering).
 
 **§0 closed the same program with `k` in place of `n`**, so what is left of
 this defect is exactly the question of whether a PARAMETER's value can be a
