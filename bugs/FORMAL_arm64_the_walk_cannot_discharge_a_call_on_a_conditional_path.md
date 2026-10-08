@@ -1,5 +1,19 @@
 # The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing`
 
+**Status 2026-10-08 (`work/formal184-docs`): the reproducer now refuses EARLIER,
+for a different reason, so re-measure before sizing this.**  The two-`printf`
+program below no longer reaches the conditional/disjunction refusal: the
+stack-floor guard's `getrlimit` is an out-of-image `BL` in every prologue since
+`bfeec991` (2026-10-05), so `generate_arm64_proof` refuses with "3 calls this
+walk cannot follow (0x10000041c -> …, 0x1000004e8 -> …, 0x100000504 -> …) …
+OUT OF THE IMAGE" — the `getrlimit` plus the two `printf`s, measured, and the
+same reason the whole example corpus emits 0 value theorems.  That is
+`bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md`
+(owned by `formal163-docs`, branch `dfb40ce7`).  The `ProofLib` half this doc
+names is unchanged, and the earlier "conditional refusal" defect its §"A second,
+separable defect" names is already fixed on this tree (the walk's per-path
+`crossed` state in `_reached_without_a_condition`).
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the blocker this doc names is
 MISNAMED, and the correction is worth more than the work it precedes — the Lean
 gate is NOT what stands in front of option 1. It is runnable, cheaply, by
