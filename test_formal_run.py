@@ -23274,6 +23274,12 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        'rf"a={n}b"',           # a TWO-character prefix (`r` then `f`): the
+        'fr"pre{x}"',           # …reader used to look for the quote at index 1
+        'Rf"{x}lead"',          # …and a capital `R` is a second order again
+        'rf"{{lit}}"',          # the brace escape survives a two-char prefix
+        'rf"\\s={n}"',          # raw changes `\s`'s MEANING, not segmentation
+        'rf"""a{x}b"""',        # a two-character prefix AND a triple quote
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,7 +23332,12 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
-                          ('f"', "not even a quoted token")):
+                          ('f"', "not even a quoted token"),
+                          # The prefix widens the QUOTE's index, not the rule:
+                          # an unterminated two-character-prefix literal must
+                          # still be refused by the delimiter test rather than
+                          # read as a body.
+                          ('rf"a{b', "does not end with")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
         except _TYPE_VALUE_MODEL.CodegenError as e:

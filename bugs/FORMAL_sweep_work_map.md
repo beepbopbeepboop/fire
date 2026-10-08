@@ -964,9 +964,15 @@ measured it three rounds ago. The exceptions are named:
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
 * `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
-  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
-  own document for the reason above: the measurement is here (§1.11) and the fix
-  has a question to answer first that belongs with the fix.
+  `b14` §1.11's `rf"…"` row, filed by that round and **FIXED 2026-10-07**: the
+  reader asked `spelled[1]` for the quote, which is right only for a
+  ONE-character prefix, so every two-character one (`rf`, `fr`, `Rb`, …) was
+  refused with a sentence claiming the character after the prefix was not a
+  quote when it was. The shape it named is now `formal/model.py::
+  interpolated_literal_delimiters`, the delimiter index is computed from the
+  prefix, and `test_formal_run.py`'s
+  `check_interpolated_segments_against_cpython` carries the `rf"…"`/`fr"…"`/
+  `Rf"…"` rows. The document is deleted with the fix.
 
 **The per-slice rounds also fixed things and recorded the pins**, and so did
 `b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the

@@ -25,7 +25,7 @@ moved, which is this doc's subject happening again rather than a new bug:**
 $ python3 tools/dangling_doc_refs.py
 7 citations of 6 bugs/ docs that are not there, across 2 files
      1  <the -b13 sweep map>            # spelled WITHOUT the `bugs/` prefix on
-         bugs/FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
+         <the interpolated-literal doc>:59
                                         # purpose: quoting a walk's own output
      1  NEVER_WRITTEN.md                # reproduces a citation, which is how
          test_suite.py:2653             # this measurement found itself, once
