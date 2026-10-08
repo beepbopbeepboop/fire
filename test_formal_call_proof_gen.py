@@ -1889,19 +1889,30 @@ class TestNestedConditionFactSharing(unittest.TestCase):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
-            # x2 per condition, which is the path count. The pre-memo growth was
-            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
-            # bound of 2.2 is below the old one and above the new one — and it
-            # is a bound rather than a count because the exact number moves with
-            # the block layout, while the growth rate is the thing that was wrong.
-            for k in (3, 4):
-                ratio = counts[k] / counts[k - 1]
+            # x2 per condition, which is the path count — and the quantity that
+            # doubles is the INCREMENT, not the total.
+            #
+            # `counts[k] - counts[k-1]` is the facts that exist ONLY because
+            # the k-th condition doubled the path count, and it doubles exactly
+            # with each condition. The total also carries a CONSTANT (the
+            # prologue's own facts, which every path repeats), so the ratio of
+            # totals is noisy when the total is small: since the stack-floor
+            # guard's branches were decided and its `getrlimit` moved to the
+            # startup stub, the totals fell from 95/155/275 to 9/21/45 and
+            # `9 -> 21` reads as x2.33 while the per-path increment is still
+            # exactly x2. The pre-memo growth was x2.0 / x2.67 / x2.5 on the
+            # totals; what this pins is the per-path rate, which the memo makes
+            # x2 and which anything above 2.2 would show as the exponential back.
+            inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
+            self.assertTrue(all(v > 0 for v in inc.values()), (counts, inc))
+            for k in (4,):
+                ratio = inc[k] / inc[k - 1]
                 self.assertLessEqual(
                     ratio, 2.2,
-                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
-                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
-                    f"this x2 (the number of paths) and anything above 2.2 is "
-                    f"the exponential back")
+                    f"the per-path facts grew by x{ratio:.2f} "
+                    f"({inc[k - 1]} -> {inc[k]}) from {k - 2} to {k} "
+                    f"conditions; the per-path memo makes this x2 (the number "
+                    f"of paths) and anything above 2.2 is the exponential back")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
