@@ -639,6 +639,33 @@ def erased_only_params(template_src: str, params) -> set:
     return out
 
 
+def phantom_type_params(template_src: str, params) -> set:
+    """The subset of `params` that occurs NOWHERE outside the generic head.
+
+    A phantom parameter is a type parameter the declaration names but never
+    mentions again — not in a field's type, not in a method's signature, not in
+    a method body, not in a `comptime` alias.  It is a strictly stronger
+    condition than `erased_only_params`' "only in positions `_mojo_type`
+    discards": a phantom parameter has no occurrence to discard, and
+    `erased_only_params` deliberately requires `occ` to be non-empty, so it
+    returns the EMPTY set for one.  That gap is why this is a second predicate
+    rather than a reuse: `struct Marker[T: AnyType]: var v: Int` is exactly the
+    shape `erased_only_params` declines and `formal/monomorph.py`'s
+    `without_template_bodies` needs the answer for (it decides whether such a
+    template's declaration is already a concrete one and must not be dropped).
+
+    COUNTED over `_code_only`, which removes the head's own `[...]`, every
+    docstring and every comment — so the declared name in the head and prose
+    about the parameter are not uses of it, exactly as for
+    `erased_only_params`."""
+    src = _code_only(template_src)
+    out = set()
+    for p in params:
+        if not re.search(rf'\b{re.escape(p)}\b', src):
+            out.add(p)
+    return out
+
+
 def _fill_erased_params(template_src, params, binding) -> dict:
     """`binding` plus `ERASED_TYPE_ARG` for every still-unbound parameter that
     `erased_only_params` proves is discarded. An unbound parameter that is NOT
