@@ -24,7 +24,11 @@ FAILED (failures=2)
 (The second failure, `test_library_state_agrees_with_the_question_it_asks`, is a
 different thing: it asserts `lib/*.olean` exists and this is a clean worktree
 where the `prooflib` build has not run. It is not the row staleness and is not
-counted here.)
+counted here — but it is worth its own note, because the registered job
+`formal-proof-census-tool` declares `deps=['preflight']` and NOT `['prooflib']`,
+so under a parallel `proofs` bucket it can start before the shared `.olean`
+build and fail on a machine that has not built it. The fix, if it is taken, is
+one word in `tools/suite.py`.)
 
 `fact` is the ONLY stale row, measured over all 93:
 
