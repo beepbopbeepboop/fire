@@ -141,6 +141,16 @@ _SIGN_FLIP = "0x8000000000000000"
 # same table `_dylib_spec_lean` uses, reached through it.
 _ARITH_OPS = {"+", "-", "*", "/", "%"}
 
+# The AST spells integer division `//`; this IR -- and the model's own word
+# arithmetic -- spell it `/`, the tag `_lean_of` renders as `UInt64.div` and
+# `_eval_of` evaluates as `a // b`.  A reader keyed on the AST operator alone
+# therefore had no arm for `//` at all: a clause over it emitted nothing (with a
+# reason that named `/`), and a body containing it was a skip at every input.
+# The alias is what keeps the ONE IR the reader produces and the model's
+# spelling identical, rather than a second spelling supplied by each caller --
+# which is what `formal/loop_invariants.py`'s removed `_word_arith` used to do.
+_ARITH_ALIASES = {"//": "/"}
+
 # The verdict set.  Named constants rather than bare strings because
 # `classify` and every consumer have to agree on the SPELLING, and a typo in a
 # verdict is a silent skip -- the exact failure this module exists to prevent.
@@ -517,12 +527,13 @@ class _Reader:
                 if a is None or b is None:
                     return None
                 return (_Op.CMP, "=" if op == "==" else op, a, b)
-            if op in _ARITH_OPS:
+            tag = _ARITH_ALIASES.get(op, op)
+            if tag in _ARITH_OPS:
                 a = self.value(getattr(node, "left", None))
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                return (_Op.ARITH, op, a, b)
+                return (_Op.ARITH, tag, a, b)
             return None
         if kind == "TernaryExpr":
             test = self.truth(getattr(node, "condition", None))
@@ -1185,7 +1196,7 @@ def unlowered_reason(contract, params, model_name=None) -> str:
         (f"`{c.text}`" if c.is_pragma else f"`@{c.name}(...)`") for c in bad)
     return (f"{len(bad)} of {len(contract.clauses)} clause(s) has no Lean "
             f"rendering ({spelled}); the expression subset a contract may use "
-            f"is literals, the parameters, `result`, `+ - * / %`, the six "
+            f"is literals, the parameters, `result`, `+ - * / // %`, the six "
             f"comparisons, `and`/`or`/`not`, a conditional expression, and "
             f"`abs`/`min`/`max`/`clamp`")
 
@@ -1332,7 +1343,7 @@ class SourceRunner:
             return (a - b) & _MASK
         if op == "*":
             return (a * b) & _MASK
-        if op == "/":
+        if op in ("/", "//"):
             if b == 0:
                 raise Unsupported("a division by zero (the machine traps here)")
             return (a // b) & _MASK

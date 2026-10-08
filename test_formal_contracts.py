@@ -175,6 +175,49 @@ def test_the_reader_takes_both_spellings(tmpdir=None):
           len(c.requires) == 1 and len(c.ensures) == 1 and bool(c), repr(c))
 
 
+def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
+    """`//` is the AST's spelling of integer division, and this IR's `/` is the
+    same operation: `_lean_of` renders it `UInt64.div` and `_eval_of` evaluates
+    it as `(a // b) & _MASK`, which is what the machine computes.
+
+    A reader keyed on the AST operator therefore had no arm for `//` at all: a
+    clause over it emitted no theorem, and the refusal NAMED `/` -- so a reader
+    who took the sentence as the specification was told an operator inside the
+    subset was outside it.  This pins all three consequences, and the
+    evaluator's half at an input where the word reading and a signed one differ
+    (7 // 2 is 3; a floor of the sign-extended word would not be).
+    """
+    from formal import contracts as CT
+    src = ("@ensures(result == a // b)\n"
+           "def h(a, b):\n"
+           "    return a // b\n")
+    fn = functions(parse(src))[0]
+    c = contract_of(fn, "floordiv.mojo", src)
+    check("a_clause_over_floordiv_is_read", len(c.ensures) == 1, repr(c))
+    check("a_clause_over_floordiv_emits_a_theorem",
+          bool(CT.contract_theorems(c, ["a", "b"], fn=fn).lean))
+    check("a_clause_over_floordiv_has_no_unlowered_reason",
+          CT.unlowered_reason(c, ["a", "b"]) == "",
+          CT.unlowered_reason(c, ["a", "b"]))
+    ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
+    check("floordiv_renders_as_the_words_div",
+          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
+    env = {"a": 7, "b": 2, "result": 3}
+    check("floordiv_evaluates_as_the_words_division",
+          CT._eval_of(ir, env, [1000]) is True, CT._eval_of(ir, env, [1000]))
+    check("the_source_runner_runs_a_body_with_floordiv",
+          CT.SourceRunner(fn)(7, 2) == 3, CT.SourceRunner(fn)(7, 2))
+    # The refusal that names the subset has to name BOTH spellings of division,
+    # or the same reader is told `//` is outside it while `_ARITH_ALIASES`
+    # accepts it.  `other` is not a parameter, so this clause is refused.
+    bad = contract_of(functions(parse("@ensures(other // n >= 0)\n"
+                                      "def f(n):\n    return n\n"))[0],
+                      "unreadable.mojo")
+    check("the_unlowered_reason_names_floordiv_too",
+          "//" in CT.unlowered_reason(bad, ["n"]),
+          CT.unlowered_reason(bad, ["n"]))
+
+
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     """The difference every consumer needs between "promised nothing" and
     "promised something".  A checker that treats them alike reports a
@@ -1012,6 +1055,7 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
 
 ALL = [
     test_the_reader_takes_both_spellings,
+    test_the_reader_reads_the_ASTs_own_division,
     test_a_function_with_no_decoration_is_NOT_a_contract,
     test_the_comment_pragma_is_read_too,
     test_an_unreadable_clause_is_a_REFUSAL,
