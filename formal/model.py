@@ -44931,6 +44931,18 @@ class GlobalDataImage:
 # main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
 # program dies as it does today — no worse than the defect being fixed — while a
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
+#
+# **The budget is BYTES and the frame is not, so the recursion depth it affords
+# is PER ARCHITECTURE, and this is the one place that says so.** The arm64 frame
+# is `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is `X86_64_CONTAINER_BUDGET`
+# (16 KiB), so one byte budget is 60 frames on arm64 and 480 on x86-64 — an 8x
+# band, measured as a trap at 59 on arm64 and 471 on x86-64
+# (`tools/formal_recursion_depth.py`). It is by design — the byte guarantee is
+# the point, and the frame sizes are the emitters' — but it means a program
+# between the two depths ANSWERS on x86-64 and TRAPS on arm64, so a harness that
+# reads `trapped` apart from `match` (`tools/formal_fuzz.py::classify`) is
+# reporting a fact about the frame and not a backend disagreement. Stated here
+# so the next reader does not re-derive it from a sweep.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
 
@@ -45297,9 +45309,15 @@ def call_graph_depth(edges: dict) -> int:
     The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
-    sixty levels deep spends the same stack as a recursion sixty deep. Every
-    formal frame is at least 128 KiB, so the depth that matters is
-    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+    sixty levels deep spends the same stack as a recursion sixty deep. **On
+    arm64** every formal frame is at least 128 KiB, so the depth that matters
+    there is `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 60, measured 59. **x86-64's
+    frame is 16 KiB** (`X86_64_CONTAINER_BUDGET`), so the same byte budget
+    affords 480 frames there — measured 471 — and this bound is 8x conservative
+    on x86-64 rather than wrong. The asymmetry and where it is stated are in
+    `STACK_FLOOR_BUDGET_BYTES`'s own comment; it is safe in this direction (a
+    bound too low over-guards, never under-guards) and it is NOT one number for
+    both machines.
 
     **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
     The exact figure is the longest SIMPLE path, which is NP-hard in general, so

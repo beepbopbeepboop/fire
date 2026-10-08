@@ -5453,6 +5453,16 @@ def classify(results, want_exit, want_out, args):
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
+        # Its own verdict, and it is NOT a backend disagreement: the stack
+        # floor is one BYTE budget over two frame sizes
+        # (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`), so the recursion
+        # depth it affords is PER ARCHITECTURE — 59 on arm64 against 471 on
+        # x86-64 — and a program in that band answers on one machine and traps
+        # on the other. Reading it as a `refusal` or a `match` would hide that;
+        # reading it as a divergence would invent one. The metamorphic harness
+        # sees the same pair as `TWIN-DIVERGES-<ARCH>`
+        # (`tools/formal_metamorph.py`) and the answer is the same: a known
+        # property of the frame, not a finding.
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend
