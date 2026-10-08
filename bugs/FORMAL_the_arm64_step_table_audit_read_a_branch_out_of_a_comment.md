@@ -10,6 +10,20 @@ of the four signatures now carrying the obligation that fails, named from the
 generated file rather than from a truncated tail. Filed 2026-10-03 on
 `work/formal16-2`, refreshed 2026-10-04.
 
+**Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
+not this doc's fix that regressed.** The census this doc pins — "all twelve
+generate" — is measured green when written, and on this tree
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 12
+failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
+`both`, `either` and `wdiff` now REFUSE at
+`formal/arm64_proof_gen.py::_reached_without_a_condition` (the
+conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
+`sum_range` refuses there instead of at its owned loop-contract refusal. The
+cause is a logic bug in that check, not a reopened gap, and it is filed with
+the reproduction and the fix as
+`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`.
+That doc is another claim's code, so nothing here was edited.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
 here:
