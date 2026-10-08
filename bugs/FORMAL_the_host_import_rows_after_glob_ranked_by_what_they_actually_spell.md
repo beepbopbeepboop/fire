@@ -1,5 +1,21 @@
 # FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell: what is left, which of it is reachable, and why four of the next six are not this wave's
 
+**Status 2026-10-08 (`work/formal180-docs`): §2's `zlib` row and §5 item 3's
+"`zlib`, 27 files" are FALSE and are corrected here — `zlib` is 0 files and 0
+uses, not a project.** `formal/imports.py`'s own `HOST_UNREACHABLE` comment
+records the measurement: the 27 files were closure through `coro.py`'s
+`import zlib as _zlib`, `gimple_codegen.py`'s `mojo_zlib_*` signature table (a
+list of runtime entry points it never calls) and a `types.py` docstring, and the
+three DEAD `import zlib` lines were deleted, so "`zlib` is now 0 files and 0
+uses; both are ratcheted by [this entry]". The tool-based census in
+`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0.1 does not list
+it either, which is the same measurement from the other document. So the queue
+this doc hands over has no `zlib` item: the rows behind the `glob` wave are
+`collections` (claimed, `hostmods-platform`) and the type factories
+(`types`/`copy`/`datetime`/`resource`, each with an owner), which §5 items 4-5
+already say. The historical §2/§5 rows are left standing as the `sweep-arm-9`
+reading they are labeled, with this the correction to them.
+
 **Status 2026-10-05 (`work/formal31-5`): §5 item 2, `random`, is DONE —
 `formal/hostmods/random.mojo` and `test_formal_random.py`.** Three names
 (`seed`, `getrandbits`, `randrange`), **1452 answers per backend**, every one
