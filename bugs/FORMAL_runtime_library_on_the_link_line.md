@@ -108,14 +108,16 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
-206 exported / 166 reachable where the same census measures 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
-exactly that. Pre-existing, measured on this document's base, and filed as
-`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
-fixed here: `FORMAL.md`'s figure sweep is another branch's project
-(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
-have nothing to do with the link line.
+**`FORMAL.md` §2.2/§6's published figures were behind the tree** — they
+published 206 exported / 166 reachable where the same census measures 216 / 176,
+and `test_formal_doc_truth.py` and `test_formal_runtime_link.py` were red on
+exactly that. Pre-existing and measured on this document's base; the figures
+have since been brought up to the tree on both architectures (216 / 176), and
+the one remaining test hardcode that stood beside them — a `262` in
+`test_formal_doc_truth.py` for a surface that had grown to 272 — is gone with
+it: that check now reads §6 phase 2's own row, so the document is the oracle
+instead of a second copy of the number. Seven of the eight stale figures had
+nothing to do with the link line (`DOCS vs REALITY`, `1dd68a48`/`ca50560f`).
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
