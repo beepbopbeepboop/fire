@@ -139,16 +139,15 @@ _SIGN_FLIP = "0x8000000000000000"
 # UInt64 arithmetic as Lean spells it.  `UInt64.div` / `UInt64.mod` rather than
 # a bare `/` or `%`, which on `UInt64` is not the truncating operation -- the
 # same table `_dylib_spec_lean` uses, reached through it.
-_ARITH_OPS = {"+", "-", "*", "/", "//", "%"}
+_ARITH_OPS = {"+", "-", "*", "/", "%"}
 
-# The AST spells integer division `//`; this IR -- and the model's own word
-# arithmetic -- spell it `/`, the tag `_lean_of` renders as `UInt64.div` and
-# `_eval_of` evaluates as `a // b`.  A reader keyed on the AST operator alone
-# therefore had no arm for `//` at all: a clause over it emitted nothing (with a
-# reason that named `/`), and a body containing it was a skip at every input.
-# The alias is what keeps the ONE IR the reader produces and the model's
-# spelling identical, rather than a second spelling supplied by each caller --
-# which is what `formal/loop_invariants.py`'s removed `_word_arith` used to do.
+# Spellings the AST carries that this IR folds onto a canonical operator.
+# `fire_compiler` spells integer division `//` (bare `/` is float division in
+# Python's grammar); in this word-valued IR there is ONE division, `/`, which
+# `_lean_of` renders as `UInt64.div` and `_eval_of` evaluates as `a // b`.  The
+# reader accepts either spelling and normalises to the canonical tag, so a
+# clause over `a // b` is no longer refused / skipped by naming the wrong
+# operator.
 _ARITH_ALIASES = {"//": "/"}
 
 # The verdict set.  Named constants rather than bare strings because
@@ -418,7 +417,7 @@ class _Op:
     NEG = "neg"        # word negation: (NEG, e)
     POS = "pos"        # unary `+`, which is the identity: (POS, e)
     INVERT = "inv"     # `~`: (INVERT, e)
-    ARITH = "arith"    # (ARITH, op, a, b) for + - * / % (source `//` reads `/`)
+    ARITH = "arith"    # (ARITH, op, a, b) for + - * / %
     CMP = "cmp"        # (CMP, op, a, b) for the six comparisons
     AND = "and"        # (AND, a, b)
     OR = "or"          # (OR, a, b)
@@ -527,19 +526,18 @@ class _Reader:
                 if a is None or b is None:
                     return None
                 return (_Op.CMP, "=" if op == "==" else op, a, b)
-            tag = _ARITH_ALIASES.get(op, op)
-            if tag in _ARITH_OPS:
+            if op in _ARITH_OPS or op in _ARITH_ALIASES:
                 a = self.value(getattr(node, "left", None))
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                # `//` and `/` are the SAME IR tag.  The machine computes
-                # `UInt64.div` for both -- `_eval_of`'s `/` is `a // b` and
-                # `_lean_of`'s `/` is `UInt64.div`, the word reading -- so
-                # normalising the spelling here is what keeps one reader for
-                # the operator rather than a second one in every caller.
-                # `_ARITH_ALIASES` is that normalisation, applied to `tag`.
-                return (_Op.ARITH, tag, a, b)
+                # The AST spells integer division `//`; this word-valued IR has
+                # one division, tag `_Op.ARITH` with `/` (which renders as
+                # `UInt64.div` and evaluates as `a // b`).  Normalise the
+                # spelling here rather than growing a second tag: a rule that
+                # lived in a second reader is a rule the next reader does not
+                # have, which is the defect this replaces.
+                return (_Op.ARITH, _ARITH_ALIASES.get(op, op), a, b)
             return None
         if kind == "TernaryExpr":
             test = self.truth(getattr(node, "condition", None))
