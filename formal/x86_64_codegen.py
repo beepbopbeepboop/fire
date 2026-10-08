@@ -246,6 +246,23 @@ def _range_args(iterable):
     return None
 
 
+def _strip_stars(tree):
+    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
+    leaf.
+
+    This backend has never handled a starred for-target as a REST binding: it
+    read the leaf names from `_lbn_target_names`, which drops the star, and
+    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
+    keeps the nested fix from turning the (already broken on both backends)
+    starred spelling into a build refusal on one architecture only — see
+    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
+    if isinstance(tree, list):
+        return [_strip_stars(c) for c in tree]
+    if isinstance(tree, str) and tree.startswith("*"):
+        return tree[1:].strip()
+    return tree
+
+
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
 
@@ -6659,6 +6676,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # answer. arm64 reads the same tree through the same `M` reader.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
+            # `*rest` leaves keep their star in the tree; strip it so a starred
+            # for-target keeps the (already broken on both backends) spelling
+            # from becoming a build refusal on one architecture only — see
+            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
+            ttree = _strip_stars(ttree)
             leaves = _for_tree_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
@@ -9328,6 +9350,7 @@ preference.
             # `M.for_target_tree`.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
+            ttree = _strip_stars(ttree)
             leaves = _for_tree_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(

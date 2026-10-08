@@ -163,7 +163,10 @@ _SRET_LOCAL = "__sret_block"
 # exit (`model.receiver_writeback_name` is the rule).
 _RECV_CELL_LOCAL = "__receiver_cell"
 
-
+# The for/comprehension target tree parser is `model.for_target_tree`
+# (`fire_compiler.for_target_tree`), read as `M.for_target_tree` so the two
+# formal backends and the register allocator cannot disagree about how a
+# target's groups nest.
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in order of first assignment.
 

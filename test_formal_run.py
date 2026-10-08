@@ -6333,6 +6333,34 @@ ASSIGNED_TYPE_CASES = [
 # noticed for the whole life of the divergence.  (Its doc is deleted with the
 # fix; this comment is the record.)
 BOTH_ARCH_CASES = [
+    # A `for` target nested more than one group deep.  On this group because the
+    # x86-64 emitter used to FLATTEN the target's leaves before unpacking, so
+    # `for a, (b, (c, d)) in …` counted the three leaves of `(b, (c, d))` into
+    # the OUTER arity check and compared the element blob's count of 2 against a
+    # target count of 4 — exiting(1) with NOTHING printed while arm64 answered
+    # CPython's number.  Both backends now unpack `fire_compiler.for_target_tree`,
+    # so the row is checked on both rather than on the host's.  The expected 110
+    # is `(1+2+3+4) + (10+20+30+40)` over the two elements, so a backend that
+    # bound the wrong nesting level (e.g. read a group's blob pointer as its
+    # first element) would answer a different number rather than merely fail to
+    # build.
+    ("both_arch_a_for_target_nested_two_groups_deep",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4))), (10, (20, (30, 40)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=110"),
+    # The same nested shape as a COMPREHENSION generator target, which is the
+    # other place the flat-leaves bug lived on x86-64 (the `_cgu` arm).  The
+    # answer 21 is `a + b` for the single element `(1, (20, 300))`, so it is the
+    # group that was unpacked and not the whole element read as one word.
+    ("both_arch_a_comprehension_target_nested_one_group_deep",
+     "def main():\n"
+     "    var xs = [a + b for a, (b, c) in [(1, (20, 300))]]\n"
+     "    printf(\"x=%d\", xs[0])\n"
+     "    return 0\n", 0, "x=21"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.
