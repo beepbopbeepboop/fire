@@ -1,14 +1,45 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
-that stand in for them are landed.** `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green; this doc
-is about the rows in it that are green *as refusals*, which is a different thing
-from green as answers.
+**Status: PARTIALLY FIXED — item 3, the set algebra (`&`, `-`, `^`, and `|` on
+x86-64), is LANDED on BOTH backends; items 1 (`==`/`!=` between two containers),
+2 (ordering) and 4 (a length-changing slice store) remain.**
+`test_formal_container_methods.py` measures the whole surface against CPython on
+both architectures and is green; the set rows that were green *as refusals* are
+now green as answers, and the rows for items 1/2/4 are still green as refusals —
+which is a different thing from green as answers.
 
-Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
-number below is measured on that branch, on both `arm64` and `x86-64`, and each
-has a named row in `test_formal_container_methods.py`.
+Branch `work/formal64-container-methods`, claim `project:container-methods`.
+Every number below is measured on that branch, on both `arm64` and `x86-64`, and
+each has a named row in `test_formal_container_methods.py`.
+
+## What landed 2026-10-08 (`formal162-docs`): the set algebra, both backends
+
+`|`, `&`, `-` and `^` between two SETS are now lowered on arm64 AND x86-64.
+Before this, arm64 lowered `|` only and refused the other three; x86-64 refused
+all four (`|` by `model.set_union_refusal`, the other three by
+`container_operator_refusal`). The predicate is `_try_emit_set_algebra`, asked
+from the SYNTAX before the shared gate, because a KIND cannot tell a set from a
+list — both are a `list:<elem>` blob — so the gate's message had to stay for
+every pair that is not two sets (`[1] & [2]`, `{1} - [2]`), each a CPython
+`TypeError`.
+
+* arm64: `_emit_set_op_header` / `_emit_set_append` / `_emit_set_scan` /
+  `_emit_set_pass` are the shared machinery, and `_emit_set_intersection`,
+  `_emit_set_difference`, `_emit_set_symmetric_difference` are three filters
+  over it; `_emit_set_union` is unchanged and now also reached for `s | t`
+  between two set NAMES (which the old concat branch missed, because a name
+  bound to a set is not a `_is_container_expr`).
+* x86-64: the same four, written fresh (`_emit_set_union` did not exist; the
+  `|` branch lowered a concatenation and was then refused by
+  `set_union_refusal`, which is deleted with the emitter).
+* The augmented forms `|=`, `&=`, `-=`, `^=` desugar onto the binary emitters
+  in both backends' `_emit_aug_assign`, before the shared gate.
+* The blob-growth guard is emitted at every set site, so a reservation the
+  static estimate cannot keep is a loud stop rather than a frame overrun.
+  `test_formal_run.py`'s `_BLOB_GROWTH_PROBES` grew the x86-64 `uni` row.
+* `test_formal_container_methods.py`: the five set rows and the two operator
+  rows moved from `probe=None` to answers, and the four `s_union*` rows left
+  `BACKEND_ONLY` (x86-64 is no longer a backend that cannot build them).
 
 ## What was wrong, and what landed instead
 
@@ -79,14 +110,18 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3). arm64 only, then x86-64; both
-   already have `_set_vars` and `container_union_refusal` to gate on, so the
-   gate narrows from "refuse" to "lower" without new machinery. Each row in
-   `test_formal_container_methods.py`'s `set` group
-   (`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r`,
-   `s_andassign_r`) becomes an answer case, and `container_operator_refusal`
-   loses that operator from `CONTAINER_GATED_OPS` — the table is the only place
-   the operator set is written, which is why widening it was one line.
+1. ~~**`&`, `^`, `-` between two sets** (item 3)~~ **DONE 2026-10-08, both
+   backends** — see "What landed" above. The note below is kept because it is
+   what the next item should follow, not because it is still to do: the gate
+   narrows from "refuse" to "lower" without new machinery, and the refusal
+   stays for every pair that is not two sets. The actual landing did NOT drop
+   the operator from `CONTAINER_GATED_OPS` — a KIND cannot tell a set from a
+   list, so the set-ness question is asked from the syntax in
+   `_try_emit_set_algebra`, before the shared gate, and the gate keeps
+   refusing `[1] & [2]` / `{1} - [2]` with the message it always had (reworded
+   to name the new lowerings). Each set row in
+   `test_formal_container_methods.py` became an answer case and the four
+   `s_union*` rows left `BACKEND_ONLY`.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
@@ -104,12 +139,14 @@ the second reason this is a project rather than a rewrite.
 
 `test_formal_container_methods.py` asserts a refusal by matching a phrase from a
 shared table, so removing a row when its lowering lands would hide the change
-rather than record it. **The landing order for each is: drop the operator from
-`model.CONTAINER_GATED_OPS`, move the case from `probe=None` to a probe, and
-delete nothing.** The docstring of the gate is where the measurement lives, and
-it has to be re-measured when the answer is right: "measured answering 0 where
-CPython answers 1" is a claim about the pre-fix tree and becomes a false
-statement about this one the moment it stops being true.
+rather than record it. **The landing order for each is: move the case from
+`probe=None` to a probe, and delete nothing.** The docstring of the gate is
+where the measurement lives, and it has to be re-measured when the answer is
+right: "measured answering 0 where CPython answers 1" is a claim about the
+pre-fix tree and becomes a false statement about this one the moment it stops
+being true. For item 3 that re-measurement is the `container_operator_refusal`
+STATUS paragraph and the `&`/`-`/`^` message arm, both of which now name the
+lowerings and refuse only a non-set pair.
 
 Three rows in that table are claims about what this path is NOT, and each has a
 document saying so: `bugs/FORMAL_set_value_model.md` (a set lowers as a list, so

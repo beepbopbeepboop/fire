@@ -2723,6 +2723,12 @@ dylib_exports: list = None, globals_base: int = None,
             # non-answer as `s = s + t`, which BOTH backends refused, from the
             # same line of source. `stmt.op` is the spelling to quote, so the
             # diagnostic names the `+=` the reader is looking at.
+            # `s &= t`, `s -= t`, `s ^= t` between two sets desugar onto the
+            # binary emitters, exactly as `s += t` does below — asked before the
+            # shared gate, which cannot tell a set from a list.
+            if self._try_emit_set_algebra(op, stmt.target, stmt.value):
+                self._store_var(name, 0)
+                return
             reason = M.string_binary_refusal(
                 op, self._expr_str_kind(stmt.target),
                 self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -7993,6 +7999,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        # `&`, `-`, `^` between two SETS are real lowerings on this backend and
+        # must be asked before the shared gate, which cannot tell a set from a
+        # list.  Any other pair keeps the refusal below.
+        if self._try_emit_set_algebra(op, e.left, e.right):
+            return
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -13202,6 +13213,204 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(urd)
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    # -- set algebra: `&`, `-`, `^` between two SETS ------------------------
+    #
+    # A set lowers as a list blob here (`bugs/FORMAL_set_value_model.md`), so
+    # every one of these is a per-element membership scan and the three share
+    # ONE scan, ONE result-prologue and ONE append, which is what keeps the
+    # three from drifting.  `_emit_set_union` above is the fourth and is left
+    # as it is: its first loop is a raw COPY of the left operand, which none
+    # of these three does, and rewriting a correct emitter to share a prologue
+    # with three new ones would put the union's count-word fix at risk for no
+    # answer.
+    #
+    # The predicate is what decides which of these runs, so a `&` between two
+    # container NAMES that are not both sets never reaches here and keeps the
+    # shared refusal: `[1] & [2]` and `{1} & [2]` are CPython `TypeError`s and
+    # have no correct program on the far side.
+
+    def _emit_set_op_header(self, left, right, bound_reg: int) -> int:
+        """Emit both operands and a fresh (empty) result blob.
+
+        Leaves X7 = left base, X8 = right base, X2 = nL, X3 = nR and X9 = the
+        result base with its count word zeroed, and returns the blob offset.
+        `bound_reg` holds the run-time element upper bound the reservation is
+        guarded against: X2 for a one-source filter, X4 = nL + nR for the
+        symmetric difference, whose result can hold an element from each side.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        offset = self._list_cursor
+        self._list_cursor += 8 + 8 * cap
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
+        if bound_reg != 2:
+            self.asm.emit(encode_add_xd_xn_xm(bound_reg, 2, 3))
+        self._emit_blob_growth_guard("a set operation", bound_reg, cap, "set")
+        self._emit_list_base(offset)
+        self.asm.emit(encode_movz_wd_imm(4, 0))
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))    # result count = 0
+        return offset
+
+    def _emit_set_append(self, offset: int, elem_reg: int) -> None:
+        """`result[count] = elem; count += 1` (result base reloaded into X9).
+
+        Elements are assumed unique, as a set's are; the reservation guarded in
+        `_emit_set_op_header` is what keeps the store inside the blob."""
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(elem_reg, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+
+    def _emit_set_scan(self, base_reg: int, count_reg: int, elem_reg: int,
+                       found_label: str, miss_label: str) -> None:
+        """Scan `blob[base_reg][0..count_reg)` for `elem_reg`.
+
+        Branches to `found_label` on a hit and `miss_label` when the count is
+        exhausted, so the two callers differ only in which arm appends.
+        Clobbers X0, X1 and X4; `base_reg`, `count_reg` and `elem_reg` are
+        X7/X8, X2/X3 and X6 at every call site, so none is touched."""
+        self.asm.emit(encode_mov_zr_xn(1, count_reg))
+        self.asm.emit(encode_movz_wd_imm(0, 0))
+        loop = f"{self.func_name}_sscan{self._while_counter}"
+        self._while_counter += 1
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(miss_label, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, base_reg, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))
+        self.asm.emit(encode_cmp_xn_xm(4, elem_reg))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(found_label, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(loop)
+
+    def _emit_set_pass(self, src: int, src_n: int, probe: int, probe_n: int,
+                       offset: int, keep_present: bool) -> None:
+        """Append every element of `src` whose probe membership is `keep_present`.
+
+        `src`/`probe` are base registers, `src_n`/`probe_n` the matching count
+        registers. One pass is one of the three filters: intersection keeps
+        the present ones, difference and symmetric difference keep the absent
+        ones (the symmetric difference runs this twice, once per side)."""
+        self._while_counter += 1
+        n = self._while_counter
+        loop = f"{self.func_name}_sp{n}"
+        done = f"{self.func_name}_spd{n}"
+        found = f"{self.func_name}_spf{n}"
+        miss = f"{self.func_name}_spm{n}"
+        nxt = f"{self.func_name}_spx{n}"
+        self.asm.emit(encode_movz_wd_imm(5, 0))
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(5, src_n))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, src, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))    # elem
+        self._emit_set_scan(probe, probe_n, 6, found, miss)
+        self.asm.label(found)
+        if keep_present:
+            self._emit_set_append(offset, 6)
+        self._emit_b_to(nxt)
+        self.asm.label(miss)
+        if not keep_present:
+            self._emit_set_append(offset, 6)
+        self.asm.label(nxt)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+
+    def _emit_set_intersection(self, left, right) -> None:
+        """`a & b`: left elements that right also holds."""
+        offset = self._emit_set_op_header(left, right, 2)
+        self._emit_set_pass(7, 2, 8, 3, offset, True)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_difference(self, left, right) -> None:
+        """`a - b`: left elements that right does not hold."""
+        offset = self._emit_set_op_header(left, right, 2)
+        self._emit_set_pass(7, 2, 8, 3, offset, False)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_symmetric_difference(self, left, right) -> None:
+        """`a ^ b`: left-not-in-right, then right-not-in-left.
+
+        Two absent-passes rather than `(a - b) | (b - a)`, because a union of
+        two freshly-built blobs has no operand NODE to hand `_emit_set_union`.
+        The result order matches CPython's for the same reason the other three
+        do: the left side's own order, then the right side's."""
+        offset = self._emit_set_op_header(left, right, 4)
+        self._emit_set_pass(7, 2, 8, 3, offset, False)
+        self._emit_set_pass(8, 3, 7, 2, offset, False)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _try_emit_set_algebra(self, op, left, right) -> bool:
+        """Lower `left {op} right` when `op` is `|`/`&`/`-`/`^` and BOTH are sets.
+
+        The one gate the two backends share but cannot answer from KINDS:
+        `container_operator_refusal` cannot tell a set from a list (both are a
+        `list:<elem>` blob), so the set-ness question is asked HERE, from the
+        syntax, before the shared gate.  `|` is asked here too rather than only
+        at the concat branch below, because that branch recognises a container
+        by `_is_container_expr` and a NAME bound to a set is not one — so
+        `s | t` between two set NAMES would otherwise reach the ALU.
+
+        A pair that is not set-and-set returns False and keeps the shared
+        refusal, which is right for `[1] | [3]`, `[1] & [2]` and `{1} & [2]` —
+        all CPython `TypeError`s with no correct program on the far side."""
+        if op not in ("|", "&", "-", "^"):
+            return False
+        if not (self._expr_is_set_like(left)
+                and self._expr_is_set_like(right)):
+            return False
+        if op == "|":
+            self._emit_set_union(left, right)
+        elif op == "&":
+            self._emit_set_intersection(left, right)
+        elif op == "-":
+            self._emit_set_difference(left, right)
+        else:
+            self._emit_set_symmetric_difference(left, right)
+        return True
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.

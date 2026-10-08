@@ -12788,37 +12788,6 @@ def container_union_refusal(left: str, right: str, left_is_set: bool,
         f"with an explicit membership test")
 
 
-def set_union_refusal(left: str, right: str) -> str:
-    """Why `{left} | {right}` is not lowered on the backend that asks.
-
-    The SECOND question, asked only once `container_union_refusal` above has
-    said the operator really is a set union between two sets: it is CPython's
-    union, and this backend has no emitter for it. The second one used to lower
-    the operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]`
-    with `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython
-    says 6. Measured on the pre-change tree: it built, it ran, it exited 0, and
-    it was wrong, which is the outcome this file exists to replace with a
-    refusal.
-
-    The message lives here, beside the other refusal texts, so the two backends
-    cannot word it differently on the day the second one grows the emitter —
-    and it says which backend does lower it, because "this is not supported" is
-    the answer that sends a reader looking for a spec when the answer is an
-    emitter. That sentence names arm64's `_emit_set_union` FOR SETS ONLY, and
-    the qualification is the point: the same emitter is what answered
-    `{"a": 1} | {"b": 2}` with 1 before `container_union_refusal` above started
-    refusing a pair blob, so a claim that arm64 "lowers this operator correctly"
-    without the qualification was a false statement about this tree.
-    """
-    return (
-        f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
-        f"containers as a concatenation: the result would keep every element "
-        f"of both sides, repeats included, which is not a set and answers a "
-        f"different program than the source writes. Use `+` if a "
-        f"concatenation is what you want, or build the union with an explicit "
-        f"membership test. arm64 lowers this operator correctly, for two SETS")
-
-
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 
@@ -13795,6 +13764,17 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     other way round (`a = [1, 2]; b = [3, 4]`) happens to agree, because `[3, 4]`
     is the later block and therefore the higher address.
 
+    **STATUS: `&`, `-` and `^` between two SETS are lowered on BOTH backends
+    now** (`_emit_set_intersection` / `_emit_set_difference` /
+    `_emit_set_symmetric_difference`, and x86-64's new `_emit_set_union`), so
+    the SIGSEGV and the 163061056 above are history rather than the current
+    tree: `_try_emit_set_algebra` asks the set-ness question from the syntax,
+    before this gate, because a KIND cannot tell a set from a list.  What is
+    still refused for those three operators is every pair that is NOT two sets
+    — `[1] - [2]`, `{1} & [2]` — and each is a CPython `TypeError` with no
+    correct program on the far side.  `==`/`!=`, the ordering operators and the
+    six no-op operators are still refused here for the reason below.
+
     **The two architectures agreeing is no comfort, and for `==` they do NOT
     agree about being wrong at all**: they agree on the ordering row because they
     lay the frame out the same way, and disagree on the `&` row because their
@@ -13841,6 +13821,24 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     which = ("the left operand" if on_left else
              "the right operand" if container_operand_is_blob(right_kind)
              else "an operand")
+    if bare in ("&", "-", "^"):
+        # The three SET operators have a lowering now (both backends, for two
+        # sets), so this arm is reached only by a pair that is NOT two sets —
+        # and every such pair is a CPython `TypeError` with no correct program
+        # on the far side.  The emitters are named so a reader who meant a set
+        # operation learns which spelling the gate did NOT refuse.
+        return (
+            f"{shown!r} is refused when {which} is a list, tuple, set or dict "
+            f"and the pair is not two SETS. A blob on this path is a fixed "
+            f"block of the frame, so the word the name carries is the block's "
+            f"ADDRESS: `{shown}` between a list and a set, or between two "
+            f"lists, is then arithmetic on that address and never looks at an "
+            f"element. `&`, `-` and `^` between two SETS ARE lowered on both "
+            f"backends (`_emit_set_intersection` / `_emit_set_difference` / "
+            f"`_emit_set_symmetric_difference`); every other pair is a CPython "
+            f"`TypeError`, so refusing is the whole answer. Compare the element "
+            f"you mean (`xs[i] {bare} ys[i]`), reduce the pair to the number "
+            f"you actually want, or test membership with `in`")
     return (
         f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "
         f"blob on this path is a fixed block of the frame, so the word the "
@@ -13848,13 +13846,7 @@ def container_operator_refusal(op: str, left_kind, right_kind,
         f"that address and never looks at an element. Measured on this tree, "
         f"both backends: `a = [3, 1, 2]` then `1 if a == [3, 1, 2] else 0` "
         f"answered 0 where CPython answers 1, because the literal is a second "
-        f"block at a different address; `s = {{1, 2}}` then `s - {{2}}` and "
-        f"`s ^ {{2}}` both died with SIGSEGV and no output, because the result "
-        f"is a word nowhere near a blob and `len` read a count out of it; and "
-        f"`s & {{2}}` answered 2 on arm64 and 163061056 on x86-64 where CPython "
-        f"answers 1, which is one bitwise AND of two addresses — the two "
-        f"architectures disagreeing is the clearest sign that neither of them "
-        f"computed a set. Python's `{shown}` on two containers is "
+        f"block at a different address. Python's `{shown}` on two containers is "
         f"{CONTAINER_OP_MEANING[bare]}, and every one of those needs a "
         f"per-element STRIDE this path has to know before anything runs, so "
         f"there is no lowering to reach for. Compare the element you mean "
