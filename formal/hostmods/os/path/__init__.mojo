@@ -23,13 +23,17 @@ deviations that are properties of this target and are stated on each one:
     alias say that too, because which one you got decides whether there is
     anything to free.
 
-  * A DEFAULT ARGUMENT IS MATERIALIZED ACROSS A DYLIB NOW, so a parameter
-    CPython gives a default gets that default here. `relpath`'s `start` is the
-    one such parameter in this module and it defaults to `"."` — CPython's own
-    `os.curdir`. A call from another image USED not to materialize a callee's
-    default arguments (`FORMAL_default_argument_not_applied_across_a_dylib`,
-    fixed; its doc is deleted, as a fixed bug's is), and that is what the old
-    "no parameter has a default" rule was a workaround for.
+  * NO PARAMETER HAS A DEFAULT. A call from another image USED not to
+    materialize a callee's default arguments — the caller had no signature to
+    read them from, so a defaulted parameter arrived as a stack address — and
+    that is fixed (`formal/imports.py`'s `external_declarations`). `relpath` is
+    the one function here that CPython gives a default to, and it still requires
+    its argument: a choice rather than a limit, and the step that gives it back
+    is written down in
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
+    because it wants a sweep behind it.
+    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
+    deleted, as a fixed bug's is.)
 
   * FOUR FUNCTIONS CARRY NO RETURN ANNOTATION, and it is not an oversight.
     `split`, `splitdrive`, `splitext` and `_next_component` return a TUPLE, and
@@ -72,7 +76,8 @@ from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
-from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32s
+from .._syscalls import fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -615,13 +620,18 @@ def stat_ino(p, follow) -> int:
 
 
 def stat_dev(p, follow) -> int:
-    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+    """`st_dev` — the device the inode lives on, an `int32` at offset 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+    Read SIGNED (`fs_stat_field32s`) rather than zero-extended because that is
+    what CPython's `os.stat().st_dev` is: the field is `dev_t`, an `int32`, and
+    CPython exposes it sign-extended into the `unsigned long long` its
+    `stat_result` stores, so a device with bit 31 set is a value above `2**63`
+    and not the positive 32-bit number a zero-extended read produces.
     """
-    return fs_stat_field32(p, follow, 0)
+    return fs_stat_field32s(p, follow, 0)
 
 
 def stat_nlink(p, follow) -> int:
@@ -717,7 +727,7 @@ def realpath(p) -> str:
     return r
 
 
-def relpath(path, start=".") -> str:
+def relpath(path, start) -> str:
     """`path` relative to `start` — CPython's `os.path.relpath`.
 
     Both are made absolute, the components they share are dropped, one `..` is
@@ -725,13 +735,14 @@ def relpath(path, start=".") -> str:
     `path` is appended. `"."` is the answer when the two are the same path, as
     in CPython. A fresh buffer unless the answer is the literal `"."`.
 
-    `start` defaults to `"."`, which IS CPython's default (`os.curdir` is the
-    string `"."` on a POSIX target, and a default argument has to be a literal
-    on this path, so the module's own `curdir()` cannot be spelled here). A
-    default argument is applied to a call from another image now —
-    `formal/imports.py`'s `external_declarations` gives the emitter the callee's
-    declaration, so the omitted register is filled from the default rather than
-    left holding whatever the caller last put there.
+    `start` is REQUIRED rather than defaulting to `"."`. A default argument is
+    applied to a call from another image now — `formal/imports.py`'s
+    `external_declarations` gives the emitter the callee's declaration, so the
+    omitted register is filled from the default rather than left holding
+    whatever the caller last put there — so this is a choice, not a limit, and
+    the step that gives the default back is in
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`.
+    Pass `"."` for CPython's one-argument form.
 
     There is no `ValueError` for a relative `path` on a target that cannot
     change directory, which CPython raises on Windows; on a POSIX target the
