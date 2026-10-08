@@ -3073,7 +3073,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # is looking at rather than the `+` the table is keyed on.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
-            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op,
+            lowered_container_ops=M.SET_ALGEBRA_OPS)
         if reason is not None:
             raise CodegenError(reason)
         # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
@@ -6375,6 +6376,126 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(crd)
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
 
+    def _emit_set_algebra(self, left, right, op) -> None:
+        """`a & b` (intersection), `a - b` (difference) and `a ^ b` (symmetric
+        difference) over two SET blobs -> a fresh blob in RAX.
+
+        The x86-64 twin of `ARM64Codegen._emit_set_algebra`, over the same
+        shared `_blob_site_growth`/`_emit_blob_growth_guard` helpers, so the two
+        architectures size and guard a site identically.  CPython's answers,
+        element-wise over the blob's 8-byte stride: `&` keeps every element of
+        `a` also in `b`, `-` keeps every element of `a` not in `b`, and `^` is
+        both directions of `-`.  Two blobs hold unique elements, so the appended
+        sequence needs no dedup pass.
+
+        Before this the three operators reached the integer ALU holding blob
+        ADDRESSES (`s & {2}` answered 163061056 here where CPython answers 1),
+        and `s - {2}`/`s ^ {2}` died with SIGSEGV; `container_setop_refusal` is
+        what keeps a LIST/dict operand refused by name, and `|` still refuses on
+        this backend because there is no union emitter.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = min(want, (avail - 8) // 8)
+
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                    # [rsp] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left.
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = min(want, (avail - 8) // 8)
+        offset = self._reserve_blob(8 + 8 * cap, "a set operation")
+
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
+        # The run-time element total the static estimate cannot see.  Symmetric
+        # difference is the only one that can hold both operands, so it checks
+        # nL + nR; `&` and `-` hold at most `a`'s elements and check nL.  R10
+        # carries the total and survives the guard (R11 is its scratch).
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R8))
+        if op == "^":
+            self.asm.emit(encode_add_r64_r64(Reg.R10, Reg.R9))
+        self._emit_blob_growth_guard("a set operation", Reg.R10, cap, "setop")
+        self._emit_blob_base(offset, Reg.RDI)       # RDI = result base
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))  # count = 0
+        # `&` keeps the source element when it is FOUND in the other side;
+        # `-` keeps it when it is ABSENT.  `^` is both directions of `-`.
+        self._emit_set_select(Reg.RSI, Reg.R8, Reg.RDX, Reg.R9, op == "&")
+        if op == "^":
+            self._emit_set_select(Reg.RDX, Reg.R9, Reg.RSI, Reg.R8, False)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _emit_set_select(self, src, src_n, scan, scan_n, keep_found) -> None:
+        """Append every `src` element whose membership in `scan` is
+        `keep_found`, into the result blob at RDI.
+
+        One inner loop, used three times by `_emit_set_algebra`.  Register plan,
+        fixed for the duration: RSI/RDX the operand bases, R8/R9 their count
+        words, RDI the result base; RCX the source index, R10 the element, RAX
+        the scan index, R11 scratch.  `_emit_set_append` clobbers RAX and R11
+        only, both dead at the point it runs.
+        """
+        self._while_counter += 1
+        n = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_ssl{n}"
+        done = f"{fn}_ssd{n}"
+        found = f"{fn}_ssf{n}"
+        miss = f"{fn}_ssm{n}"
+        nxt = f"{fn}_ssn{n}"
+        scan_l = f"{fn}_ssc{n}"
+        self._emit_mov_imm(Reg.RCX, 0)              # i = 0
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, src_n))
+        self._emit_jcc(COND_AE, done)               # i >= n -> done
+        self._emit_elem_addr(src, Reg.RCX, Reg.R10)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R10, 0))   # elem
+        self._emit_mov_imm(Reg.RAX, 0)              # k = 0
+        self.asm.label(scan_l)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, scan_n))
+        self._emit_jcc(COND_AE, miss)               # k >= n -> not found
+        self._emit_elem_addr(scan, Reg.RAX, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R10))
+        self._emit_jcc(COND_E, found)               # equal -> found
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
+        self._emit_jmp(scan_l)
+        self.asm.label(found)
+        if keep_found:
+            self._emit_set_append()
+        self._emit_jmp(nxt)
+        self.asm.label(miss)
+        if not keep_found:
+            self._emit_set_append()
+        self.asm.label(nxt)
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+
+    def _emit_set_append(self) -> None:
+        """`result[count] = R10; count++`, result base RDI, count at [RDI]."""
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RDI, 0))   # count
+        self._emit_elem_addr(Reg.RDI, Reg.R11, Reg.R11)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+
     def _emit_list_repeat(self, blob, count) -> None:
         """`xs * n` over a blob -> a fresh blob with the elements n times, in
         RAX.  arm64's `_emit_list_repeat`, and the same register plan as this
@@ -7442,7 +7563,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
-            untyped_callee=self._untyped_callee)
+            untyped_callee=self._untyped_callee,
+            lowered_container_ops=M.SET_ALGEBRA_OPS)
         if reason is not None:
             raise CodegenError(reason)
         # `|` on a container is a SET UNION only between two SETS, and it has
@@ -7520,6 +7642,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(M.set_union_refusal(
                     M.spelled(e.left), M.spelled(e.right)))
             self._emit_list_concat(e.left, e.right)
+            return
+
+        # `&`, `^` and `-` on a container are set algebra ONLY between two
+        # SETS (`container_setop_refusal`), and this backend passed
+        # `lowered_container_ops=SET_ALGEBRA_OPS` to `string_binary_refusal`
+        # above so the generic blob gate does not refuse them first.  A blob on
+        # either side reaches the gate here whether or not both sides are sets,
+        # so a list operand is refused by name; two words never reach it and
+        # keep the ALU's `&`/`^`/`-`.  x86-64's `_emit_set_algebra` is the twin
+        # of arm64's and shares the reservation/guard helpers; this backend has
+        # no set UNION emitter, so `|` above still refuses.
+        if op in M.SET_ALGEBRA_OPS and (
+                M.container_operand_is_blob(self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            reason = M.container_setop_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
+            if reason is not None:
+                raise CodegenError(reason)
+            self._emit_set_algebra(e.left, e.right, op)
             return
 
         # `xs * n` is a REPETITION and never reached the ALU table before
@@ -10111,11 +10253,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         if isinstance(e, F.IdentExpr):
             return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "&", "^", "-"):
+            # `+` is a concatenation, `|` a union and `&`/`^`/`-` the three
+            # set-algebra operators, and every one leaves a SET a set — but
+            # only where the operands are sets, and a list operand is a CPython
+            # `TypeError` whose refusal is `container_union_refusal`'s or
+            # `container_setop_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
         return False

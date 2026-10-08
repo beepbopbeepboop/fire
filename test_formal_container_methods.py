@@ -627,9 +627,9 @@ SET_CASES = [
     ("s_intersection_r", ["s = {1, 2}", "t = s & {2}", "u = 0",
                           "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
-     "`&` is INTERSECTION — every element both sides hold — lowered on arm64 "
-     "by a per-element membership scan. x86-64 has no set-algebra emitter and "
-     "refuses it, so this case is arm64-only"),
+     "`&` is INTERSECTION — every element both sides hold — lowered on both "
+     "backends by a per-element membership scan. Measured before the gate: 2 "
+     "on arm64 and 163061056 on x86-64 where CPython answers 1"),
     ("s_difference_r", ["s = {1, 2}", "t = s - {2}", "u = 0",
                         "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
@@ -787,12 +787,14 @@ OPERATOR_CASES = [
     ("o_sub", ["a = [1, 2]", "t = a - [2]"], None,
      "`-` between two containers: a TypeError in CPython, and measured as a "
      "SIGSEGV here before the gate"),
-    ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate"),
-    ("o_and", ["s = {1, 2}", "t = s & {2}"], None,
+    ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], "len(t)",
+     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate and "
+     "now lowered on both backends"),
+    ("o_and", ["s = {1, 2}", "t = s & {2}"], "len(t)",
      "`&`: INTERSECTION, measured as 2 on arm64 and 163061056 on x86-64 where "
      "CPython answers 1 — the two architectures disagreeing is the clearest "
-     "possible sign that neither computed a set"),
+     "possible sign that neither computed a set. It is in the operator group "
+     "because it is a container operator, and now answers on both"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -867,18 +869,6 @@ BACKEND_ONLY = {
     "s_union_elems": "x86_64",
     "s_union_str": "x86_64",
     "s_union_ior": "x86_64",
-    # x86-64 has no set-ALGEBRA emitter either (`&`, `^`, `-`); arm64 now
-    # lowers all three, so these are answers on arm64 and absent on x86-64.
-    "s_intersection_r": "x86_64",
-    "s_difference_r": "x86_64",
-    "s_symdiff_r": "x86_64",
-    "s_sub_r": "x86_64",
-    "s_andassign_r": "x86_64",
-    # In the OPERATOR group these two are REFUSAL cases (`o_sub` uses two
-    # LISTS and stays refused on both backends): arm64 now lowers set `^`/`&`,
-    # so the refusal is x86-64's alone.
-    "o_xor": "arm64",
-    "o_and": "arm64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
