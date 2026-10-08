@@ -6,6 +6,15 @@ document `formal/hostmods/json.mojo` cited a file that did not exist. Found
 2026-09-30 while auditing the cross-references of the second host-module wave;
 the measurement below is new, the behaviour is old.
 
+**Status 2026-10-07 (`work/formal160-docs`): next-step item 3 — "pin the
+behaviour" — is DONE, and the sentence that said it was not is corrected below.**
+`test_formal_exceptions.py` now exists and is the three-case group this document
+asked for and more: it runs each program under `python3` and the image and
+compares stdout AND exit status (285 checks), with the uncaught half of the
+exception contract answered and the caught half refused by name. Items 1 (one
+shared success/failure convention) and 2 (an EH runtime) are unchanged and open,
+and item 2 is the reason this stays a limit-of-the-target document.
+
 **Why a document rather than a line in a module docstring.** Four modules now
 answer the same question differently because of this, and each had to invent its
 own wording: `os.makedirs` is CPython's `makedirs(path, exist_ok=True)` with no
@@ -180,10 +189,13 @@ Ordered by what unblocks the most:
    exception object is more than one 64-bit word). That is a real programme,
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.
-3. **Pin the behaviour so a backend change cannot quietly alter it.** There is
-   no test in the tree that raises on this path, which is why the arm64 flush
-   divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` sat unnoticed
-   through both backends and both host-module waves. A three-case group —
-   raise under a handler, `try` with nothing raised, and `return 1` — is enough,
-   and it belongs beside `test_formal_link_accounting.py`, which is the
-   gate-resident file that already owns "does the thing this claim names exist".
+3. ~~**Pin the behaviour so a backend change cannot quietly alter it.**~~ **DONE
+   2026-10-07.** `test_formal_exceptions.py` is the three-case group this item
+   asked for and more: it runs each program under CPython and under the image
+   and compares stdout AND exit status, which is the observable the
+   exit-0-only `test_formal_run.py` runner could not express, and it asserts
+   the uncaught contract (a `raise` terminates, nothing reaches stdout) and the
+   caught contract (a `try`/`except` arm with a body is refused by name). The
+   arm64 flush divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` is
+   the case that motivated it. (The file is not in a `tools/suite.py` bucket;
+   registering it is a separate decision this document does not make.)
