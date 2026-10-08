@@ -1873,95 +1873,80 @@ def _reachable_by_a_call(an, fn):
     return set(an.module_bindings) | _captured_names(fn)
 
 
-def _function_aliases(fn):
-    """`{name: every name a value bound to it may be the SAME OBJECT as}`.
+def _root_name(expr):
+    """The NAME a container expression is rooted at, or None.
 
-    `_info`'s independence test is a NAME-level test, and an object's CONTENTS
-    are not in a name: `a = o.v` binds `a` to the very list `o.v` is, so
-    `o.v[0] = 62` and `w = a[0]` are a store and the read that observes it — and
-    a name-level test sees `{o}` against `{a}`, disjoint, and swaps them.
-    Measured on `refs:0` of `formal_fuzz`'s `refs` mix: the swap moved the store
-    past the read and changed the printed value from `62` to `46`.
-
-    So every assignment `x = <expr>` where `<expr>` names anything contributes an
-    edge between `x` and each name in `<expr>` (and the relation is closed
-    transitively). That is deliberately an OVER-approximation — `x = y + 1`
-    claims the integers `x` and `y` are the same object, which they are not — and
-    it is the sound direction: a false entry can only refuse a swap, never
-    license an unsound one. `t_reorder` consults it and only consults it when one
-    of the two statements MUTATES a container, so a swap of two pure-int
-    statements (the corpus `reorder` exists for) is untouched.
-
-    Nested scopes are skipped: a name bound inside a `def`/`class` body is that
-    scope's own local and cannot alias one of this function's.
+    `h31.b23` and `h31.b23[0]` are both rooted at `h31`; a literal, a call and
+    a comprehension have no root.  This is the reader that lets `t_reorder` see
+    that `A32 = h31.b23` makes the two names one object.
     """
-    edges = {}
-
-    def _bind(target, value):
-        names = _names_in(value)
-        if not names:
-            return
-        targets = [t.id for t in ast.walk(target) if isinstance(t, ast.Name)]
-        for t in targets:
-            edges.setdefault(t, set()).update(names)
-
-    def scan(body):
-        for s in body:
-            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
-                              ast.ClassDef)):
-                continue
-            if isinstance(s, ast.Assign):
-                for t in s.targets:
-                    _bind(t, s.value)
-            elif isinstance(s, ast.AnnAssign) and s.value is not None:
-                _bind(s.target, s.value)
-            elif isinstance(s, (ast.For, ast.AsyncFor)):
-                _bind(s.target, s.iter)
-            elif isinstance(s, (ast.With, ast.AsyncWith)):
-                for item in s.items:
-                    if item.optional_vars is not None:
-                        _bind(item.optional_vars, item.context_expr)
-            for field in ("body", "orelse", "finalbody"):
-                inner = getattr(s, field, None)
-                if isinstance(inner, list):
-                    scan(inner)
-
-    scan(fn.body)
-    # Closure under the union: if `x` may be `y` and `y` may be `z`, all three are
-    # one group. The merge is a small union-find over the few container names a
-    # generated function has, so the quadratic form is not worth a rank table.
-    groups = {}
-
-    def _group(name):
-        return groups.setdefault(name, {name})
-
-    for x, names in edges.items():
-        for n in names:
-            gx, gn = _group(x), _group(n)
-            if gx is gn:
-                continue
-            merged = gx | gn
-            for m in merged:
-                groups[m] = merged
-    return {name: groups[name] for name in groups}
+    while isinstance(expr, (ast.Attribute, ast.Subscript)):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
 
 
-def _mutates_through_an_alias(mutator, other, groups):
-    """Whether `mutator` mutates something `other` reads or writes by another name.
+def _walk_own_scope(node):
+    """Every node in `node`'s own scope, without descending into nested scopes.
 
-    The question `_function_aliases` exists to answer, asked of one ordered pair:
-    `mutator` changes a container reached through `mutator.mutates`, and `other`
-    mentions (reads or writes) a name that may be the same object as one of them.
+    `reorder` operates on one function's statement list, and an alias
+    established by a `def`/`lambda`/`class` body is a fact about THAT body's
+    scope rather than this one — the same argument `_bind_body` makes for not
+    descending into a nested `def`.  So the nested nodes are skipped, and each
+    scope gets its own alias map when it is the `fn` under consideration.
     """
-    if not mutator.mutates:
-        return False
-    mentioned = other.reads | other.writes
-    if not mentioned:
-        return False
-    for base in mutator.mutates:
-        if groups.get(base, {base}) & mentioned:
-            return True
-    return False
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        for child in ast.iter_child_nodes(n):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            stack.append(child)
+
+
+def _alias_classes(fn):
+    """`{name: canonical name}` over the direct aliasing assignments of `fn`.
+
+    A container is mutable and two names bound to the same object ARE one
+    object, so a store through one and a read through the other interact even
+    though the two statements share no name.  Measured on the `refs` mix:
+    `A32 = h31.b23` then `h31.b23[0] = 62` beside `w34 = A32[0]` — the two
+    statements' names are disjoint, the swap was licensed, and CPython printed
+    `46` where the original printed `62`.
+
+    Only a DIRECT assignment whose value is an existing object (`A32 =
+    h31.b23`, `A35 = L20`) establishes an alias here.  A call result is treated
+    as fresh: a callee returning one of its arguments is a shape this reader
+    cannot see, and a statement that holds such a value is already refused
+    whenever it is observable.  Over-approximating — a name is merged even when
+    the aliasing store and the use are on different paths — can only refuse a
+    swap, which is the safe direction; the pair still has to clear every other
+    rule.
+    """
+    parent = {}
+
+    def find(name):
+        parent.setdefault(name, name)
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    for node in _walk_own_scope(fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            root = _root_name(node.value)
+            if root is not None:
+                a, b = find(node.targets[0].id), find(root)
+                if a != b:
+                    parent[a] = b
+    return find
+
+
+def _canonical(names, find):
+    """`names` merged through the alias relation `find`."""
+    return {find(n) for n in names}
 
 
 def t_reorder(module, an, rng):
@@ -1977,11 +1962,6 @@ def t_reorder(module, an, rng):
         `break`/`continue` not inside a loop or `try` of its own);
       * they are not BOTH observable — two statements that each print cannot be
         exchanged, because exchanging them exchanges two lines of output;
-      * a statement that MUTATES a container (`o.v[0] = …`, `o.v = …`) is not
-        exchanged with a statement that mentions any name the mutated base may be
-        the SAME OBJECT as (`_function_aliases`) — `a = o.v` and then a store
-        through `o.v` beside a read of `a`.  This is the rule the NAME-level test
-        cannot state, because the shared object is not a shared name;
       * a statement that WRITES a name a call from this function can reach
         (`_reachable_by_a_call` — a module-level binding, or a name a nested
         scope captures) is not exchanged with a statement that calls anything.
@@ -2008,8 +1988,15 @@ def t_reorder(module, an, rng):
     pairs = []
     for fn in an.functions:
         infos = [_info(s) for s in fn.body]
-        reach = _reachable_by_a_call(an, fn)
-        aliases = _function_aliases(fn)
+        # Names bound to the SAME object are one name for every check below, so
+        # the sets are merged through the function's own alias relation before
+        # they are compared (`_alias_classes`/`_canonical`).
+        find = _alias_classes(fn)
+        for info in infos:
+            info.reads = _canonical(info.reads, find)
+            info.writes = _canonical(info.writes, find)
+            info.escapes = _canonical(info.escapes, find)
+        reach = _canonical(_reachable_by_a_call(an, fn), find)
         for i in range(len(fn.body) - 1):
             a, b = infos[i], infos[i + 1]
             if a.terminal or b.terminal:
@@ -2034,11 +2021,6 @@ def t_reorder(module, an, rng):
             # already restricted the pair to two field binds, it is the one
             # false positive and is skipped.  The name rules below still refuse
             # a same-field or same-read pair (`self.a = self.b`).
-            if not _is_constructor(an, fn):
-                if _mutates_through_an_alias(a, b, aliases):
-                    continue
-                if _mutates_through_an_alias(b, a, aliases):
-                    continue
             if a.writes & (b.reads | b.writes):
                 continue
             if b.writes & (a.reads | a.writes):
