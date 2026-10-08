@@ -4190,6 +4190,11 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # 7 788 (question, struct) pairs changed its answer inside one call.
     if one_field is None:
         one_field = M.one_field_struct_names(structs)
+    # `{name: FunctionDef}`, overloaded names dropped: the ONE by-name reader
+    # `_prepare_functions`' receiver rewrite and each `_seed_one_word_bindings`
+    # call both need, so a callee's DECLARED return type is read from one table
+    # rather than two that could disagree about which definition a name is.
+    functions_by_name = _unique_functions_by_name(functions)
     if not framed:
         # A module with no framed struct has no frame anywhere in it, which is a
         # DEFINITE answer about every parameter — each is an ordinary word —
@@ -4219,7 +4224,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         one_word = {_fn_key(fn): {} for fn in functions}
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
-                                    holders, hstruct, one_word, one_field)
+                                    holders, hstruct, one_word, one_field,
+                                    functions_by_name=functions_by_name)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -4538,7 +4544,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
-                                hstruct, one_word, one_field)
+                                hstruct, one_word, one_field,
+                                functions_by_name=functions_by_name)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -5634,13 +5641,6 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # guessing a nested receiver there is exactly the name-dispatch bug
         # `_check_method_receiver_types` exists for.
         _rewrite_nested_method_calls(fn, nested_fields)
-        # …and the BARE-name half of the same dispatch: a local or parameter
-        # this fixpoint settled as a frame holder, whose method's name a second
-        # struct also declares, is answered from that binding here.  A `with`
-        # alias is the shape that needed it (`with Box() as b: b.use()`), because
-        # its binding is `Box___enter__(tmp)` rather than a construction and the
-        # construction-binding table the earlier pass reads therefore lacks it.
-        _rewrite_holder_method_calls(fn, by_name, structs_by_name)
         # …and the `len` spelling of the same receiver, which is the second
         # route to one `__len__` decision rather than a second decision about
         # it.  It asks `_typed_nested_frame` rather than reading
@@ -6774,67 +6774,6 @@ def _rewrite_nested_method_calls(fn, nested_fields) -> None:
             continue
         node.func = F.IdentExpr(name=M.method_function_name(st.name,
                                                             node.func.member))
-        node.args = [obj] + list(node.args)
-
-
-def _rewrite_holder_method_calls(fn, by_name, structs_by_name) -> None:
-    """`recv.m(x)` -> `Struct_m(recv, x)` for a BARE name that holds a frame.
-
-    **The bare-name half of `_rewrite_nested_method_calls`, and it closes the
-    `with`-alias hole `_lift_one_word_field_method` cannot reach.**  That
-    function's bare-receiver arm dispatches a name whose method's name is
-    declared by two structs of the image — the ambiguity `_method_owners` pops
-    on purpose — but it is handed `_bound_receiver_structs`, which is a
-    CONSTRUCTION-binding table and is built before any frame analysis exists.
-    A `with EXPR as b:` alias is bound to `S.__enter__(tmp)`, not to `S()`, so
-    the name is absent from that table and `b.use()` (with `use` declared by
-    `Box` and one other struct) fell through to the emitter's value-receiver
-    arm and was refused as "a method call on a value … a guess about what it
-    means on 'int'".
-
-    The holder fixpoint has already answered the question by the time this runs:
-    `by_name` maps every name that holds a FRAME to the struct whose layout that
-    frame has, and a `with` alias whose `__enter__` returns the receiver is one
-    of them (which is why `b.tag` already lowered while `c.tag` for an
-    `__enter__` that returns a field still refuses). So the alias's own struct is
-    known here, the name's two-owner ambiguity disappears, and the receiver's
-    struct is the binding evidence this file makes every lowering decision from.
-
-    Runs beside `_rewrite_nested_method_calls` and reads the SAME `by_name`, for
-    the same reason: `_rewrite_method_calls` ran two passes earlier, so any call
-    it could resolve by name alone is already an `IdentExpr` and can never reach
-    here — reaching here means the name-only path declined it, which is exactly
-    the case a binding can answer and a bare name cannot.
-
-    It only fires for a name with EXACTLY ONE frame candidate, a method the
-    struct DECLARES, and a method that takes a receiver; anything else is left
-    for the diagnostic that already describes it.
-    """
-    if not by_name:
-        return
-    for node in M.iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
-                                                             F.MemberExpr):
-            continue
-        obj = node.func.obj
-        if not isinstance(obj, F.IdentExpr):
-            continue
-        cands = by_name.get(obj.name)
-        if not cands or len(cands) != 1:
-            continue
-        st = cands[0]
-        member = node.func.member
-        decl = next((m for m in M.struct_methods(st) if m.name == member), None)
-        if decl is None or not M.method_declares_receiver(decl):
-            continue
-        # The SAME exception `_lift_one_word_field_method` carries: a struct
-        # deriving from the binding's struct and declaring the member makes the
-        # lift a wrong answer, because the base's method is compiled against the
-        # base's layout and the value may be the child's.  Python dispatches on
-        # the value; this path can only see the declaration.
-        if _derived_overrides(st, member, structs_by_name):
-            continue
-        node.func = F.IdentExpr(name=M.method_function_name(st.name, member))
         node.args = [obj] + list(node.args)
 
 
@@ -9837,9 +9776,40 @@ def _nested_frame_bindings(fn, by_name, structs_by_name, params=()):
     return settled, reassigned
 
 
-def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
+def _unique_functions_by_name(functions) -> dict:
+    """`{name: FunctionDef}` for a unit's functions, DROPPING overloaded names.
+
+    One reader for the two places that need a callee's DECLARED return type
+    from a call site: `_prepare_functions`' receiver rewrite and the one-word
+    binding analysis. A name with several definitions is two declarations with
+    no spelling in a call that says which one runs, so it is an answer this
+    table must not give — the same agree-or-refuse rule every other by-name
+    reader in this file applies. Keeping the first and forgetting the rest was
+    the defect this shape exists to prevent.
+    """
+    by_name, overloaded = {}, set()
+    for f in functions or ():
+        name = getattr(f, "name", None)
+        if not name:
+            continue
+        if name in by_name:
+            overloaded.add(name)
+        elif name not in overloaded:
+            by_name[name] = f
+    for name in overloaded:
+        by_name.pop(name, None)
+    return by_name
+
+
+def _one_word_constructor_bindings(fn, structs_by_name, functions_by_name=None,
+                                   one_field=None) -> dict:
     """`{name: [struct, …]}` for locals bound from a ONE-FIELD struct's
     construction — the case whose value is a plain word that IS the field.
+
+    Two bindings, and both are the same fact about one word: the construction
+    `S()` itself, and a CALL whose declared `-> T` names a one-field struct
+    (`_call_returns_one_word_struct`), which hands the caller that struct's only
+    field exactly as the construction does.
 
     `_constructor_bindings` one filter wider, and the filter is the whole
     content rather than a variation: a struct of one field has no frame, so
@@ -9884,9 +9854,15 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
                 or not isinstance(value.func, F.IdentExpr):
             continue
         st = (structs_by_name or {}).get(value.func.name)
-        if st is None or M.type_constructor_kind(value.func.name) is not None:
-            continue
-        if M.struct_is_framed(st) or M.struct_field_count(st) != 1:
+        if st is not None and (M.type_constructor_kind(value.func.name)
+                               is not None
+                               or M.struct_is_framed(st)
+                               or M.struct_field_count(st) != 1):
+            st = None
+        if st is None:
+            st = _call_returns_one_word_struct(
+                value, structs_by_name, functions_by_name, one_field)
+        if st is None:
             continue
         got = out.setdefault(target, [])
         if st not in got:
@@ -9895,11 +9871,13 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
 
 
 def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
-                            one_word, one_field=None) -> None:
+                            one_word, one_field=None, functions_by_name=None
+                            ) -> None:
     """Seed `one_word[fn]` for `fn`, and the HOLDER half of the same fact.
 
-    A LOCAL construction and a DECLARED parameter, the two ways a name becomes
-    a one-field struct's value.
+    A LOCAL construction, a CALL whose declared `-> T` names a one-field
+    struct, and a DECLARED parameter — the three ways a name becomes a
+    one-field struct's value.
 
     One function because there are two arms that need it and a module whose
     structs are ALL one field takes the early-return arm — which is the case
@@ -9977,7 +9955,7 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
     """
     key = _fn_key(fn)
     bound = _one_word_constructor_bindings(fn, structs_by_name,
-                                           [f.name for f in functions])
+                                           functions_by_name, one_field)
     one_word[key].update(bound)
     # …and the same bindings read for the FRAME half, which is the case the
     # one-word VALUE table above cannot see and the frame pass had no case for.
@@ -11126,13 +11104,60 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
     return tuple(chain)
 
 
+def _call_returns_one_word_struct(value, structs_by_name: dict,
+                                  functions_by_name: dict, one_field=None):
+    """The ONE-WORD struct a CALL's declared `-> T` names, or None.
+
+    The third source of one-word evidence beside a construction and a declared
+    parameter: a function of this image DECLARED to return a one-field struct
+    hands its caller that struct's only field, because a one-field struct has
+    no frame and `struct_is_framed` is False for it.  `receiver_struct`'s CALL
+    row already reads a callee's `-> T` for exactly this reason; this is that
+    same declaration asked at the BINDING (`r = f()`) rather than at a
+    receiver, so `r.<sole field>` is the identity `r`.
+
+    `functions_by_name` is `_prepare_functions`' own `{name: FunctionDef}`
+    table, which DROPS an overloaded name rather than picking one, so a name
+    with several definitions claims nothing here — the same agree-or-refuse
+    rule every other by-name reader in this file applies.
+
+    Three refusals, and each is the direction that cannot produce a wrong
+    number:
+
+      * `type_constructor_kind` answers for the name — a conversion produces a
+        plain word that is not a field of anything, so it is not this;
+      * the struct is not one-field, or `struct_is_framed` is True for it — a
+        frame address has its own tables and its own returned-frame convention;
+      * the one field is itself a FRAME (`one_word_sole_field_frame`) — the word
+        is then an ADDRESS, which the HOLDER tables own, and claiming it as a
+        plain one-word value would read through the wrong lowering.  Left to
+        the holder path rather than answered here, which is the safe direction.
+    """
+    if not isinstance(value, F.CallExpr) \
+            or not isinstance(value.func, F.IdentExpr):
+        return None
+    callee = (functions_by_name or {}).get(value.func.name)
+    if callee is None:
+        return None
+    base = M.annotation_base_name(getattr(callee, "return_type", None))
+    st = (structs_by_name or {}).get(base) if base else None
+    if st is None or M.type_constructor_kind(getattr(st, "name", "")) is not None:
+        return None
+    if not M.one_field_answer(st, one_field):
+        return None
+    if M.one_word_sole_field_frame(st, structs_by_name, one_field) is not None:
+        return None
+    return st
+
+
 def _one_word_field_map(fn, structs_by_name: dict, owner=None,
-                        one_field=None) -> dict:
+                        one_field=None, functions_by_name=None) -> dict:
     """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
-    struct's constructor holds that struct's only field, and nothing else on
-    this path can produce such a value.
+    struct's constructor holds that struct's only field, and so does one
+    initialised from a CALL whose declared `-> T` names a one-word struct
+    (`_call_returns_one_word_struct`).
 
     A PARAMETER declared as a one-field struct joins them, from the
     declaration rather than from a binding, because the declaration is the same
@@ -11167,6 +11192,9 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
         if not isinstance(value.func, F.IdentExpr):
             continue
         st = structs_by_name.get(value.func.name)
+        if st is None:
+            st = _call_returns_one_word_struct(
+                value, structs_by_name, functions_by_name, one_field)
         if st is not None and M.one_field_answer(st, one_field):
             mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
@@ -14607,49 +14635,6 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
-def _export_rule_for(module: str, name: str, link_line):
-    """Which `doc/ABI.md` export rule kept `name` off `module`'s boundary.
-
-    The answer a refusal about a bare call needs, and it is the SAME rule the
-    export table was built by (`reflect.export_exclusions`) rather than a
-    second statement of it: `_module_published_names` says the name is not
-    published, and this says WHY, from the defining module's own source.  The
-    source travels in the library's manifest and reaches here through
-    `dylib_export_lists` — the manifest records it for exactly this kind of
-    reader (`_imported_structs` reads a struct declaration back out of one).
-
-    Returns one of `reflect`'s `EXCL_*` constants, `model.EXPORT_RULE_DECLARED`
-    (the file names the declaration but no rule excluded it from the export set
-    — an alias, or a shape this path does not emit), `model.EXPORT_RULE_ABSENT`
-    (the file never names it), or `None` when the source cannot be consulted
-    (no library for `module`, or no `source` in its manifest), which is the
-    caller's cue to fall back to the unqualified sentence rather than invent a
-    rule.  `None` is the only "I could not look" answer; a looked-at file never
-    returns it.
-    """
-    if not link_line or not module:
-        return None
-    source = None
-    for lib in dylib_export_lists(link_line):
-        if lib.get("module") == module:
-            source = lib.get("source")
-            break
-    if not source:
-        return None
-    try:
-        with open(source, encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
-        return None
-    import reflect                              # lazy, as in _export_entries
-    excluded = reflect.export_exclusions(text)
-    if name in excluded:
-        return excluded[name]
-    if name in reflect.declared_names(text):
-        return M.EXPORT_RULE_DECLARED
-    return M.EXPORT_RULE_ABSENT
-
-
 def _module_published_variables(module: str, link_line) -> set:
     """The module-level names the library built for `module` treats as VARIABLES.
 
@@ -14812,10 +14797,7 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
     published = _module_published_names(module, link_line)
     if not published or base_name in published:
         return None
-    rule, declared = M.export_rule_for(base_name,
-                                       getattr(sym, "module", None), link_line)
-    return M.imported_callee_refusal(base_name, sym, fn_name,
-                                     rule=rule, declared=declared)
+    return M.imported_callee_refusal(base_name, sym, fn_name)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None) -> None:
@@ -16006,10 +15988,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.is_import_alias(cname, import_aliases)
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
-                    rule, declared = M.export_rule_for(
-                        cname, getattr(csym, "module", None), link_line)
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name, rule=rule, declared=declared))
+                        cname, csym, fn.name))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16140,10 +16120,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # fact about the boundary and not about storage — see the
                     # `bracket_callees` note above for why this is refused here
                     # rather than allowed to reach a dangling `BL`.
-                    rule, declared = M.export_rule_for(
-                        name, getattr(sym, "module", None), link_line)
                     raise CodegenError(M.imported_callee_refusal(
-                        name, sym, fn.name, rule=rule, declared=declared))
+                        name, sym, fn.name))
                 # A module-level name with no slot, refused for the reason a
                 # module-level name is refused: nothing writes it, so its value
                 # is the module-level one, and the build can only know that if
@@ -18250,14 +18228,9 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # read (`structs_by_name` over deduplicated StructDefs, `method_owners` over
     # owners that have already popped their ambiguous names), and this is the one
     # place a name reaches a table before anything has established that it is.
-    _functions_by_name, _overloaded_names = {}, set()
-    for _f in functions:
-        if _f.name in _functions_by_name:
-            _overloaded_names.add(_f.name)
-        elif _f.name not in _overloaded_names:
-            _functions_by_name[_f.name] = _f
-    for _n in _overloaded_names:
-        _functions_by_name.pop(_n, None)
+    # The rule is `_unique_functions_by_name`, shared with the one-word binding
+    # analysis so the two cannot disagree about which definition a callee is.
+    _functions_by_name = _unique_functions_by_name(functions)
     for fn in functions:
         # A `match` is lowered to compares and branches HERE, before anything
         # else in this loop reads the body, and for the same reason the `with`
@@ -18355,7 +18328,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # through one of those fields gets — and the chain is one line away
         # either way.  One recognition of "this name is a one-word word", read
         # once.
-        one_word = _one_word_field_map(fn, structs_by_name, st, one_field)
+        one_word = _one_word_field_map(fn, structs_by_name, st, one_field,
+                                       _functions_by_name)
         if st is not None and M.one_field_answer(st, one_field):
             one_word["self"] = st
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
@@ -19460,19 +19434,24 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
     `pattern == subject`.** `==` cannot answer differently either way on this
     path — it is a word compare or a `strcmp` (`_emit_branch_unless`'s
     `_emit_strcmp_flags` arm), with no `__eq__` dispatch to make it asymmetric —
-    and the two orders were NOT the same to the arm64 proof generator, which is
-    the whole reason for the choice. `if n == 0:` lowers to a `CBZ` and
-    `if 0 == n:` to `CMP` + `B.cond`, and the generator's CBZ-only "the taken
-    arm is statically dead" optimisation was applied to the `B.cond` too — its
-    `r = w & 0x1f` is the condition field, not a register — so the second
-    spelling's proof did not elaborate (`Application type mismatch` on the
-    `absurd`). That gap is FIXED (`formal/arm64_proof_gen.py` guards the
-    optimisation with `_bidx == 16`, pinned by
-    `test_formal_call_proof_gen.py::TestAComparisonWithTheImmediateOnTheLeft`),
-    but the subject-on-the-left order is still what this lowering emits: a
-    `match n: case 0:` then lowers to the same compare an `if` does, so a
-    `match` is provable wherever its `if` spelling is — which is the whole claim
-    this lowering makes.
+    and the two orders are NOT the same to the arm64 proof generator, which is
+    the whole reason for the choice. Measured on this tree through
+    `formal/lean.py::check_proof_cached`:
+
+        def main() -> Int:          arm64 proof
+            n = 3
+            if n == 0: ...          ok
+            if 0 == n: ...          FAILS (Application type mismatch on the
+                                   B.cond block's hcond obligation)
+
+    and a `match` with one literal case lowered to the second order fails the
+    same way while the identical program written as `if` passes. Putting the
+    subject on the left makes `match n: case 0:` emit the compare an `if` would,
+    so a `match` is provable wherever its `if` spelling is — which is the whole
+    claim this lowering makes, and it would be false of the Lean model for every
+    two-case `match` otherwise. The operand-order sensitivity itself is a
+    pre-existing gap in that generator and is filed as
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md`.
 
     **Adding a capture's name to `bound` is a STATIC answer to a question the
     reference asks at RUN TIME, and it is the right one.** The reference asks
@@ -20473,20 +20452,11 @@ def dylib_export_lists(dylibs: list) -> list:
     which of the two shapes it is (`model.dylib_module_variables`,
     `model.dylib_module_containers`)."""
     return [{"module": d.get("module") or "",
-             "source": d.get("source"),
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},
              "variables": list(d.get("variables") or []),
-             "containers": list(d.get("containers") or []),
-             # The defining module's OWN source, carried so that a refusal that
-             # has only the module NAME can read the declaration the export rule
-             # was applied to (`model.export_rule_for`).  It is the same file the
-             # library was compiled from — the argument `_imported_structs`
-             # already makes for a struct declaration read back out of a
-             # manifest — rather than a second lookup of a path this list
-             # already heard.
-             "source": d.get("source")}
+             "containers": list(d.get("containers") or [])}
             for d in (dylibs or [])]
 
 
@@ -20883,7 +20853,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (684 entry points, 273 of them word-shaped,
+    §3.1 for the word-shaped surface (683 entry points, 272 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps
@@ -21356,13 +21326,13 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
-                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a BACKEND "
-                f"rule that a module nothing binds needs no library at all, an "
-                f"importer reading the constant directly instead of linking a "
-                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
-                f"cannot_be_a_dylib.md`). Neither exists here, so this is "
-                f"refused at the build rather than linked as a library with "
-                f"nothing in it, and nothing here is waiting on this file.")
+                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a rule that "
+                f"a module nothing binds needs no library at all, an importer "
+                f"reading the constant directly instead of linking a library "
+                f"for it (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_"
+                f"a_dylib.md`). Neither exists here, so this is refused at the "
+                f"build rather than linked as a library with nothing in it, and "
+                f"nothing here is waiting on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and
