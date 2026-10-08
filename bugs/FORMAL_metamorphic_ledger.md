@@ -4,6 +4,35 @@
 
 `bugs/FORMAL_fuzz_ledger.md` is the differential fuzzer's ledger and the two read together: `formal_fuzz` asks "does the image answer what CPython answers", this one asks "do two builds of the same meaning answer the same". See §3 for why the second question reaches a class the first cannot.
 
+**Status 2026-10-07 (`work/formal160-docs`): FOUR tool defects and two stale
+test expectations were red, and they are fixed. `test_formal_metamorph.py` was
+55 tests with 5 failures; it is 55/55 now.** Two are `reorder` soundness holes
+that §5's table did not carry, both caught by the file's own
+`test_every_transform_preserves_the_meaning`:
+
+* **An ALIAS made two names look independent.** `A32 = h31.b23` makes `A32[0]`
+  and `h31.b23[0]` one memory, and `reorder` swapped `h31.b23[0] = 62` past
+  `w34 = A32[0]` — the two statements mention no name in common, and the
+  printed value moved 62 → 46 (generated `refs:0`). `Analysis.alias_closure`
+  and `_reference_aliases` are the relation now consulted; it is a sound
+  over-approximation built from assignments whose RHS is a Name/Attribute/
+  Subscript.
+* **The call-reachability rule asked only about WRITES.** `_reachable_by_a_call`
+  is the names a CALL may READ OR WRITE, so `w13 = G8` swapped past
+  `print(bump11(1))` — which writes `G8` — moved the printed value 32 → 33
+  (generated `globals:3`). The rule now asks about reads too.
+
+The other two are in the normaliser and the tests: `normalise_mojo` removed
+`@spec`/`@require`/`@ensure` but not `@refines(Specs.factorial64; 20)`, whose
+Mojo-only arguments CPython's parser refuses, so ELEVEN examples (`fact`,
+`sum`, `absval`, `bitops`, `chain`, `bigconst`, `identity`, `localmul`,
+`nonzero`, `pair`, `shiftlr`) were undrivable; and the driver's unit tests
+mocked `cpython_answer` with a bare `(exit, stdout)` tuple, which
+`oracle_answer` rejects, so three cross-machine verdict tests read
+`not-answerable`. §6 item 1's "one unmeasured example" is therefore three
+`struct` files now (`wide_recv`, `struct_point`, `struct_method`), which is
+the documented non-goal rather than the `@refines` hole.
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
@@ -212,20 +241,24 @@ Every row in §2 is reproducible from the seed and the index range:
     python3 tools/memslot.py --gb 8 --label mm -- python3 tools/formal_metamorph.py \
         -n 20 --mix core --stmts 8 20 -j 6
 
-`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus of 14 programs (one per documented rule), every generator mix, and every drivable example — and now that **51 of the 51** examples have a CPython oracle, which is what makes the two argument-taking examples (`twoparams`, `subscript_var`) part of the property rather than silently unanswered.
+`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus (one program per documented rule), every generator mix, and every drivable example — and now that **90 of the 93** examples have a CPython oracle, which is what makes the two argument-taking examples (`twoparams`, `subscript_var`) part of the property rather than silently unanswered. The three that are not are the `struct` files §6 item 1 names; the eleven `@refines` files that used to be among them are driven as of 2026-10-07 (the Status at the top).
 
 **What is NOT measured here**, and is the next thing a session should do. The
 first three items of the previous session's list are now DONE and are recorded in
 §2a; these are the four that remain:
 
-1. **One `formal/examples` file is unmeasured: `wide_recv.mojo`**, for its
-   `struct Point:`. The rules remove `@spec`/`@require`/`@ensure`, `var` and `fn`
-   and nothing else, deliberately: a Python `class` body of bare annotations has no
+1. **Three `formal/examples` files are unmeasured, and all three are `struct`:
+   `wide_recv.mojo`, `struct_point.mojo` and `struct_method.mojo`.** The rules
+   remove `@spec`/`@require`/`@ensure`/`@refines`, `var` and `fn` and nothing
+   else, deliberately: a Python `class` body of bare annotations has no
    attributes, so `p.get_y()` reads a name that was never assigned while the
-   struct's field reads `0` — a real disagreement with CPython manufactured by the
-   translation rather than found by it. Giving each field an initialiser is a
+   struct's field reads `0` — a real disagreement with CPython manufactured by
+   the translation rather than found by it. Giving each field an initialiser is a
    judgement about what a struct's fields are worth, not a removal of syntax. So
-   the next step is a DECISION about `struct`, not another rule.
+   the next step is a DECISION about `struct`, not another rule. **The eleven
+   `@refines` examples that were undrivable for a spelling are now driven** — see
+   the Status at the top — and `test_the_examples_corpus_is_mostly_measured`
+   allows exactly these three by name, so a NEW undriven file still fails.
 2. **No metamorphic sweep of the stdlib.** `formal/hostmods/*.mojo` is the largest
    body of real source this backend must keep working, and a metamorphic pair over
    it needs the import machinery the fuzzer does not have. This is the largest
