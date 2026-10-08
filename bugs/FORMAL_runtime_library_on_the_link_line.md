@@ -108,14 +108,14 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
-206 exported / 166 reachable where the same census measures 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
-exactly that. Pre-existing, measured on this document's base, and filed as
-`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
-fixed here: `FORMAL.md`'s figure sweep is another branch's project
-(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
-have nothing to do with the link line.
+**`FORMAL.md` §2.2/§6's published figures are the tree's again** — 272
+word-shaped, 216 the runtime library exports, 176 reachable, 411 with a box —
+and the two tests that compare them (`test_formal_doc_truth.py`,
+`test_formal_runtime_link.py`) are green (the latter 183/183). They had fallen
+15 entry points behind when the runtime grew, which is what
+`1dd68a48`/`ca50560f` ("DOCS vs REALITY") and a follow-up sweep corrected;
+`test_formal_doc_truth.py` had also kept a hardcoded 262 of its own beside the
+document it was checking.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the

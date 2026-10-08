@@ -120,7 +120,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | **unclaimed** | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
 | `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | **unclaimed** | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
 | `FORMAL_string_value_model.md` | **unclaimed** | what a string IS on the formal path, and the two things that want to be one |
-| `FORMAL_the_published_surface_figures_are_behind_the_tree.md` | **unclaimed** | `FORMAL.md` §1/§2.2/§6/§12 publish numbers the tree has outgrown, and TWO registered gate jobs are red on exactly that |
 | `FORMAL_the_runtime_dylib_leaves_its_staging_directory.md` | **unclaimed** | 520 kB per cold CAS, never removed |
 | `TEST_the_formal_doc_truth_census_is_in_no_bucket.md` | **unclaimed** | `FORMAL.md`'s numbers are 8 rows stale and the file that measures them runs in no gate |
 
