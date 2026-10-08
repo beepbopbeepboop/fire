@@ -9486,6 +9486,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
+            deref_kind=lambda e: M.pointer_deref_kind(
+                fn, e, self._structs, self._functions),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
