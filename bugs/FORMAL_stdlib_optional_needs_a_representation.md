@@ -1,9 +1,21 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
+**Status 2026-10-08 (`work/formal181-docs`): the REPRESENTATION this document
+asks for LANDED 2026-10-05, so its "NOT FIXED" headline is no longer true — read
+`bugs/FORMAL_optional_needs_a_niche.md`, which is the live document. `None` is a
+NICHE word per payload type (`formal/model.py::optional_none_word`), and
+`x is None`, `x == None`, `or_else`, `value_or`, `or`, `unsafe_value` and
+`bool(x)` all lower to a compare against an immediate plus a conditional, on both
+backends. What remains is the TWO-WORD form for a payload with no niche —
+`Optional[Int]`, which is exactly `builtin_slice.mojo`'s field — and an unstated
+payload; both are §2 and §3 of that doc, and neither is this row's work. **The
+chain analysis below is kept as the HISTORY that priced the two-word form**: it
+is why the niche was chosen first and what the tagged form still costs. A reader
+who wants the current state should read the niche doc, not this one.**
+
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
-Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
-value-model decision, and it is the last thing between the `builtin_slice` row
-and 13 files.** Its own dependency chain has since moved TWICE and is now
+Found 2026-10-01 on `work/formal2-re-and-slice`. Its own dependency chain has
+since moved TWICE and is now
 blocked one layer EARLIER than either revision of it below says: see
 "Re-measured 2026-10-03" at the end, whose first arrow is a frame-identity
 question in somebody else's area (a one-word struct whose only field is a nested frame, whose `__init__` was read as returning a frame — the doc that filed it was deleted with the fix, and its subject is now `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`).

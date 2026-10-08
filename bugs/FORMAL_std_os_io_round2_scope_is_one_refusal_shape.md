@@ -6,21 +6,17 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
-**Status (2026-10-07, `work/formal135-docs`): the §0.4/§6.2 sentence was red on
-`master`, and the RED was a merge, not a missing fix. The `no_public_api_reason`
-constants-only text was reworded by the `work/formal27-5`/`work/merge-formal45`
-merge (`b9174ce1e`) and two phrases its own pin asserts went with it — "nothing
-an importer could bind" became "no address an importer could bind", and "a
-decision about the BACKEND" was dropped — so
-`test_formal_imports.py::test_a_constants_only_module_is_not_told_nothing_could_be_added`
-failed and `formal-imports` (a gate job) was red. The sentence is restored with
-both halves the doc itself states: the refusal is correct ("nothing an importer
-could bind") and what would remove it is "a decision about the BACKEND" beside
-the two things that would answer it. Measured: `test_formal_imports.py`
-PASS=90 FAIL=0 (was 89/1). The §0.4 pin the doc names
-(`test_formal_monomorph.py`'s constants-only test) has since become a
-build-and-RUN comparison, so this file's test is the live pin; the doc's §0.4
-sentence is otherwise unchanged.**
+**Status (2026-10-08, `work/formal181-docs`): §0.4's red guard is GREEN again — a
+reword had drifted the sentence past two phrases the guard asserts, and both are
+restored.** `test_formal_imports.py::test_a_constants_only_module_is_not_told_
+nothing_could_be_added` checks, of the constants-only branch, that it does not
+say the false clause "nothing this backend could add", that it NAMES its owner,
+that it says the missing thing is a rule about the BACKEND rather than work on
+the module, and that it keeps the branch's own judgement "nothing an importer
+could bind". A later rewrite of the branch's text dropped the "BACKEND" phrase
+and the "nothing an importer could bind" phrase, leaving that guard red on
+`master`; both are back, with the newer wording that cites both owner docs kept.
+The judgement is unchanged and §6 item 2 stays closed.
 
 **Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
 (§0.4) — the false clause "nothing this backend could add" is gone and the
