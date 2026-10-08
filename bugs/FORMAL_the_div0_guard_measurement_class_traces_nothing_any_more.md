@@ -38,8 +38,9 @@ worker's claim.**
   subtracted **anywhere**, and there is a SECOND opaque call — the guard's
   `getrlimit` — that the doc's single-call account does not have.
 * **Both halves are another worker's.** The `getrlimit` guard and the dropped
-  `_emit_trap_flush` are `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_
-  a_program_call.md` (`formal163-docs`), whose own next step 1 is exactly
+  `_emit_trap_flush` are
+  `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`
+  (`formal163-docs`), whose own next step 1 is exactly
   "subtract the compiler's calls from `_calls`". Step 2 below is therefore not
   this tree's to take and is not taken here. When it lands, the check added here
   is what makes the resumed measurement trustworthy: the mechanism row passes

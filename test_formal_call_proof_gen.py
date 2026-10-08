@@ -5484,8 +5484,9 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     """The measurement itself: the residual is `1 = 0`, and it is FALSE.
 
     **And the mechanism check the doc asks for first, because this class has
-    gone blind once already — `bugs/FORMAL_the_div0_guard_measurement_class_
-    traces_nothing_any_more.md` step 1.** The class dissects a generated file
+    gone blind once already — the step 1 of
+    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`.**
+    The class dissects a generated file
     by replacing the walk terminal's `all_goals (first | done | sorry)`
     admission with a `trace_state`; when the fixture stops producing a file (or
     produces one with no such admission) the replacement is a no-op, no goal is
