@@ -6,6 +6,7 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 from __future__ import annotations
 import re
 import sys
+import unicodedata
 import dataclasses
 from dataclasses import dataclass, field
 
@@ -1783,14 +1784,41 @@ def decode_c_escapes(s: str) -> str:
     path passes that text to a C compiler, which decodes the escapes itself.
     A consumer that does not hand the text to a C compiler has to do it here.
 
-        The set: the C simple escapes, plus \xHH.
+        The set: the C simple escapes, \xHH, \uXXXX, \UXXXXXXXX, \N{NAME} and
+        a one-to-three-digit octal run.
 
-    \n \t \r \\ \" \' \0 \a \b \f \v, then \x followed by two hex digits. An
+    \n \t \r \\ \" \' \a \b \f \v, then \x followed by exactly two hex digits,
+    \u followed by exactly four, \U by exactly eight, \N{…} resolved through
+    `unicodedata.lookup`, and `\` followed by one to three octal digits. An
     UNKNOWN escape keeps its backslash (`"\d"` is a backslash and a d, which is
     CPython's own behaviour and what `gimple_codegen._c_escape` passes through),
-    and a trailing lone backslash is kept verbatim. That is deliberately
-    permissive: a recognised escape it gets WRONG is a wrong answer, while an
-    unrecognised one it leaves alone is what the source most likely meant.
+    and a trailing lone backslash is kept verbatim. A RECOGNISED escape with
+    the wrong number of digits (`"\x4"`, `"\u12"`, `"\N{}"`) falls to that same
+    permissive arm rather than being half-decoded. `\0` is a one-digit octal run
+    and so is still a NUL byte, which is why `0` is deliberately NOT in the
+    simple table: it used to be, and that entry made `"\101"` a NUL followed by
+    the text `101` instead of the letter `A`.
+
+    **`\u`, `\U`, `\N{…}` and octal used to be missing entirely, and that was a
+    wrong answer in all three engines rather than a refusal**: measured,
+    `"\\u00e9"` was one character in CPython and six here, and `"\\101"` was `A`
+    there and four characters here. `formal/model.py`'s TEXT ENCODING block
+    makes the formal half free (a literal's `len` folds from its decoded text),
+    which is why the formal backends are the ones that gain
+    `len("\\u00e9") == 1` from this change alone.
+
+    **`\N{…}` on an unknown name is an error, not a passthrough.** CPython
+    refuses the source there, and a decoder that returned the spelling would be
+    a second wrong answer, so `unicodedata.lookup`'s `KeyError` becomes a
+    `SyntaxError` naming the name.
+
+    **A `\u`/`\U` escape naming a lone SURROGATE stays verbatim**, because a
+    surrogate is a character CPython's `str` can hold and no UTF-8 encoder can
+    write, and every consumer here writes the decoded text to UTF-8 — so
+    decoding one would turn a source literal into a crash in `str.encode`.
+    CPython's own value there is unrepresentable on this path (a string is a
+    NUL-terminated `char *`), so the permissive arm is the honest answer rather
+    than a half-decode.
 
     Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
     that no engine here preserves `r"..."`, so a literal's body arriving here has
@@ -1801,18 +1829,59 @@ def decode_c_escapes(s: str) -> str:
     if '\\' not in s:
         return s
     simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
-              "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+              "'": "'", 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+    hexdigits = '0123456789abcdefABCDEF'
     out = []
     i, n = 0, len(s)
     while i < n:
         c = s[i]
         if c == '\\' and i + 1 < n:
             nxt = s[i + 1]
+            # `\xHH` — exactly two hex digits, the rule that already refused a
+            # short one.
+            if nxt == 'x' and i + 3 < n and s[i + 2] in hexdigits \
+                    and s[i + 3] in hexdigits:
+                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
+            # `\uXXXX` — exactly four hex digits, and NOT a surrogate.  A lone
+            # surrogate (U+D800..U+DFFF) is a character CPython's `str` can hold
+            # and no UTF-8 encoding can spell; every consumer here writes the
+            # decoded text to UTF-8 (`_intern_string`, `formal/build.py`), so
+            # producing one turns a source literal into a crash in the encoder.
+            # It falls to the permissive arm instead, which is the honest answer
+            # for a value this path's NUL-terminated `char *` cannot represent.
+            if nxt == 'u' and i + 5 < n \
+                    and all(s[i + 2 + k] in hexdigits for k in range(4)):
+                code = int(s[i + 2:i + 6], 16)
+                if not (0xD800 <= code <= 0xDFFF):
+                    out.append(chr(code)); i += 6; continue
+            # `\UXXXXXXXX` — exactly eight digits, in range and not a surrogate,
+            # for the same two reasons `\u` gives.
+            if nxt == 'U' and i + 9 < n \
+                    and all(s[i + 2 + k] in hexdigits for k in range(8)):
+                code = int(s[i + 2:i + 10], 16)
+                if code <= 0x10FFFF and not (0xD800 <= code <= 0xDFFF):
+                    out.append(chr(code)); i += 10; continue
+            # `\N{NAME}` — the braced Unicode name. An empty or unclosed brace
+            # falls through to the permissive arm; an UNKNOWN name is an error.
+            if nxt == 'N' and i + 2 < n and s[i + 2] == '{':
+                close = s.find('}', i + 3)
+                if close > i + 3:
+                    name = s[i + 3:close]
+                    try:
+                        out.append(unicodedata.lookup(name))
+                    except KeyError:
+                        raise SyntaxError(
+                            f"unknown Unicode character name in \\N{{...}}: "
+                            f"{name!r}") from None
+                    i = close + 1; continue
+            # An octal run of one to three digits (`\0` is the one-digit case).
+            if nxt in '01234567':
+                j = i + 1
+                while j < n and j < i + 4 and s[j] in '01234567':
+                    j += 1
+                out.append(chr(int(s[i + 1:j], 8))); i = j; continue
             if nxt in simple:
                 out.append(simple[nxt]); i += 2; continue
-            if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
-                    and s[i + 3] in '0123456789abcdefABCDEF':
-                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
             # Unknown escape — leave the backslash as-is (CPython's own
             # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
             # `\\` passthrough.

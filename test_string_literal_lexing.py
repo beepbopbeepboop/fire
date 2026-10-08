@@ -77,11 +77,13 @@ decision rather than an accident.
 
 Run:  python3 test_string_literal_lexing.py [-v]
 """
+import ast
 import os
 import platform
 import subprocess
 import sys
 import tempfile
+import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -847,6 +849,74 @@ def check_refusal_message(verbose):
     return False, "an unterminated triple-quoted literal was accepted"
 
 
+# The escape table: a COOKED literal body on the left, and CPython is the oracle
+# for what it means — `ast.literal_eval` of the quoted body, run HERE, so a row's
+# expectation is a comparison rather than a constant a person transcribed. The
+# rows are `r"..."` in this file so CPython's own loader does not decode them
+# first.
+#
+# `\u`, `\U`, `\N{...}` and the octal run were NOT in `decode_c_escapes`, and
+# that was a wrong answer in all three engines rather than a refusal — measured
+# and fixed 2026-10-08 (the front-end escape-decoding bug; its doc went with the
+# fix). The three rows at the end (`\d`, `\q`, `\$`) are the permissive arm: an
+# UNKNOWN escape keeps its backslash, which is CPython's behaviour too.
+ESCAPE_ROWS = (
+    r"\n", r"\t", r"\r", r"\\", r"\'", r"\a", r"\b", r"\f", r"\v",
+    r"\x41", r"\xe9", r"\u00e9", r"\u2603", r"\U0001F600",
+    r"\N{LATIN SMALL LETTER E WITH ACUTE}", r"\101", r"\0", r"\12", r"\7",
+    r"\d", r"\q", r"\$",
+)
+
+# Malformed named escapes are the permissive arm, not a half-decode: a
+# recognised letter with the wrong DIGIT COUNT falls through to "unknown", which
+# keeps the backslash. `\N{...}` with an unknown NAME is the one that is an
+# error, because CPython refuses the source and returning the spelling would be
+# a second wrong answer.
+# A lone SURROGATE is in this table and not in `ESCAPE_ROWS` on purpose: CPython
+# makes one character of it, but that character has no UTF-8 encoding and every
+# consumer here writes the decoded text as UTF-8, so decoding it turned a doc
+# comment (`formal/hostmods/json.mojo` spells `\ud800` while explaining why it
+# refuses exactly that code point) into a `UnicodeEncodeError` from the
+# assembler. This path cannot represent it, so the permissive arm is the answer.
+ESCAPE_MALFORMED = (r"\x4", r"\u12", r"\u123", r"\U0001F60", r"\N{}",
+                    r"\N{unclosed", r"\ud800", r"\U0000D800")
+
+
+def check_escape_decoding(verbose):
+    """`decode_c_escapes` against CPython, row by row."""
+    for body in ESCAPE_ROWS:
+        with warnings.catch_warnings():
+            # `"\d"` is a DeprecationWarning under CPython 3.14 and is still
+            # the value `\d`; the warning is CPython's opinion about the SOURCE,
+            # not about the answer this row compares.
+            warnings.simplefilter("ignore")
+            try:
+                want = ast.literal_eval('"' + body + '"')
+            except (SyntaxError, ValueError) as e:
+                return False, (f"the oracle could not read {body!r}: {e}")
+        got = F.decode_c_escapes(body)
+        if got != want:
+            return False, (f"decode_c_escapes({body!r}) is {got!r} where CPython "
+                           f"makes {want!r}")
+        if verbose:
+            print(f"  escape       {body:44s} -> {got!r}")
+    for body in ESCAPE_MALFORMED:
+        got = F.decode_c_escapes(body)
+        if got != body:
+            return False, (f"a malformed escape {body!r} was decoded to {got!r}; "
+                           f"a recognised letter with the wrong digit count "
+                           f"must keep the backslash rather than half-decode")
+    try:
+        F.decode_c_escapes(r"\N{ZZZ NOT A NAME}")
+    except SyntaxError:
+        pass
+    else:
+        return False, ("an unknown Unicode name was accepted; CPython refuses "
+                       "the source and returning the spelling is a second "
+                       "wrong answer")
+    return True, ""
+
+
 def run_end_to_end(verbose):
     """Build an arm64 image, RUN it, and compare with CPython on the same text.
 
@@ -1053,6 +1123,9 @@ def main(argv):
     ok, why = check_refusal_message(verbose)
     if not ok:
         failures.append(why)
+    ok, why = check_escape_decoding(verbose)
+    if not ok:
+        failures.append(why)
     ok, why = check_interpolated_flag(verbose)
     if not ok:
         failures.append(why)
@@ -1063,7 +1136,7 @@ def main(argv):
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 6
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 7
     print()
     if failures:
         for f in failures:

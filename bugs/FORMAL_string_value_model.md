@@ -1057,18 +1057,24 @@ divergence, recorded there and not fixed here. For a non-ASCII string it gave a
 byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
 is refused by name.
 
-## The next step, which is not in this document's subject
+## The front-end escape fix, which was not in this document's subject
 
-**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes are not decoded by any engine
-in this repository**, so `len("\u00e9")` is 6 here and 1 in CPython, on the
-interpreter, the compiled path and both formal backends alike. That is
-`fire_compiler.decode_c_escapes` and it is a FRONT-END defect, not a
-string-value-model one: `bugs/LEXER_unicode_escapes_are_not_decoded.md`, with the
-four-row measurement and the reason "an unknown escape keeps its backslash" and
-"a known escape is missing" are the same behaviour here and opposite behaviours
-in CPython. It is worth knowing that the encoding block above makes the formal
-half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
-decoder knows the escape, because the fold reads the decoded text.
+**FIXED 2026-10-08.** `\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes were
+not decoded by any engine in this repository, so `len("\u00e9")` was 6 here and
+1 in CPython, on the interpreter, the compiled path and both formal backends
+alike. That was `fire_compiler.decode_c_escapes` and it was a FRONT-END defect,
+not a string-value-model one — its doc carried the four-row measurement and the
+reason "an unknown escape keeps its backslash" and "a known escape is missing"
+were the same behaviour here and opposite behaviours in CPython, and that doc
+went with the fix. The decoder now handles all four, keeps an unknown escape
+verbatim, raises `SyntaxError` for an unknown `\N{…}` name, and keeps a lone
+surrogate verbatim (no UTF-8 encoding can spell one, so decoding it crashed the
+assembler's `str.encode`). The encoding block above is what made the formal half
+free: `len("\u00e9")` is 1 on both backends the moment the decoder knows the
+escape, because the fold reads the decoded text, and `ord("\u00e9")` is 233
+where the escaped spelling's first byte is a backslash. The unit rows are
+`test_string_literal_lexing.py::check_escape_decoding` (CPython is the oracle)
+and the formal rows are in `test_formal_unicode.py`.
 
 ## `ord`, `chr` and `hash` were not an encoding question at all
 

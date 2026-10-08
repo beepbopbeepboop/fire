@@ -58,14 +58,14 @@ CPython. Without the guard a fix that refused everything would pass this file.
 
 ## What this file does NOT cover, and where it went instead
 
-  * `\\uXXXX`, `\\UXXXXXXXX` and `\\N{…}` ESCAPES are not decoded by
-    `fire_compiler.decode_c_escapes`, so all three engines make a six-character
-    string out of `"\\u00e9"` where CPython makes one character (and a
-    thirty-five-character one out of `"\\N{…}"`). That is a FRONT-END question
-    shared by the interpreter, the compiled path and both formal backends, not a
-    formal-backend divergence, so it is filed rather than fixed here:
-    `bugs/LEXER_unicode_escapes_are_not_decoded.md`. The rows here that want a
-    character outside ASCII therefore SPELL IT rather than escape it, and say so.
+  * `\\uXXXX`, `\\UXXXXXXXX`, `\\N{…}` and octal escapes ARE now decoded by
+    `fire_compiler.decode_c_escapes`, the tree's one front-end decoder, so every
+    engine makes one character out of `"\\u00e9"` where it used to make six (and
+    `"\\101"` is `A` rather than a NUL and `101`). The fix and its unit rows are
+    in `fire_compiler.py` and `test_string_literal_lexing.py`; the front-end bug
+    doc went with the fix. The rows here that want a character outside ASCII
+    still SPELL IT rather than escape it, because that is the case the encoding
+    block is about; the escaped spelling now reaches it through the same fold.
   * `encode` and `decode` are refused as VALUE METHODS before any question
     about encoding arises — `formal/model.py`'s `BUILTIN_VALUE_METHODS` has
     neither name. Both are string→bytes and bytes→string, so on this path they
@@ -134,12 +134,12 @@ ORACLE_CASES = [
     # A character OUTSIDE the BMP: FOUR bytes, one code point, and the widest
     # gap in the table between "count the bytes" and "count the characters".
     #
-    # Spelled as the CHARACTER and not as `\\U0001F600`, which is the whole of
-    # a separate front-end defect: `fire_compiler.decode_c_escapes` handles the
-    # C simple escapes and `\\xHH` and leaves `\\u`/`\\U`/`\\N{}` alone, so an
-    # escape spelling would measure THAT (see the header and the bug doc) rather
-    # than what this row is for.  With a real character the fold answers 3, where
-    # the byte count was 6.
+    # Spelled as the CHARACTER and not as `\\U0001F600`.  The escape spelling
+    # now decodes to the same character (`fire_compiler.decode_c_escapes` handles
+    # `\\u`/`\\U`/`\\N{}` and octal), so either would measure this row; the
+    # character is kept because it is the spelling the encoding block is about
+    # and because it does not depend on the front end.  With a real character
+    # the fold answers 3, where the byte count was 6.
     ("len_astral_literal_folds",
      'def main(n):\n'
      '    printf("len=%d\\n", len("a😀b"))\n'
@@ -196,6 +196,46 @@ ORACLE_CASES = [
      '    return 0\n',
      'def main():\n'
      '    print("len=%d" % len("\\x7f"), end="\\n")\n'),
+
+    # ── `\\u`, `\\U`, `\\N{…}` and the octal run ──────────────────────────
+    #
+    # These four were NOT decoded by `fire_compiler.decode_c_escapes` before
+    # 2026-10-08: every engine made a SIX-character string out of `"\\u00e9"`
+    # where CPython makes one, a TEN-character one out of `"\\U0001F600"`, and
+    # `"\\101"` was a NUL followed by `101` rather than `A`. That was a
+    # front-end defect shared by every engine (fixed 2026-10-08; its doc went
+    # with the fix); the formal half is free here because the fold reads the
+    # DECODED text.
+    ("len_of_a_u_escaped_literal_folds",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\u00e9"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\u00e9"), end="\\n")\n'),
+
+    ("len_of_an_astral_escape_folds",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\U0001F600"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\U0001F600"), end="\\n")\n'),
+
+    ("len_of_an_octal_escape_is_the_character",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\101"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\101"), end="\\n")\n'),
+
+    # …and the same escaped text through `ord`, which is the other construct
+    # that reads the DECODED literal: `ord("\\u00e9")` is 233 where the escaped
+    # spelling's first byte is a backslash (92).
+    ("ord_of_a_u_escaped_character_folds",
+     'def main(n):\n'
+     '    printf("%d\\n", ord("\\u00e9"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("%d" % ord("\\u00e9"), end="\\n")\n'),
 
     # ── `len`: an ASCII IMAGE is untouched ────────────────────────────────
     #
@@ -1261,9 +1301,15 @@ def model_checks():
        M.non_ascii_strings_in(stmts(
            'def main(n):\n    printf("%s", b"\\xc3\\xa9")\n')), [])
 
+    # The scan decodes before deciding, so a COOKED `\\u00e9` is the non-ASCII
+    # character it names and is found — the row that separates decoding from
+    # scanning. Before the front end decoded `\\u`, this came back `[]` because
+    # the six ASCII characters of the escape were all the scan could see; the
+    # raw spelling directly above stays `[]` because a raw literal decodes
+    # nothing, which is the pair that pins the `is_raw` half.
     ok("the scan decodes before deciding",
        M.non_ascii_strings_in(stmts(
-           'def main(n):\n    printf("%s", "\\u00e9")\n')), [])
+           'def main(n):\n    printf("%s", "\\u00e9")\n')), ["é"])
 
     # ── a DOCSTRING, and the 229 files it was costing ──────────────────────
     #

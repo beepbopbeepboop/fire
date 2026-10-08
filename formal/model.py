@@ -8441,10 +8441,13 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
 #     and it answers in the CURRENT LOCALE: in the C locale it fails for every
 #     byte >= 0x80 and returns `(size_t)-1`. A locale is not a decidable
 #     answer, so it is not an answer.
-#   * No `\u` / `\U` / `\N{}` ESCAPE decoding. That is a front-end question —
-#     `fire_compiler.decode_c_escapes` — and all three engines share it, so it
-#     is not a formal-backend divergence to fix here. Filed:
-#     `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+#   * No `\u` / `\U` / `\N{}` ESCAPE decoding HERE, and deliberately: it is a
+#     front-end question — `fire_compiler.decode_c_escapes` — that all three
+#     engines share, so the formal backends get it from the one decoder rather
+#     than carrying a second copy. That decoder decoded only `\xHH` and the C
+#     simple escapes until 2026-10-08 (a front-end wrong answer, not a
+#     formal-backend divergence), and this block's fold reads the decoded text,
+#     so the formal half came free with that fix.
 
 # The two facts about a piece of TEXT, named so a reader can see which question
 # a call site is asking. `ASCII` is the permissive one and it is a fact about
