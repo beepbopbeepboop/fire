@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_the_memcheck_ledger_coverage_check_compares_basenames_to_paths.md` | `formal116-docs` | FORMAL_the_memcheck_ledger_coverage_check_compares_basenames_to_paths |
+
 
 ### `FORMAL, the program-differential fuzzer's `environ` mix` — 1 document, 1 claimed
 

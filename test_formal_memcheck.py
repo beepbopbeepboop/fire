@@ -507,10 +507,33 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
-    check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+    # The keys the ledger WRITER builds are `basename|backend`
+    # (`tools/formal_memcheck.py::ledger_key`), so the coverage check has to
+    # build the SAME keys and compare SETS. A bare length comparison tests
+    # neither direction: the corpus's paths and the ledger's keys are in two
+    # namespaces, so a program with no row and a row for a program that no
+    # longer exists cancel out and the count still agrees. This is the shape the
+    # ledger had already drifted into (120 rows for 202 (program, backend)
+    # pairs) before it was rewritten.
+    expected = {os.path.basename(p) + "|" + backend
+                for p in M.memcheck_sources() + M.example_sources()
+                for backend in BACKENDS}
+    missing = sorted(expected - set(rows))
+    extra = sorted(set(rows) - expected)
+    check("the ledger covers every corpus row on both backends", not missing,
+          "%d of %d (program, backend) rows are missing: %s"
+          % (len(missing), len(expected), ", ".join(missing[:8])))
+    check("the ledger names no program the corpus no longer has", not extra,
+          "%d stale row(s): %s" % (len(extra), ", ".join(extra[:8])))
+    # …and the coverage check is non-vacuous: the same set arithmetic must name
+    # the program when one row is dropped, or "the ledger covers the corpus"
+    # would pass for an empty ledger too.
+    probe = dict(rows)
+    probe.pop(sorted(rows)[0])
+    named = sorted(expected - set(probe))
+    check("the coverage check names a program with no ledger row",
+          len(named) == 1 and named[0] == sorted(rows)[0],
+          "dropping one row named %s" % named)
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
