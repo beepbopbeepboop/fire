@@ -5632,6 +5632,18 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # (`encode_adds_xd_xn_xm(0, 0, 1)`), so it is on a real program's path.
         # See `bugs/FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md`.
         ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
+        # The `#imm12` `sh` field.  `add x12, x29, #1675, lsl #12` and
+        # `sub x25, x14, #545, lsl #12` are the two instructions the fuzzer's
+        # `--minimise` reduced its WRONG bucket to: the model read `imm12` and
+        # dropped the `lsl #12`, so `545 << 12 = 0x221000` was stepped as 545.
+        # The UNSHIFTED row is the anti-rot — a helper that always shifted would
+        # pass the two and fail it.  See
+        # `bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`.
+        ("add x12, x29, #1675, lsl #12",
+         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 1)),
+        ("sub x25, x14, #545, lsl #12",
+         lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
+        ("add x12, x29, #1675", lambda A: A.encode_add_xd_xn_imm(12, 29, 1675)),
     )
 
     @classmethod

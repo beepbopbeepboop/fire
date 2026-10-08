@@ -1,13 +1,38 @@
 # The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12`
 
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
-**Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
-returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and
-that build peaks at **9.8 GB** measured with `formal/lean.py::ensure_library`'s
-own invocation — over a bounded worker's 8 GB ceiling, under the tree's
-`LIBRARY_MEMORY_MB = 12288`, so the blocker is memory alone and the library is
-not broken. (The `-T 0` trap that measurement has is written up in
-`bugs/FORMAL_contract_ladder_reach.md`.)
+**Status 2026-10-08 (`work/formal184-docs`): FIXED IN SOURCE, NOT YET VERIFIED —
+a fixed-but-not-verified bug, so the doc stays.** §4's "one read, not four
+copies" landed as `arm64_ext_imm12 (insn : UInt32) : Nat :=
+((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)`, and
+**all five** `#imm12` arms call it (`ADD` 32/64, `SUB` 32/64, `CMP`), so the
+shift cannot be present in one and absent from another.  The readers that had to
+move with it:
+
+* the five `work_step_*_imm*` conclusions, now `UInt64.ofNat (arm64_ext_imm12 w)`
+  — their proof bodies did not move, because the branch conditions did not;
+* `formal/arm64_proof_gen.py`'s `_step_rhs` (idx 9-13) and `_step_rhs_generic`
+  (idx 9-13), through a Python twin `_arm64_ext_imm12` and a new `_EI12` — NOT
+  `_I12`, which the unsigned-offset `LDR`/`STR` rows (idx 18/19/31) share and
+  which are a different class with no `sh` field.
+
+**§4's step 2 (what `sh = 2`/`sh = 3` do) is decided, and the decision is the
+`Nat` shift's total value rather than a refusal:** those two cannot be assembled
+as this form at all (`as` refuses), so no image contains them and the model's
+value there is unreachable rather than wrong.  A refusal would need a
+generator-side arm that no encoder can reach.
+
+**What is owed, and why this worker did not do it:** the oracle is the model
+checked against the CPU, which needs `lib/ProofLib.olean` REBUILT — the measured
+**9.8 GB** wall (re-measured 2026-10-08 for this fix under `tools/memslot.py
+--gb 8`: `BREACH 8.0 GB > 8.0 GB ceiling`; control `lib/Refine.lean` 1.2 GB from
+the same call).  The integrator's `prooflib` job is the exact suite job.  The
+test is three new rows in `test_formal_call_proof_gen.py`'s
+`TestUnsignedOffsetAccess`: `add x12, x29, #1675, lsl #12`,
+`sub x25, x14, #545, lsl #12`, and — the anti-rot §4 step 5 asks for — an
+UNSHIFTED `add x12, x29, #1675`, which a helper that always shifted would fail.
+The Lean helper's type (`UInt32`, not `UInt64`) and its `rfl`-reducibility were
+checked directly through `formal/lean.py::run_lean` (`.tmp/extdef.lean`, rc=0).
 
 ## 1. What I ran
 

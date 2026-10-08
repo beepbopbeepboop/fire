@@ -3276,6 +3276,17 @@ def _step_branch_index(w: int):
     return None
 
 
+def _arm64_ext_imm12(w: int) -> int:
+    """The EXTENDED immediate of an `ADD`/`SUB`/`CMP` `#imm12` form: the 12-bit
+    `imm12` field LSL'd by the `sh` field's 12-bit scale (bits 23:22).  The
+    Python twin of `lib/ProofLib.lean`'s `arm64_ext_imm12`, and it must stay one:
+    the arms below read only `imm12` until the helper existed, so every `lsl #12`
+    immediate was stepped unshifted (`bugs/FORMAL_arm64_the_extended_immediate_
+    arms_ignore_their_shift.md`).  `sh = 2`/`3` cannot be assembled as this form
+    at all, so the value there is unreachable rather than wrong."""
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x3))
+
+
 def _step_rhs(w: int, idx: int):
     """Return the Lean `some ...` result the model produces for word w.
 
@@ -3347,7 +3358,7 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
-        imm12 = (w >> 10) & 0xfff
+        imm12 = _arm64_ext_imm12(w)
         return (f"some {{ s with nzcv := arm64_subs_flags "
                 f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
     if idx == 14:  # B
@@ -3403,13 +3414,13 @@ def _step_rhs(w: int, idx: int):
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
-        imm = (w >> 10) & 0xfff
+        imm = _arm64_ext_imm12(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = (w >> 10) & 0xfff
+        imm = _arm64_ext_imm12(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3662,6 +3673,11 @@ _RN = "(((w >>> 5) &&& 0x1f).toNat)"
 _RM = "(((w >>> 16) &&& 0x1f).toNat)"
 _RT2 = "(((w >>> 10) &&& 0x1f).toNat)"
 _I12 = "(((w >>> 10) &&& 0xfff).toNat)"
+#: The EXTENDED immediate of the `ADD`/`SUB`/`CMP` `#imm12` forms (idx 9-13):
+#: the Lean helper `arm64_ext_imm12`, which folds in the `sh` field.  `_I12`
+#: stays the RAW 12-bit field because idx 18/19/31 (the unsigned-offset
+#: `LDR`/`STR`) are a different class with no `sh` field at all.
+_EI12 = "(arm64_ext_imm12 w)"
 _I16 = "(((w >>> 5) &&& 0xffff).toNat)"
 _HW = "(((w >>> 21) &&& 0x3).toNat)"
 _I7 = "(((w >>> 15) &&& 0x7f).toNat)"
@@ -3706,18 +3722,18 @@ def _step_rhs_generic(idx: int):
     if idx == 8:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ^^^ arm64_reg {_RM} s))"
     if idx == 9:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat {_EI12}))"
     if idx == 10:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat {_EI12} }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat {_EI12}))")
     if idx == 11:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat {_EI12}))"
     if idx == 12:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat {_EI12} }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat {_EI12}))")
     if idx == 13:
         return (f"some {{ s with nzcv := arm64_subs_flags (arm64_reg {_RN} s) "
-                f"(UInt64.ofNat {_I12}) }}")
+                f"(UInt64.ofNat {_EI12}) }}")
     if idx == 14:
         return f"some {{ s with pc := (UInt64.ofNat s.pc + {_OFF26} * 4).toNat }}"
     if idx == 15:

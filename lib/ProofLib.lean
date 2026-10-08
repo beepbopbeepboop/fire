@@ -1864,6 +1864,19 @@ def arm64_adds_flags (a b : UInt64) : UInt8 :=
     ||| (if c = 1 then 0x4 else 0)
     ||| (if v = 1 then 0x8 else 0)
 
+/-- The EXTENDED immediate of an `ADD`/`SUB`/`CMP` `#imm12` form: the 12-bit
+    `imm12` field LSL'd by the `sh` field's own 12-bit scale.  `sh` is bits
+    23:22 (`0` = `LSL #0`, `1` = `LSL #12`, `2` = `LSL #24`, `3` = `LSL #36`),
+    and the arms below read only `imm12` until this helper existed — so every
+    `lsl #12` immediate in an image was stepped as if it were unshifted, a
+    SOUNDNESS defect (`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_
+    their_shift.md`).  `sh = 2`/`sh = 3` cannot be assembled as
+    `ADD Xd, Xn, #imm` at all (the architecture keeps those in a different
+    form), so the `Nat` shift's total value there is unreachable rather than
+    wrong. -/
+def arm64_ext_imm12 (insn : UInt32) : Nat :=
+  ((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)
+
 /-- NZCV flags produced by a LOGICAL operation (`AND`/`ORR`/`EOR`/`ANDS`/`TST`):
     N is the result's sign, Z is "the result is zero", and C and V are CLEAR —
     the architecture leaves both untouched-set-to-zero for a logical operation,
@@ -2072,13 +2085,13 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   else if (insn &&& 0xff800000) = 0x11000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let imm12 := arm64_ext_imm12 insn
     let result := (arm64_reg rn s + UInt64.ofNat imm12)
     some (arm64_set_reg rd s result)
   else if (insn &&& 0xff800000) = 0x91000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
       let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
       some { s with sp := result }
@@ -2089,13 +2102,13 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   else if (insn &&& 0xff800000) = 0x51000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let imm12 := arm64_ext_imm12 insn
     let result := (arm64_reg rn s - UInt64.ofNat imm12)
     some (arm64_set_reg rd s result)
   else if (insn &&& 0xff800000) = 0xd1000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
       let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
       some { s with sp := result }
@@ -2108,7 +2121,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- literal floor.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let imm12 := arm64_ext_imm12 insn
     some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp rn s) (UInt64.ofNat imm12) }
   -- B #offset: 0x14000000 (sign-extended 26-bit, x4)
   else if (insn &&& 0xfc000000) = 0x14000000 then
@@ -5087,7 +5100,7 @@ theorem work_step_eor (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x11000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (arm64_ext_imm12 w))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5106,7 +5119,7 @@ theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x91000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5126,7 +5139,7 @@ theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x51000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (arm64_ext_imm12 w))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5147,7 +5160,7 @@ theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xd1000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5169,7 +5182,7 @@ theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xf1000000) :
-    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)) } := by
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (arm64_ext_imm12 w)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
