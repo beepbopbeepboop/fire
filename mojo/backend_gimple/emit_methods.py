@@ -4673,7 +4673,18 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
             # inside the helper.
             ginf.note_container_callable_ret(gen, ov, av, at, args[0])
-            if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
+            # An argument whose pointer type exists only because an enclosing
+            # `isinstance(x, Struct)` guard NARROWED it says nothing about the
+            # list: `if isinstance(_s, TryStmt): out.append(_s)` / `else:
+            # out.append(_s)` appends two different static types of the SAME
+            # heterogeneous value, and recording the narrowed one typed the whole
+            # list `TryStmt *` -- so `stmts = out` (gen_module_impl's
+            # `_try_replaced`) made every later `for s in stmts` declare `s` as a
+            # `TryStmt *`, and `s.body` on a FunctionDef read the NAME. The
+            # narrowed type holds in the branch, not in the container.
+            _arg_narrowed = (gen._narrow_key_for_expr(args[0])
+                             in getattr(gen, '_narrowed_exprs', {}))
+            if (not _arg_narrowed) and (at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *'))):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
                 if actual_elem == 'MojoList *' and av in gen._elem_types:

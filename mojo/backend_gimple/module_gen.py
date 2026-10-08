@@ -7075,6 +7075,43 @@ def gen_module_impl(self, stmts):
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
+    # NAMES BOUND INSIDE A NESTED `def` OF A CALLER. `_calls_in_stmts` walks
+    # into nested function bodies and attributes every call it finds there to
+    # the ENCLOSING function, so an identifier argument of such a call was
+    # resolved against the enclosing function's locals -- but inside the nested
+    # body that name may be the nested function's own parameter or local, a
+    # different variable that merely shares the spelling. Real, and the cause of
+    # the self-hosted compiler dying on every input that defines a function:
+    # `gen_module_impl`'s nested `_mkrf(name, body, ...)` calls
+    # `_infer_multi_kind_return(self, body, ...)`, `gen_module_impl` has its own
+    # string local called `body`, and the observation "call site passes a
+    # `char *`" typed `_infer_multi_kind_return`'s list parameter `char *` --
+    # whereupon every call coerced the AST list through `mojo_cstr_or_int_str`
+    # into the text of its repr. An enclosing-scope answer for a shadowed name
+    # is not evidence about this call, so it contributes nothing. Keyed
+    # "<caller>\x1f<name>" rather than a dict of sets: the self-hosted path
+    # cannot type the inner container (see `_scalar_obs` below).
+    _nested_bound: dict = {}
+    _nested_bound_ready: dict = {}
+
+    def _nested_binds(caller_name, name) -> bool:
+        _nb_c = _as_str(caller_name)
+        if _nb_c not in _nested_bound_ready:
+            _nested_bound_ready[_nb_c] = True
+            for _nb_entry in _caller_bodies:
+                if _as_str(_nb_entry[0]) != _nb_c:
+                    continue
+                for _nb_node in _walk_ast(_nb_entry[1]):
+                    if not isinstance(_nb_node, FunctionDef):
+                        continue
+                    _nb_fd = _as_funcdef_node(_nb_node)
+                    for _nb_i in range(len(_nb_fd.params or [])):
+                        _nested_bound[_nb_c + '\x1f' + _as_str(_nb_fd.params[_nb_i][0])] = True
+                    for _nb_inner in _walk_ast(_nb_fd.body):
+                        if isinstance(_nb_inner, AssignStmt) and isinstance(_nb_inner.target, IdentExpr):
+                            _nested_bound[_nb_c + '\x1f' + _as_str(_nb_inner.target.name)] = True
+        return (_nb_c + '\x1f' + _as_str(name)) in _nested_bound
+
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
         """Observed scalar C type of one call argument, or None.
@@ -7126,6 +7163,8 @@ def gen_module_impl(self, stmts):
             # cross-call scalar contract never saw a caller local's type.
             _cn = _as_str(caller_name)
             _an = _as_str(a.name)
+            if _nested_binds(_cn, _an):
+                return None
             t = self._inferred_var_types.get(_cn, {}).get(_an)
             if prefer_refined_param:
                 _pt = self._inferred_param_types.get(_cn, {}).get(_an)
@@ -8697,7 +8736,12 @@ def gen_module_impl(self, stmts):
                 _mpm[_mpn] = (None, None)
 
     for callee in sorted(_scalar_obs):
-        pmap = _scalar_obs[callee]
+        # `_as_dict`: `_scalar_obs` is `dict[str, dict[str, set]]`, but the
+        # self-hosted path keeps no value type for the inner dict, so the bare
+        # read typed `pmap` from its own subscript below and indexed a
+        # `MojoDict` as a `MojoList` -- `mojo_list_get_int (pmap, pname)` with a
+        # string index, a SIGSEGV on every input that defines a function.
+        pmap = _as_dict(_scalar_obs[callee])
         fn = _fn_by_name.get(callee)
         if not fn:
             continue

@@ -1304,6 +1304,23 @@ def _gen_stmt_AssignStmt(gen, node):
                                                   getattr(node, 'type_ann', None))
             if _ann_ctype is not None:
                 ctype = _ann_ctype
+            # `x = None` lowers to ('int', '0'): a 32-bit `int` of no kind, and
+            # `_declare_var` is first-declaration-wins, so a local whose FIRST
+            # binding is the None placeholder was declared `int` for the whole
+            # function and every LATER pointer store into it was truncated to
+            # its low 32 bits. The pre-pass hint covers a top-level function,
+            # but a lifted closure has no `_inferred_var_types` row: `cand =
+            # None` ... `cand = 'MojoList *'` in `_prebound_local_ctypes`'s
+            # `note` came back as 0x76ea40 where the string lives at
+            # 0x10076ea40, which `join_all` then handed `strcmp` -- every
+            # self-hosted compile of a function with a `return <container
+            # local>` died there. None is the null WORD, so it takes the word
+            # type.
+            if ctype == 'int' and (
+                    isinstance(node.value, gimple_ctypes.NoneLiteral)
+                    or (isinstance(node.value, gimple_ctypes.IdentExpr)
+                        and node.value.name == 'None')):
+                ctype = 'int64_t'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an

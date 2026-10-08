@@ -1757,6 +1757,18 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
+def _is_pointer_view_helper(fname: str) -> bool:
+    """Is `fname` one of fire_compiler.py's pointer-view identity helpers
+    (`_as_dict`/`_as_list`/`_as_set`/`_as_str`), spelled bare (inside
+    fire_compiler.py) or module-qualified (`fire_compiler__as_dict_<hash>`)?
+    `_as_int` is deliberately not one: it asks for the raw word, and
+    `mojo_box_int` would truncate a boxed double."""
+    for base in ('_as_dict', '_as_list', '_as_set', '_as_str'):
+        if fname == base or fname.startswith('fire_compiler_' + base):
+            return True
+    return False
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
@@ -1870,6 +1882,26 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             slit_name = gen._str_literal_to_slit(aval)
             temp = gen._new_val('char *', f'{slit_name}')
             aval = temp
+        if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
+                and _is_pointer_view_helper(fname)):
+            # `_as_dict(t[1])` / `_as_list(...)` / `_as_set(...)` / `_as_str(...)`
+            # exist to put a pointer-typed STATIC view on a value the compiled
+            # backend erased to int64_t -- and a slot read out of a
+            # heterogeneous tuple/list is exactly such a value, handed back as
+            # a BOX (`mojo_list_get_boxed`) for every non-int kind. The helper
+            # body is a bare cast, so passing the box through hands the
+            # CONTAINER FUNCTION the box itself: `mojo_dict_update (dst, box)`
+            # walked the box's first word (MOJO_BOX_MAGIC) as a slot table and
+            # SIGSEGV'd on 0x4d4a424f58310001 in `infer_return_elem_type`'s
+            # `_scratch_et.update(_as_dict(_saved[1]))`, which is the first
+            # thing every self-hosted compile runs
+            # (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). The box has to
+            # come apart before the cast; `mojo_box_int` returns a non-double
+            # box's raw word (the pointer) and anything that is not a box
+            # unchanged.
+            _ub = gen._new_temp('int64_t')
+            gen._emit(f"  {_ub} = mojo_box_int ({aval});")
+            aval = _ub
         if ptype == atype or ptype == '...':
             # Skip coercion only if C types match exactly
             coerced_args.append(aval)
