@@ -72,7 +72,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_no_exceptions.md` | `formal112-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_raise_skips_the_stdio_flush.md` | `formal113-docs` | on arm64 a `raise` throws away everything the program had already printed |
 
-| `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | `formal116-docs` | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |
+
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
 | `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | **unclaimed** | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
