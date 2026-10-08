@@ -1703,14 +1703,10 @@ test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: async capture of a mutable binding — behaviour gap, '
-            'not registered before this',
-     desc='async capture of a mutable binding — behaviour gap, not registered before this')
+     desc='async capture of a mutable binding')
 test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
      mem='tiny', deps=['preflight'],
-     expect='2 failing: closure capture through a transitive import — '
-            'behaviour gap',
-     desc='closure capture through a transitive import — behaviour gap')
+     desc='closure capture through a transitive import')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
      deps=['preflight'],
      expect='36 failing: the gimple async runner, an area with no gate '
@@ -1726,24 +1722,20 @@ test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
-     expect='3 failing: TaskGroup',
-     desc='3 failing: TaskGroup')
+     desc='TaskGroup')
 test('async-with-lock-guard', [PY, 'test_async_with_lock_guard.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: `async with` holding a lock guard across a suspension',
-     desc='2 failing: `async with` holding a lock guard across a suspension')
+     desc='`async with` holding a lock guard across a suspension')
 test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: a generic inside a nested async',
-     desc='2 failing: a generic inside a nested async')
+     desc='a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
      expect='2 failing: a detached coroutine task',
      desc='2 failing: a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
-     expect='1 of 2: toolchain/runtime proof for step A of compiled-path async/await',
-     desc='1 of 2: toolchain/runtime proof for step A of compiled-path async/await')
+     desc='toolchain/runtime proof for step A of compiled-path async/await')
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
@@ -3945,37 +3937,48 @@ BUCKETS = {
             # `the buckets:` checks in test_suite.py. Its marker states its
             # count.
             'x86-containers'],
-    # The compiled-path async/await and coroutine cluster: ten
-    # `expect=`-marked suites that were registered and in no bucket, so the
-    # gate walked past ~69 declared failing cases and reported nothing, and no
-    # `expect=` anti-rot could fire on any of them
-    # (that doc, deleted with the fix). They are the largest block of unrun
-    # failures in the tree, and
-    # every one of them is a real compile-and-run of Mojo source. All ten are
-    # here rather than in `check` for one reason stated once: they are
-    # `expect=`-marked, and an `expect` in `check` puts a permanently-
-    # EXPECTED line in the tally a developer reads to know their tree is fine
-    # (the same reasoning that keeps `formal-module-attr`,
-    # `formal-external-call` and `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so this IS gated — it is
-    # just gated somewhere whose tally is a list of known reds rather than a
-    # green/red verdict on the everyday loop.
+    # The compiled-path async/await and coroutine cluster: ten suites that were
+    # registered and in no bucket, so the gate walked past ~69 declared failing
+    # cases and reported nothing, and no `expect=` anti-rot could fire on any of
+    # them (that doc, deleted with the fix). They are the largest block of unrun
+    # failures in the tree, and every one of them is a real compile-and-run of
+    # Mojo source.
     #
-    # Measured one at a time under `tools/memslot.py --gb 8` before being named,
-    # which is also what set their `mem` to `tiny` (0.0-0.2 GB each, against
-    # the `small`/8 GB they carried while ungated):
-    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing
-    #   coro-detached-async  2.2 s  0.1 GB   2 failing
-    #   async-with-lock-guard 2.7 s 0.1 GB   2 failing
-    #   mutable-async-capture 2.7 s 0.1 GB   2 failing
-    #   transitive-closure-capture 2.7 s 0.1 GB  2 failing
-    #   async-void-return    3.3 s  0.1 GB   3 failing
-    #   nested-async-generic 3.3 s 0.1 GB    2 failing
-    #   taskgroup            3.2 s  0.2 GB   3 failing
-    #   async-runtime-scaffold 1.7 s 0.2 GB  1 of 2
-    #   coro-future-await   11.6 s  0.1 GB  17 failing
-    # 34.6 s in total, against a gate whose slowest everyday members are
-    # minutes each, so the added wall time is stated here rather than left to
-    # be discovered.
+    # Six of the ten PASS now (2026-10-07): the 563ec43a "Rename compiler and
+    # runtime sources to fire" sweep rewrote `import mojo` to `import fire` but
+    # left every `mojo.link_executable(...)` call site behind, so all ten died at
+    # link with `name 'mojo' is not defined` — and the `mojo_async_runtime.cpp`
+    # path constant it also renamed was still stale. With both fixed,
+    # mutable-async-capture, transitive-closure-capture, taskgroup,
+    # async-with-lock-guard, nested-async-generic and async-runtime-scaffold are
+    # green and their `expect=` markers are gone (a marked-but-passing test is
+    # reported as a FAILURE, so leaving them would have been the anti-rot firing).
+    # The remaining four keep their markers, and their counts were re-measured
+    # against the run on the same day.
+    #
+    # The four `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # line in the tally a developer reads to know their tree is fine (the same
+    # reasoning that keeps `formal-module-attr`, `formal-external-call` and
+    # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
+    # this IS gated — just somewhere whose tally is a list of known reds rather
+    # than a green/red verdict on the everyday loop.
+    #
+    # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
+    # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
+    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing  (expect=)
+    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
+    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
+    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
+    #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
+    #   mutable-async-capture 2.7 s 0.1 GB   2 passed
+    #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
+    #   nested-async-generic 3.3 s 0.1 GB    3 passed
+    #   taskgroup            3.2 s  0.2 GB   3 passed
+    #   async-runtime-scaffold 1.7 s 0.2 GB 11 passed
+    # ~35 s in total, against a gate whose slowest everyday members are minutes
+    # each, so the added wall time is stated here rather than left to be
+    # discovered.
     'coroutine': ['coro', 'coro-nested-capture',
                   'gimple-async-runner', 'coro-detached-async',
                   'async-with-lock-guard', 'mutable-async-capture',

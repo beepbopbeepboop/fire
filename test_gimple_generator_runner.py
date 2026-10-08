@@ -9,7 +9,7 @@ fixtures are self-contained, no stdlib imports, so there's no need to pay
 build_stdlib_dylib's ~664-module link cost per test the way a full `fire.py
 build`/driver.compile_program invocation would), RUNS the resulting binary,
 and asserts on its ACTUAL stdout. Falls back to the cpp companion-unit link
-(g++, mojo_async_runtime.cpp) for the rarer shape not yet stack-switch-
+(g++, fire_async_runtime.cpp) for the rarer shape not yet stack-switch-
 eligible.
 """
 import os

@@ -46,7 +46,7 @@ from build_config import find_gcc, find_gxx
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
 
@@ -69,7 +69,7 @@ def _build_and_run(mojo_src: str) -> str:
     parameter-threading registration in gen_module reads the source back
     off disk, see _method_threaded_comptime_params) to real .c/.cpp text,
     build both with gcc -fgimple / g++ -std=c++20, link against this
-    project's own runtime/fire_runtime.c + runtime/mojo_async_runtime.cpp
+    project's own runtime/fire_runtime.c + runtime/fire_async_runtime.cpp
     via fire.py's real link_executable(cxx=True), run it, and return
     stdout. Mirrors test_gimple_async_runner.py's harness shape."""
     wd = tempfile.mkdtemp(prefix='mojo_async_void_')
@@ -93,7 +93,7 @@ def _build_and_run(mojo_src: str) -> str:
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
     runtime_o = os.path.join(wd, 'fire_runtime.o')
-    async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
+    async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
@@ -114,10 +114,10 @@ def _build_and_run(mojo_src: str) -> str:
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
                         ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
+        raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
 
     import fire
-    r = mojo.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
+    r = fire.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
 

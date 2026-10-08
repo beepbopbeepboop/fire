@@ -12,7 +12,7 @@ int64]` capture) separately documents.
 Instead, `BlockingScopedLock` is reinterpreted as a compiler-recognized
 INTRINSIC (mirroring `TaskGroup`/`create_task` already being reinterpreted
 the same way) whose entire `__enter__`/`__exit__` pair is elided --
-verified real: `runtime/mojo_async_runtime.cpp` has no `pthread`/
+verified real: `runtime/fire_async_runtime.cpp` has no `pthread`/
 `std::thread`/worker-pool anywhere (grep-confirmed), so this project's
 async runtime is genuinely single-threaded and cooperative. A coroutine's
 body only ever yields control at an explicit `co_await`; nothing can
@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 
 # Exercises the gimple_cpp_* C++20-coroutine backend (this harness links
-# mojo_async_runtime.cpp, the cpp scheduler). doc/COROUTINE.html §5.5's
+# fire_async_runtime.cpp, the cpp scheduler). doc/COROUTINE.html §5.5's
 # cutover made the A3 stack-switch backend the default, so pin the escape
 # hatch explicitly -- the equivalent stack-switch coverage (single-level
 # and the cross-closure / TaskGroup stress shape) lives in
@@ -49,7 +49,7 @@ from build_config import find_gcc, find_gxx
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
 
@@ -93,7 +93,7 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
     runtime_o = os.path.join(wd, 'fire_runtime.o')
-    async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
+    async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
@@ -114,9 +114,9 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
                         ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
+        raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
 
-    r = mojo.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
+    r = fire.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
 

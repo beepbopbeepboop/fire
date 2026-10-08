@@ -1192,15 +1192,20 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                for n, s in suite.REGISTRY.items()
                if getattr(s, 'expect', '')}
     stated = {n: c for n, c in counted.items() if c is not None}
+    # A strict MAJORITY rather than a hard-coded floor: the floor went stale
+    # the moment six count-stating markers were removed for going green
+    # (2026-10-07, the fire-rename link-fix in the async cluster — see
+    # `BUCKETS['coroutine']`), and a floor that has to be edited every time a
+    # known red is fixed is the wrong instrument. "Most" is the property the
+    # check's own name asserts.
     check('expect count: most registered markers state a count',
-          len(stated) >= 12,
+          len(stated) * 2 > len(counted),
           f'only {len(stated)} of {len(counted)} markers state one '
           f'({sorted(stated)}); a rule with nothing to check reports green '
           f'forever')
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
-          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
-                     'async-with-lock-guard': 2,
+          stated == {'async-void-return': 3,
                      'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
@@ -1226,10 +1231,18 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # but it PASSES"). The count was never the problem; the marker was. Its
     # entry is gone here for the reason the two above name: a census that still
     # states a removed marker fails on the registry's own state.
+    #
+    # SIX more dropped on 2026-10-07, all for the same anti-rot reason:
+    # `mutable-async-capture` (2), `transitive-closure-capture` (2),
+    # `taskgroup` (3), `async-with-lock-guard` (2), `nested-async-generic` (2)
+    # and `async-runtime-scaffold` (1 of 2) are GREEN now. The 563ec43a fire
+    # rename had rewritten `import mojo` to `import fire` but left every
+    # `mojo.link_executable(...)` call site and the `mojo_async_runtime.cpp`
+    # path constant behind, so all ten async suites died at link with `name
+    # 'mojo' is not defined`; with that fixed, these six run and pass, and a
+    # marker on a passing test is reported as a FAILURE.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
-                     'mutable-async-capture': 2, 'nested-async-generic': 2,
-                     'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
