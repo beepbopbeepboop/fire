@@ -202,6 +202,17 @@ CASES = [
      "def main():\n"
      "    print(outer())\n"
      "    return 0\n"),
+    ("a_nested_def_capturing_a_nested_group_loop_target",
+     "def outer():\n"
+     "    s = 0\n"
+     "    for a, (b, c) in [(1, (20, 300))]:\n"
+     "        def get():\n"
+     "            return b\n"
+     "        s = s + get() + a\n"
+     "    return s\n"
+     "def main():\n"
+     "    print(outer())\n"
+     "    return 0\n"),
     # A nested `def` with NO capture, which is the shape that must keep working
     # for the rows above to mean anything: if the lifting machinery refused
     # every nested def, this would fail with them.

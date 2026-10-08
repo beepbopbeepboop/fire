@@ -6686,6 +6686,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+            # The target as a TREE, not the flattened leaf list: a nested
+            # group is a second unpack against the element at that position,
+            # and comparing the outer blob's count against the number of
+            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
+            # and exit 1 with nothing printed, where arm64 and CPython answer
+            # 21. `M.for_target_tree` is the one builder both backends ask.
+            ttree = M.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
 
             self._while_counter += 1
             wid = self._while_counter
