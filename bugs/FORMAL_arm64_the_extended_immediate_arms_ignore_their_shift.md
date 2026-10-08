@@ -1,5 +1,24 @@
 # The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12`
 
+**Status 2026-10-07 (`work/formal131-docs`): FIXED in source, and the one
+remaining step is the `lib/ProofLib.olean` rebuild, which is over this worker's
+8 GB ceiling.** One helper, `arm64_ext_imm12`, decodes bits 21:10 AND the `sh`
+field at 23:22, and **all five** arms (ADD 32/64, SUB 32/64, CMP) call it, so the
+shift cannot be present in one and absent from another.  The six `work_step_*`
+lemmas for those arms (`add_imm32/64`, `sub_imm32/64`, `cmp_imm`) are restated to
+the shifted value, and `formal/arm64_proof_gen.py`'s `_step_rhs` (indices 9-12,
+13) and `_step_rhs_generic` (9-13) mirror them.
+
+Verified WITHOUT rebuilding the library.  A scratch `arm64_step` carrying the
+edits plus the five restated lemmas elaborates against the served
+`ProofLib.olean` at **rc=0 / 1.3 GB**, and `#eval`s the three anti-rot rows
+`add x12, x29, #1675, lsl #12` -> `5 + (1675 << 12)` = **6860805**,
+`sub x25, x14, #545, lsl #12` -> `9 - (545 << 12)` (the wrapped `UInt64`), and
+the UNSHIFTED `add x12, x29, #1675` -> **1680** (a helper that always shifted
+would fail this third row).  Those are the `TestUnsignedOffsetAccess` rows this
+change adds; the `lib/ProofLib.olean` rebuild measures `memcap: BREACH 8.0 GB`,
+so `prooflib` and the test row are the integrator's to run.
+
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
 **Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
 returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and

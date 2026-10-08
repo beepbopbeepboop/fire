@@ -1,6 +1,25 @@
 # The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm`
 # with `Rd ≠ 31` writes NO register
 
+**Status 2026-10-07 (`work/formal131-docs`): FIXED in source, and the one
+remaining step is the `lib/ProofLib.olean` rebuild, which is over this worker's
+8 GB ceiling.** `lib/ProofLib.lean`'s `0xab000000` arm now reads and writes
+`Rd`; `arm64_set_reg 31` is the identity, so the one body is right for both the
+`CMN` and the `adds` spelling.  `work_step_cmn` is restated to state the written
+`Rd`, and `formal/arm64_proof_gen.py`'s `_step_rhs`/`_step_rhs_generic` index 66
+and `_regs_written` for indices 6 and 66 mirror it (`{rd}` when `rd ≠ 31`, the
+empty set for the compare spelling).
+
+Verified WITHOUT rebuilding the library — the one step a bounded worker may not
+take.  A scratch `arm64_step` carrying this edit plus the restated `work_step_cmn`
+elaborates against the served `ProofLib.olean` at **rc=0 / 1.3 GB**, and `#eval`s
+`adds x11, x1, x15` to **7** and `cmn x1, x15` with the destination **untouched**
+(the sibling row of `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`,
+where the `adds` row is added beside the existing `cmn` row so the two spellings
+are pinned together).  The `lib/ProofLib.olean` rebuild itself measures
+`memcap: BREACH 8.0 GB > 8.0 GB ceiling`, so `prooflib` and the
+`TestUnsignedOffsetAccess` row are the integrator's to run.
+
 **Area:** FORMAL (the arm64 machine model's flag-setting-compare arm).
 **Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
 incompleteness — `arm64_step` returns a state that is not the machine's.** Not
