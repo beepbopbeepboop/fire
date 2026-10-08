@@ -10,6 +10,57 @@ reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
 class: 3 failures before, 3 failures after, identical messages.**
 
+**Re-measured 2026-10-07 (`work/formal145-docs`), and the class's premise has
+moved one step further away, not closer. Three measurements, each a correction
+to the plan below:**
+
+1. **The fixture no longer produces a blind file — it REFUSES.** This document
+   records the class dissecting a generated file that has 234 theorems, no
+   `compiles_correctly_universal` and no `sorry`, so `tail` is empty and the
+   trace is a no-op. Measured on this tree, `_symbolic_divisor_proof` now raises
+   `formal.build.FormalBuildError` inside `setUpClass`:
+
+       universal theorem: 2 calls this walk cannot follow
+         (0x100000424 -> 0x10000088c (opaque), 0x100000514 -> 0x100000880 (opaque)),
+         every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge
+         them. …
+
+   The two opaque calls are the `BL fflush` in the divide-by-zero arm of
+   `_emit_div_shift_pow` and the `BL fflush` in `_emit_exit` — both the
+   COMPILER's, both on paths a non-zero divisor never takes. So the class does
+   not measure the wrong thing today; it cannot build its subject at all, and
+   its failure is an `ERROR` in `setUpClass` rather than the three assertion
+   failures this document records.
+
+2. **`info["compiler_traps"]` IS EMPTY ON ARM64, and that is a second defect on
+   this path.** `formal/arm64_codegen.py` declares `_compiler_trap_addrs` (line
+   724) and publishes it as `info["compiler_traps"]` (line 1100), and its own
+   comment says the set holds "the ADDRESSES of the `BL fflush` this backend
+   emits inside its own bounded stops" — but **nothing ever adds to it** (the
+   only two occurrences in the file are the declaration and the export; x86-64
+   appends at `x86_64_codegen.py:1914`). So `_program_extern_calls`'s documented
+   subtraction of the compiler's own flush is a no-op on arm64, and the class's
+   first option below rests on a set that is always `[]`.
+
+3. **Option 1 ("subtract `info["compiler_traps"]` in `_unfollowable_calls`
+   too") is confirmed a PROJECT, not a subtraction at one site — measured by
+   trying it.** With the trap addresses recorded (defect 2 fixed) AND `_calls`
+   in `_gen_universal_e2e_cfg` filtered by them, the "2 calls" refusal is gone
+   and the generator refuses at a DIFFERENT point:
+
+       recursion contract: the call in block 13 has to be below the source
+       condition's negation (`u64_sub_one_toNat_le` needs it), and this walk
+       reached the call with no enclosing branch condition to take it from.
+
+   The WALK still meets the `BL fflush` as an instruction and executes it as a
+   call, so filtering the unfollowable-call LIST does not tell the walk to treat
+   the compiler's trap as the boundary it is. Both edits were reverted: they
+   change what every arm64 theorem says and this is a light worker with no
+   whole-corpus Lean sweep. **So the next step is unchanged** — either the
+   `formal40-4` disjunction work behind option 1, or option 2's literal-divisor
+   fixture — and defect 2 is worth fixing on its own before either, because it
+   is a false claim in `_program_extern_calls`'s own docstring today.
+
 ## What I ran
 
     $ python3 tools/memslot.py --gb 8 --label t -- \
