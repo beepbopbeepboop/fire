@@ -4,9 +4,9 @@
 
 ## What this is
 
-The sibling of `bugs/CODEGEN_zero_in_a_list_nested_in_a_dict_display_prints_as_none.md`
-(now deleted, fixed): a SCALAR list literal nested in a dict display used to
-print its `0` as `None`, because `_mojo_repr_dict` hands the value to
+The sibling of the now-fixed "a `0` in a scalar list literal nested in a dict
+display prints as `None`" bug: a SCALAR list literal nested in a dict display
+used to print its `0` as `None`, because `_mojo_repr_dict` hands the value to
 `_mojo_generic_elem_repr` -> `_mojo_repr_list`, whose generic walker answers
 `None` for a zero word. That is fixed at the LITERAL:
 `_lower_list_literal` / `_lower_tuple_literal` now record per-slot kinds

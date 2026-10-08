@@ -2850,6 +2850,38 @@ print(any(ident("ab")))
 print(all(ident("")))
 """)
 
+    # A plain string literal whose CONTENT both starts and ends with a quote
+    # character lost its outer characters on the compiled path: the parser
+    # strips a non-f/t literal's delimiters (so `"'x'"`'s value is the three
+    # characters `'x'`), and `resolve_shared._decode_str_literal_text` then
+    # stripped a MATCHING first/last quote pair off that already-stripped body.
+    # The predicate is the parser's own `is_interpolated` flag now, so only an
+    # f/t token (the one producer that keeps its prefix and quotes) strips.
+    # The trailing rows are the guard that a body merely STARTING with a
+    # prefix-like letter (`T`, `f`, `r`, `b`, `u`, `t`) is not read as a
+    # prefixed token — the failure mode of guessing from the text, which is
+    # what `_str_literal_interp_flag` exists to avoid.
+    test_gimple_matches_cpython("gimple_string_literal_whose_content_is_quoted", """\
+def main():
+    print("'x'", len("'x'"))
+    print("a'b'c", len("a'b'c"))
+    print('say "hi"', len('say "hi"'))
+    print("it's", len("it's"))
+    print("", len(""))
+    print("'''x'''", len("'''x'''"))
+    print("'a'", len("'a'"))
+    print('"x"', len('"x"'))
+    print("The quick", len("The quick"))
+    print("fox", len("fox"))
+    print("rat", len("rat"))
+    print("box", len("box"))
+    print("tab", len("tab"))
+    print("uber", len("uber"))
+    print("Fern", len("Fern"))
+    print("n={n}", len("n={n}"))
+main()
+""")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]
