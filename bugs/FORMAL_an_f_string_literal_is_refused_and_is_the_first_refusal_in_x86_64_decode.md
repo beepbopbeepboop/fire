@@ -100,11 +100,15 @@ not a change.
 
 ## What it would take, and the cheap half of it
 
-* **The cheap half is the caller's spelling, and the refusal already names it:**
-  `print(f"v={v}")` becomes `print("v=", v)` (the parts as separate operands) or
-  `printf("v=%d", v)`. That is a per-site edit and it is what
+* **The cheap half is the caller's spelling, and the refusal now names the one
+  that WORKS:** `print(f"v={v}")` becomes `printf("v=%d", v)`. That is a
+  per-site edit and it is what
   `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s option 1 is
-  for its own construct.
+  for its own construct. **`print("v=", v)` is NOT the rewrite and the landed
+  refusal no longer offers it** — `print` inserts a space between operands, so
+  it prints `v= 7` where the f-string prints `v=7`, which is a different answer
+  with exit status 0; see "What landed" above and
+  `test_formal_run.py::fstring_print_of_two_operands_is_not_the_rewrite`.
 * **The real fix is a buffer**, and there are exactly two shapes it can be:
   a run-time scratch area the emitters own (a `__DATA` cell per string
   expression, or a stack slot), or a compile-time composition for the case where
