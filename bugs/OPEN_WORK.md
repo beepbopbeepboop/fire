@@ -60,7 +60,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | **unclaimed** | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | **unclaimed** | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 13 documents, 2 claimed
+### `formal/arm64_codegen` — 14 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -73,6 +73,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` | **unclaimed** | arm64: an extern call emitted from the startup stub lands its `bl` past the end of `__TEXT` |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | **unclaimed** | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
+| `FORMAL_container_operators_that_need_a_per_element_stride.md` | **unclaimed** | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_raise_skips_the_stdio_flush.md` | **unclaimed** | on arm64 a `raise` throws away everything the program had already printed |
 | `FORMAL_stack_floor_guard_still_segfaults_at_the_budget_frame_count.md` | **unclaimed** | the stack-floor guard still dies of SIGSEGV at exactly the budget's frame count under a reduced `ulimit -s` |
@@ -264,12 +265,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_one_field_mutator_has_no_method_contract.md` | **unclaimed** | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 
-### `unclassified` — 4 documents, 1 claimed
+### `unclassified` — 3 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_comprehension_element_container_aliases_every_iteration.md` | `formal103-docs` | a comprehension whose ELEMENT is a container aliases every iteration's element to the LAST one |
-| `FORMAL_container_operators_that_need_a_per_element_stride.md` | **unclaimed** | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_proof_census_baseline_covers_52_of_93_examples.md` | **unclaimed** | `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus |
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | **unclaimed** | `.returncode` is a field access on an integer |
 
