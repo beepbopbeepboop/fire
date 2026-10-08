@@ -9598,6 +9598,37 @@ def _step_result_plan(code: bytes) -> dict:
     return plan
 
 
+#: The immediate's own sign bit, in the immediate's domain, per step index —
+#: the literal the model spells (`lib/ProofLib.lean`'s `arm64_step`: `imm19
+#: &&& 0x40000`, `imm14 &&& 0x2000`) and the one `lhs` is phrased over.
+#: B.cond/CBZ/CBNZ read imm19 (`(w >>> 5) &&& 0x7ffff`); TBZ/TBNZ read imm14
+#: (`(w >>> 5) &&& 0x3fff`); B/BL's 26-bit offset has no shift (`0x02000000`).
+_SIGN_EXTEND_IMM_BIT = {14: 0x02000000, 16: 0x00040000, 17: 0x00040000,
+                        51: 0x00040000, 52: 0x00002000, 53: 0x00002000}
+
+
+def _sign_extend_mask(idx: int) -> int:
+    """The mask on the RAW WORD for the bit the sign-extend `if` splits on.
+
+    The step lemma's `lhs` is the model's term — `((w >>> 5) &&& <imm mask>
+    &&& <imm sign bit>)` — so the bit it tests is the immediate's sign bit
+    SHIFTED UP BY 5 (the immediate starts at bit 5), and the mask applied to
+    `w` to decide the `hb` polarity has to be that bit in `w`.  For imm19 that
+    is bit 23 (`0x800000`), for imm14 bit 18 (`0x40000`); B/BL's 26-bit offset
+    is read unshifted, so its sign bit is bit 25 (`0x02000000`) as-is.
+
+    **Writing the immediate-domain mask here instead is a real bug, not a
+    style choice**: it reads bit 18 for imm19 and bit 13 for imm14, decides
+    the WRONG branch whenever those disagree with the real sign bit, and the
+    `hb` it then emits is false about the word — which `native_decide` rejects
+    outright.  Measured on the `not n` → CMP+CSET dylib's own TBZ, word
+    `0x36312064`: bit 18 (the sign bit) is 0 but bit 13 is 1, so the old
+    `0x2000` mask emitted `¬(lhs = 0)` for a `lhs` that is 0.
+    """
+    bit = _SIGN_EXTEND_IMM_BIT[idx]
+    return bit if idx == 14 else bit << 5
+
+
 def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
@@ -9685,17 +9716,27 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             # everything downstream is a proof of something else. That is why
             # the numbers are spelled out here rather than derived from a
             # table the two families do not share.
+            #
+            # **`sign_mask` is the SAME BIT AS `lhs`, and `lhs` tests the bit
+            # in the SHIFTED word (`w >>> 5`) while `sign_mask` is applied to
+            # `w` — so it is the immediate's sign bit shifted back up by 5.**
+            # The two families' immediates start at bit 5 (the model reads
+            # `(insn >>> 5) &&& 0x7ffff` / `&&& 0x3fff`), so the sign bit the
+            # model's `if` splits on is bit 23 of `w` for imm19 and bit 18 for
+            # imm14.  Writing the immediate-domain mask here (0x40000 / 0x2000)
+            # instead reads bit 18 / bit 13 of `w` and decides the WRONG branch
+            # whenever those disagree with the real sign bit — a `hb` that is
+            # false about the word, which `native_decide` rejects outright
+            # (measured: the `not n` → CMP+CSET dylib's own TBZ, word
+            # 0x36312064, bit 18 = 0 but bit 13 = 1).
             if idx == 14:
                 immv = w & 0x03ffffff
                 lhs = f"(({immv} : UInt32) &&& (33554432 : UInt32))"
-                sign_mask = 0x02000000
             elif idx in (52, 53):
                 lhs = f"(({w} : UInt32) >>> 5 &&& 16383 &&& 8192)"
-                sign_mask = 0x2000
             else:
                 lhs = f"(({w} : UInt32) >>> 5 &&& 524287 &&& 262144)"
-                sign_mask = 0x00040000
-            if w & sign_mask:
+            if w & _sign_extend_mask(idx):
                 tactics.append(f"have hb : \u00ac ({lhs} = 0) := by native_decide")
             else:
                 tactics.append(f"have hb : ({lhs}) = 0 := by native_decide")

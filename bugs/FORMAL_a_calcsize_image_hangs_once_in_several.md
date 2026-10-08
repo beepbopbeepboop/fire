@@ -4,8 +4,11 @@
 rather than by argument; the format question this document left open is closed
 by exhaustion; a THIRD candidate for the neighbourhood was found and filed; and
 as of 2026-10-05 the one thing the "What is left" section said the next
-recurrence NEEDS — the image, kept — is what the harness now does. The hang
-itself is still unexplained and this document stays open for it.**
+recurrence NEEDS — the image, kept — is what the harness now does. As of
+2026-10-07 the harness also ANSWERS the two-way branch rather than offering it:
+the timeout message now carries the child's own CPU seconds, which rules the
+SPINNING reading in or out (§0b). The hang itself is still unexplained and this
+document stays open for it.**
 
 Found 2026-10-01 while re-running `test_struct_formal.py` to settle
 `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`. **NOT MINE and NOT FIXED** —
@@ -48,6 +51,40 @@ One of the two is the image's fault and the other is not, so a message that
 offered only the `gdbtool.py` route would send the next reader to the wrong one
 — which is what the previous wording did.
 
+## 0b. What landed 2026-10-07: the message MEASURES which of the two readings it is
+
+**"What is left" ends with a question the previous wording only OFFERED**: *"the
+interesting question is which of the two it was: a process that never got
+SCHEDULED (look at the machine) or a process spinning inside the image."* The
+harness now answers it, because the answer is one number it can take.
+
+`_child_cpu_seconds()` reads `resource.getrusage(RUSAGE_CHILDREN)`'s user+system
+total, snapshotted immediately before the image is run and again after
+`subprocess.run` has reaped it — so the delta is the image's own CPU and
+nothing the build used (the build child is reaped before the first snapshot).
+`build_and_run`'s `except TimeoutExpired` then states it:
+
+* `used ≥ 0.5 s` → *"it used N.Ns of CPU, so it was SPINNING inside the image —
+  a fact about the IMAGE"*;
+* otherwise → *"it used N.NNs of CPU, so it was not spinning: it was never
+  SCHEDULED or it is BLOCKED, and either way that is a fact about the
+  MACHINE"*.
+
+**The threshold is deliberately neither reading's proof.** A looping image burns
+CPU at wall speed (the self-test's probe is a real `while True` and reports
+~3 s against a 3 s timeout); a process that never ran uses ~0 s. What the number
+does NOT separate is starvation from a block on a lock or a syscall — both use
+~0 s — which is why the low reading names both and calls it the machine's rather
+than claiming starvation, and why the high reading is the one that matters: it
+is the only evidence that turns "it did not finish" into "it is looping", and it
+is available exactly when the `TemporaryDirectory` copy or `gdbtool.py` is not.
+`_hang_reading(used)` is the one place the threshold and the sentence live, and
+the self-test pins it three ways: the real `while True` probe's message must
+carry a CPU figure and one of the two attributions (the production path), and
+`_hang_reading(3.0)` / `_hang_reading(0.0)` are called directly so both
+branches are decided by a number rather than by hoping a shared box schedules
+the probe into the high one.
+
 Pinned in `test_struct_formal.py`'s own self-test
 (`test_the_harness_records_a_case_even_when_it_cannot_pass`), which is where the
 harness's reporting defects are pinned and not in a suite that would need the
@@ -60,7 +97,12 @@ bug to happen:
   the fix** — `192/193 checks passed` with `_preserve_a_hung_image` stubbed to
   return `None`, against `193/193` with it;
 * **both readings appear in the message**, because a message that offers one
-  sends the reader to the wrong fault.
+  sends the reader to the wrong fault;
+* **the CPU figure decides between them** (§0b): the real `while True` probe's
+  message must carry the figure and one of the two attributions, and
+  `_hang_reading(3.0)` / `_hang_reading(0.0)` pin the two branches by direct
+  call, so the test does not depend on a shared box scheduling the probe into
+  the high one.
 
 A third change came with it, and it is a **false statement in the report** rather
 than a missing one: `expect_lines`' second check said `not reached: the program
@@ -71,14 +113,15 @@ report can no longer claim the compiler refused a program the compiler built.
 
 ```
 $ python3 tools/memslot.py --gb 8 --label sf -- python3 test_struct_formal.py
-193/193 checks passed
+196/196 checks passed
 memcap: done, peak 0.2 GB across up to 2 procs (ceiling 8.0 GB), child exit 0
 ```
 
 **What this does NOT do, and the reason it is a Status and not a deletion: the
 hang is still unexplained.** Everything the section below measures is still
-measured, none of it moved, and the two-way branch is now *answerable* rather
-than *answerable-if-somebody-happens-to-have-kept-the-image*. A document whose
+measured, none of it moved, and the two-way branch is now *answerable* — the
+message decides it by CPU (§0b) rather than leaving it to a reader with the
+image in hand. A document whose
 only remaining content is a diagnostic instruction is worth deleting; this one's
 remaining content is an unexplained fault that has not recurred since 2026-10-01
 and whose one candidate reading (machine pressure) is a property of the box, not
