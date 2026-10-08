@@ -12,6 +12,39 @@ remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
 next 4-6 of them. The ranking is the deliverable and it is negative; §4 is the
 arithmetic and §5 is the next step.
 
+## What landed 2026-10-08: the `--dead` ratchet caught two more, and the row's third name
+
+The `--dead` walk (§3's second half) is the set the sweep's ranking CANNOT see,
+and `test_formal_host_import_shapes.py`'s
+`test_the_whole_tree_has_one_dead_host_import_and_it_is_named` is its ratchet. It
+was **RED with three entries, not one**:
+
+* **`tools/formal_doc_index.py`'s `import subprocess`** — dead since the tool was
+  rewritten to generate `OPEN_WORK.md`'s formal section (`57aa166d`); nothing in
+  the file reads it. Deleted.
+* **`tools/formal_metamorph.py`'s `import subprocess`** — it carried a
+  `# noqa: F401 — re-exported for callers that shim this module`, and **the
+  comment names no caller**: `test_formal_metamorph.py` (the module's only
+  importer) imports its own `subprocess`, and no file in the tree reads
+  `formal_metamorph.subprocess`. Deleted.
+* **`fire_compiler.py`'s `from abc import abstractmethod`** — **left, on purpose,
+  exactly as §3 says**: it is the AST source of truth, line 8401 emits
+  `@abstractmethod` into GENERATED source, and deleting it belongs to whoever
+  owns that file.
+
+The test's other half is the `importlib.util` row, and it now pins a **third
+name**: `importlib.util.find_spec` joined the row when `test_formal_imports.py`
+grew a precondition that asks CPython itself which names have a spec on this host
+(`f4aca5cd`). All three — `spec_from_file_location`, `module_from_spec`,
+`find_spec` — are `FIELD` reads of a name `importlib.util` publishes and none is
+`DEAD`, so the row is unchanged in meaning: an embedded CPython, tiered
+`unreachable`.
+
+**Worth, in this document's units: two files off the wall for nothing.** Both are
+`tools/` files, so neither was in the sweep's 220 host-import lines and the
+ranked table does not move — which is exactly why the `--dead` column exists
+(§3). `test_formal_host_import_shapes.py` is **26 tests, OK** (was 2 failures).
+
 ## 0. What is here, in one table
 
 `python3 tools/formal_host_import_shapes.py`, over
