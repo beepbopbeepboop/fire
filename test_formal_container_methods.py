@@ -998,6 +998,7 @@ def compare(group, cases, backend, verbose):
 #: the two that name a construct this path has no representation for at all.
 _NAMED_REFUSAL_FRAGMENTS = (
     "is refused when",                  # container_operator_refusal
+    "has no emitter for it",            # set_algebra_refusal (the set case)
     "is refused because",               # container_union_refusal
     "as the NEEDLE of",                 # container_membership_refusal
     "is not lowered on this path",      # slice_store_refusal

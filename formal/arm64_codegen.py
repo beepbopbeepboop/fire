@@ -5192,6 +5192,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
+        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
+            # Set algebra is defined for two sets and nothing else, so a result
+            # is a set exactly when BOTH sides are — which is what keeps a
+            # nested `(s & t) | u` from being refused as "the left is not
+            # established to be a set".
+            return (self._expr_is_set_like(e.left)
+                    and self._expr_is_set_like(e.right))
         return False
 
     def _is_dict_subscript(self, obj) -> bool:
@@ -6124,6 +6131,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
         if reason is not None:
             raise CodegenError(reason)
+        # `&`/`-`/`^` between two BLOBS are set algebra and the shared gate now
+        # DEFERS them, but a subscript TARGET is an element, not a whole set
+        # variable: there is no fresh-blob lowering to store back here, and
+        # without this the deferral would let `a[0] &= b` reach the integer ALU
+        # as two blob addresses — the exact wrong answer the gate exists for.
+        if op in M.SET_ALGEBRA_OPS and (
+                M.container_operand_is_blob(self._expr_str_kind(target))
+                or M.container_operand_is_blob(self._expr_str_kind(stmt.value))):
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(target), M.spelled(stmt.value),
+                self._expr_is_set_like(target),
+                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
         self._emit_subscript_addr(target)
         # The element's width and sign belong to the TARGET, and the RHS below
         # can itself be a subscript (`q[0] += r[1]`) whose address computation
@@ -8034,6 +8053,26 @@ ctor_field_value=self._ctor_field_value_for(name),
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
+        # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
+        # now DEFERS them (see `model.SET_ALGEBRA_OPS`), so this is the site
+        # that decides.  Lowered here only for two SETS, which is what CPython
+        # defines them for; anything else is refused by name rather than
+        # reaching the integer ALU with two blob ADDRESSES, which is the
+        # measured bug the gate was widened for (`s & {2}` answered 2 on arm64
+        # and 163061056 on x86-64, `s - {2}` SIGSEGVed on both).  `-`, `&` and
+        # `^` are also ordinary integer operators, and the blob test is what
+        # keeps this off `a - b` for two words.
+        if op in M.SET_ALGEBRA_OPS and (
+                M.container_operand_is_blob(self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            left_set = self._expr_is_set_like(e.left)
+            right_set = self._expr_is_set_like(e.right)
+            if left_set and right_set:
+                self._emit_set_op(e.left, e.right, op)
+                return
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                left_set, right_set, backend_has_emitter=True))
         # Comparisons
         cmp_conds = {
             "<=": ("ls", "le"),

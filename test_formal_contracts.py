@@ -306,6 +306,49 @@ def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
 
 # ── 2. one reader, three printers ───────────────────────────────────────────
 
+def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
+    """`//` is the operator the AST carries, and the IR reads it as `/`.
+
+    `fire_compiler`'s `BinaryOp` spells integer division `//` (measured:
+    `Parser(py_tokenize("a // b")).parse_module()[0].body[0].value.op == "//"`),
+    where the IR's arithmetic arm was keyed on `/`. So a clause that wrote the
+    operator the source actually contains was refused with a reason that named
+    the wrong one, and a body that used it could not be run by the bounded
+    search at all -- every input a skip. Both forms are the SAME truncating
+    operation (`_eval_of`'s `/` is `a // b`, `_lean_of`'s is `UInt64.div`)."""
+    from formal import contracts as CT
+    src = "@ensures(result == a // b)\ndef h(a, b):\n    return a // b\n"
+    fn = functions(parse(src, "x.mojo"))[0]
+    c = contract_of(fn, "x.mojo", src)
+    params = ["a", "b"]
+
+    ir = CT._Reader(params).clause_ir(c.ensures[0], params)
+    check("the_reader_reads_floordiv_as_the_IRs_division",
+          ir is not None and ir[0] == CT._Op.CMP
+          and ir[1] == "==" and ir[2][0] == CT._Op.ARITH
+          and ir[2][1] == "/", repr(ir))
+
+    e = CT.contract_theorems(c, params, fn=fn)
+    check("a_clause_over_floordiv_is_emitted", bool(e.lean), e.lean)
+    check("a_clause_over_floordiv_is_not_reported_as_unreadable",
+          CT.unlowered_reason(c, params) == "",
+          CT.unlowered_reason(c, params))
+    check("the_emitted_theorem_renders_the_division_as_UInt64.div",
+          "UInt64.div" in e.lean, e.lean[:400])
+
+    check("the_source_evaluator_runs_a_body_with_floordiv",
+          CT.SourceRunner(fn)(7, 2) == 3, repr(CT.SourceRunner(fn)(7, 2)))
+
+    # And the plain `/` spelling keeps the reading it always had, so the two
+    # are one operator in the IR and not a second, differently-typed one.
+    slash = functions(parse("@ensures(result == a / b)\ndef h(a, b):\n"
+                            "    return a // b\n", "x.mojo"))[0]
+    c2 = contract_of(slash, "x.mojo")
+    ir2 = CT._Reader(params).clause_ir(c2.ensures[0], params)
+    check("the_slash_spelling_reads_identically",
+          ir2 == ir, f"{ir2!r} vs {ir!r}")
+
+
 def test_the_lean_printer_and_the_evaluator_agree_on_the_corpus(tmpdir=None):
     """The clause is read once and printed three ways.  The pair most able to
     disagree is the Lean printer and the Python evaluator, because they are the
@@ -1080,6 +1123,7 @@ ALL = [
     test_the_comment_pragma_is_read_too,
     test_an_unreadable_clause_is_a_REFUSAL,
     test_a_name_outside_the_parameters_is_not_silently_zero,
+    test_the_reader_reads_the_sources_floordiv,
     test_the_lean_printer_and_the_evaluator_agree_on_the_corpus,
     test_a_comparison_is_SIGNED_in_both_printers,
     test_the_mojo_printer_emits_MOJO_and_not_LEAN,

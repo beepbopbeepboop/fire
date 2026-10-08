@@ -418,7 +418,7 @@ class _Op:
     NEG = "neg"        # word negation: (NEG, e)
     POS = "pos"        # unary `+`, which is the identity: (POS, e)
     INVERT = "inv"     # `~`: (INVERT, e)
-    ARITH = "arith"    # (ARITH, op, a, b) for + - * / %
+    ARITH = "arith"    # (ARITH, op, a, b) for + - * / % (source `//` reads `/`)
     CMP = "cmp"        # (CMP, op, a, b) for the six comparisons
     AND = "and"        # (AND, a, b)
     OR = "or"          # (OR, a, b)
