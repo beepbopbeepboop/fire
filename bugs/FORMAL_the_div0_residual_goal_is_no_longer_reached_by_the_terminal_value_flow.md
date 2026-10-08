@@ -7,6 +7,37 @@ merge. NOT reproduced on `master`, and the difference is the library, not the
 code** — see §1. **Needs a Lean-backed read, so it is filed rather than
 guessed at**; this session is a light worker and may not launch lean.
 
+## 0. Re-measured 2026-10-08: the failure MOVED, and it is now EARLIER than §3 describes
+
+The class no longer reaches the residual at all. `_symbolic_divisor_proof`
+(`test_formal_call_proof_gen.py:5267`) calls
+`fb.compile_formal(symdiv.mojo, prove=True)`, and on this tree that now RAISES
+before any Lean file is written:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label div0 -- \
+    python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean -v
+setUpClass ... ERROR
+formal.build.FormalBuildError: no proof was generated: …
+  NotImplementedError: universal theorem: 2 calls this walk cannot follow
+    (0x100000424 -> 0x10000088c (opaque), 0x100000514 -> 0x100000880 (opaque)),
+    every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge
+    them …
+```
+
+So the class is an ERROR in `setUpClass`, not the three residual failures §1/§3
+record — the generator refuses `def q(a, b): return a // b`'s universal theorem
+before the div0 arm is emitted at all. **The question §5 poses ("does the div0
+arm still contribute a goal?") is therefore not yet askable on this tree**, and
+the answer is upstream: the walk now cannot follow two out-of-image calls in the
+program, which is the subject of
+`bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
+and its siblings (`formal/arm64_proof_gen.py`, another claim's write set). Until
+that walk can follow the calls, this class cannot measure the residual, and the
+honest status of the doc's own subject is BLOCKED behind it rather than red on
+its own terms. The library is not the variable here — the refusal is at
+generation, before Lean — so a rebuild does not change this.
+
 ## 1. What I ran, and why `master` is green
 
 ```console
