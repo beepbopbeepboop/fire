@@ -21350,21 +21350,19 @@ def no_public_api_reason(source_paths: list) -> str:
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
                 f"constants, and a constant is not a boundary symbol: there is "
-                f"nothing an importer could bind — no address such a name could "
-                f"take — so the refusal itself is correct. What would remove it "
-                f"is not a declaration this file is missing, and saying so is "
-                f"the point: the two things that "
+                f"no address an importer could bind, so the refusal itself is "
+                f"correct. What would remove it is not a declaration this file "
+                f"is missing, and saying so is the point: the two things that "
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
                 f"(`bugs/FORMAL_module_state_no_storage.md`) — and a BACKEND "
                 f"rule that a module nothing binds needs no library at all, an "
-                f"importer "
-                f"reading the constant directly instead of linking a library "
-                f"for it (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_"
-                f"a_dylib.md`). Neither exists here, so this is refused at the "
-                f"build rather than linked as a library with nothing in it, and "
-                f"nothing here is waiting on this file.")
+                f"importer reading the constant directly instead of linking a "
+                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
+                f"cannot_be_a_dylib.md`). Neither exists here, so this is "
+                f"refused at the build rather than linked as a library with "
+                f"nothing in it, and nothing here is waiting on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and
