@@ -184,6 +184,59 @@ class TestExemptions(unittest.TestCase):
         self.assertEqual(
             [], [r.encoder for r in rows if r.missing() and not r.excluded])
 
+    def test_the_x86_64_backend_has_no_unexplained_gap_or_backlog_row(self):
+        """The x86-64 backlog is CLOSED and no row may rejoin it by default.
+
+        Every x86-64 gap was a missing decoder arm, model arm, `samples()` row or
+        pool entry, and each was closed by measurement rather than by re-labelling
+        (see `tools/formal_isa_census.BACKLOG`'s x86-64 note). The last one was
+        not a gap at all: `encode_cmov_r64_r64` is named in
+        `formal/x86_64_codegen.py`'s docstring and called nowhere, so a text
+        `call_sites` exempted nothing and left it as the only unexplained x86-64
+        row. The pin is in both directions — the unexplained-gap list must be
+        empty (so the AST `call_sites` cannot regress to counting prose), and no
+        x86-64 `BACKLOG` entry may come back without a real gap behind it.
+        """
+        rows = _ROWS["x86_64"]
+        self.assertGreater(len(rows), 50,
+                           "the x86-64 census has collapsed to %d rows, so it "
+                           "is no longer measuring the emitter" % len(rows))
+        self.assertEqual(
+            [], [r.encoder for r in rows if r.missing() and not r.excluded],
+            "the x86-64 backend has an unexplained gap again; a real harness "
+            "limit belongs in HARNESS_LIMITS and a real gap needs a bug doc")
+        x86_backlog = sorted(
+            n for n in C.BACKLOG if n in {r.encoder for r in rows})
+        self.assertEqual(
+            [], x86_backlog,
+            "the x86-64 backend has a BACKLOG entry again: %s" % x86_backlog)
+        self.assertIn(
+            "encode_call_r64", C.HARNESS_LIMITS,
+            "encode_call_r64's FUZZ gap is a property of the harness (it jumps "
+            "to a register's contents, which no case value can install), not "
+            "work; without its HARNESS_LIMITS entry the row falls back into the "
+            "unexplained-gap list above")
+
+    def test_call_sites_does_not_count_a_docstring_mention(self):
+        """A name in prose is not an emitted form.
+
+        `formal/x86_64_codegen.py` names `encode_cmov_r64_r64` in a docstring on
+        purpose (the `cmov` it deliberately does NOT emit, and why), so a text
+        scan reads a form nothing can contain. The census's own definition is a
+        CALL SITE, and the AST walk is the one the FUZZ and AS columns already
+        use.
+        """
+        sites = C.call_sites("x86_64")
+        self.assertNotIn(
+            "encode_cmov_r64_r64", sites,
+            "call_sites counts a docstring mention again; a form named only in "
+            "prose is not emitted and must not appear in the census")
+        # The control: a form the emitter really calls must still be found, so
+        # the exclusion above cannot be satisfied by finding nothing at all.
+        self.assertIn("encode_ret", sites,
+                      "call_sites found no real call sites, so excluding "
+                      "docstring-only names proves nothing")
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

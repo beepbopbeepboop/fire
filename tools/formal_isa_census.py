@@ -246,18 +246,32 @@ def encoder_names(arch):
 
 
 def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only."""
-    for rel in LEVER_ROOTS[arch]:
-        blob = _read(os.path.join(ROOT, rel))
+    """{encoder: [(file, count)]} over the emitter files only, by AST.
+
+    AST and not a text search, for the reason the module docstring gives: an
+    `encode_*` that appears only in a comment or a docstring is not a call site,
+    and an emitter's prose names encoders no lowering emits. The measured case is
+    `encode_cmov_r64_r64`, which `formal/x86_64_codegen.py` names in its own
+    docstring and calls nowhere; counting the prose made it the one x86-64 form
+    with no model arm and no exemption, while a decoder, a pool entry and an `as`
+    check were all absent for a form nothing can emit. Counting `Name` loads is
+    the same rule the FUZZ and AS columns already use.
+    """
+    encoders = set(encoder_names(arch))
     out = {}
-    for name in encoder_names(arch):
-        hits = []
-        for rel in LEVER_ROOTS[arch]:
-            n = len(re.findall(r"\b%s\b" % re.escape(name),
-                               _read(os.path.join(ROOT, rel))))
-            if n:
-                hits.append((os.path.basename(rel), n))
-        out[name] = hits
+    for rel in LEVER_ROOTS[arch]:
+        tree = ast.parse(_read(os.path.join(ROOT, rel)))
+        counts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in encoders:
+                counts[node.id] = counts.get(node.id, 0) + 1
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "getattr" and len(node.args) == 2:
+                for nm in _resolve_getattr(node, tree):
+                    if nm in encoders:
+                        counts[nm] = counts.get(nm, 0) + 1
+        for name, n in counts.items():
+            out.setdefault(name, []).append((os.path.basename(rel), n))
     return out
 
 
@@ -532,6 +546,12 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "`callq *%r` jumps to the CONTENTS of a register, which "
+                       "is outside the harness's one `MAP_FIXED` region and "
+                       "cannot be installed as a case value — the same reason "
+                       "as `encode_jmp_rm64` and arm64's `encode_br_xn`; the "
+                       "decoder, model arm, `samples()` row and `as` check are "
+                       "all `yes`",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -575,51 +595,40 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
-    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
-    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
-    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`. The previous pass recorded that and left it
-    # here on purpose because the tool was "another claim's write set"; the
-    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
-    # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
-    # ── x86-64: runnable, and the pool does not draw them ────────────────
-    # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
-    # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
-    # engines' RIPs differ by the load slide" for the `lea` and "a call cannot
-    # run in the harness's straight-line stub without leaving it" for the
-    # `call`.  Both reasons are FALSE of this harness and were worth measuring
-    # rather than repeating: the emulated region is ONE `MAP_FIXED` mapping and
-    # the model is handed the same base, so a pc-relative result is the same
-    # number in both halves; and a branch to the NEXT instruction stays inside
-    # whatever the program has already put there.  All four are in the pool now
-    # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
-    # reason is the one that fits IT: this project does not map the arm64
-    # harness's code at a fixed address, so a pc-relative RESULT cannot be
-    # compared and only pc DELTAS are.
+    # The x86-64 backend has no gap left that is a missing model arm, a missing
+    # fuzz case or a missing `as` check, so no entry here points at the former
+    # x86-64 instruction-coverage-backlog doc any more. What was here, and where
+    # each row went:
+    #
+    # * `encode_imul_r64_r64_imm` was removed 2026-10-06
+    #   (`work/x86-coverage-endtoend`): it reads `yes/yes/yes`, and its note
+    #   ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
+    #   `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row
+    #   and a pool entry since `4a680153`.
+    # * All nine of shape 1's SSE2 rows (`addsd`, `subsd`, `mulsd`, `divsd`,
+    #   `ucomisd`, `xorpd`, `movq_r64_xmm`, `cvtsi2sd`, `cvttsd2si`) came out on
+    #   2026-10-06: each gained a decoder arm, a model arm, a `samples()` row and
+    #   a fuzz-pool entry, and the census reads `yes yes yes` for every one.
+    # * `encode_and_r8_r8` and `encode_or_r8_r8` came out on 2026-10-08: both read
+    #   `yes yes yes` now. The byte-wise ALU class was this tree's own encoder
+    #   omitting the REX prefix for SPL/BPL/SIL/DIL, fixed by
+    #   `_byte_rex_required`; the fuzz pool draws every `rm`/`reg` pair and the
+    #   row's note ("the decoder's REX.W-only ALU arm does not reach it") was the
+    #   stale half of that.
+    # * `encode_call_r64` moved to `HARNESS_LIMITS`, where its FUZZ gap belongs:
+    #   the instruction jumps to a register's CONTENTS, which is outside the
+    #   harness's one `MAP_FIXED` region, and that is a property of the harness
+    #   (the same one that keeps `encode_jmp_rm64` and arm64's `encode_br_xn`
+    #   out), not work nobody has done.
+    # * The four runnable rows that left on 2026-10-05 (`encode_lea_r64_rip`,
+    #   `encode_jcc_rel32`, `encode_jmp_rel32`, `encode_call_rel32`) are in the
+    #   pool. Both of the reasons they once carried were FALSE of this harness
+    #   (the emulated region is ONE `MAP_FIXED` mapping the model is handed too,
+    #   so a pc-relative result is the same number in both halves; and a branch
+    #   to the NEXT instruction stays inside whatever the program has already put
+    #   there), and all four are measured AGREE at four initial states each.
 }
 
 
