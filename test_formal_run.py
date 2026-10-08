@@ -23740,7 +23740,9 @@ def check_interpolated_literal_census(verbose=False):
                     fields = [s for s in segs if s[0] == 'field']
                     rows.append(dict(
                         path=path, spelled=spelled,
-                        is_t=spelled[:1] in ('t', 'T'),
+                        is_t=any(c in ('t', 'T') for c in spelled[
+                            :_TYPE_VALUE_MODEL.interpolated_literal_prefix(
+                                spelled)]),
                         nfield=len(fields),
                         specs=sum(1 for f in fields if f[2]),
                         convs=sum(1 for f in fields if f[3])))

@@ -63,6 +63,7 @@ recursion argument bound` for ANY program containing a call, which is agent
 about a proof until that lands, and pretending otherwise would be a test that
 passes vacuously -- the exact failure the census was built to catch.
 """
+import glob
 import os
 import subprocess
 import sys
@@ -581,6 +582,43 @@ def test_manifest_round_trips():
           "and the bind spelling is the C name, not the Mach-O one")
 
 
+# ── 4b. a cold runtime build leaves no staging directory ────────────────────
+
+def test_a_cold_runtime_build_leaves_no_staging_directory():
+    """`runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
+    directory under `$TMPDIR`, links the dylib there and moves ONLY the dylib
+    out; the directory has to go with the build. Same shape in
+    `_driver_targets`, which stages its arch probe in `mojo_archprobe_*`.
+
+    Measured on a COLD cas, because a warm one returns before any staging
+    directory exists at all — so this builds in a subprocess with its own
+    `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
+    shared cas the other groups use. Both leaks are per cold build and cost
+    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
+    the third instance of the same shape and is filed rather than asserted here
+    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    """
+    for arch in ('arm64', 'x86_64'):
+        home = tempfile.mkdtemp(prefix='rtstage_home_')
+        tmp = tempfile.mkdtemp(prefix='rtstage_tmp_')
+        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+        code = ('from build_stdlib_dylib import runtime_dylib\n'
+                f'print(runtime_dylib(arch={arch!r}))\n')
+        proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                              capture_output=True, text=True)
+        check(proc.returncode == 0,
+              f'{arch}: a cold runtime dylib build succeeds',
+              (proc.stderr or proc.stdout)[-400:])
+        check('.dylib' in proc.stdout,
+              f'{arch}: …and it produced a dylib', proc.stdout[-200:])
+        left = sorted(os.path.basename(p) for p in
+                      glob.glob(os.path.join(tmp, 'mojo_rt_*')) +
+                      glob.glob(os.path.join(tmp, 'mojo_archprobe_*')))
+        check(not left,
+              f'{arch}: no staging directory is left behind in $TMPDIR',
+              str(left))
+
+
 # ── 5. the audit still fires ────────────────────────────────────────────────
 
 def test_bind_audit_not_weakened():
@@ -987,6 +1025,7 @@ def main():
     test_elf_is_refused_for_the_container_and_not_for_the_link_line()
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
+    test_a_cold_runtime_build_leaves_no_staging_directory()
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()
