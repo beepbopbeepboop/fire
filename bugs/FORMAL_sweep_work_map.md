@@ -963,10 +963,13 @@ measured it three rounds ago. The exceptions are named:
 * `FORMAL_known_limits.md` — the audit of which refusals in the residue are
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
-* `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
-  `b14` §1.11's `rf"…"` row, filed by that round and **still open**. Kept as its
-  own document for the reason above: the measurement is here (§1.11) and the fix
-  has a question to answer first that belongs with the fix.
+* `b14` §1.11's `rf"…"` row was filed by that round and is **FIXED**: a prefix
+  is a set of spelling flags, and `formal/model.py::interpolated_literal_segments`
+  assumed exactly one letter, so the reader and `fire_compiler.py`'s own
+  `_string_prefix_start` disagreed about what a prefix is. The reader now asks
+  the lexer's boundary, and the doc was deleted with the fix as `CLAUDE.md`
+  requires; `test_formal_run.py`'s `check_interpolated_segments_against_cpython`
+  carries the two-letter-prefix rows.
 
 **The per-slice rounds also fixed things and recorded the pins**, and so did
 `b14` (§5 of that round: `max`/`min`). Those pins are in the test files and the

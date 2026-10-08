@@ -11232,6 +11232,41 @@ def is_interpolated_literal(node) -> bool:
         getattr(node, "is_interpolated", False))
 
 
+def interpolated_literal_prefix_len(spelled) -> int:
+    """How many characters of `spelled` are its string PREFIX, or -1.
+
+    **A prefix is a SET OF SPELLING FLAGS, not one character.** `f`, `t`, `r`,
+    `b` and `u` may appear in any order and up to two of them (`rf"…"`, `fr"…"`,
+    `Rb"…"`, `tR"…"`), so where a literal's quote is is not something a caller
+    can guess. The quote is the first quote in the token, and where the prefix
+    ENDS is not guessed here either: `fire_compiler.py::_string_prefix_start` is
+    the lexer's one answer to "does a legitimate prefix begin at position 0 and
+    end at this quote", so asking it is what keeps this reader and the lexer
+    from disagreeing about what a prefix is.
+
+    The rule the lexer learned on 2026-10-05 (the b13 round of
+    `bugs/FORMAL_sweep_work_map.md`) was `fire_compiler.py::_prefix_is_interpolated`;
+    this reader is one layer down and had assumed exactly one letter, so every
+    two-letter prefix was refused with a sentence that was false about the
+    source — `the character after the prefix is not a quote` about `rf"…"`, whose
+    character after the prefix IS a quote. -1 means the token does not open with
+    a legitimate prefix and quote at all; 0 is impossible in practice (an
+    interpolated literal is always prefixed) and is refused for that reason.
+    """
+    if not isinstance(spelled, str):
+        return -1
+    quote_at = -1
+    for i, ch in enumerate(spelled):
+        if ch == '"' or ch == "'":
+            quote_at = i
+            break
+    if quote_at <= 0:
+        return -1
+    if F._string_prefix_start(spelled, quote_at) != 0:
+        return -1
+    return quote_at
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11266,28 +11301,26 @@ def interpolated_literal_segments(spelled: str) -> list:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it is not "
             f"even a quoted token, so there are no parts to compose")
-    # The prefix is ONE character and it is still there — that is the whole of
-    # why this is readable at all (`is_interpolated_literal` tests it), so the
-    # quote is at index 1 and every test below is from THERE and not from 0.
-    quote = spelled[1]
-    if quote not in ('"', "'"):
+    # The prefix is a SET OF SPELLING FLAGS, not one character (see
+    # `interpolated_literal_prefix_len`): `rf"…"`, `fr"…"` and `Rb"…"` all put
+    # the quote at an index the caller cannot guess, so the quote is found and
+    # the boundary is confirmed by the lexer rather than assumed at 1.
+    prefix_len = interpolated_literal_prefix_len(spelled)
+    if prefix_len < 0:
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: the "
             f"character after the prefix is not a quote")
-    if spelled[1:4] == quote * 3:
+    quote = spelled[prefix_len]
+    if spelled[prefix_len:prefix_len + 3] == quote * 3:
         term = quote * 3
-    elif spelled[1:2] == quote:
-        term = quote
     else:
-        raise CodegenError(
-            f"cannot read an interpolated literal from {spelled!r}: its "
-            f"opening delimiter does not close")
+        term = quote
     if not spelled.endswith(term):
         raise CodegenError(
             f"cannot read an interpolated literal from {spelled!r}: it opens "
             f"with {term} and does not end with {term}, so where its text "
             f"stops is not knowable from the token")
-    body = spelled[1 + len(term):-len(term)]
+    body = spelled[prefix_len + len(term):-len(term)]
     out: list = []
     lit: list = []
     i, n = 0, len(body)
@@ -11410,7 +11443,12 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
     # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
     # first three words are wrong is a message a reader stops reading.
-    is_t = spelled[:1] in ("t", "T")
+    # WHICH kind it is is asked of the whole PREFIX rather than of its first
+    # character, because a two-letter prefix may carry the `t` second (`rt"…"`)
+    # or first (`tr"…"`); reading `spelled[:1]` called `rt"…"` an f-string.
+    _pfx_len = interpolated_literal_prefix_len(spelled)
+    is_t = _pfx_len > 0 and any(c == 't' or c == 'T'
+                                for c in spelled[:_pfx_len])
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:

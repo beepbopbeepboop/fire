@@ -23274,6 +23274,18 @@ def check_interpolated_segments_against_cpython(verbose=False):
         'f"a{{b{c}d}}e"',       # escapes either side of a field
         'f"{f(1, 2)}"',
         'f"{x:{w}}"',           # a spec that is itself an interpolated field
+        # TWO-CHARACTER PREFIXES: a prefix is a SET of spelling flags, and this
+        # reader assumed exactly one letter, so every `rf"…"` was refused with
+        # the false sentence “the character after the prefix is not a quote”.
+        # `rf`, `fr` and `Rf` are all f-strings to CPython, and all must
+        # segment identically to `f"…"` — including a raw string, whose
+        # rawness changes what `\` MEANS and not where its chunks and fields
+        # are.
+        'rf"a={n}b"',
+        'fr"x={y}"',
+        'Rf"pre{n}"',
+        'rf"{{esc}}={n}"',
+        'fr"mid{d}dle{x}end"',
     ]
     passed, failures = 0, []
     for tok in cases:
@@ -23326,6 +23338,8 @@ def check_interpolated_segments_against_cpython(verbose=False):
     for tok, must_say in (('f"a}b"', "a single '}' is not allowed"),
                           ('f"{unclosed', "does not end with"),
                           ("f'{ {'", "never closed"),
+                          ('f"a{b', "does not end with"),
+                          ('nope', "the character after the prefix is not a quote"),
                           ('f"', "not even a quoted token")):
         try:
             got = _TYPE_VALUE_MODEL.interpolated_literal_segments(tok)
