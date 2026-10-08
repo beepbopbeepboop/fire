@@ -60,7 +60,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | `formal112-docs` | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal115-docs` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 12 documents, 8 claimed
+### `formal/arm64_codegen` — 10 documents, 8 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -74,8 +74,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | `formal116-docs` | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
-| `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | **unclaimed** | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
-| `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 
 ### `formal/arm64_proof_gen` — 19 documents, 12 claimed
 
@@ -237,12 +235,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | `formal109-docs` | the 13-file row, split by what each call site actually hands over |
 
-### `formal/x86_64_codegen` — 3 documents, 0 claimed
+### `formal/x86_64_codegen` — 2 documents, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_a_nested_for_target_unpack_prints_nothing.md` | **unclaimed** | x86-64: a `for` target nested more than one group deep prints nothing and exits 1, where arm64 answers CPython's number |
-| `FORMAL_x86_64_cross_module_function_value_call_segfaults.md` | **unclaimed** | x86-64: a comptime specialization through a FUNCTION VALUE across a dylib boundary SIGSEGVs |
 | `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` | **unclaimed** | FORMAL x86-64: `getsize` segfaults (executes at address 0) inside an imported hostmod dylib, where arm64 answers |
 
 ### `formal/x86_64_decode` — 2 documents, 0 claimed
