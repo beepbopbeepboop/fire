@@ -31,8 +31,12 @@ FAIL    stat_null [x86_64]  1 of 5 answers wrong:
 ```
 
 `formal-os-backing` is registered in `tools/suite.py` with no `expect=` marker, so
-this is a red gate job and not a declared one. The `listdir`/`len`/readdir rows
-this task's docs are about all PASS.
+this is a red gate job and not a declared one. **This is a DIFFERENT red from
+`bugs/TEST_formal_os_backing_is_red_with_no_marker.md`**, whose subject (30 of 58,
+every one the non-ASCII string-subscript refusal) is fixed: the `listdir`/`len`/
+readdir rows this task's docs are about now all PASS, and the 6 above are the
+residual. That TEST doc's `expect=`/green decision is still owed, and it is now
+owed against THESE six.
 
 ## The arithmetic, which is the root cause
 
