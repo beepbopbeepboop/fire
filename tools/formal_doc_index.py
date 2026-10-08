@@ -297,6 +297,27 @@ def block_in(text):
     return text[i:j + len(END)]
 
 
+# A committed git merge conflict marker is always a bug, and the block check
+# above cannot see one that sits in the HAND-maintained half of OPEN_WORK.md —
+# which is exactly where one was on 2026-10-08: a `=======` and a duplicated
+# copy of the "where the detail lives" table, left by a merge that resolved a
+# conflict by keeping both sides. `--check` compares the generated region only,
+# so the marker survived every gate until a reader noticed.
+#
+# Checked over the WHOLE file. The marker shapes are git's own: seven characters
+# then a space for the two outer markers, and a run of exactly seven `=` for the
+# middle one. A Markdown setext H1 underline may also be a line of `=`; an index
+# of bug documents has no such heading, and a false positive here is one line to
+# delete, while the miss it prevents is invisible for weeks.
+CONFLICT_MARKER = re.compile(r'^(?:<{7}|>{7}|\|{7})(?:\s|$)|^={7}$')
+
+
+def conflict_markers(text):
+    """1-based line numbers of git merge conflict markers in `text`."""
+    return [i for i, ln in enumerate(text.split('\n'), 1)
+            if CONFLICT_MARKER.match(ln)]
+
+
 # The claim column, blanked.
 #
 # STRUCTURAL, not a regex over the whole line. A regex was tried and it is wrong
@@ -405,7 +426,16 @@ def main() -> int:
         return 0
 
     if args.check:
-        current = block_in(open_work_text())
+        text = open_work_text()
+        hit = conflict_markers(text)
+        if hit:
+            print(f'FAIL  formal doc index: '
+                  f'{os.path.relpath(OPEN_WORK, ROOT)} carries a git merge '
+                  f'conflict marker on line(s) '
+                  f'{", ".join(str(n) for n in hit)} — resolve the merge; a '
+                  f'committed marker is never intended content.')
+            return 1
+        current = block_in(text)
         if current is None:
             print(f'FAIL  formal doc index: '
                   f'{os.path.relpath(OPEN_WORK, ROOT)} has no generated block '

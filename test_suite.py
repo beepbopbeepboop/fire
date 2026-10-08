@@ -5486,6 +5486,22 @@ def test_the_formal_doc_index_is_current():
     check('formal doc index: OPEN_WORK.md\'s generated block is current',
           rc == 0, out.strip() or f'--check exited {rc}')
 
+    # A committed MERGE CONFLICT MARKER is always a bug, and the block check
+    # above cannot see one in the HAND-maintained half of OPEN_WORK.md — it
+    # compares the generated region only, and that is where one sat from a merge
+    # until 2026-10-08 (a `=======` plus a duplicated table). Checked over the
+    # whole file, and shown to fire on a planted string rather than only on the
+    # clean tree it is run against.
+    planted_marker = 'before\n=======\nafter\n'
+    check('formal doc index: a committed merge conflict marker is caught',
+          F.conflict_markers(F.open_work_text()) == []
+          and F.conflict_markers(planted_marker) == [2]
+          and F.conflict_markers('<<<<<<< HEAD\nx\n>>>>>>> other\n') == [1, 3],
+          'a `=======` / `<<<<<<<` / `>>>>>>>` line in OPEN_WORK.md must fail '
+          '--check: the block comparison cannot see the hand-maintained half, '
+          'so the marker this checks for went unnoticed through every gate '
+          'until a reader found it')
+
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
     os.makedirs(os.path.dirname(backup), exist_ok=True)
