@@ -17161,8 +17161,9 @@ COMPREHENSION_ELEMENT_CASES = [
     # append stores a pointer to it rather than to the shared blob. An element
     # whose result holds a pointer to a blob built in the SAME emission is still
     # refused, because a byte copy of it would still alias — the copy is only
-    # sound where the result is self-contained. `_element_result_is_flat` is the
-    # predicate; `model.comprehension_element_blob_refusal` is the fallback.
+    # sound where the result is self-contained.
+    # `model.comprehension_element_is_flat_container` is the predicate;
+    # `model.comprehension_element_blob_refusal` is the fallback.
     ("a_comprehension_element_that_is_a_list_literal_builds",
      "def main() -> Int:\n"
      "    var r = [[y, y + 1] for y in [10, 20, 30]]\n"

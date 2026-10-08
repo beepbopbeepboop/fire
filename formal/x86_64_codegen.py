@@ -1333,8 +1333,8 @@ class X86_64Codegen:
         # `_emit_comprehension` so a nested container's own size cannot win
         # over its outer one. A comprehension's element leaf reads it to size
         # the per-iteration copy that makes each iteration's element a distinct
-        # object; `_element_result_is_flat` decides whether such a copy is
-        # sound. arm64's twin.
+        # object; `model.comprehension_element_is_flat_container` decides
+        # whether such a copy is sound. arm64's twin.
         self._last_blob_size = None
         # Blocks for CONTAINERS this function RECEIVES from a callee that
         # returns one, and the COPY after each such call that fills them.  The
@@ -3562,59 +3562,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.comprehension_element_blob_refusal(
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
-
-    def _element_member_stores_a_blob(self, member) -> bool:
-        """arm64's `_element_member_stores_a_blob`, over the same node shapes.
-
-        True when emitting `member` can leave, in the element's result blob, a
-        pointer to a frame blob the element allocated during its own emission —
-        the one thing a byte copy of the result cannot answer, because the copy
-        would carry the pointer to the shared blob the comprehension overwrites
-        each iteration. The reading is deliberately narrow: a call, a subscript
-        and a member read all count, because the type that would tell them apart
-        is not a fact this path computes. Over-refusing leaves the ledger
-        refusal in place, which is the safe direction.
-        """
-        if isinstance(member, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
-                               F.Comprehension, F.SliceExpr)):
-            return True
-        if isinstance(member, (F.CallExpr, F.SubscriptExpr, F.MemberExpr)):
-            return True
-        if isinstance(member, F.UnaryOp):
-            if member.op == "*":
-                return True
-            return self._element_member_stores_a_blob(member.operand)
-        if isinstance(member, F.BinaryOp):
-            if self._is_container_expr(member):
-                return True
-            return (self._element_member_stores_a_blob(member.left)
-                    or self._element_member_stores_a_blob(member.right))
-        return False
-
-    def _element_result_is_flat(self, element) -> bool:
-        """arm64's `_element_result_is_flat`: a byte copy of the element's
-        result blob is sound because the result holds no pointer to a blob the
-        element allocated. A display of scalars, a dict of scalars, and a nested
-        comprehension whose own element is flat all qualify; anything else keeps
-        `_refuse_an_element_blob`. See arm64's for the full reading.
-        """
-        if isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            if any(isinstance(m, F.UnaryOp) and m.op == "*"
-                   for m in element.elements):
-                return False
-            return all(not self._element_member_stores_a_blob(m)
-                       for m in element.elements)
-        if isinstance(element, F.DictExpr):
-            return all(not self._element_member_stores_a_blob(k)
-                       and not self._element_member_stores_a_blob(v)
-                       for k, v in element.pairs)
-        if isinstance(element, F.Comprehension):
-            if getattr(element, "kind", "list") == "dict":
-                return (not self._element_member_stores_a_blob(element.element)
-                        and not self._element_member_stores_a_blob(
-                            element.value))
-            return not self._element_member_stores_a_blob(element.element)
-        return False
 
     def _emit_element_copy(self, res_offset: int, arena_offset: int,
                            size: int) -> None:
@@ -9187,7 +9134,7 @@ preference.
             # every iteration's blob and each one overwrites the last.
             #
             # A FLAT result is copied into its own arena slot per iteration (see
-            # `_element_result_is_flat`); anything else keeps the refusal.
+            # `model.comprehension_element_is_flat_container`); anything else keeps the refusal.
             # `model.comprehension_element_blob_refusal` has the measurement and
             # the boundary; the arm64 backend's leaf is the same shape.
             _before = self._list_cursor
@@ -9206,9 +9153,9 @@ preference.
                 # its own arena slot PER ITERATION; anything else keeps the
                 # refusal, because a byte copy of a result holding a freshly
                 # allocated blob would still alias it. See
-                # `_element_result_is_flat`.
+                # `model.comprehension_element_is_flat_container`.
                 if (_delta and cap > 1 and _size
-                        and self._element_result_is_flat(expr.element)):
+                        and M.comprehension_element_is_flat_container(expr.element)):
                     _arena = self._reserve_blob(
                         cap * _size,
                         "a per-iteration comprehension element")

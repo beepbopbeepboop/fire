@@ -30175,6 +30175,92 @@ def struct_parameter_not_bound_refusal(struct_name: str, spelling: str,
             f"the instantiation site, not by editing the expression")
 
 
+_CONTAINER_BUILDING_NODES = (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
+                             F.SliceExpr)
+
+
+def _element_expr_rebuilds_a_container(e) -> bool:
+    """True when `e`, in a comprehension ELEMENT position, leaves a pointer to a
+    frame blob the element's OWN emission built.
+
+    That is the one thing a byte copy of the element's result cannot answer: the
+    copy carries any such pointer unchanged, so the copy would still alias the
+    one compile-time blob the comprehension overwrites every iteration. A
+    pointer to a blob built ELSEWHERE — a name's container, a parent literal —
+    is not this, because CPython shares those objects too and copying the
+    pointer is the right answer.
+
+    A nested `Comprehension` is the one node whose result may or may not be in
+    this class, so it is asked recursively rather than answered by its type: its
+    RESULT holds the yielded values (self-contained iff its own element is),
+    while its ITERABLES are separate blobs the result does not point at. A call,
+    a subscript and a member read are treated as rebuilding even where one of
+    them answers a scalar, because the type that would tell them apart is not a
+    fact this path computes — over-refusing leaves the ledger refusal in place,
+    which is the safe direction.
+    """
+    if e is None or isinstance(e, str):
+        return False
+    if isinstance(e, F.Comprehension):
+        return not comprehension_element_is_flat_container(e)
+    if isinstance(e, _CONTAINER_BUILDING_NODES):
+        return True
+    if isinstance(e, (F.CallExpr, F.SubscriptExpr, F.MemberExpr)):
+        return True
+    if isinstance(e, F.UnaryOp):
+        return (e.op == "*" or _element_expr_rebuilds_a_container(e.operand))
+    if isinstance(e, F.BinaryOp):
+        return (_element_expr_rebuilds_a_container(e.left)
+                or _element_expr_rebuilds_a_container(e.right))
+    if isinstance(e, F.TernaryExpr):
+        return (_element_expr_rebuilds_a_container(e.condition)
+                or _element_expr_rebuilds_a_container(e.then_val)
+                or _element_expr_rebuilds_a_container(e.else_val))
+    if isinstance(e, F.CompareChain):
+        return any(_element_expr_rebuilds_a_container(o) for o in e.operands)
+    if isinstance(e, F.WalrusExpr):
+        return _element_expr_rebuilds_a_container(e.value)
+    return False
+
+
+def comprehension_element_is_flat_container(element) -> bool:
+    """True when a byte copy of a comprehension element's RESULT blob is a SOUND
+    per-iteration materialization.
+
+    THE predicate both emitters ask before materializing an element per
+    iteration, and it is here rather than in either backend so the two
+    architectures cannot disagree about which elements are representable — a
+    program that built on one machine and was refused on the other is the
+    divergence this path is built to prevent.
+
+    "Flat" is the property, not a shape list: a display of scalars, a dict
+    display of scalars, and a NESTED comprehension whose own element is flat all
+    qualify. The nested one qualifies for the same reason a display does —
+    its RESULT holds the yielded values, not its iterables' addresses (the
+    iterables are separate blobs, above the result, re-filled with the same
+    content every iteration). What does not qualify is a display with a
+    container among its members, a `*` splice, or a member that is a
+    call/subscript/member read whose result this path cannot type; those keep
+    `comprehension_element_blob_refusal`. A wrong element list is worse than a
+    missing one.
+    """
+    if isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        if any(isinstance(m, F.UnaryOp) and m.op == "*"
+               for m in element.elements):
+            return False
+        return not any(_element_expr_rebuilds_a_container(m)
+                       for m in element.elements)
+    if isinstance(element, F.DictExpr):
+        return not any(_element_expr_rebuilds_a_container(c)
+                       for pair in element.pairs for c in pair)
+    if isinstance(element, F.Comprehension):
+        if getattr(element, "kind", "list") == "dict":
+            return (not _element_expr_rebuilds_a_container(element.element)
+                    and not _element_expr_rebuilds_a_container(element.value))
+        return not _element_expr_rebuilds_a_container(element.element)
+    return False
+
+
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container and
@@ -30188,9 +30274,10 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     What reaches this refusal is the element that a byte copy of would STILL
     alias: a container built inside the element (`[[y, [y]] …]`), a call, a
     subscript or a member read whose result this path cannot type, a `*` splice
-    — and, for now, a dict comprehension's value. `_element_result_is_flat` is
-    the per-backend predicate and `test_formal_run.py`'s
-    `COMPREHENSION_ELEMENT_CASES` is the row set that pins both sides.
+    — and, for now, a dict comprehension's value.
+    `comprehension_element_is_flat_container` is the shared predicate and
+    `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
+    pins both sides.
 
     **Where it does fire it is still a silent wrong answer if emitted, and that
     is why it is a refusal rather than a guess.** A container on this path is a

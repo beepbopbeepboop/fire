@@ -812,8 +812,8 @@ dylib_exports: list = None, globals_base: int = None,
         # `_emit_comprehension` so a nested container's own size cannot win
         # over its outer one. A comprehension's element leaf reads it to size
         # the per-iteration copy that makes each iteration's element a distinct
-        # object; `_element_result_is_flat` decides whether such a copy is
-        # sound. x86-64's twin.
+        # object; `model.comprehension_element_is_flat_container` decides
+        # whether such a copy is sound. x86-64's twin.
         self._last_blob_size = None
         # Nesting depth of for-in (non-range) loops currently being emitted.
         # Selects _fi{d}/_fb{d} temps; reset per function.
@@ -10999,78 +10999,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
-    def _element_member_stores_a_blob(self, member) -> bool:
-        """True when emitting `member` can leave, in the element's result blob,
-        a pointer to a frame blob the element allocated during its own emission.
-
-        That is the one question a byte copy of the result cannot answer: a copy
-        copies any such pointer unchanged, so the copy would still alias the one
-        compile-time blob the comprehension overwrites every iteration. A
-        pointer to a blob allocated ELSEWHERE (a name's container, a parent
-        literal) is not this — CPython shares those objects too, so copying the
-        pointer is the right answer and the copy is sound for them.
-
-        The reading is deliberately NARROW rather than "allocates": a call, a
-        subscript and a member read are all treated as storing a blob even where
-        one of them answers a scalar, because the type that would tell them
-        apart is not a fact this path computes. Over-refusing here leaves the
-        ledger refusal below in place, which is the safe direction; under-it
-        would be the silent wrong element list this whole change exists to
-        remove.
-        """
-        if isinstance(member, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
-                               F.Comprehension, F.SliceExpr)):
-            return True
-        if isinstance(member, (F.CallExpr, F.SubscriptExpr, F.MemberExpr)):
-            return True
-        if isinstance(member, F.UnaryOp):
-            if member.op == "*":
-                return True
-            return self._element_member_stores_a_blob(member.operand)
-        if isinstance(member, F.BinaryOp):
-            # `+`/`|`/`*` over a container operand SPLICES element values into
-            # a fresh blob, and that fresh blob is the value stored, so it
-            # counts. A scalar `+` is arithmetic and allocates nothing, so its
-            # operands decide on their own.
-            if self._is_container_expr(member):
-                return True
-            return (self._element_member_stores_a_blob(member.left)
-                    or self._element_member_stores_a_blob(member.right))
-        return False
-
-    def _element_result_is_flat(self, element) -> bool:
-        """True when a byte copy of `element`'s result blob is a SOUND
-        per-iteration materialization.
-
-        "Flat" is the property, not a shape list: a display of scalars, a dict
-        of scalars, and a NESTED comprehension whose own element is flat all
-        qualify — and a nested comprehension qualifies for the same reason a
-        display of scalars does, because its RESULT holds the yielded values,
-        not its iterables' addresses (the iterables are separate blobs, above
-        the result, and are re-filled with the same content each iteration).
-        What does not qualify is a display with a container among its members, a
-        `*` splice, or a member that is a call/subscript/member read whose
-        result this path cannot type. Those keep `_refuse_an_element_blob` — a
-        wrong element list is worse than a missing one.
-        """
-        if isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            if any(isinstance(m, F.UnaryOp) and m.op == "*"
-                   for m in element.elements):
-                return False
-            return all(not self._element_member_stores_a_blob(m)
-                       for m in element.elements)
-        if isinstance(element, F.DictExpr):
-            return all(not self._element_member_stores_a_blob(k)
-                       and not self._element_member_stores_a_blob(v)
-                       for k, v in element.pairs)
-        if isinstance(element, F.Comprehension):
-            if getattr(element, "kind", "list") == "dict":
-                return (not self._element_member_stores_a_blob(element.element)
-                        and not self._element_member_stores_a_blob(
-                            element.value))
-            return not self._element_member_stores_a_blob(element.element)
-        return False
-
     def _emit_element_copy(self, res_offset: int, arena_offset: int,
                            size: int) -> None:
         """Copy the element's result blob into this iteration's arena slot.
@@ -11338,7 +11266,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # comprehension runs that same element `cap` times, so one blob is
             # every iteration's blob and each one overwrites the last.
             #
-            # A FLAT result (`_element_result_is_flat`) is copied into its own
+            # A FLAT result (`model.comprehension_element_is_flat_container`) is copied into its own
             # arena slot per iteration, so the append stores this iteration's
             # object; anything else keeps the refusal, because a byte copy of a
             # result holding a freshly allocated blob would still alias it.
@@ -11371,9 +11299,9 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # the refusal: a byte copy of a result that holds a freshly
                 # allocated blob would still alias it. `cap <= 1` needs no slot
                 # (the body runs at most once, so one blob is shared by
-                # nothing). See `_element_result_is_flat`.
+                # nothing). See `model.comprehension_element_is_flat_container`.
                 if (_delta and cap > 1 and _size
-                        and self._element_result_is_flat(expr.element)):
+                        and M.comprehension_element_is_flat_container(expr.element)):
                     _arena = self._reserve_blob(
                         cap * _size,
                         "a per-iteration comprehension element")
