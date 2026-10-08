@@ -5,57 +5,29 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
-element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
-`[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
-the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
-is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
-
-## What landed 2026-10-06: the flat-container element is per-iteration
-
-**The refusal was replaced by real per-iteration storage for the shapes a byte
-copy makes sound, on both backends.** `model.comprehension_element_is_flat_container`
-is the one predicate: the element is a list / tuple / set / dict literal and
-NOTHING inside it builds a second container (a nested literal, a comprehension, a
-slice or a call). Both emitters' `_materialize_compr_element` then reserve a
-`cap`-slot array beside the element's own scratch blob and, at the element site,
-`memcpy` the element's blob into slot `i`, where `i` is the result blob's count
-word — the number appended so far, so the append that follows stores the copy and
-not the scratch. The predicate is shared so the two architectures cannot disagree
-about which elements are representable; the message stays
-`model.comprehension_element_blob_refusal` for the shapes that are not.
-
-| program | CPython 3.14 | before | after |
-|---|---|---|---|
-| `[[y, y + 1] for y in [10, 20, 30]]`, `r[i][1]` | `11 21 31` | refused | **`11 21 31`** |
-| `[(y, y + 1) for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
-| `[{y, y + 1} for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
-| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | refused (runtime base) |
-| `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused (shallow copy) |
-| `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
-| `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
-
-**Why the shallow copy is sound exactly here, and only here.** The copy carries
-the element blob's WORDS; a nested container would be carried as its ADDRESS, so
-every iteration's outer container would point at one inner object — the same
-defect one level down. A NAME is deliberately not a container: `[a, b]` over two
-outer lists copies the outer list and shares `a`/`b`, which is what CPython does.
-That is why the predicate recurses rather than keying on the element's node type.
-
-**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): three
-build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because three
-copies of the last iteration and one element per iteration have the same count),
-the nested / dict-value / list-of-lists refusals, and the one-iteration guard.
+**Status: the REFUSAL branch (2026-10-05) and the RELOCATION (2026-10-08) have
+BOTH landed, on both backends.** Every silent wrong answer in this class is
+gone, and the common shapes now BUILD AND ANSWER CPython: a comprehension whose
+element is a FLAT container — a display of scalars, a dict display of scalars,
+or a nested comprehension whose own element is flat — is materialized into its
+own arena slot per iteration by `_emit_element_copy`, a byte copy of the
+element's single compile-time blob into `arena + i*size`. **This includes this
+doc's own nested-comprehension reproducer**, which the "obvious array fix" below
+measured as NOT fixable by the per-element array — the copy works because a
+nested comprehension's RESULT holds the yielded values, not its iterables'
+addresses, so copying the result (and not the iterable, re-filled with the same
+content each iteration) is sound. What is STILL refused is the element a byte
+copy would not fix: a container built INSIDE the element (`[[y, [y]] …]`), a
+call/subscript/member read this path cannot type, a `*` splice, and — for now —
+a dict comprehension's VALUE, whose append path (`_compr_append_pair`) does not
+yet carry a per-iteration slot. So this doc STAYS open for the two remaining
+shapes, and "What landed 2026-10-05" plus "What the obvious fix actually is"
+below are the measurements the copy was designed against rather than the next
+step. The relocation is pinned by `test_formal_run.py`'s
+`COMPREHENSION_ELEMENT_CASES` (both architectures) and by
+`test_formal_closures.py`'s `a_comprehension_whose_element_is_a_container`
+(against CPython); the sibling document it used to cross-reference is deleted,
+its subject fixed.
 
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
