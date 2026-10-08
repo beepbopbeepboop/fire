@@ -1506,6 +1506,64 @@ class TestBitTestBranches(unittest.TestCase):
                     f"imm14 decode: word 0x{word:08x} should branch to "
                     f"{pc + delta}, not {G._branch_target(words, pc)}")
 
+    def test_the_sign_extend_mask_reads_the_sign_bit_in_the_word(self):
+        """The `hb` polarity mask is the immediate's sign bit SHIFTED UP BY 5.
+
+        The step lemma's `lhs` tests `(w >>> 5) &&& <imm sign bit>`, so the
+        bit it decides is bit 23 of `w` for imm19 and bit 18 for imm14 — NOT
+        the immediate-domain mask (`0x40000` / `0x2000`), which reads bit 18 /
+        bit 13 and decides the wrong branch whenever those disagree.  A wrong
+        mask emits a `hb` that is FALSE about the word, and `native_decide`
+        rejects the whole proof — measured on the `not n` → CMP+CSET dylib's
+        TBZ, word `0x36312064`, bit 18 (sign) = 0 but bit 13 = 1.
+        """
+        import formal.arm64_proof_gen as G
+        self.assertEqual(G._sign_extend_mask(52), 0x40000)
+        self.assertEqual(G._sign_extend_mask(53), 0x40000)
+        for idx in (16, 17, 51):
+            self.assertEqual(G._sign_extend_mask(idx), 0x800000)
+        self.assertEqual(G._sign_extend_mask(14), 0x02000000)
+
+    def test_the_hb_polarity_is_decided_by_the_immediate_s_own_sign_bit(self):
+        """A branch whose sign bit disagrees with the immediate-domain mask
+        gets a TRUE `hb`, in BOTH families.
+
+        Each fixture has the immediate-domain mask bit set but the REAL sign
+        bit clear, so the old masks emitted `¬(… = 0)` about a `lhs` that is
+        `0` and Lean rejected the proof.  The emitted `hb` must be the
+        UN-negated `= 0`.
+
+          * TBZ: `encode_tbz_xn_bit(3, 5, 1024)` — imm14 bit 8 set (bit 13 of
+            the word), imm14 bit 13 (bit 18 of the word, the sign) clear;
+          * CBZ: `encode_cbz_xn(32768, 3)` — imm19 bit 13 set (bit 18 of the
+            word), imm19 bit 18 (bit 23 of the word, the sign) clear.
+        """
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import encode_tbz_xn_bit, encode_cbz_xn, encode_ret
+        for label, enc, mask_bit, sign_bit, idx, name in (
+                ("TBZ", encode_tbz_xn_bit(3, 5, 1024), 13, 18, 52, "synth_tbz"),
+                ("CBZ", encode_cbz_xn(32768, 3), 18, 23, 16, "synth_cbz")):
+            word = _struct.unpack("<I", enc)[0]
+            self.assertEqual(G._step_branch_index(word), idx,
+                             f"{label}: the fixture is not the intended step")
+            self.assertTrue((word >> mask_bit) & 1,
+                            f"{label} fixture: bit {mask_bit} must be set for "
+                            f"this to test the disagreement")
+            self.assertFalse((word >> sign_bit) & 1,
+                             f"{label} fixture: bit {sign_bit} (the sign bit) "
+                             f"must be clear")
+            text = G._gen_step_result_lemmas(name, enc + encode_ret(), 0x1000)
+            hb = [ln for ln in text.splitlines() if "have hb" in ln]
+            self.assertTrue(hb, f"{label}: no `hb` was emitted")
+            self.assertNotIn("\u00ac", hb[0],
+                             f"{label}: the sign-extend polarity is NEGATED "
+                             f"for a word whose sign bit is clear: "
+                             f"{hb[0].strip()}")
+            self.assertIn("= 0 := by native_decide", hb[0],
+                          f"{label}: the emitted hb is not the un-negated "
+                          f"`lhs = 0`: {hb[0].strip()}")
+
 
 class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
     """`_written_expr` reads the value a step writes to a register, for EVERY
