@@ -1986,7 +1986,12 @@ def t_reorder(module, an, rng):
         (`_reachable_by_a_call` — a module-level binding, or a name a nested
         scope captures) is not exchanged with a statement that calls anything.
         This is the rule no amount of looking at the two statements finds, and
-        it carries the closure-cell and the global hazards at once.
+        it carries the closure-cell and the global hazards at once;
+      * the names the rules above compare are the names the program can REALLY
+        reach: two names bound to one object (`A32 = h31.b23`) are merged, so a
+        store through one and a read through the other are not disjoint
+        (`_alias_classes`).  This is the rule no amount of looking at the two
+        statements' own spellings finds.
 
     Every one of those is a decidable predicate, and the CPython oracle then
     checks the RESULT — but the predicate is the transform, and the oracle is the

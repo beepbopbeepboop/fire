@@ -719,6 +719,80 @@ class ScopeResolution(unittest.TestCase):
         self.assertNotIn("n", an.int_only)
 
 
+class ReorderAliasing(unittest.TestCase):
+    """Two names bound to ONE object are one name to `reorder`'s test.
+
+    `A32 = h31.b23` binds both names to the same list, so `h31.b23[0] = 62`
+    beside `w34 = A32[0]` is not an independent pair even though the two
+    statements share no spelling — swapping them changed what the program
+    printed.  The CPython oracle caught it over the `refs` mix (the twin printed
+    46 where the original printed 62); these are the hand-written half, so the
+    rule is a unit test rather than a 27-mix sweep.
+    """
+
+    @staticmethod
+    def _twin(source, seed="t"):
+        tree = ast.parse(source)
+        return M.t_reorder(tree, M.Analysis(tree), random.Random(seed))
+
+    def test_a_direct_assignment_merges_two_names(self):
+        fn = M.Analysis(ast.parse(
+            "def main() -> Int32:\n"
+            "    b = [1, 2]\n"
+            "    c = b\n"
+            "    d = c.b[0]\n"
+            "    return 0\n")).functions[0]
+        find = M._alias_classes(fn)
+        self.assertEqual(find("b"), find("c"))
+        self.assertEqual(find("b"), find("d"),
+                         "an alias of an alias is the same object, so `d = c.b` "
+                         "chains into the class")
+        self.assertNotEqual(find("b"), find("e"),
+                            "a name with no aliasing assignment is its own class")
+
+    def test_an_aliased_store_and_read_pair_is_not_swapped(self):
+        source = ("def main() -> Int32:\n"
+                  "    b = [1, 2]\n"
+                  "    c = b\n"
+                  "    b[0] = b[0] + 62\n"
+                  "    w = c[0]\n"
+                  "    print(w)\n"
+                  "    return 0\n")
+        with self.assertRaises(M.NotApplicable):
+            self._twin(source)
+
+    def test_an_unaliased_store_and_read_pair_is_still_swapped(self):
+        """The control: two DIFFERENT lists are the swap this rule must keep.
+
+        `c` is built from `b[0]`, so the only adjacent pair with no dependency
+        is `b[0] = …` beside `w = c[0]`, and because `c` is a fresh literal the
+        pair is genuinely independent.  The rule refuses the aliased spelling
+        and nothing else.
+        """
+        source = ("def main() -> Int32:\n"
+                  "    b = [1, 2]\n"
+                  "    c = [b[0], 4]\n"
+                  "    b[0] = b[0] + 62\n"
+                  "    w = c[0]\n"
+                  "    print(w)\n"
+                  "    return 0\n")
+        tree = self._twin(source)
+        self.assertIsNotNone(tree)
+
+    def test_the_aliased_pair_is_refused_in_both_orders(self):
+        """The pair is `store` then `read`; the read-through-the-alias first is
+        the symmetric hazard and it is refused by the same merged names."""
+        source = ("def main() -> Int32:\n"
+                  "    b = [1, 2]\n"
+                  "    c = b\n"
+                  "    w = c[0]\n"
+                  "    b[0] = w + 62\n"
+                  "    print(w)\n"
+                  "    return 0\n")
+        with self.assertRaises(M.NotApplicable):
+            self._twin(source)
+
+
 class TheDriver(unittest.TestCase):
     """The harness's own decisions: verdicts, drivers, and what a run reports."""
 

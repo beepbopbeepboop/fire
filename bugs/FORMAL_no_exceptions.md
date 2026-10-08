@@ -45,6 +45,38 @@ internalised the rule will read each of those as an approximation of CPython
 and "fix" it into a raise. The rule belongs in one place, and the place is a
 document every one of them can cite.
 
+**Status 2026-10-07 (`work/formal143-docs`): "The next step" item 3 landed long
+before this was written down, and §"What I ran" (a) is no longer the behaviour —
+the caught half is now a NAMED REFUSAL rather than a silent termination, which is
+this document's own disease (a diagnostic false about the path it describes)
+fixed one layer in. Nothing in the RULE below moves; the two host-module
+conventions and items 1 and 2 of "The next step" are unchanged.**
+
+* **A `try`/`except` whose arm has a NON-EMPTY body is refused at BUILD time, by
+  name, on both architectures and byte-identically** —
+  `formal/model.py::refuse_dropped_handler_arm`, which
+  `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` owns. So §"What I
+  ran" (a)'s measurement ("the arm is never entered, and the output is lost",
+  exit 1 with no `before`) describes a tree that no longer exists: that program
+  does not build. The empty-body shapes still build and run — `except: pass`, and
+  a `try` with nothing raised — because an arm with no effect to drop loses
+  nothing by being left out.
+* **Item 3 (pin the behaviour) is DONE, in a better place than the one it asked
+  for.** `test_formal_exceptions.py` is 285 checks over both architectures: the
+  uncaught half against CPython's own stdout and exit status (including
+  `raise ValueError`/`OSError(...)`/a declared class/`SystemExit(<computed>)`,
+  where the status is a value and not a literal), the `finally` half, and three
+  `REFUSED` rows that keep the handler-arm refusal honest. The three-case group
+  ("`raise` under a handler, `try` with nothing raised, `return 1`") is
+  `a_bare_except_with_a_body_is_refused_by_name`, `an_except_pass_arm_still_builds`
+  and the ordinary `return 1` rows, so the sentence "there is no test in the tree
+  that raises on this path" below is stale.
+* **The rule below still stands, and items 1 and 2 still do not have a fix.**
+  There is still no unwinder: the uncaught `raise` is still `exit`/`_emit_diverge`,
+  the exception object is still never constructed, and the host modules still
+  choose a return convention each. This is a limit-of-the-target document with a
+  narrower open remainder than it was filed with.
+
 ## What a `raise` actually lowers to
 
 Both backends take the same decision, at the same place in their statement
