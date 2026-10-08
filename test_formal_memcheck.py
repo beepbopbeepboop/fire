@@ -507,10 +507,30 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
+    # The ledger is keyed `basename|backend` -- that is what `--write-ledger`
+    # writes (`M.ledger_key`) and what the two checks below read -- so the
+    # coverage check has to build its key set the same way.  A LENGTH compared
+    # against the corpus's full paths is not a statement about coverage at all:
+    # it says nothing about WHICH programs have a row, so a ledger with one
+    # program renamed and another dropped keeps the same count and passes, and
+    # a ledger missing every row for one backend but carrying a stale one for
+    # each of the other's programs passes too.  `missing` is the answer a
+    # reader can act on: the programs that have no baseline row.
+    expected = {"%s|%s" % (os.path.basename(p), b)
+                for p in M.memcheck_sources() + M.example_sources()
+                for b in BACKENDS}
+    missing = sorted(expected - set(rows))
     check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+          not missing,
+          "%d corpus row(s) have no ledger entry, so a regression in them "
+          "would not show up as DRIFT: %s"
+          % (len(missing), ", ".join(missing[:8])))
+    extra = sorted(set(rows) - expected)
+    check("the ledger has no row for a program outside the corpus",
+          not extra,
+          "the ledger is the baseline for the corpus and names %d row(s) no "
+          "corpus source produces (a deleted or renamed program that kept its "
+          "row): %s" % (len(extra), ", ".join(extra[:8])))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
