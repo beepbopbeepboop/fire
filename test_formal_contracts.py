@@ -184,8 +184,8 @@ def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
     clause over it emitted no theorem, and the refusal NAMED `/` -- so a reader
     who took the sentence as the specification was told an operator inside the
     subset was outside it.  This pins all three consequences, and the
-    evaluator's half at an input where the word reading and a signed one differ
-    (7 // 2 is 3; a floor of the sign-extended word would not be).
+    evaluator's half at inputs where the word reading and a signed one differ
+    (7 // 2 is 3, 9 // 2 is 4; a floor of the sign-extended word would not be).
     """
     from formal import contracts as CT
     src = ("@ensures(result == a // b)\n"
@@ -207,6 +207,14 @@ def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
           CT._eval_of(ir, env, [1000]) is True, CT._eval_of(ir, env, [1000]))
     check("the_source_runner_runs_a_body_with_floordiv",
           CT.SourceRunner(fn)(7, 2) == 3, CT.SourceRunner(fn)(7, 2))
+    check("floordiv_evaluates_truncating_on_the_word_reading",
+          CT.SourceRunner(fn)(9, 2) == 4, CT.SourceRunner(fn)(9, 2))
+    # The reader recurses, so normalising only the top node would pass the rows
+    # above and fail this one.
+    nested = functions(parse("def h(a, b, c):\n    return (a // b) // c\n"))[0]
+    check("a_nested_floordiv_reads_too",
+          CT.SourceRunner(nested)(17, 2, 2) == 4,
+          CT.SourceRunner(nested)(17, 2, 2))
     # The refusal that names the subset has to name BOTH spellings of division,
     # or the same reader is told `//` is outside it while `_ARITH_ALIASES`
     # accepts it.  `other` is not a parameter, so this clause is refused.
@@ -1006,14 +1014,26 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
     # a rung fails, so that rung can only ADD reach, and these two still close.
     #
-    # `mini.mojo` and `abspos.mojo` are still NOT in this list because their
-    # contracts are UNREACHED by the ladder and their verdict is UNKNOWN.  That
-    # is the honest answer and `test_UNKNOWN_is_reachable_and_is_not_a_pass` is
-    # what holds the line; the reason each one is still unreached, measured, is
-    # in `bugs/FORMAL_contract_ladder_reach.md`.
+    # `mini.mojo` and `abspos.mojo` are named here as the NEGATIVE half, and
+    # they are the rows that make this list a measurement of the ladder's reach
+    # rather than a list of things that happen to pass: both are still UNREACHED
+    # (their verdict is UNKNOWN) and their rows would go red the moment a rung
+    # closed them, which is what says the reach is still short of "everything".
+    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the same line at the
+    # `classify` level; the reason each is still unreached, measured, is in
+    # `bugs/FORMAL_contract_ladder_reach.md` §6.
+    #
+    # `mini` and `abspos` need an xor-cancellation fact this toolchain does not
+    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): the goal is an
+    # EQUALITY over `UInt64`, so the `toNat` bridges the ladder carries -- all
+    # of them about `<`/`≤` -- do not rewrite it, and `UInt64.toNat_inj` only
+    # turns it into a Nat equality the simplifier cannot discharge without that
+    # missing lemma.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),
+             ("mini.mojo", "mini", False),
+             ("abspos.mojo", "abspos", False),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
         path = os.path.join(EXAMPLES, name)

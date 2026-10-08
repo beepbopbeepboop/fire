@@ -139,7 +139,7 @@ _SIGN_FLIP = "0x8000000000000000"
 # UInt64 arithmetic as Lean spells it.  `UInt64.div` / `UInt64.mod` rather than
 # a bare `/` or `%`, which on `UInt64` is not the truncating operation -- the
 # same table `_dylib_spec_lean` uses, reached through it.
-_ARITH_OPS = {"+", "-", "*", "/", "%"}
+_ARITH_OPS = {"+", "-", "*", "/", "//", "%"}
 
 # The AST spells integer division `//`; this IR -- and the model's own word
 # arithmetic -- spell it `/`, the tag `_lean_of` renders as `UInt64.div` and
@@ -533,6 +533,12 @@ class _Reader:
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
+                # `//` and `/` are the SAME IR tag.  The machine computes
+                # `UInt64.div` for both -- `_eval_of`'s `/` is `a // b` and
+                # `_lean_of`'s `/` is `UInt64.div`, the word reading -- so
+                # normalising the spelling here is what keeps one reader for
+                # the operator rather than a second one in every caller.
+                # `_ARITH_ALIASES` is that normalisation, applied to `tag`.
                 return (_Op.ARITH, tag, a, b)
             return None
         if kind == "TernaryExpr":
