@@ -3922,13 +3922,13 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
           "the refusal does not name the feature that would remove it, so the "
           f"6 files behind this row still have no next step: {reason}")
-    check("BACKEND" in reason,
+    check("a rule that a module nothing binds needs no library at all" in reason,
           "the refusal does not say the missing thing is a backend RULE "
           f"rather than work on the module, which is the part a reader acts "
           f"on: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
-    check("nothing an importer could bind" in reason,
+    check("no address an importer could bind" in reason,
           f"the refusal stopped saying why the refusal is correct: {reason}")
     # The private sibling is a DIFFERENT branch and must not have been edited.
     priv = os.path.join(tmpdir, "private_only.mojo")
@@ -3936,7 +3936,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
         f.write("def _hidden() -> Int:\n  return 1\n")
     other = no_public_api_reason([priv])
     check("every declaration in it is private" in other
-          and "BACKEND" not in other,
+          and "needs no library at all" not in other,
           f"the constants-only wording leaked into the private branch, whose "
           f"reason is a different fact: {other}")
 
