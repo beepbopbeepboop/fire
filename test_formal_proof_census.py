@@ -929,6 +929,75 @@ class TestCacheReport(unittest.TestCase):
             self.assertIn(stem, L.LIBRARY_MODULES)
 
 
+class TestABreachIsNotAVerdict(unittest.TestCase):
+    """A bound breach is the ABSENCE of a verdict, so it must never be PUBLISHED.
+
+    `proof_census` caches a verdict — pass or fail — in a content-addressed CAS
+    whose key is a pure function of the proof's bytes and the toolchain
+    (`proof_verdict_key`). A bound breach is a fact about the MACHINE instead:
+    how loaded it was, how many proofs ran at once. Publishing one writes a red
+    that no edit to the proof can clear, and every later run on every worktree
+    replays it — the exact failure `checked_run.py`'s "a recorded FAILURE is
+    re-run" rule exists to prevent, reintroduced one layer down. This pins the
+    branch that refuses it, Lean-free: the launcher, the library and the CAS
+    lookup are all faked, so what is under test is `proof_census`'s decision.
+
+    The bug this pins: a Lean TIMEOUT was published to the proof-verdict cache
+    as if it were a verdict. It is fixed by commit 2335a001, "formal/lean.py:
+    ONE launcher, bounded in wall AND cpu, for every Lean run", which turned the
+    timeout into `LeanRun.exceeded` and made `proof_census` skip
+    `_publish_verdict` for it; the doc that described it is deleted because that
+    branch is the fix its "Next step" asks for.
+    """
+
+    def _census_with(self, run):
+        from formal import lean as L
+        seen = {"published": []}
+        saved = {k: getattr(L, k) for k in (
+            "find_lean", "ensure_library", "library_census",
+            "proof_verdict_key", "cas_lookup_verdict", "_run_lean",
+            "_publish_verdict")}
+        L.find_lean = lambda root=None: "/fake/lean"
+        L.ensure_library = lambda lean, lib_dir: None
+        L.library_census = lambda lean, lib_dir: {}
+        L.proof_verdict_key = lambda proof_path, lib_dir, lean: "proof/fake"
+        L.cas_lookup_verdict = lambda key: None          # a cold cache
+        L._run_lean = lambda *a, **kw: run
+        L._publish_verdict = lambda key, *a: seen["published"].append(key)
+        try:
+            got = L.proof_census("/nonexistent/proof.lean")
+        finally:
+            for k, v in saved.items():
+                setattr(L, k, v)
+        return got, seen
+
+    def test_a_bound_breach_is_reported_and_not_published(self):
+        breach = "lean exceeded 1500s wall across its process tree"
+        got, seen = self._census_with((False, breach, None, breach))
+        self.assertFalse(got.ok)
+        self.assertFalse(got.cached)
+        self.assertEqual(got.detail, breach,
+                         "the breach is the reason the caller reads")
+        self.assertIsNone(got.n_sorries,
+                          "a killed elaborator printed a PREFIX of its "
+                          "warnings, and reporting that prefix — or 0 — as a "
+                          "count is the conflation this file exists to catch")
+        self.assertEqual(seen["published"], [],
+                         "a machine's bound was written into a key that says "
+                         "nothing about the machine, so every later run would "
+                         "replay it as a verdict")
+
+    def test_a_measured_failure_is_still_published(self):
+        """The control, and it is what keeps the branch above from hiding a
+        regression: a real verdict on the proof — pass or fail — is exactly what
+        the cache is FOR, so a change that stopped publishing everything would
+        pass the test above and be wrong.
+        """
+        got, seen = self._census_with((False, "unsolved goals", 3, None))
+        self.assertFalse(got.ok)
+        self.assertEqual(seen["published"], ["proof/fake"])
+
+
 class TestEntryPoint(unittest.TestCase):
     """`--list` builds nothing, which is what makes the tool inspectable."""
 
