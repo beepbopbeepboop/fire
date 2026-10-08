@@ -6866,5 +6866,65 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
                          "out-of-image call — it is keyed on the wrong condition")
 
 
+class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
+    """`if 0 == n:` elaborates, exactly as `if n == 0:` does.
+
+    `_cmp_spec` lowers `n == 0` to a `CBZ` but `0 == n` to `CMP` + `B.cond`,
+    and the CBZ-only "the taken arm is statically dead" optimisation
+    (`_cbz_reg_const` + `_taken_dead`) was applied to the `B.cond` too. A
+    `B.cond`'s `r = w & 0x1f` is the CONDITION FIELD, not a register, so
+    `_cbz_reg_const` could return a non-zero constant for a register the branch
+    never tests, and the generated
+
+        exact absurd hc_2 hne_2
+
+    was an `Application type mismatch` — `hc_2` is about
+    `arm64_matches_condition`, `hne_2` about `arm64_reg` — so the proof did not
+    elaborate at all. Measured on
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
+    elaborate.md`. The fix is to apply the optimisation only where it is sound,
+    `_bidx == 16` (CBZ): the contradiction is `hc : arm64_reg r s = 0` and
+    `hne : arm64_reg r s ≠ 0`, which are complementary only for a CBZ.
+    """
+
+    LEFT = ("def main() -> Int:\n    n = 3\n    if 0 == n:\n"
+            "        return 10\n    else:\n        return 20\n")
+    RIGHT = ("def main() -> Int:\n    n = 3\n    if n == 0:\n"
+             "        return 10\n    else:\n        return 20\n")
+
+    def test_the_left_spelling_does_not_emit_the_cbz_only_absurd(self):
+        tmp = tempfile.mkdtemp(prefix="a2-imm-left-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        proof, err = _generate(tmp, self.LEFT, "imm_left")
+        self.assertIsNone(err, err)
+        with open(proof, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn(
+            "absurd hc_", text,
+            "the CBZ-only 'the taken arm is statically dead' contradiction is "
+            "being emitted for a `B.cond` again, where its hypothesis is the "
+            "CONDITION FIELD and the obligation is an `Application type "
+            "mismatch`")
+        self.assertIn("arm64_matches_condition", text,
+                      "the left spelling's branch is no longer modelled as a "
+                      "`B.cond` on the flags")
+
+    def test_both_spellings_elaborate(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        tmp = tempfile.mkdtemp(prefix="a2-imm-both-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for name, src in (("right", self.RIGHT), ("left", self.LEFT)):
+            with self.subTest(spelling=name):
+                proof, err = _generate(tmp, src, "imm_" + name)
+                self.assertIsNone(err, err)
+                got = _check_proof(proof)
+                self.assertIsNotNone(got, "Lean is available but returned "
+                                          "nothing")
+                ok, detail, _sorries = got
+                self.assertTrue(ok, f"{name}: {detail}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

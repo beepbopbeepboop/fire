@@ -8357,8 +8357,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # register holds a compile-time non-zero constant at the CBZ, the
             # taken (div0/error) arm is statically dead — close it by
             # contradiction instead of exploring the dead path.
+            #
+            # **`_bidx == 16` (CBZ) ONLY, and that is not tidiness.** The
+            # contradiction is `absurd hc hne` with `hc : arm64_reg r s = 0` and
+            # `hne : arm64_reg r s ≠ 0`, which are complementary ONLY for a CBZ.
+            # A `B.cond` tests the FLAGS (`hc : arm64_matches_condition k s.nzcv
+            # = true`) and its `r = w & 0x1f` is the CONDITION FIELD, not a
+            # register, so `_cbz_reg_const` can return a non-zero constant for a
+            # register the branch never tests and `absurd` then fails to
+            # elaborate. Measured on `if 0 == n:` (which lowers to `cmp` +
+            # `B.cond`, unlike `if n == 0:`'s `CBZ`): `Application type
+            # mismatch` at every `absurd`, and the proof did not elaborate at
+            # all. A CBNZ is excluded for the same reason with the polarity
+            # flipped (`hc` and `hne` are then the SAME proposition).
             _reg_const = None
-            if _src is None and not is_contract and cbz_force is None:
+            if _src is None and not is_contract and cbz_force is None \
+                    and _bidx == 16:
                 _reg_const = _cbz_reg_const(block, words, r)
             _taken_dead = (_reg_const is not None and _reg_const != 0)
             if cbz_force == "taken":

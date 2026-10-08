@@ -69,7 +69,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_return_inside_a_finally_emits_two_epilogues_on_arm64.md` | **unclaimed** | A `return` inside a `finally` emits the epilogue twice, and arm64 SIGBUSes |
 | `FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md` | **unclaimed** | A `try`'s `finally` runs on the FIRST exit path out of its body and on no other |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
-| `FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md` | **unclaimed** | An arm64 conditional whose immediate is on the LEFT never elaborates |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | **unclaimed** | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |

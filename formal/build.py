@@ -19342,24 +19342,19 @@ def _lower_one_case(case, subject_ref, rest: list, bound: set, fn) -> tuple:
     `pattern == subject`.** `==` cannot answer differently either way on this
     path — it is a word compare or a `strcmp` (`_emit_branch_unless`'s
     `_emit_strcmp_flags` arm), with no `__eq__` dispatch to make it asymmetric —
-    and the two orders are NOT the same to the arm64 proof generator, which is
-    the whole reason for the choice. Measured on this tree through
-    `formal/lean.py::check_proof_cached`:
-
-        def main() -> Int:          arm64 proof
-            n = 3
-            if n == 0: ...          ok
-            if 0 == n: ...          FAILS (Application type mismatch on the
-                                   B.cond block's hcond obligation)
-
-    and a `match` with one literal case lowered to the second order fails the
-    same way while the identical program written as `if` passes. Putting the
-    subject on the left makes `match n: case 0:` emit the compare an `if` would,
-    so a `match` is provable wherever its `if` spelling is — which is the whole
-    claim this lowering makes, and it would be false of the Lean model for every
-    two-case `match` otherwise. The operand-order sensitivity itself is a
-    pre-existing gap in that generator and is filed as
-    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md`.
+    and the two orders were NOT the same to the arm64 proof generator, which is
+    the whole reason for the choice. `if n == 0:` lowers to a `CBZ` and
+    `if 0 == n:` to `CMP` + `B.cond`, and the generator's CBZ-only "the taken
+    arm is statically dead" optimisation was applied to the `B.cond` too — its
+    `r = w & 0x1f` is the condition field, not a register — so the second
+    spelling's proof did not elaborate (`Application type mismatch` on the
+    `absurd`). That gap is FIXED (`formal/arm64_proof_gen.py` guards the
+    optimisation with `_bidx == 16`, pinned by
+    `test_formal_call_proof_gen.py::TestAComparisonWithTheImmediateOnTheLeft`),
+    but the subject-on-the-left order is still what this lowering emits: a
+    `match n: case 0:` then lowers to the same compare an `if` does, so a
+    `match` is provable wherever its `if` spelling is — which is the whole claim
+    this lowering makes.
 
     **Adding a capture's name to `bound` is a STATIC answer to a question the
     reference asks at RUN TIME, and it is the right one.** The reference asks
