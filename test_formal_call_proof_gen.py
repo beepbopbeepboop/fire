@@ -5705,6 +5705,51 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
                          f"refused or never run is not an agreement")
 
 
+class TestTheModelArmAndItsMirrorsAgree(unittest.TestCase):
+    """The two soundness fixes' GENERATOR halves, pinned without Lean.
+
+    `TestUnsignedOffsetAccess` is the oracle — the CPU against `arm64_step` —
+    and it needs `lib/ProofLib.olean` rebuilt, which is the 9.8 GB wall a light
+    worker cannot cross.  So the half that IS runnable is the generator's: the
+    `_step_rhs`/`_step_rhs_generic` text a generated proof `exact`s its
+    `work_step_*` lemma against, and `_regs_written`, which decides whether the
+    walk tracks the destination.  A model fix that did not move these with it
+    would pass here and fail in the (disabled) Lean gate; a move here that did
+    not move the model would fail the CPU-vs-model rows.
+    """
+
+    def test_adds_writes_its_destination(self):
+        import formal.arm64_proof_gen as AP
+        w = 0xab0f002b                       # adds x11, x1, x15
+        self.assertEqual(AP._step_branch_index(w), 66)
+        rhs = AP._step_rhs(w, 66)
+        self.assertIn("arm64_set_reg 11 s", rhs)
+        self.assertIn("arm64_adds_flags", rhs)
+        self.assertEqual(AP._regs_written(w, 66), {11})
+
+    def test_cmn_still_writes_no_register(self):
+        # `cmn x1, x15` is the same class with Rd = 31, which `arm64_set_reg`
+        # makes the identity, so the two spellings share one model arm and the
+        # generator must not treat them differently.
+        import formal.arm64_proof_gen as AP
+        w = 0xab0f003f
+        self.assertEqual(AP._step_branch_index(w), 66)
+        self.assertIn("arm64_set_reg 31 s", AP._step_rhs(w, 66))
+
+    def test_the_immediate_arms_read_the_shift(self):
+        import formal.arm64_proof_gen as AP
+        # the two words the fuzzer's `--minimise` reduced its WRONG bucket to
+        self.assertEqual(AP._arm64_ext_imm12(0x915a2fac), 1675 << 12)
+        self.assertEqual(AP._arm64_ext_imm12(0xd14885d9), 545 << 12)
+        # sh = 0 is the RAW immediate, which a helper that always shifted fails
+        self.assertEqual(AP._arm64_ext_imm12(0x911a2fac), 1675)
+        self.assertIn(str(1675 << 12), AP._step_rhs(0x915a2fac, 10))
+        self.assertIn(str(545 << 12), AP._step_rhs(0xd14885d9, 12))
+        # the generic mirror uses the Lean helper the lemma states
+        self.assertIn("arm64_ext_imm12 w", AP._step_rhs_generic(10))
+        self.assertIn("arm64_ext_imm12 w", AP._step_rhs_generic(13))
+
+
 class TestANarrowTypedParameterGetsItsRange(unittest.TestCase):
     """A narrow TYPED parameter's theorem carries the RANGE the truncation
     needs, and the truncation discharges against it.
