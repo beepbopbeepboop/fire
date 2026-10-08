@@ -829,6 +829,9 @@ class X86_64Codegen:
         # Enclosing try-finally bodies, outermost first. Flushed before a
         # return/break/continue so the finally runs on those paths too.
         self._pending_finally = []
+        # try-finally bodies currently being EMITTED by a flush, by object
+        # identity. A return/raise inside one must not re-enter it.
+        self._emitting_finally = set()
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1394,6 +1397,7 @@ class X86_64Codegen:
         self._comptime_vals: dict = {}
         self._comptime_list_asts: dict = {}
         self._pending_finally = []
+        self._emitting_finally = set()
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
@@ -2661,18 +2665,39 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         `depth` is 0 for a return (every enclosing finally runs) and the
         enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). The list is truncated first, so a return
-        inside a finally does not re-enter the same body. RAX (the return
-        value being built) is saved across the flush in a 16-byte slot."""
-        if len(self._pending_finally) <= depth:
+        opened INSIDE that loop). RAX (the return value being built) is saved
+        across the flush in a 16-byte slot.
+
+        **The frames are NOT removed here; `_emit_try` owns the pop.**  The
+        old shape truncated the list first "so a return inside a finally does
+        not re-enter the same body", and that is true but not the whole
+        story: the `del` also removed the frame for every LATER exit site in
+        the same `try` body, because the emitter visits exit sites in source
+        order and "already flushed" is not "on this path".  The first
+        `return` flushed the cleanup; the second found an empty list and
+        emitted nothing — a program that runs, exits 0 and silently skipped
+        the source's cleanup, on both backends.
+
+        Re-entrancy is instead guarded by `_emitting_finally`, keyed on the
+        statement-list object's IDENTITY rather than an index: `_emit_try`
+        pops frames as it unwinds, so every index-based marker shifts under a
+        nested `try` and an object's identity does not."""
+        frames = self._pending_finally[depth:]
+        if not frames:
             return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
         self._push_slot(Reg.RAX)
-        for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
-        self._pop_slot(Reg.RAX)
+        try:
+            for fin in reversed(frames):
+                if id(fin) in self._emitting_finally:
+                    continue
+                self._emitting_finally.add(id(fin))
+                try:
+                    for s in fin:
+                        self._emit_stmt(s)
+                finally:
+                    self._emitting_finally.discard(id(fin))
+        finally:
+            self._pop_slot(Reg.RAX)
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.

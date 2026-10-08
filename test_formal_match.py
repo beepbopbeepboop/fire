@@ -674,14 +674,11 @@ ROWS = [
     # see it. A lowering that built a separate function per arm, or that
     # lowered the arm body into a synthetic block, would skip the cleanup
     # entirely. CPython's order — the `finally` runs BEFORE the returned value
-    # reaches the caller — is what this row pins, and it is ALSO where the row
-    # finds somebody else's bug: the FIRST exit out of a `try` body flushes the
-    # pending `finally` and the second one does not, so this image is missing
-    # the `fin` that CPython prints before `20`. That defect is not about
-    # `match` (it reproduces with a plain `if` in the `try`, measured) and it is
-    # written down in
-    # `bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md`, so this
-    # row is in the KNOWN-DEFECT table at the end of this file rather than here.
+    # reaches the caller — is what this row pins. It is the FIRST exit only; the
+    # second-exit spelling (a `return 20` after this arm) is
+    # `second_exit_from_a_try_runs_the_finally` above, and the two are separate
+    # rows because the first exit always worked and only the later ones were
+    # missing their cleanup.
     ("arm_return_inside_a_try_runs_the_finally", "def f(n):\n"
      "    try:\n"
      "        match n:\n"
@@ -894,30 +891,13 @@ ROWS = [
      "\n"
      "def main():\n"
      "    return 0\n", ("frontend",), "module"),
-]
-
-
-# ── the rows that PIN a known wrong answer ───────────────────────────────────
-#
-# Every row above is either right or refused. These are not, and a table of
-# `match` semantics that quietly left them out would be a census with the
-# failures taken out — the thing CLAUDE.md calls "a fixed bug still listed is
-# indistinguishable from an open one" in its worse form, the failure never
-# written down at all.
-#
-# Each row asserts the CURRENT answer and carries CPython's in a comment. When
-# the defect is fixed the row fails, which is the point: the fix and the row's
-# update land in the same commit, and a silent fix cannot leave a stale claim
-# behind.
-#
-# (name, body, the answer the image gives today, CPython's answer, the doc).
-KNOWN_DEFECT_ROWS = [
-    # The FIRST exit out of a `try` body flushes the pending `finally`; the
-    # second one finds the emitter's frame list already emptied and emits
-    # nothing. So `fin` is missing before the `20`. Measured with a plain `if`
-    # in place of the `match`, so it is not a `match` bug:
-    # bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md
-    ("second_exit_from_a_try_drops_the_finally",
+    # Every exit out of a `try` body runs its `finally`, not only the first one
+    # the emitter visits.  `f(2)` takes the SECOND exit (`return 20`), and the
+    # old `_flush_pending_finally` had already emptied the frame list at the
+    # first one, so it emitted no cleanup: measured `one / fin / 10 / 20 / done`
+    # where CPython runs `fin` again before the `20`.  Both backends, because
+    # the truncation was shared.
+    ("second_exit_from_a_try_runs_the_finally",
      "def f(n):\n"
      "    try:\n"
      "        match n:\n"
@@ -934,9 +914,7 @@ KNOWN_DEFECT_ROWS = [
      "    print(f(1))\n"
      "    print(f(2))\n"
      "    print('done')\n"
-     "    return 0\n",
-     "one\nfin\n10\n20\ndone\n", "one\nfin\n10\nfin\n20\ndone\n",
-     "bugs/FORMAL_a_second_exit_path_in_a_try_drops_the_finally.md"),
+     "    return 0\n", ("cpython",), "module"),
 ]
 
 
@@ -1074,30 +1052,6 @@ def _want(want, backend):
         if isinstance(want, dict) else want
 
 
-def judge_known_defect(row, tmpdir):
-    """One KNOWN-DEFECT row: the image's CURRENT stdout, on both backends.
-
-    Deliberately not compared with an oracle. A row that pins a wrong answer
-    cannot be compared with the right one — that is the failure it documents —
-    so it states the wrong answer, and says so in a comment beside CPython's.
-    Both architectures must produce the SAME wrong answer, because the defect
-    is in the shared `_flush_pending_finally` and a per-backend difference here
-    would mean something else is also wrong.
-    """
-    name, body, want, cpython, doc = row
-    source = mod_prog(body)
-    for backend in BACKENDS:
-        res = build_run(tmpdir, name, source, backend)
-        tag = "[%s] %s" % (backend, name)
-        if res[0] == "BUILD-FAIL":
-            check(False, tag + " builds", res[1][-400:])
-            continue
-        check((res[1], res[2]) == (want, 0),
-              tag + " still prints the documented wrong answer (%s)" % doc,
-              "printed %r exit %d; the pinned answer is %r (CPython: %r)"
-              % (res[1], res[2], want, cpython))
-
-
 def judge(name, backend, res, want, tmpdir, source):
     tag = "[%s] %s" % (backend, name)
     if res[0] == "BUILD-FAIL":
@@ -1223,8 +1177,6 @@ def main():
         rows = [(i, r) for i, r in rows if i == args.only_row]
     if args.substring:
         rows = [(i, r) for i, r in rows if args.substring in r[0]]
-    if not args.substring and args.only_row is None:
-        rows += [(1000 + i, r) for i, r in enumerate(KNOWN_DEFECT_ROWS)]
 
     ready, why_not = (False, "--no-lean") if args.no_lean \
         else _lean_ready()
@@ -1240,9 +1192,6 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="formal-match-") as tmp:
         for i, row in rows:
-            if i >= 1000:
-                judge_known_defect(row, tmp)
-                continue
             name, want = row[0], row[2]
             source = row_source(row)
             for backend in BACKENDS:
@@ -1253,9 +1202,8 @@ def main():
         check_proofs(tmp, PROOF_PAIRS, ready and not args.no_lean)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
-    print("%d/%d verdicts passed over %d rows (%d of them pinning a known "
-          "wrong answer)"
-          % (passed, len(RESULTS), len(rows), len(KNOWN_DEFECT_ROWS)))
+    print("%d/%d verdicts passed over %d rows"
+          % (passed, len(RESULTS), len(rows)))
     return 0 if passed == len(RESULTS) else 1
 
 

@@ -804,6 +804,13 @@ dylib_exports: list = None, globals_base: int = None,
         # Enclosing try-finally bodies, outermost first. Flushed before
         # return/break/continue so finally runs on those paths.
         self._pending_finally = []
+        # try-finally bodies currently being EMITTED by a flush, by object
+        # identity. A return/raise inside one must not re-enter it.
+        self._emitting_finally = set()
+        # How many 16-byte X0 saves a flush currently has outstanding on the
+        # stack. `_emit_epilogue` adds this to `_SCRATCH` so an epilogue
+        # emitted from inside a flushed finally restores SP to the frame base.
+        self._flush_push_depth = 0
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -1378,6 +1385,8 @@ dylib_exports: list = None, globals_base: int = None,
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        self._emitting_finally = set()
+        self._flush_push_depth = 0
         # Blocks for CONTAINERS this function RECEIVES from a callee that returns
         # one, and the COPY after each such call that fills them.  The third kind
         # of block in the same reserved region as the constructor frames and the
@@ -1681,7 +1690,18 @@ dylib_exports: list = None, globals_base: int = None,
         self._current_function = None
 
     def _emit_epilogue(self) -> None:
-        _emit_add_imm(self.asm, 31, 31, _SCRATCH)
+        # The flush pushes X0 on the stack around the finally bodies, and a
+        # `return` inside one of those bodies tears the frame down WHILE the
+        # pushes are still outstanding — so SP is `16 * _flush_push_depth`
+        # below the frame base here.  Add that back with `_SCRATCH`, or the
+        # post-index LDPs reload the saved x19..x28/x29/x30 from 16 bytes too
+        # low and `ret` jumps to garbage (measured: SIGBUS on arm64 for
+        # `try: return 1 finally: print(); return 2`).  x86-64 is immune
+        # because its epilogue resets RSP from RBP (`leave`); this is arm64's
+        # equivalent, and it is a no-op when no flush is active, which is
+        # every ordinary return.
+        _emit_add_imm(self.asm, 31, 31,
+                      _SCRATCH + 16 * self._flush_push_depth)
         for i in reversed(range(self._npairs)):
             self.asm.emit(encode_ldp_sp_post(19 + 2 * i, 20 + 2 * i))
         self.asm.emit(encode_ldp_sp_post(29, 30))
@@ -3001,16 +3021,39 @@ dylib_exports: list = None, globals_base: int = None,
 
         `depth` is 0 for return (run every enclosing finally) and the
         loop's entry `fin_depth` for break/continue (only frames opened
-        inside that loop). The list is truncated first so a return inside
-        a finally does not re-enter the same body."""
-        if len(self._pending_finally) <= depth:
+        inside that loop).
+
+        **The frames are NOT removed here; `_emit_try` owns the pop.**  The
+        old shape truncated the list first "so a return inside a finally
+        does not re-enter the same body", and that is true but not the whole
+        story: the `del` also removed the frame for every LATER exit site in
+        the same `try` body, because the emitter visits exit sites in source
+        order and "already flushed" is not "on this path".  The first
+        `return` flushed the cleanup; the second found an empty list and
+        emitted nothing — a program that runs, exits 0 and silently skipped
+        the source's cleanup, on both backends.
+
+        Re-entrancy is instead guarded by `_emitting_finally`, keyed on the
+        statement-list object's IDENTITY rather than an index: `_emit_try`
+        pops frames as it unwinds, so every index-based marker shifts under a
+        nested `try` and an object's identity does not."""
+        frames = self._pending_finally[depth:]
+        if not frames:
             return
-        fins = self._pending_finally[depth:]
-        del self._pending_finally[depth:]
         self.asm.emit(encode_stp_sp_pre(0, 31))
-        for fin in reversed(fins):
-            for s in fin:
-                self._emit_stmt(s)
+        self._flush_push_depth += 1
+        try:
+            for fin in reversed(frames):
+                if id(fin) in self._emitting_finally:
+                    continue
+                self._emitting_finally.add(id(fin))
+                try:
+                    for s in fin:
+                        self._emit_stmt(s)
+                finally:
+                    self._emitting_finally.discard(id(fin))
+        finally:
+            self._flush_push_depth -= 1
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
     def _emit_exit(self, status) -> None:

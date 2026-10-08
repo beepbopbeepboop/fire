@@ -946,6 +946,98 @@ CASES = [
      "    finally:\n"
      "        print('outerfin')\n"
      "    return 0\n", 3),
+    # ── the SECOND exit out of one `try` runs its finally ───────────────────
+    # `two_returns(3)` reaches the `return 20` at the END of the body, which is
+    # the SECOND exit site the emitter visits.  The old `_flush_pending_finally`
+    # truncated the pending list at the FIRST site, so this path found an empty
+    # list and emitted no cleanup at all: a program that runs, exits 0 and
+    # silently skips the source's `finally`, on BOTH backends.
+    # `two_returns(1)` is the control — the FIRST site, which always worked.
+    ("the_second_exit_out_of_a_try_runs_its_finally",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(n))\n"
+     "    print(two_returns(n - 2))\n"
+     "    return 0\n",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(n))\n"
+     "    print(two_returns(n - 2))\n"
+     "    return 0\n", 3),
+    # ── a `return` INSIDE a `finally` overrides and tears down once ─────────
+    # CPython warns and then returns 2, discarding the in-flight `return 1`.
+    # arm64 used to SIGBUS here (two epilogues for one frame: the flush's X0
+    # save left SP 16 bytes below the frame base when the nested `return`
+    # emitted its own epilogue, so the saved pairs were reloaded from the wrong
+    # place and `ret` jumped to garbage).  x86-64 answered correctly only
+    # because `leave` resets RSP from RBP.
+    ("a_return_inside_a_finally_overrides_and_tears_down_once",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n",
+     "def h():\n"
+     "    try:\n"
+     "        return 1\n"
+     "    finally:\n"
+     "        print('fin')\n"
+     "        return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n", 3),
+    # The same construct with an ENCLOSING finally, which is what makes the
+    # ordering observable: CPython runs the inner body, then the inner finally's
+    # `return`, which runs the OUTER finally before it returns.  A lowering that
+    # tears down at the nested `return` without re-flushing the outer frames
+    # prints `inner` and skips `outer` (x86-64 did exactly that before this fix).
+    ("a_return_inside_a_finally_still_runs_the_enclosing_finally",
+     "def h():\n"
+     "    try:\n"
+     "        try:\n"
+     "            return 1\n"
+     "        finally:\n"
+     "            print('inner')\n"
+     "            return 2\n"
+     "    finally:\n"
+     "        print('outer')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n",
+     "def h():\n"
+     "    try:\n"
+     "        try:\n"
+     "            return 1\n"
+     "        finally:\n"
+     "            print('inner')\n"
+     "            return 2\n"
+     "    finally:\n"
+     "        print('outer')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h())\n"
+     "    return 0\n", 3),
     # ── a `try` with no raising body ────────────────────────────────────────
     # The `except: pass` shape, which is the commonest in the corpus and must
     # keep building: the arm has no effect to drop, so nothing is lost by
