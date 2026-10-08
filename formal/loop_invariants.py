@@ -1955,27 +1955,6 @@ def _if_paths_pairs(st):
     return arms
 
 
-def _word_arith(node):
-    """`//` spelled `/`, for `formal/contracts.py`'s expression IR.
-
-    That module's `_ARITH_OPS` is `{+ - * / %}`, so the source's `//` — which
-    is what `collatz.mojo` writes, and what `formal/arm64_proof_gen.py`'s own
-    model calls `UInt64.div` — has no reading there and every `//` was a skip.
-    The rewrite is on the NODE and it is one character, so the search keeps
-    using the one IR reader rather than growing a second one for an operator
-    whose IR tag already exists and whose evaluation is already the truncating
-    one (`_eval_of`'s `/` is `a // b`, measured).
-
-    The semantics are the module's WORD semantics, so `-7 // 2` reads as
-    `(-7 mod 2^64) // 2` read back SIGNED — which is what the machine computes
-    and what `formal/contracts.py`'s docstring already says its comparison
-    spelling is there for.
-    """
-    if type(node).__name__ == "BinaryOp" and getattr(node, "op", None) == "//":
-        return F.BinaryOp("/", node.left, node.right, 0, 0)
-    return node
-
-
 def _one_step(env, arms, shape, rel):
     """One iteration, evaluated from the loop's own statements.
 
@@ -2024,7 +2003,7 @@ def _one_step(env, arms, shape, rel):
             value = F.BinaryOp(op, F.IdentExpr(target.name), st.value, 0, 0)
         else:
             value = st.value
-        ir = reader.value(_word_arith(value))
+        ir = reader.value(value)
         if ir is None:
             return None
         try:

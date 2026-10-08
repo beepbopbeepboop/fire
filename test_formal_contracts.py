@@ -327,6 +327,45 @@ def test_a_comparison_is_SIGNED_in_both_printers(tmpdir=None):
           CT._eval_of(ir, env, [1000]) is True, "n = 5 must satisfy n > 0")
 
 
+def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
+    """The source writes integer division `//`, the parser keeps it as `//`, and
+    this reader used to be keyed on `/` alone -- so a clause over `a // b` was
+    refused with a reason that named `/`, and a body whose statements contained
+    `//` could not be run at any input.
+
+    Both spellings are ONE operation on this target (`UInt64.div`), so the
+    reader takes both and normalises to the single `"/"` the IR tag and both
+    printers already know.  The corpus writes it: `collatz.mojo` halves a
+    variable with `v // 2`, and every halving step used to be a skip, which the
+    bounded search counts as "no counterexample" rather than as "unreadable"."""
+    from formal import contracts as CT
+    src = ("@ensures(result == a // b)\n"
+           "def h(a, b):\n    return a // b\n")
+    fn = functions(parse(src))[0]
+    c = contract_of(fn, "x.mojo", src)
+    e = CT.contract_theorems(c, ["a", "b"], fn=fn)
+    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), repr(e))
+    check("a_floordiv_clause_is_not_explained_away",
+          CT.unlowered_reason(c, ["a", "b"]) == "",
+          CT.unlowered_reason(c, ["a", "b"]))
+    ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
+    check("a_floordiv_clause_renders_as_the_word_division",
+          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
+    runner = CT.SourceRunner(fn)
+    check("a_floordiv_body_runs_at_its_own_word_semantics",
+          runner(7, 2) == 3, repr(runner(7, 2)))
+    try:
+        runner(7, 0)
+        check("a_floordiv_by_zero_is_still_a_skip", False, "returned a number")
+    except CT.Unsupported:
+        check("a_floordiv_by_zero_is_still_a_skip", True)
+    fn2 = functions(parse("@ensures(other == 1)\ndef f(n):\n    return n\n"))[0]
+    check("the_arith_subset_message_names_floordiv",
+          "`+ - * / // %`" in CT.unlowered_reason(contract_of(fn2, "x.mojo"),
+                                                  ["n"]),
+          CT.unlowered_reason(contract_of(fn2, "x.mojo"), ["n"]))
+
+
 def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
     """Two defects this group exists to catch, both found by RUNNING the
     run-time lowering and neither visible by reading it:
@@ -1018,6 +1057,7 @@ ALL = [
     test_a_name_outside_the_parameters_is_not_silently_zero,
     test_the_lean_printer_and_the_evaluator_agree_on_the_corpus,
     test_a_comparison_is_SIGNED_in_both_printers,
+    test_a_floor_division_clause_reads_as_the_word_division,
     test_the_mojo_printer_emits_MOJO_and_not_LEAN,
     test_the_ladder_is_generated_from_the_list_it_reports,
     test_a_multi_postcondition_contract_is_split_before_its_first_bullet,
