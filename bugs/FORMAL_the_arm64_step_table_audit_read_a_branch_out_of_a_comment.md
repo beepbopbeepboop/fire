@@ -21,14 +21,16 @@ carries `(block, crossed)` and answers True only for a block that CONTAINS the
 halt with no source conditional crossed, pinned in both directions by
 `test_formal_call_proof_gen.py::TestTheReachedWalkIsPerPath`. So the class is
 one row from green: `wdiff` refuses in the loop contract because the stack-floor
-guard's `getrlimit` (`bfeec991`, every arm64 prologue) is counted as a program
-call and becomes the theorem's halt boundary, and because the arm64 half of
+guard's `getrlimit` (`bfeec991`, every arm64 prologue) was counted as a program
+call and became the theorem's halt boundary, and because the arm64 half of
 `38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
-by a merge. Both are filed as
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
-"all twelve generate" below is true of the ten recursive examples and false of
-`wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
-row).
+by a merge. Both are fixed: the read moved to the startup stub
+(`arm64_codegen.py::_emit_stack_floor_init`) and `_emit_trap_flush` is restored,
+pinned by
+`test_formal_call_proof_gen.py::TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`.
+So "all twelve generate" below was true of the ten recursive examples and false
+of `wdiff` at the time of that measurement; `sum_range` refuses by design (the
+signed-loop contract, its `REFUSED` row).
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
