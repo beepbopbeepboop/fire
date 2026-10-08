@@ -9816,11 +9816,20 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
     Appends a RET sentinel after the code and executes the whole program
-    (starting from the entry stub) with the initial link register pointing
-    at that sentinel, using arm64_exec_go_exit (which only stops at the
-    designated exit address, so recursion is traced correctly). The result
-    in x0 is verified against the semantic model by native_decide.
-    Additional inputs are executed from the function entry directly.
+    **from the entry FUNCTION** with the initial link register pointing at that
+    sentinel, using arm64_exec_go_exit (which only stops at the designated exit
+    address, so recursion is traced correctly). The result in x0 is verified
+    against the semantic model by native_decide.
+
+    **From the entry function, not the startup stub, and the stub is why.** The
+    stub now reads `RLIMIT_STACK` once (`arm64_codegen.py::_emit_stack_floor_init`)
+    and that `bl getrlimit` goes through a `__TEXT,__stubs` trampoline the model
+    cannot follow — so a run started at the stub stops at the trampoline and
+    never reaches the program.  The entry function's own arguments are what
+    `model.entry_arg_values` records (the words the stub materialized), so
+    starting here loses nothing about the program and says nothing false about
+    the stub, which no proof walks.  This is the same rule x86-64's
+    `_run_tests_section` follows (it starts at `<fn>_offset`).
     """
     exit_addr = base + len(code)
     # The entry function's ARGUMENT words as the startup stub materialized
@@ -9832,7 +9841,7 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     # that says "input 10" about a two-parameter entry whose second argument is
     # 20 would be describing a different program.
     tinput = test_input if arity <= 1 else ", ".join(vals)
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    init = (f"{{ {_entry_run(vals, func_entry, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     _tac = _decide_or_admit(admitted_model)
     # The admission note goes on the FIRST block only, and every docstring here
@@ -9946,6 +9955,7 @@ def _program_extern_calls(info: dict) -> list:
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
+                     func_entry: int = None,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
                      entry_values: list = None, scope=None) -> tuple:
@@ -9999,12 +10009,19 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     not, plus `mod_by_var` itself through Lean's kernel.
     """
     exit_addr = base + len(code)
+    # **From the entry FUNCTION, not the startup stub** — the stub's
+    # `bl getrlimit` goes through a `__TEXT,__stubs` trampoline the model cannot
+    # follow, so a run started there stops before the program.  `func_entry` is
+    # the entry function's label; `base` remains the code's base address, which
+    # `exit_addr` and the addresses below are measured from.
+    if func_entry is None:
+        func_entry = base
     # The entry function's ARGUMENT words as the startup stub materialized
     # them (`model.entry_arg_values`, already widened to `arity`), so a
     # two-parameter entry's run starts from the same x0/x1 the binary was
     # given rather than from an x1 the model invented.
     vals = [str(v) for v in (entry_values or [test_input])]
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    init = (f"{{ {_entry_run(vals, func_entry, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     ret_type_of = {e.name: e.return_type for e in externs}
     blocks = []
@@ -10999,6 +11016,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     if extern_calls:
         run_test, step_tests = _gen_extern_test(
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            func_entry=info["labels"].get(func_name, base_addr),
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
             admitted_names=_admitted_used_names, scope=_vscope)
