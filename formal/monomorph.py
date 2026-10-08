@@ -687,6 +687,114 @@ def all_instantiation_calls(consumer_src: str) -> dict:
         "all_instantiation_calls", consumer_src, derive).items()}
 
 
+#: A type-argument spelling an ANNOTATION reader will carry into a demand: a
+#: bare or dotted identifier and nothing else.  An annotation is a STRING by the
+#: time this module sees it (`VarDecl.type_ann`), so the nested-application
+#: spelling `List[Int]` — which `type_arg_text` mangles to `List_Int` for a CALL
+#: bracket — cannot be converted here without a second copy of that mangling.
+#: The conservative direction is to leave it OUT: no demand is invented for a
+#: spelling this reader cannot name exactly, and the construction keeps the
+#: refusal it has today rather than binding a body under a name nobody computed.
+_ANNOTATION_TYPE_ARG_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
+
+
+def annotated_construction_demands(stmts, templates=None, skip=()) -> list:
+    """`[(base, (type arg, …), call), …]` for `x: Base[…] = Base(…)`.
+
+    A type argument WRITTEN IN A NON-CALL POSITION is not a demand to
+    `all_instantiation_calls`, which walks CALL sites: `VarDecl.type_ann` is a
+    STRING by the time an AST carries it (`x: Base[Int]`), not a subscript node,
+    so the bracket in it is invisible to every reader built on the parsed tree.
+    The construction on the right is a bare `Base(...)`, and because the
+    template's own body was dropped by `without_template_bodies` it names no
+    struct and no function — the binding loses its home and the field read is
+    refused, or the image carries a call nothing provides.  This is the reader
+    that turns the ANNOTATION into a demand, so the machinery that already
+    handles an explicit-bracket call (`instantiate_all` +
+    `rewrite_instantiation_calls`) handles this spelling too.
+
+    `templates`, when given, is the set of names this is allowed to speak for
+    (a module's own STRUCT templates); `None` asks about every annotation and
+    lets the caller's `demap` decide, which is what the rewrite pass wants.
+
+    `skip` is the module's own GENERIC TEMPLATE names, and it is load-bearing
+    rather than tidy: a demand reader runs before `without_template_bodies`
+    drops the template declarations, and an annotated construction inside one
+    (`struct Outer[T]: … var x: Inner[T] = Inner()`) would otherwise demand
+    `Inner` at the outer template's PARAMETER, publishing `Inner_T` with `T`
+    undeclared.  A template's own body is in no image, so it states no demand.
+
+    The argument spellings are checked twice and both are the safe direction:
+    each must be a bare or dotted identifier (a nested application is left out
+    rather than mangled by a second rule), and it must not be a name the reading
+    SCOPE binds as a value — the same "a name nothing binds is a type" rule
+    `type_arg_text` states, because an annotation that names a local is not a
+    type no matter where the parser put it.
+    """
+    from formal import model as M                  # lazy — cycle
+    from formal.build import _names_bound_in       # lazy — cycle
+
+    skip = set(skip or ())
+    out = []
+    module_values = set(M.collect_module_symbols(stmts) or {})
+    for st in stmts:
+        if getattr(st, "name", None) in skip:
+            continue
+        values = _names_bound_in(st) if isinstance(st, F.FunctionDef) \
+            else module_values
+        for node in M.iter_nodes(st):
+            if not isinstance(node, F.VarDecl):
+                continue
+            ann = node.type_ann
+            value = node.value
+            if not isinstance(ann, str) or not isinstance(value, F.CallExpr):
+                continue
+            if not isinstance(value.func, F.IdentExpr):
+                continue
+            base = M.annotation_base_name(ann)
+            if base is None or value.func.name != base:
+                continue
+            if templates is not None and base not in templates:
+                continue
+            texts = M._split_type_args(ann)
+            if not texts:
+                continue
+            if any(t in values or not _ANNOTATION_TYPE_ARG_RE.match(t)
+                   for t in texts):
+                continue
+            out.append((base, tuple(texts), value))
+    return out
+
+
+def own_annotation_demands(src: str, stmts) -> dict:
+    """`{template: [(type arg, …), …]}` — the annotated constructions of `src`'s
+    OWN struct templates.
+
+    The own-template half of `annotated_construction_demands`, and a function
+    rather than a clause in each of its two callers because both the executable
+    path (`formal/imports.py::_own_instantiations`) and the library path
+    (`build_module_dylib`, whose own demand set feeds BOTH the artifact's
+    identity and the call-site rewrite) need the same table from the same rule.
+    A name the export rule filed as a template that neither extractor can pull
+    out is skipped rather than fatal — `template_names`' own documented
+    imprecision — because this is a demand and not the place to report it.
+    """
+    structs = set()
+    for name in template_names(src):
+        try:
+            if template_kind(src, name) == KIND_STRUCT:
+                structs.add(name)
+        except MonomorphError:
+            continue
+    out: dict = {}
+    for base, args, _call in annotated_construction_demands(
+            stmts, structs, skip=template_names(src)):
+        entries = out.setdefault(base, [])
+        if args not in entries:
+            entries.append(args)
+    return out
+
+
 def demands_from_calls(found: dict, templates, own=()) -> dict:
     """`found` restricted to `templates`, minus the consumer's own `own`.
 
@@ -933,6 +1041,21 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
     n = 0
+    # The ANNOTATION half, and it is a separate pass because its call site has
+    # no bracket: `var x: Base[Int] = Base(…)` writes the type argument in the
+    # declaration and the call is bare, so the bracket-reading loop below cannot
+    # see it.  `annotated_construction_demands` reads the same annotation the
+    # demand side read, so the two cannot disagree about the arguments; the
+    # `demap` lookup is what makes this a rewrite of a demand that was actually
+    # built rather than of every annotation that happens to name a template.
+    for base, args, call in annotated_construction_demands(stmts):
+        mangled = demap.get((base, args))
+        if mangled is None:
+            continue
+        call.func = F.IdentExpr(name=mangled,
+                                line=getattr(call.func, "line", 0),
+                                col=getattr(call.func, "col", 0))
+        n += 1
     for st in stmts:
         if isinstance(st, F.FunctionDef):
             values = _names_bound_in(st)

@@ -32,6 +32,18 @@ single boundary layout either"), so every item below was already refused.
 
 ## 1. A type argument in a NON-CALL position is not a demand
 
+**Status 2026-10-08 (`work/formal168-docs`): the LOCAL `VarDecl`-annotation half
+is FIXED.** A `var m: Marker[Int] = Marker(…)` now writes a demand from the
+annotation and rewrites the bare construction, so the local non-call position is
+no longer the reason such a program is refused;
+`test_formal_monomorph.py`'s `a type argument in a local annotation is a demand`
+and `a library with an annotated construction publishes it` pin it. What the
+paragraph below still describes is the CROSS-IMAGE half (`keep(p: Pair[Int])` in
+a library the consumer applies), and that is the name-resolution/ABI decision
+§1a records — not the local case. The reader is
+`formal/monomorph.py::annotated_construction_demands` (plus
+`own_annotation_demands`, the own-template table both demand sets merge).
+
 **The construct.** `def keep(p: Pair[Int]) -> Int` , `var xs: List[Pair[Int]]`,
 a `Pair[Int]` field's annotation, a `Pair[Int]` in a `return_type`. The
 instantiation exists — `Pair_1_T_3_Int` is what the boundary symbol has to be,

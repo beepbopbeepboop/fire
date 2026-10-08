@@ -240,18 +240,6 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
-    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
-    # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
-    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
-    # this tree returns NO SPEC for each, which is the rule at the top of this
-    # section applied: the object is missing from the target. `_gdbm` and
-    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
-    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
-    # leading underscore), so this moves the PUBLIC unclassified count by zero;
-    # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
-    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -3326,18 +3314,13 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    source_of = {}
-    for src, (bindings, _why) in (library_free or {}).items():
+    for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.  The
-            # SOURCE is the defining module's, which is the key this table is
-            # built under — the refusal reads it to name the rule that applied.
+            # neither has a callee, so the refusal has to reach either.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
-            source_of.setdefault(bound, src)
-            source_of.setdefault(defining, src)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -3351,12 +3334,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
-            rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
-                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                M.imported_callee_refusal(callee.name, sym, scope))
 
 
 def _enclosing_scopes(stmts: list) -> list:
@@ -3723,6 +3702,16 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # `dkey` exactly as an importer's do, and a library built for its own
     # `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
     for _tmpl, _args in MM.own_demands(module_source_text(source_path)).items():
+        mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
+    # …and the type arguments this module writes in a NON-CALL position, which
+    # `own_demands` cannot see: `var a: Box[Int] = Box(…)` states the
+    # instantiation in the annotation and leaves the construction bare.  The same
+    # table the executable path merges (`_own_instantiations`), and it belongs in
+    # `mine` for the same reason the call-site demands do — it changes what the
+    # library publishes, so it is part of the artifact's identity.
+    for _tmpl, _args in MM.own_annotation_demands(
+            module_source_text(source_path),
+            module_statements(source_path)).items():
         mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
     dkey = MM.demands_key(mine)
     key = (arch, here, dkey)
@@ -4308,6 +4297,17 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     wanted = MM.own_demands(consumer_src)
+    # …and the type arguments this file writes in a NON-CALL position: a
+    # `var x: Base[Int] = Base(…)` states the instantiation in the annotation and
+    # leaves the construction bare, and `own_demands` walks CALL sites only.  The
+    # STRUCT templates are the ones a construction can name; a FUNCTION template
+    # is answered by the local-specialisation machinery and must not be
+    # instantiated here.
+    for base, args in MM.own_annotation_demands(consumer_src, stmts).items():
+        entries = wanted.setdefault(base, [])
+        for a in args:
+            if a not in entries:
+                entries.append(a)
     if not wanted:
         return {}
     made, _failed = MM.instantiate_all(consumer_src, wanted)
