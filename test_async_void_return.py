@@ -42,6 +42,7 @@ import tempfile
 
 import gimple_codegen
 from build_config import find_gcc, find_gxx
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
@@ -97,22 +98,22 @@ def _build_and_run(mojo_src: str) -> str:
     exe = os.path.join(wd, 'prog.exe')
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
 
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_o, cpp_path],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}\n---\n{cpp_code}")
 
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
-                        ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
+                        ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
 
@@ -122,7 +123,7 @@ def _build_and_run(mojo_src: str) -> str:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
 
     os.chmod(exe, 0o755)
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout
