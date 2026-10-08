@@ -6817,5 +6817,106 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
                          "out-of-image call — it is keyed on the wrong condition")
 
 
+class TestAReachableSourceConditionIsABarrierNotAGlobalRefusal(unittest.TestCase):
+    """`_reached_without_a_condition` asks about a PATH, not about reachability.
+
+    The function's own docstring is the specification: a block blocks only when
+    it is `cbz`-kinded AND its branch pc is in `cond_branches` — i.e. only a
+    source condition ON THE WAY to the halt address makes that address
+    conditional. The implementation returned `False` the moment ANY reachable
+    source conditional was found, even one the halt address sits BEFORE, and
+    that is a different (and false) claim.
+
+    It is measurable without Lean because the question is about the CFG: a
+    program whose opaque call is in the prologue, before its `if`/`while` test,
+    has an unconditional halt address — every input reaches it. The prologue of
+    every image now carries the stack-floor guard's `getrlimit` extern call
+    (`formal/arm64_codegen.py::_emit_stack_floor_guard`), so every conditional
+    program has exactly such a call and the old code refused all of them with
+    "the call ... is the halt address, and it is behind a CONDITIONAL".
+
+    Both directions are pinned here, because "the source conditional is a
+    barrier" is only half of the fix: a call that really IS behind the condition
+    must still answer `False`, or the premise `native_decide` checks becomes
+    false again.
+    """
+
+    #: The call is the prologue guard, before the source `if` — unconditional.
+    CALL_BEFORE_COND = (
+        "def p(n):\n"
+        "    if n > 0:\n"
+        "        return 1\n"
+        "    return 0\n")
+
+    #: The second opaque call (`printf`) is behind the source `if`.
+    CALL_BEHIND_COND = (
+        "def p(n):\n"
+        "    if n > 100:\n"
+        "        printf(\"b\")\n"
+        "    return 0\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="reach-without-cond-")
+        cls.built = {}
+        for name, src in (("before", cls.CALL_BEFORE_COND),
+                          ("behind", cls.CALL_BEHIND_COND)):
+            path = os.path.join(cls.tmp, name + ".mojo")
+            with open(path, "w") as f:
+                f.write(src)
+            import formal.build as fb
+            cls.built[name] = fb.compile_formal(
+                path, arch="arm64",
+                output=os.path.join(cls.tmp, name + ".aout"), prove=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _opaque_calls(self, name):
+        import formal.arm64_proof_gen as G
+        r = self.built[name]
+        code, info = r["code"], r["info"]
+        base = info["base_addr"]
+        func_entry = info["labels"][info["func_name"]]
+        calls = [c for c in G._unfollowable_calls(code, base, func_entry, None)
+                 if c["kind"] == "opaque"]
+        guard = {c["addr"]
+                 for c in (info.get("extern_calls") or [])
+                 if c.get("sym") == "getrlimit"}
+        return code, info, base, func_entry, calls, guard
+
+    def test_the_prologue_guards_call_is_reached_without_a_condition(self):
+        """The regression: the guard call is before the source `if`, so it is
+        reachable on every path and the theorem's premise holds."""
+        import formal.arm64_proof_gen as G
+        code, info, base, func_entry, calls, guard = self._opaque_calls("before")
+        self.assertTrue(guard, "no `getrlimit` guard call in the image, so this "
+                               "test is not watching the shape it names")
+        for c in calls:
+            if c["pc"] in guard:
+                self.assertTrue(
+                    G._reached_without_a_condition(
+                        code, base, func_entry, c["func_end"], c["pc"],
+                        cond_branches=set(info.get("cond_branches") or ())),
+                    f"the guard call at {c['pc']:#x} is BEFORE the source "
+                    f"conditional, so every run reaches it, but the helper "
+                    f"reported it conditional")
+
+    def test_a_call_actually_behind_the_condition_is_still_refused(self):
+        """The barrier must not become permissive: this call IS conditional."""
+        import formal.arm64_proof_gen as G
+        code, info, base, func_entry, calls, guard = self._opaque_calls("behind")
+        behind = [c for c in calls if c["pc"] not in guard]
+        self.assertTrue(behind, "no call behind the conditional in the image, "
+                                "so this test is not watching the shape it "
+                                "names")
+        for c in behind:
+            self.assertFalse(
+                G._reached_without_a_condition(
+                    code, base, func_entry, c["func_end"], c["pc"],
+                    cond_branches=set(info.get("cond_branches") or ())))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

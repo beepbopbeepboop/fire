@@ -6665,7 +6665,16 @@ def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
                 queue.append(tgt)
         elif block["kind"] == "cbz":
             if cond_branches and block["instrs"][-1] in cond_branches:
-                return False           # a SOURCE condition sits on the path
+                # A SOURCE condition is a BARRIER, not a global refusal: `pc` is
+                # not reachable THROUGH it, but a source condition that is
+                # reachable and off every path to `pc` does not make `pc`
+                # conditional.  Returning False the moment one is reachable —
+                # which this did — refused `wdiff`, whose opaque call sits in
+                # the prologue before the `while` test the source conditional
+                # belongs to.  The question is whether `pc` is reached WITHOUT
+                # crossing a source condition, so the branch is simply not
+                # traversed; `pc` is reported by the reachability check below.
+                continue
             # BOTH edges of a branch that is not a source condition.  The walk
             # cannot know which way an emitter-internal branch goes — `a // b`
             # puts its `__div0` call on the TAKEN edge of the guard's own
