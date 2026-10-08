@@ -676,14 +676,14 @@ dylib_exports: list = None, globals_base: int = None,
         self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
-        # The ADDRESSES of the calls THIS BACKEND emits for itself, published as
-        # `info["compiler_traps"]` and subtracted by
+        # The ADDRESSES of the `BL fflush` this backend emits inside its own
+        # bounded stops, published as `info["compiler_traps"]` and subtracted by
         # `formal/arm64_proof_gen.py::_program_extern_calls` from the program's
-        # own extern calls. Two of them: the `BL fflush` inside every bounded
-        # stop (`_emit_trap_flush`), and the `getrlimit` the stack-floor guard
-        # reads `RLIMIT_STACK` with in every guarded prologue
-        # (`_emit_trap_extern_call`). See `_emit_exit` for why the subtraction is
-        # the difference between a proof and a `lean-rejected` row.
+        # own extern calls.  The stack-floor guard's `getrlimit` is NOT here: it
+        # runs in the startup stub (`_emit_stack_floor_init`), below
+        # `func_offset`, and `_program_extern_calls` subtracts it by address
+        # instead.  See `_emit_exit` for why the subtraction is the difference
+        # between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
         self._if_counter = 0
         self._while_counter = 0
@@ -1015,6 +1015,17 @@ dylib_exports: list = None, globals_base: int = None,
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
+            # The stack floor is read here, before any entry argument is
+            # materialised: `getrlimit` needs X0/X1 and clobbers every
+            # caller-saved register, INCLUDING LR, and that is why the `stp`
+            # above comes first. Emitted before the save (as x86-64 does, where
+            # a `call` pushes its return address and cannot clobber LR) the
+            # init's `bl` would leave LR pointing at the instruction after it,
+            # so the stub's own `ret` would jump back into the init and call the
+            # entry again forever — measured: `def main(): printf("hi")` wrote
+            # "hi" without end. The read is a CALL and must also stay out of
+            # every function body; see `_emit_stack_floor_init`.
+            self._emit_stack_floor_init()
             test_val = self.test_input
             # `_emit_mov_imm`, not a hand-rolled movz+movk pair: it is the one
             # materializer on this backend, it covers the whole 64-bit word
@@ -1793,6 +1804,90 @@ dylib_exports: list = None, globals_base: int = None,
             return
         raise CodegenError(self._no_home(name))
 
+    def _emit_stack_floor_init(self) -> None:
+        """Read `RLIMIT_STACK` once and park the FLOOR in `__DATA`.
+
+        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
+        before the entry function is called and outside every function body —
+        and that placement is the whole reason this is its own method. The read
+        is a `getrlimit` CALL, and a call inside a guarded prologue is a `BL` on
+        a path `formal/arm64_proof_gen.py` WALKS: the walker cannot follow a call
+        out of the image, so with the read in the prologue it refused proof
+        generation for every guarded program in the corpus (measured: two
+        `getrlimit` call sites in one image, and "ONE halt address cannot
+        discharge them"). Moving it here puts it BELOW `func_offset`, where no
+        run test starts and no path tree walks; `_program_extern_calls` subtracts
+        it by address for the same reason x86-64's `_program_externs` does.
+
+        The arithmetic is `model.stack_floor_budget_for_limit`:
+        `budget = min(BUDGET, max(limit - MARGIN - frame, MIN))`, clamped with
+        two taken-or-not branches rather than two `csel`, because `arm64_step`
+        has no `csel` arm.
+
+        `rlim_cur` is the FIRST word of `struct rlimit` on both targets this
+        emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
+        `unsigned long`); `rlim_max` says nothing about what the kernel enforces
+        and is not read. getrlimit's RETURN VALUE is a STATUS (0 or -1), not the
+        limit — caching the status instead made the budget the compile-time
+        `STACK_FLOOR_BUDGET_BYTES` on every process, which is the guard that
+        never fires under a reduced `ulimit -s`.
+        """
+        if self._globals_base is None:
+            # No `__DATA`, so no word to keep the floor in. `formal/build.py`
+            # always hands a base over — the data segment is unconditional since
+            # the floor word landed — so this is the `_emit_global_init` shape
+            # rather than a live case.
+            return
+        done_label = "sfinit_done"
+        clamp_lo_label = "sfinit_cl"
+        clamp_hi_label = "sfinit_ch"
+        floor = M.stack_floor_address(self._globals_base)
+        limit_word = M.stack_limit_address(self._globals_base)
+        scratch = M.stack_scratch_address(self._globals_base)
+        # Already read? The cached limit word is zero until this fills it.
+        self._adrp_add_abs(16, limit_word)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self.asm.emit(encode_cbnz_xn(0, 16))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        # `getrlimit(RLIMIT_STACK, &rlim)`: X0 = the resource, X1 = a `__DATA`
+        # address for the `struct rlimit` — never a stack address, because every
+        # stack answer was measured to corrupt the program; see
+        # `model.GlobalDataImage.stack_scratch_offset`. `_emit_extern_call`, NOT
+        # `_emit_call`: the argument is the ADDRESS this method just computed
+        # into X1, and `_emit_call` would EVALUATE its args into X0.. and
+        # overwrite it.
+        self.asm.emit(encode_movz_xd_imm(0, _RLIMIT_STACK))
+        self._adrp_add_abs(1, scratch)
+        self._emit_extern_call("getrlimit")
+        # `rlim_cur`, LOADED from the struct — getrlimit's return value in X0 is
+        # a status, not the limit. X1 and X16 are caller-saved, so the scratch
+        # address is re-derived rather than reused.
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self._adrp_add_abs(17, limit_word)
+        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        # budget = min(BUDGET, max(limit - MARGIN - frame, MIN)). `cmp x15, x14`
+        # computes `x15 - x14`, so carry is set exactly when `x15 < x14` and
+        # `b.hs` is its complement.
+        _emit_sub_imm(self.asm, 15, 16, M.STACK_FLOOR_MARGIN_BYTES + _SCRATCH)
+        self._emit_mov_imm("X14", M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_xn_xm(15, 14))
+        self._emit_b_cond_to("hs", clamp_lo_label)
+        self._emit_mov_imm("X15", M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.label(clamp_lo_label)
+        self._emit_mov_imm("X14", M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_xn_xm(15, 14))
+        self._emit_b_cond_to("lo", clamp_hi_label)
+        self._emit_mov_imm("X15", M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.label(clamp_hi_label)
+        # floor = SP - budget, with the frame already inside the budget
+        # (`stack_floor_budget_for_limit` subtracts it).
+        self.asm.emit(encode_add_xd_xn_imm(16, 31, 0))
+        self.asm.emit(encode_sub_xd_xn_xm(16, 16, 15))
+        self._adrp_add_abs(17, floor)
+        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        self.asm.label(done_label)
+
     def _emit_stack_floor_guard(self) -> None:
         """Refuse instead of dying when the frame just taken crosses the floor.
 
@@ -1804,18 +1899,13 @@ dylib_exports: list = None, globals_base: int = None,
         one outcome this backend already has an idiom for and the one a caller
         can read.
 
-        The sequence and every decision in it are `model.stack_floor_address`'s
-        and are written down there; what is here is its instruction selection:
+        The FLOOR is a `__DATA` word the STARTUP STUB filled once
+        (`_emit_stack_floor_init`), so the guard only LOADS it and compares:
 
             ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
-            CBNZ X16, done                             already stored
-            ADD X16, SP, #0 ; SUB X16, X16, #BUDGET    the first caller sets it
-            STR X16, [X17]
-        done:
             ADD X17, SP, #0 ; CMP X17, X16
             B.HS ok                                    SP >= floor: carry set
-            movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
-        ok:
+            <message> ; movz x0, 2 ; movz x16, 1 ; svc #0x80   SP < floor
 
 **Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way
@@ -1837,217 +1927,20 @@ dylib_exports: list = None, globals_base: int = None,
         argument has been moved to its home above this point.
         """
         if self._globals_base is None:
-            # No `__DATA`, so no word to keep the floor in, so nothing to
-            # compare against. `formal/build.py` always hands a base over — the
-            # data segment is unconditional since the floor word landed — so
-            # this is the `_emit_global_init` shape rather than a live case.
+            # No `__DATA`, so no word to compare against. See
+            # `_emit_stack_floor_init`, whose early return is the same case.
             return
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
-        done_label = f"{fn}_sf{sid}_done"
-        set_label = f"{fn}_sf{sid}_set"
-        ret_label = f"{fn}_sf{sid}_ret"
-        trap_label = f"{fn}_sf{sid}_trap"
         ok_label = f"{fn}_sf{sid}_ok"
-        clamp_lo_label = f"{fn}_sf{sid}_cl"
-        clamp_hi_label = f"{fn}_sf{sid}_ch"
         floor = M.stack_floor_address(self._globals_base)
-        limit_word = M.stack_limit_address(self._globals_base)
-        scratch = M.stack_scratch_address(self._globals_base)
-        # X17 = the address of the floor word, X16 = the floor itself. The
-        # same ADRP/ADD pair and the same LDR the lazy global initializer uses,
-        # for the same reason: it is the addressing this backend already proves
-        # against a real dyld rather than a new one.
+        # X16 = the floor word the startup stub wrote. The same ADRP/ADD pair
+        # and the same LDR the lazy global initializer uses, for the same
+        # reason: it is the addressing this backend already proves against a
+        # real dyld rather than a new one.
         self._adrp_add_abs(17, floor)
         self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
-        self.asm.emit(encode_cbnz_xn(0, 16))
-        self.asm.emit_label_rel(done_label, here_offset=-4)
-        # ── FIRST CALLER: read the process's REAL stack limit ────────────
-        #
-        # This whole block runs ONCE per process — the `CBNZ` above skips it on
-        # every other call — so the `getrlimit` in it costs one call per process
-        # rather than one per call, and the answer is CACHED in a `__DATA` word
-        # so a second guarded prologue does not repeat it.
-        #
-        # Why the limit has to be read at all, measured: with the budget as the
-        # compile-time constant it was, the same binary at the same depth gives
-        # `exit 2` under the default `ulimit -s 8176` and `exit 139` — a SIGSEGV
-        # with no output — under `ulimit -s 2048`. A budget larger than the real
-        # stack is a guard that never fires, and what it leaves behind is the
-        # silent crash the guard exists to replace.
-        self.asm.label(set_label)
-        # The cached word, or straight to `getrlimit` when it is still zero.
-        self._adrp_add_abs(16, limit_word)
-        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
-        self.asm.emit(encode_cbnz_xn(0, 16))
-        self.asm.emit_label_rel(ret_label, here_offset=-4)
-        # `getrlimit(RLIMIT_STACK, &rlim)`: X0 = the resource, X1 = the address
-        # of a `struct rlimit`.
-        #
-        # **X1 is a `__DATA` word, and every stack answer was measured to
-        # corrupt the program.** `model.GlobalDataImage.stack_scratch_offset` has
-        # the full account; the short version, because it is the reason this line
-        # is an ADRP/ADD rather than the `ADD X1, SP, #0` it looks like it should
-        # be:
-        #
-        #   * `sub sp, #16` around the call, with a matching `add` after it: SP is
-        #     16 bytes lower across an extern call, and the C library reads
-        #     SP-relative state across that boundary. Measured as a hang or a
-        #     SIGSEGV on EVERY program — `def helper(x): return x + 1` with a
-        #     `main` that calls it, no recursion, no output, correct emitted text
-        #     instruction by instruction. Leaving the 16 claimed instead of
-        #     restoring it did not help either, because the offset the rest of the
-        #     prologue computes from SP is then wrong by 16 in a different place.
-        #   * the caller's red zone at `[sp, #16)`: that is the caller's own
-        #     frame, and a 16-byte store over it hangs immediately.
-        #   * `[sp, #0..#16)` after `sub sp, #_SCRATCH`, the guard's ORIGINAL
-        #     placement: inside the reserved BLOB region, which is where a
-        #     RECEIVER FRAME lives (`struct_constructor_sites`), so a store there
-        #     corrupts the struct the call was handed.
-        #
-        # `__DATA` is writable, already addressed by the ADRP/ADD pair two
-        # instructions above, outlives every frame, and has exactly one writer —
-        # this, on a path the `CBNZ` runs once per process.
-        #
-        # `_emit_extern_call`, NOT `_emit_call`: the argument here is an ADDRESS
-        # this method has just computed into X1, and `_emit_call` EVALUATES its
-        # `args` into X0.. — which would overwrite both registers with whatever a
-        # `CallExpr` spelling had to carry, and the call would then ask for the
-        # wrong resource and write into the wrong address. It built, ran, and
-        # segfaulted at every depth under a reduced `ulimit -s`, which is the
-        # failure this comment is the record of. The same reason
-        # `_emit_global_init` sets its own registers rather than spelling a call.
-        #
-        # (X0 is a plain `movz` and X1 is this ADRP/ADD — neither reads SP, so
-        # the `Rn`-of-31 trap `_emit_stack_floor_guard`'s docstring names, where
-        # `encode_mov_zr_xn(1, 31)` reads XZR instead of SP and sends
-        # `getrlimit` to address 0, cannot arise on this call.)
-        # X0 and X1, NOT the argument registers: the guard is emitted before the
-        # prologue's `MOV X19, X0` and the `add x19, x0, #0` that saves argument 0
-        # into its callee-saved home, so X0 still holds the CALLER's argument at
-        # this point. Writing the resource number into it made `main(k)` read a
-        # `deep(k)` whose `k` was 3 — `printf("d=%d", deep(7))` printed `d=0` on
-        # every depth and the guard never fired, because the program under test
-        # was not the one being run. X15/X16/X17 are the guard's own scratch (the
-        # budget is built in X15 and the floor in X16) and neither is an argument
-        # register, so the pair below is free.
-        self.asm.emit(encode_movz_xd_imm(15, _RLIMIT_STACK))
-        self._adrp_add_abs(16, scratch)
-        # Argument 0 is parked in X14 BEFORE X0 is used for the call, because
-        # `getrlimit` CLOBBERS X0 with its own return value and this code runs
-        # before the prologue's `add x19, x0, #0` has saved it. Measured as
-        # `printf("d=%d", deep(7))` printing `d=0` at every depth — the program
-        # under test was not the one being run, because `deep` was called with
-        # `getrlimit`'s return value instead of 7.
-        self.asm.emit(encode_mov_zr_xn(14, 0))
-        self.asm.emit(encode_mov_zr_xn(0, 15))
-        self.asm.emit(encode_mov_zr_xn(1, 16))
-        self._emit_trap_extern_call("getrlimit")
-        # `rlim_cur` is the FIRST word of the struct on both targets this path
-        # emits for (`__rlim_t` on Darwin, `__rlim64_t` on Linux, both
-        # `unsigned long`), and `rlim_max` — which the kernel will not let an
-        # unprivileged process raise, and which says nothing about what it
-        # enforces — is not read.
-        #
-        # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
-        # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
-        # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
-        # …and argument 0 goes back, from X14.
-        self.asm.emit(encode_mov_zr_xn(0, 14))
-        # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value
-        # has to be moved into it before the cache store. Storing X16 directly
-        # wrote the scratch's own address into the limit word, and the next
-        # guarded prologue then read an address in `__DATA` as a byte count —
-        # `address - 262144` is still enormous, so neither clamp caught it.
-        self.asm.emit(encode_mov_zr_xn(16, 13))
-        self._adrp_add_abs(17, limit_word)
-        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
-        if False:
-            # exit((limit >> 20) & 0x7f): distinct for 8176/4096/2048/1024
-            self.asm.emit(encode_movz_xd_imm(17, 20))
-            self.asm.emit(encode_lslv_xd_xn_xm(0, 16, 17))
-            self.asm.emit(encode_movz_xd_imm(17, 0x7f))
-            self.asm.emit(encode_and_xd_xn_xm(0, 0, 17))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
-        self.asm.label(ret_label)
-        # budget = min(STACK_FLOOR_BUDGET_BYTES, max(limit - MARGIN, MIN)).
-        # X16 = the limit in, X15 = the budget out.
-        _emit_sub_imm(self.asm, 15, 16, M.STACK_FLOOR_MARGIN_BYTES + _SCRATCH)
-        # The two clamps, as BRANCHES rather than CSEL, and this is the same
-        # lesson the x86-64 half learned from `formal/x86_64_proof_gen.py`, which
-        # has no `cmov` arm either: `arm64_step` has no `csel` branch and
-        # `formal/arm64_proof_gen.py`'s CFG decomposition builds a block's runs
-        # certificate out of branches, so a block with none cannot be certified
-        # and a `csel` in the GUARD refuses proof generation for every program in
-        # the corpus. Measured: `test_formal_call_proof_gen.py` goes from 21
-        # failures to 42 failures and 15 errors the moment this clamp is a
-        # `csel`, and the message names the guard's own instruction ("CFG
-        # decomposition unsupported ... it is CSEL (0x9a8f31cf), which has no
-        # branch in `arm64_step`"). The bug doc that message points at
-        # (`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`)
-        # is about the EMITTER's `a if c else b`; this was the compiler using
-        # the same unmodelled word for its own arithmetic, which the doc does not
-        # cover.
-        #
-        # `cmp x15, x14` computes `x15 - x14`, so carry is set exactly when
-        # `x15 < x14` and `b.hs` is its complement.
-        self._emit_mov_imm("X14", M.STACK_FLOOR_MIN_BUDGET_BYTES)
-        self.asm.emit(encode_cmp_xn_xm(15, 14))
-        self._emit_b_cond_to("hs", clamp_lo_label)
-        self._emit_mov_imm("X15", M.STACK_FLOOR_MIN_BUDGET_BYTES)
-        self.asm.label(clamp_lo_label)
-        self._emit_mov_imm("X14", M.STACK_FLOOR_BUDGET_BYTES)
-        self.asm.emit(encode_cmp_xn_xm(15, 14))
-        self._emit_b_cond_to("lo", clamp_hi_label)
-        self._emit_mov_imm("X15", M.STACK_FLOOR_BUDGET_BYTES)
-        self.asm.label(clamp_hi_label)
-        # floor = SP - CHARGE, where CHARGE is
-        # `model.stack_floor_charge(budget, _SCRATCH)` — the budget LESS this
-        # function's own frame, because the guard is emitted after the `stp` that
-        # saved the frame pointer and so reads an SP one frame below the entry's.
-        # `stack_floor_charge`'s docstring has the four-limit table that pins it,
-        # and the placement bug it fixes.
-        #
-        # **X17 is reloaded with the FLOOR's address here, and that reload is
-        # load-bearing rather than redundant.** The `getrlimit` half above uses
-        # X17 to address the CACHED LIMIT word (`&limit`), and it is still live
-        # on the path that skipped the call (`cbnz` at the cached-word test jumps
-        # straight to `ret_label`), so on the first-caller path X17 arrives here
-        # holding `&limit` and on every later one it holds `&limit` too. Storing
-        # the floor through it wrote the floor INTO THE LIMIT WORD. Measured, and
-        # the symptom was not a wrong answer but a hang or a crash in whatever
-        # ran next: the second guarded function read the floor as though it were
-        # the limit, treated a stack ADDRESS as a byte count, computed a budget
-        # of roughly 2^64, and recursed until the kernel killed it — SIGKILL at
-        # every depth including a two-function program with no recursion and no
-        # output. An address in `__DATA` is around 0x100400000, so
-        # `address - MARGIN` is still enormous and no clamp catches it.
-        #
-        # So every store states the word it addresses. The alternative — keeping
-        # the floor's address in a register the limit half does not touch — needs
-        # a fourth scratch register in a prologue that has none to spare, and
-        # would leave the same trap for the next instruction that clobbers one.
-        #
-        # A REGISTER subtraction, not the immediate form the frame subtraction
-        # uses, because the charge is a computed value (the budget came from
-        # `getrlimit`). `encode_sub_xd_xn_xm` is the form `lib/ProofLib.lean`
-        # reads as `SUBS Xd, Xn, Xm` — the same instruction the immediate form
-        # lowers to, with a register where the literal was.
-        # floor = SP - CHARGE, where CHARGE is
-        # `model.stack_floor_charge(budget, _SCRATCH)`. The frame term is already
-        # inside the BUDGET now (`stack_floor_budget_for_limit` subtracts it),
-        # so nothing is discounted here — see `stack_floor_charge`'s table for why
-        # it moved between the two functions rather than staying in one.
-        self.asm.emit(encode_add_xd_xn_imm(16, 31, 0))
-        self.asm.emit(encode_sub_xd_xn_xm(16, 16, 15))
-        self._adrp_add_abs(17, floor)
-        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
-        self.asm.label(done_label)
         # SP into X17, then `SP - floor`. The stack grows DOWN, so having spent
         # the budget is `SP < floor`, which is the subtraction BORROWING and so
         # carry CLEAR. `B.HS` is the complement of that — "carry set", i.e.
@@ -2057,31 +1950,17 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_cmp_xn_xm(17, 16))
         self.asm.emit(encode_b_cond("hs", 12))
         self.asm.emit_label_rel(ok_label, here_offset=-4)
-        # The trap is three instructions: `movz x0, <status>; movz x16, 1; svc
-        # #0x80` is Darwin arm64 `exit(status)`, and it is the same sequence
-        # with the same shape as the divide-by-zero arm of `_emit_div_shift_pow`.
-        # **The one exit on this backend that does NOT go through
-        # `_emit_exit`,** and it is the only deliberate exception: this trap can
-        # fire before the program has produced any output at all (it is the
-        # first thing a prologue does), so there is nothing for a flush to
-        # push, and `fflush` is a call — which would move the address this trap
-        # is decoded from. `lib/ProofLib.lean` reads that address out of
-        # `info["compiler_traps"]`, so a flush here would silently move the
-        # decoded trap under the proof layer.
-        # The MESSAGE, before the exit — `model.stack_trap_message`, the fourth
-        # member of the `*_message` family and the one that was missing, because
-        # this trap used to be the only bounded stop on the path that said
-        # nothing at all. A reader who hit it got a status and no sentence.
-        #
-        # **A raw `svc`, not `_emit_overflow_diagnostic`'s `call write`, and the
-        # reason is the one the comment above gives for the exit:** the trap is
-        # decoded from its own address, which `info["compiler_traps"]` records on
-        # the x86-64 half and `lib/ProofLib.lean` reads as an in-image `svc` here.
-        # Darwin arm64's `write` is syscall 4 in X16, the same `svc #0x80` the
-        # exit below uses for syscall 1, so the message costs no CALL and moves
-        # nothing the proof layer decodes. A `bl write` here would put an
-        # unfollowable call in front of every guard's trap and change what every
-        # arm64 theorem says about where the run stops.
+        # The MESSAGE, before the exit — `model.stack_trap_message`, so a reader
+        # who hit this gets the bound it names rather than a bare status.
+        # **A raw `svc`, not `_emit_exit` and not `_emit_overflow_diagnostic`'s
+        # `call write`:** this trap is decoded from its own address by
+        # `lib/ProofLib.lean`, so it must contain no CALL, and it can fire
+        # before the program has produced any output, so there is nothing for a
+        # flush to push. Darwin arm64's `write` is syscall 4 in X16, the same
+        # `svc #0x80` the exit below uses for syscall 1, so the message costs no
+        # CALL and moves nothing the proof layer decodes. A `bl write` here would
+        # put an unfollowable call in front of every guard's trap and change what
+        # every arm64 theorem says about where the run stops.
         #
         # The two registers are set with `movz_xd` rather than `movz_wd`, which
         # is what the rest of this file uses for x0 and x16 and what
@@ -3150,64 +3029,34 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_movz_wd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
 
-    def _record_trap_addresses(self, symbol: str, before: int) -> None:
-        """Record every `BL` to `symbol` the emitter appended since `before`.
-
-        The recording is the point of the two wrappers below, and it cannot be
-        done by taking the assembler's position before the call: `_emit_call`
-        emits the ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl
-        fflush`), so that position is short of the `BL`. Reading the addresses
-        the call actually appended to `asm.extern_refs` is therefore the only way
-        to name the instruction, and naming it is what `info["compiler_traps"]`
-        is for — `formal/arm64_proof_gen.py::_program_extern_calls` subtracts
-        these addresses from the program's own extern calls, so a program whose
-        only unbound call is one of the compiler's gets its run tests back.
-
-        Filtered by SYMBOL as well as `kind` because a wrapper's evaluation can
-        reach a nested call of its own, and a nested program call is not a
-        compiler trap.
-        """
-        self._compiler_trap_addrs.update(
-            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
-            if kind == "bl" and sym == symbol)
-
     def _emit_trap_flush(self) -> None:
         """`fflush(NULL)`, and RECORD where the call landed.
 
-        The recording is the whole reason this is a method: `_emit_call` emits
-        the ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`),
-        so the assembler's position before the call is twelve bytes short of the
-        instruction, and an address that is in no `extern_calls` entry subtracts
-        nothing while publishing a list that claims otherwise. Measured on
+        The recording is the point of the method, and it could not be done by
+        taking the assembler's position before the call: `_emit_call` emits the
+        ARGUMENT first (`fflush(NULL)` is `mov w0, #0` and then `bl fflush`), so
+        the position before the call is twelve bytes short of the `BL`. Reading
+        the addresses the call actually appended to `asm.extern_refs` is
+        therefore the only way to name the instruction, and naming it is what
+        `info["compiler_traps"]` is for — `formal/arm64_proof_gen.py::
+        _program_extern_calls` subtracts these addresses from the program's own
+        extern calls, so a program whose only unbound call is a trap the program
+        never takes gets its run tests back. Measured on
         `formal/examples/mod_by_var.mojo`: without this the example is a
         `lean-rejected` row whose first diagnostic is a false
         `run_pc_reached … = true`, and with it the example's ordinary run test
         (`run_result_exit … = mojo 10`) is emitted and is true.
+
+        Filtered to `fflush` rather than to "whatever the call added", because
+        `_emit_call` on a computed status can reach a nested call of its own and
+        a nested `exit(f())` is the PROGRAM's call, not a compiler trap.
         """
         before = len(self.asm.extern_refs)
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                    args=[F.IntLiteral(0)]))
-        self._record_trap_addresses("fflush", before)
-
-    def _emit_trap_extern_call(self, symbol: str, total: int = 0) -> None:
-        """`_emit_extern_call(symbol)`, and RECORD where the call landed.
-
-        The arm64 STACK-FLOOR guard reads `RLIMIT_STACK` with `getrlimit` in
-        every guarded prologue, so that call is the COMPILER's, on no path the
-        program wrote. It is in `extern_calls` (a real `BL` to a stub, so the
-        link line needs it), and both `_program_extern_calls` and the universal
-        walk need to tell it from a program call, so it is recorded beside the
-        exit flush.
-
-        x86-64 emits the same `getrlimit` but in a STARTUP STUB below the entry,
-        where `_program_externs` subtracts it by address against `func_offset`
-        and no trap list is involved. arm64 emits the guard in the PROLOGUE,
-        above the entry and inside the walk's range, so the trap list is the only
-        mechanism that reaches it.
-        """
-        before = len(self.asm.extern_refs)
-        self._emit_extern_call(symbol, total)
-        self._record_trap_addresses(symbol, before)
+        self._compiler_trap_addrs.update(
+            addr for sym, addr, _, kind in self.asm.extern_refs[before:]
+            if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
         """Leave the machine: run every enclosing finally, then `exit(status)`.

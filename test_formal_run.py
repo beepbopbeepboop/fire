@@ -15462,7 +15462,12 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
 #: whose budget exceeds the process's real stack never fires, and the process
 #: runs off the end of it.
 _REDUCED_STACK_SOURCES = (
-    # name, program, the depth that must still ANSWER, the depth that must refuse
+    # name, program, the depth that must still ANSWER (per arch), the depth that
+    # must refuse (per arch).  The SHALLOW depth is per arch because a frame is:
+    # arm64 reserves a fixed 128 KiB and x86-64 16 KiB, so under the same 2 MiB
+    # `ulimit -s` arm64 answers only ~13 frames where x86-64 answers hundreds.
+    # One depth for both would make the shallow row a refusal on arm64, which is
+    # the opposite of what it exists to show.
     ("reduced_stack_a_shallow_recursion_still_answers",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15470,8 +15475,8 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\\n\", deep(100))\n"
-     "    return 0\n", 100),
+     "    printf(\"%d\\n\", deep(DEPTH))\n"
+     "    return 0\n", 100, 5),
     ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15479,30 +15484,25 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    return deep(5000)\n", 5000),
+     "    return deep(DEPTH)\n", 5000, 5000),
 )
 
 
-#: Architectures this group does NOT yet cover, and why — a DECLARED per-arch
-#: gap, not a skip, and per architecture rather than per row because the whole
-#: group is one defect.
+#: Architectures this group does NOT cover, and why — a DECLARED per-arch gap,
+#: not a skip.
 #:
-#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
-#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
-#: `call getrlimit` there is exactly what
-#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
-#: moved without first fixing the extern-stub layout: an extern call emitted
-#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
-#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
-#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
-#:
-#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
-#: than the process's real stack never fires — so under a reduced `ulimit -s` it
-#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
-#: next step.
-_REDUCED_STACK_DEFERRED = {
-    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
-}
+#: EMPTY. arm64 used to read `RLIMIT_STACK` in its guard's PROLOGUE, which is a
+#: `call` on a path `formal/arm64_proof_gen.py` walks, so proof generation
+#: refused every guarded program and the read could not move to the startup stub
+#: until the stub could make a call without clobbering LR. It can now:
+#: `formal/arm64_codegen.py::_emit_stack_floor_init` runs AFTER the stub's
+#: `stp x29, x30`, so the saved link register survives the `bl getrlimit` and
+#: the stub returns instead of looping back into the entry. arm64 therefore
+#: reads the limit once in the startup stub exactly as x86-64 does, and a
+#: reduced `ulimit -s` is refused with a status rather than a SIGSEGV. What the
+#: two frame sizes still need is the per-arch SHALLOW DEPTH in
+#: `_REDUCED_STACK_SOURCES`, not a deferral.
+_REDUCED_STACK_DEFERRED = {}
 
 
 def reduced_stack_cases(tmpdir, verbose=False):
@@ -15514,27 +15514,31 @@ def reduced_stack_cases(tmpdir, verbose=False):
     written that way.
     """
     out_rows = []
-    for name, src, depth in _REDUCED_STACK_SOURCES:
-        path = os.path.join(tmpdir, name + ".mojo")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(src + "\n")
+    for name, src, dx86, darm in _REDUCED_STACK_SOURCES:
         for arch in ("x86_64", "arm64"):
+            depth = dx86 if arch == "x86_64" else darm
             if arch in _REDUCED_STACK_DEFERRED:
                 out_rows.append((
                     name, arch, None,
                     "DEFERRED on %s — see %s"
                     % (arch, _REDUCED_STACK_DEFERRED[arch])))
                 continue
+            # The source carries the depth as a `%d`, so the two arches can use
+            # their own shallow depth and the deep one is the same number.
+            path = os.path.join(tmpdir, name + ".mojo")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src.replace("DEPTH", str(depth)) + "\n")
             out = os.path.join(tmpdir, "%s_%s" % (name, arch))
             rc, text = build_formal(path, out, backend=arch)
             if rc != 0 or not os.path.isfile(out):
                 out_rows.append((name, arch, False,
                                  "build failed: " + text.strip()[-200:]))
                 continue
-            # 2 MiB: below this backend's 7.5 MiB budget on x86-64 and its
-            # 128 KiB frame on arm64 leaves room for the shallow case and not for
-            # the deep one, so a threshold that reads the limit and one that does
-            # not are told apart by these two rows together.
+            # 2 MiB: below both backends' 7.5 MiB budget, so a guard that reads
+            # the limit refuses the deep case and one that uses the compile-time
+            # budget does not (and dies of SIGSEGV). The shallow depth is per
+            # arch because a frame is (see `_REDUCED_STACK_SOURCES`), so it
+            # still answers under the same reduced limit.
             run = subprocess.run(
                 ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
                 capture_output=True, text=True, timeout=RUN_TIMEOUT)
@@ -15559,9 +15563,11 @@ def reduced_stack_cases(tmpdir, verbose=False):
                 else:
                     out_rows.append((name, arch, True, ""))
             else:
-                if "100" not in run.stdout:
+                # The answer is the depth it recursed to, which is per arch.
+                if str(depth) not in run.stdout:
                     out_rows.append((name, arch, False,
-                                     "stdout %r does not answer" % run.stdout[:80]))
+                                     "stdout %r does not answer depth %d"
+                                     % (run.stdout[:80], depth)))
                 else:
                     out_rows.append((name, arch, True, ""))
     return out_rows
