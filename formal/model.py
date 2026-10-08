@@ -13864,6 +13864,19 @@ CONTAINER_OP_MEANING = {
 #: same defect wearing different operators, so they belong in one gate.
 CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
 
+#: The three operators that are a SET operation between two sets and nothing
+#: else: `&` intersection, `-` difference, `^` symmetric difference.  A backend
+#: that lowers them asks this tuple before `string_binary_refusal` so that two
+#: SET operands reach its emitter, while a blob that is not established to be a
+#: set still falls through to `container_operator_refusal` (CPython raises
+#: `TypeError` for `[1] - [2]`, and the address arithmetic this path would do is
+#: not that answer).  It is here rather than spelled at each backend's gate for
+#: the same reason `CONTAINER_GATED_OPS` is: the operator set is one table, so a
+#: backend cannot widen or narrow it silently.  `|` (union) is deliberately
+#: absent — it has its own `container_union_refusal`, because a union is also
+#: defined for two DICTS, where these three are not.
+SET_ALGEBRA_OPS = ("&", "-", "^")
+
 
 def container_operator_refusal(op: str, left_kind, right_kind,
                                spelled_op: str | None = None) -> str | None:
