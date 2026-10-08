@@ -2189,6 +2189,46 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
           "unclassified names only if there are many of them")
 
 
+def test_the_five_find_spec_decided_names_are_unreachable(tmpdir, _shared):
+    """The first entries `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    §0.5 said a worker could add "with a measurement behind each".
+
+    `importlib.util.find_spec` returns no spec for every one of them here, and
+    the object each is missing is one a freestanding image (libSystem and
+    nothing else) cannot have.  `_overlapped`/`_winapi`/`_wmi` are Windows-only,
+    so their no-spec measurement is host-independent; `_gdbm` needs libgdbm and
+    `_tkinter` needs Tk, both outside libSystem — a fact about the TARGET, so
+    the placement does not turn on this host having either.  All five are
+    private (a leading `_`), so classifying them moves the PUBLIC unclassified
+    count by zero: five per-name judgements done with an oracle, not a moved
+    row.
+    """
+    import importlib.util
+    import formal.imports as I
+    import sys as _sys
+    windows_only = ("_overlapped", "_winapi", "_wmi")
+    outside_libsystem = ("_gdbm", "_tkinter")
+    for name in windows_only + outside_libsystem:
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module")
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the rule at the top of "
+              "formal/imports.py has not been applied to it")
+        answer, _detail = I.host_module_verdict(name)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}, not "
+              "'unreachable'")
+    # The measurement itself, and only for the three whose absence is
+    # HOST-INDEPENDENT: `find_spec` cannot find them on any host, so this row
+    # does not go red on a machine that happens to ship Tk or gdbm.  For those
+    # two the placement rests on the object being outside libSystem, which is a
+    # fact about the TARGET and not about the interpreter running this test.
+    for name in windows_only:
+        check(importlib.util.find_spec(name) is None,
+              f"importlib.util.find_spec({name!r}) found a spec here, so the "
+              "no-spec measurement this placement rests on does not hold")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5194,6 +5234,8 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
+    ("the five find_spec-decided names are unreachable",
+     test_the_five_find_spec_decided_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

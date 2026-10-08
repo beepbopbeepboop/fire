@@ -633,6 +633,21 @@ HOST_SET_ADDED_TIERS = {
     "winreg": "unreachable",
     "winsound": "unreachable",
     "nt": "unreachable",
+    # ── 2026-10-07, the five `find_spec`-decided names ──
+    #
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measured the
+    # oracle's split and named these as the entries a worker could add "with a
+    # measurement behind each": `importlib.util.find_spec` returns no spec for
+    # every one here, and each is missing an object a freestanding image cannot
+    # have.  `_gdbm` needs libgdbm and `_tkinter` needs Tk (both outside
+    # libSystem, a fact about the TARGET); `_overlapped`/`_winapi`/`_wmi` are
+    # Windows-only, so their no-spec measurement is host-independent.  All five
+    # are private, so the PUBLIC unclassified count moves by zero.
+    "_gdbm": "unreachable",
+    "_tkinter": "unreachable",
+    "_overlapped": "unreachable",
+    "_winapi": "unreachable",
+    "_wmi": "unreachable",
     # …and these four are the OPPOSITE reading, which is why they are in the
     # table at all: `find_spec` DOES find every one of them here, because they
     # are frozen or arithmetic-over-strings modules CPython ships everywhere and
