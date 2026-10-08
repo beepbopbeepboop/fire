@@ -464,8 +464,9 @@ def gen_flagged_alu(rng, free):
     that row. The case is here now, next to the other flag-setting forms the mix
     exists for. `CMN` is the same instruction with the result discarded and is
     already drawn by `gen_flags` (its `cmn x%d, x%d` arm), so it is not repeated
-    here. Filed as `bugs/FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md`;
-    fixed in the commit that added this arm, and the doc is deleted with it.
+    here. Before this arm, the census's FUZZ column read `NO` for an
+    instruction the emitter calls and the model already had — an emitted form
+    with no fuzz case, which is the shape that column exists to catch.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
