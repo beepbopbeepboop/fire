@@ -3468,6 +3468,53 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                           f"presence check cannot see")
 
 
+class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
+    """The arm64 stack-floor guard must contain NO call.
+
+    The guard used to read `RLIMIT_STACK` with a `getrlimit` `BL` in the first
+    guarded prologue, behind a `CBNZ` cache test.  A call on a path a
+    conditional selects is exactly what the universal theorem refuses, so no
+    program with a source `if` had a value theorem, and the cached word held
+    `getrlimit`'s RETURN CODE (a status) rather than `rlim_cur`, so the budget
+    clamped to the compile-time constant and the guard never fired under a
+    reduced `ulimit -s`.  Both are fixed by moving the read to the startup stub
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), and this pins the two
+    halves the bug docs name as the anti-rot: `formal/examples/either.mojo`
+    (a source conditional) regenerates its value theorem, and
+    `formal/examples/mod_by_var.mojo` still takes the ordinary run-test path
+    (its div0 `fflush` is a compiler trap, not a program call).
+    """
+
+    def _proof(self, filename):
+        src = os.path.join(HERE, "formal", "examples", filename)
+        if not os.path.isfile(src):
+            raise unittest.SkipTest(f"{src} is not in this checkout")
+        tmp = tempfile.mkdtemp(prefix="a2-guardpath-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with open(src, encoding="utf-8") as fh:
+            source = fh.read()
+        path, err = _generate(tmp, source, filename[:-5])
+        self.assertIsNone(err, f"{filename} refused: {err}")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_a_source_conditional_gets_the_value_theorem(self):
+        text = self._proof("either.mojo")
+        self.assertIn(
+            "theorem either_compiles_correctly_universal", text,
+            "the guard's `getrlimit` is back on the walked path, so a program "
+            "with a source conditional has no value theorem")
+
+    def test_the_div0_example_still_takes_the_run_test_path(self):
+        text = self._proof("mod_by_var.mojo")
+        self.assertNotIn(
+            "theorem mod_by_var_compiles_correctly_universal", text,
+            "the div0 guard's `fflush` is being followed, which is the "
+            "opaque-call boundary the run test exists to stop at")
+        self.assertRegex(text, r"theorem mod_by_var_runs_\d+",
+                         "the example's ordinary run test is gone")
+
+
 class TestLoopContractBlocks(unittest.TestCase):
     """Which block is a loop's TEST, asked once and asked right.
 
