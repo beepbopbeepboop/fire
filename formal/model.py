@@ -13862,6 +13862,16 @@ CONTAINER_OP_MEANING = {
 #: literals are two distinct blocks and so two distinct addresses, which is
 #: what identity is.  `==`/`!=` on a blob and the ordering operators are the
 #: same defect wearing different operators, so they belong in one gate.
+#:
+#: `-`, `&` and `^` are still LISTED because this gate is the answer for a
+#: list/tuple/dict operand and for every operand shape the set lowering does
+#: not take — but arm64 lowers all three BETWEEN TWO SETS in
+#: `_emit_set_algebra`, and asks this gate only after its own set test fails.
+#: x86-64 has no set emitter, so it reaches the gate and refuses, which is
+#: why the operator rows in `test_formal_container_methods.py` are
+#: `BACKEND_ONLY` on that backend.  A backend that grows the lowering
+#: deletes its row there; the operator set is not narrowed here, because the
+#: refusal is still correct for everything this gate is actually asked about.
 CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
 
 

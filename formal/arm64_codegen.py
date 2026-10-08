@@ -2697,6 +2697,18 @@ dylib_exports: list = None, globals_base: int = None,
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
                 else stmt.op
+            # SET ALGEBRA between two sets, the augmented spelling.  Asked
+            # BEFORE the shared container gate below for the same reason the
+            # binary form asks it in `_emit_binop`: this backend lowers `&=`,
+            # `-=` and `^=` between two sets, and the gate is the answer for
+            # every other operand shape.  The result is a fresh blob in X0, so
+            # it is bound to the target exactly as `s = s OP t` would be.
+            if op in ("&", "-", "^") and (
+                    self._expr_is_set_like(stmt.target)
+                    and self._expr_is_set_like(stmt.value)):
+                self._emit_set_algebra(op, stmt.target, stmt.value)
+                self._store_var(name, 0)
+                return
             # The same refusal `_emit_binop` makes, asked HERE because an
             # augmented assignment is a separate emitter that never went
             # through it. That is not a hypothetical: `s += t` built, ran, and
@@ -8046,6 +8058,23 @@ ctor_field_value=self._ctor_field_value_for(name),
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        # SET ALGEBRA between two SETS: `&`, `-` and `^` are per-element
+        # membership scans and this backend lowers them.  Asked HERE, before
+        # `string_binary_refusal`'s container gate, because that gate is the one
+        # decision both backends share and x86-64 has no set emitter at all — so
+        # the pair `(two sets)` is this backend's and the gate stays the answer
+        # for every other operand shape (`[1] & [2]` is a CPython `TypeError`
+        # and is still refused).  `_expr_is_set_like` on BOTH sides is the
+        # discriminator: `-` is also integer subtraction and `&`/`^` are also
+        # integer ALU, so a single blob operand must fall through to the gate
+        # rather than be treated as a set.  `test_formal_container_methods.py`'s
+        # `set` group measures the five rows against CPython and records the
+        # x86-64 half in `BACKEND_ONLY`.
+        if op in ("&", "-", "^") and (
+                self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            self._emit_set_algebra(op, e.left, e.right)
+            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -13312,6 +13341,159 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(urd)
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_algebra(self, op, left, right) -> None:
+        """`a & b`, `a - b` and `a ^ b` between two list blobs that are SETS.
+
+        CPython answers every one of these by a per-element membership scan —
+        INTERSECTION is the elements both sides hold, DIFFERENCE the left-hand
+        ones the right does not, SYMMETRIC DIFFERENCE the elements exactly one
+        side holds — and this path carries a set as a list blob, so the answer
+        is a fresh blob whose count is built one append at a time.  Before this
+        existed the three operators reached the integer ALU holding a blob's
+        ADDRESS: `s & {2}` answered 2 on arm64 and 163061056 on x86-64 where
+        CPython answers 1, and `s - {2}`/`s ^ {2}` died with SIGSEGV on both,
+        because the result was a word nowhere near a blob.  Those are
+        `model.container_operator_refusal`'s measurements, and the gate stays
+        the answer for every operand shape this method does not take.
+
+        The reservation is `nL + nR` for all three, not `nL` for the two that
+        cannot exceed it: one number keeps the growth guard, the capacity clamp
+        and the frame arithmetic identical across the three, and a symmetric
+        difference genuinely can hold every element of both sides.  The result
+        starts EMPTY (count 0) and grows, unlike `_emit_set_union` which starts
+        by copying the left operand.
+
+        Elements are compared as WORDS, so a set of `char *` compares
+        addresses exactly as `_emit_set_union`'s dedup does; the value model
+        that makes that the documented answer for a set is
+        `bugs/FORMAL_set_value_model.md`.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        # Nested emits above may have advanced the cursor — re-clamp.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        nbytes = 8 + 8 * cap
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # reservation = nL + nR
+        self._emit_blob_growth_guard("a set operation", 4, cap, "setop")
+        self._emit_list_base(offset)
+        self.asm.emit(encode_movz_wd_imm(4, 0))
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))    # result count = 0
+        if op == "&":
+            self._emit_set_filter(offset, 7, 2, 8, 3, keep_found=True)
+        elif op == "-":
+            self._emit_set_filter(offset, 7, 2, 8, 3, keep_found=False)
+        else:
+            # `^` is both differences, appended to the one result blob.
+            self._emit_set_filter(offset, 7, 2, 8, 3, keep_found=False)
+            self._emit_set_filter(offset, 8, 3, 7, 2, keep_found=False)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_filter(self, offset, src, scount, other, ocount,
+                         keep_found) -> None:
+        """Append the elements of blob `src` that pass a membership test.
+
+        `src`/`scount` are the source blob pointer and its count word,
+        `other`/`ocount` the blob the membership scan reads, and `keep_found`
+        selects INTERSECTION (`&`, keep the elements present in `other`) from
+        DIFFERENCE (`-`, keep the ones absent).  The result blob is at
+        `offset`; its count word is read and written per append, so a second
+        call (the symmetric difference's other half) extends the same blob.
+
+        The appended word is the source's own element, at the same width a copy
+        uses, so a set of words and a set of `char *` go through one loop.
+
+        Registers, none live across a blob-producing call: X7/X8 the two blob
+        pointers, X2/X3 their counts, X5 the outer index, X6 the element,
+        X0/X1 the inner index and scratch, X4 the membership result, X9 the
+        result base.
+        """
+        self._while_counter += 1
+        tag = self._while_counter
+        outer = f"{self.func_name}_set{tag}o"
+        inner = f"{self.func_name}_set{tag}i"
+        hit = f"{self.func_name}_set{tag}h"
+        inner_done = f"{self.func_name}_set{tag}d"
+        skip = f"{self.func_name}_set{tag}s"
+        done = f"{self.func_name}_set{tag}e"
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # i = 0
+        self.asm.label(outer)
+        self.asm.emit(encode_cmp_xn_xm(5, scount))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)   # i >= count → done
+        # elem = src[i]
+        self.asm.emit(encode_add_xd_xn_imm(0, src, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))    # X6 = elem
+        # scan other[0..ocount) for the element; X4 = found
+        self.asm.emit(encode_movz_wd_imm(0, 0))         # k = 0
+        self.asm.emit(encode_movz_wd_imm(4, 0))         # found = 0
+        self.asm.label(inner)
+        self.asm.emit(encode_cmp_xn_xm(0, ocount))
+        self.asm.emit(encode_cset_xd_cond(1, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 1))
+        self.asm.emit_label_rel(inner_done, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(1, other, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 1, 0))
+        self.asm.emit(encode_cmp_xn_xm(1, 6))
+        self.asm.emit(encode_cset_xd_cond(1, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 1))
+        self.asm.emit_label_rel(hit, here_offset=-4)    # found → set the flag
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(inner)
+        self.asm.label(hit)
+        self.asm.emit(encode_movz_wd_imm(4, 1))         # found = 1
+        self.asm.label(inner_done)
+        # keep the element when `found` equals `keep_found`
+        if keep_found:
+            self.asm.emit(encode_cbz_xn(0, 4))          # absent → skip
+        else:
+            self.asm.emit(encode_cbnz_xn(0, 4))         # present → skip
+        self.asm.emit_label_rel(skip, here_offset=-4)
+        # append: result[count] = elem; count++
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(skip)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(outer)
+        self.asm.label(done)
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.
