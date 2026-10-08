@@ -16,11 +16,7 @@ a paragraph with a measurement rather than "ANOTHER LANE'S"; the citation §2 ca
 pointed at a doc deleted with its fix, and that dangling reference is gone; and
 §6's `stdlib_core.mojo` row is **closed** — the file builds and passes on both
 architectures in `bugs/sweeps/sweep-arm-8.txt` — so the section and its citation are
-retired. **Four rows remained, and one more is now closed too:** §2's
-"one parameter, two kinds of value" row is **FIXED** — `fd396597` landed the
-static `__DATA` frame this file said was "not started", so the section is retired
-below (`work/formal115-docs`, 2026-10-07). **Three rows remain, none of them a
-patch.**
+retired. **Four rows remain, none of them a patch.**
 
 The measurement is one build per row with the row's own file, arm64, and the
 x86-64 build where the row could plausibly differ:
@@ -45,44 +41,68 @@ read-before-store stance this backend takes everywhere else. Already measured,
 with the same reasoning, in the `repo-c` round of `bugs/FORMAL_sweep_work_map.md`
 §4.4. **Not the sweep's next step, and not cheap either way.**
 
-## 2. "one parameter, two kinds of value" — `module_loader.py` — FIXED 2026-10-03, so this section is retired
+## 2. "one parameter, two kinds of value" — `module_loader.py` — 20 FILES, UNOWNED, and its next wall is measured
 
-**The row is FIXED**, by `fd396597` ("formal: a module-level struct value is a
-frame in the IMAGE, not a body block"), which is exactly the change this section
-described as `What would make it work … **Not started here.**` — the new
-`GlobalSlot` `init` kind `("frame", struct, words)`, laid out in `__DATA`, with
-`module_frame_slot_initializer` deciding when it is expressible. The commit moved
-the STORAGE rather than lifting the refusal, which is what this section's own
-paragraph ("Teaching the holder fixpoint … would convert this refusal into a
-SIGSEGV") correctly warned against.
+    build: ModuleLoader_load_module() takes a ModuleLoader receiver at argument 0
+    — 'self' — at ModuleLoader_load_module(self, module_name) here, and
+    something that is not a frame address at
+    ModuleLoader_load_module(_module_loader, module_name). One parameter, two
+    kinds of value: … Measured on both architectures with nothing lifted: the
+    two-call-site shape builds, runs, and dies with SIGSEGV (exit 139).
 
-Measured 2026-10-07, both architectures, a module-level `Loader()` with a method
-reached through BOTH `self` and the global:
+**Re-measured 2026-10-03 (`work/formal14-sweep-b8`, claim `sweep14:sweep-b8`). Three
+things in the paragraph above are now stale and the row is bigger than one file.**
 
-```python
-struct Loader:
-    var a: Int = 0
-    var b: Int = 0
-    var c: Int = 0
-    fn load(self, name: Int) -> Int:
-        return self.a + name
-    fn again(self, name: Int) -> Int:
-        return self.load(name) + self.b + self.c
-_ml = Loader()
-def main(n: Int) -> Int:
-    return _ml.load(1) + _ml.again(2)
-```
+**The cited doc is GONE.** This section used to point at
+`FORMAL_frame_by_value_ceiling_zero.md` in `bugs/`, and that file does not exist on
+this tree — its bug was fixed and the doc deleted with it, which is this project's
+rule for a fixed bug. (Named without the `bugs/` prefix on purpose:
+`tools/dangling_doc_refs.py` counts any citation of a doc that is not there, and
+re-introducing one to say it is missing would put this file back on its own census.)
+So the mechanism's record is this section and
+the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.2, and **the dangling citation was
+the defect `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` exists to
+catch.** `formal10-3` has also exited, so "ANOTHER LANE'S" in this section's heading
+was true when written and is false now.
 
-`Built: … [arm64/macho]` and `… [x86_64/macho]`, both run and answer `3`, the
-same as `fire.py run` — the SIGSEGV this section recorded is gone. The
-`two-kinds-of-value` message no longer appears for this shape.
+**The row is 20 files, not one.** `module_loader.py` blocks **19** dependents plus
+itself, on both architectures, byte-identically, and **0 of the 19 name anything it
+declares** — they are refused for having imported it. It is the fourth-largest cause
+row in `bugs/sweeps/sweep-arm-8.txt` and **no live worker holds it**
+(`python3 tools/control.py claims`: no `FORMAL_*` doc for it is claimed).
 
-**The row's next wall is not this row and is not stated here any more.**
-`module_loader.py` now stops earlier than the two-kinds refusal, at the f-string
-on its line 108 (`FORMAL_string_composition_has_no_buffer`); behind that is the
-`os.path` read out of the imported `os` (`FORMAL_module_state_no_storage`). The
-per-file ranking this section carried is the `b8`/`b9` rounds of
-`bugs/FORMAL_sweep_work_map.md`, which supersede it.
+**Its next wall is measured, and it is not this row.** With
+`_check_one_callee`'s disagreement refusal lifted and nothing else changed
+(`.tmp/probe_after_two_kinds.py`, which prints each refusal it lifted so the number
+is not a guess), `module_loader.py` refuses at
+
+    build: _find_stdlib_path: os.environ reads 'environ' out of the imported module
+    `os`, and a module is not a value this path can place …
+
+which is the **12-file** "a module's ATTRIBUTE read as a value" row, whose doc
+(`bugs/FORMAL_module_state_no_storage.md` §(4)) makes it an exported slot or a
+command line. **So fixing this row moves 0 of the 20.** That is the same lesson
+`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` records for the 165-file row,
+and the reason this is a measurement rather than a patch.
+
+**The root cause, stated so the obvious fix is visibly wrong.** `_module_loader =
+ModuleLoader()` at module level puts the address of a **three-field frame** in a
+`__DATA` slot. Since the load-time initializer landed, the module body runs at load,
+builds the three `dict` fields in **its own** frame and stores that frame's address —
+so `self` (line 1011) is a live frame and `_module_loader` (line 1063) is an address
+into a frame that has already been returned from. **Teaching the holder fixpoint
+that a `__DATA` slot of framed-struct type is a frame address would convert this
+refusal into a SIGSEGV**, which is why it has not been done and why the
+disagreement check is right to fire.
+
+What would make it work: a **static frame in `__DATA`** for a module-level global
+whose value is a construction of a multi-field struct — a new `GlobalSlot` `init`
+kind plus the field layout in `build_data_image` (shared by both backends, and its
+`nested_element` machinery is the precedent). Nothing in either emitter moves,
+because the read is already a load from the slot. `ModuleLoader`'s three fields are
+all empty dicts, so it is expressible; a general struct needs the "every field is
+itself a static initializer" rule, which is `static_initializer_refusal_reason`'s
+existing `computed_element` boundary moved one level out. **Not started here.**
 
 ## 3. a slot holding a frame address rebound — `regex_compile.py` — CORRECT refusal
 
