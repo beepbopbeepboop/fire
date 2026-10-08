@@ -174,6 +174,18 @@ TWO_ARG_CASES = [
 ]
 
 
+# The OMITTED-argument spelling of a function CPython gives a default: the
+# one-argument `relpath(path)` must materialize `start="."` across the dylib
+# boundary. The corpus is the first elements of `RELPAIRS` — the paths already
+# exercised with an explicit `start` — and it is its own list because
+# `posixpath.relpath("")` raises `ValueError` and the one-argument form is a
+# different question from `DEVIATION_CASES` above.
+DEFAULT_CASES = [
+    ("relpath-default", "relpath(%s)",
+     lambda a: (posixpath.relpath(a),), "s", [p[0] for p in RELPAIRS]),
+]
+
+
 def mojo_string(s):
     """A Mojo string literal for `s`.
 
@@ -232,7 +244,8 @@ def build_strings_program(module="os.path"):
     second copy of the corpus — see `group_posixpath`.
     """
     imports = sorted({c[1].split("(")[0] for c in ONE_ARG_CASES}
-                     | {c[0] for c in TWO_ARG_CASES})
+                     | {c[0] for c in TWO_ARG_CASES}
+                     | {c[1].split("(")[0] for c in DEFAULT_CASES})
     lines = [f"from {module} import " + ", ".join(imports), "",
              "def main(n):"]
     expected = []
@@ -251,6 +264,12 @@ def build_strings_program(module="os.path"):
     for label, call, want in DEVIATION_CASES:
         lines += emit_case(label, 0, call, "s", 1)
         expected.append(f"{label}|0|0|[{want}]")
+    for label, tmpl, py, kind, corpus in DEFAULT_CASES:
+        for ai, a in enumerate(corpus):
+            want = py(a)
+            lines += emit_case(label, ai, tmpl % mojo_string(a), kind, len(want))
+            for k, v in enumerate(want):
+                expected.append(f"{label}|{ai}|{k}|{render(v, kind)}")
     lines.append("    return 0")
     return "\n".join(lines) + "\n", expected
 
@@ -287,6 +306,11 @@ def main(n):
     printf("makedirs-deep=%d@@", makedirs(join(root, "a/b/c/d/e"), 511))
     printf("makedirs-kept=%d@@", makedirs(join(root, "p/q/r"), 511))
     show("made-deep", join(root, "p/q/r"))
+    # The mode OMITTED, which is CPython's `mode=0o777` default. The oracle
+    # for the mode is a directory CPython's own `os.mkdir`/`os.makedirs`
+    # create with THEIR defaults, checked from outside after the run.
+    printf("mkdir-default=%d@@", mkdir(join(root, "def-one")))
+    printf("makedirs-default=%d@@", makedirs(join(root, "def/a/b")))
     printf("rmdir=%d@@", rmdir(join(root, "a/b/c/d/e")))
     show("removed", join(root, "a/b/c/d/e"))
     printf("rmdir-missing=%d@@", rmdir(join(root, "a/b/c/d/e")))
@@ -592,6 +616,8 @@ def group_fs(tmpdir, verbose):
         "replace": "0",
         "unlink": "0",
         "makedirs-kept": "0",
+        "mkdir-default": "0",         # the mode OMITTED is CPython's 0o777
+        "makedirs-default": "0",
         "chmod": "0",
         "chmod-missing": "-1",
         "cwd-rel": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
@@ -644,6 +670,26 @@ def group_fs(tmpdir, verbose):
     else:
         if mode != 0o600:
             bad.append(f"chmod(…, 384) left mode {mode:o}, expected 600")
+    # The mode OMITTED, compared against CPython's own default. The oracle is
+    # a directory CPython's `os.mkdir`/`os.makedirs` create with THEIR
+    # defaults, so the comparison is of the two defaults rather than of a
+    # number typed here — the umask masks both the same way.
+    for tag, ref, made in (
+            ("mkdir", p("ref-default"), p("def-one")),
+            ("makedirs", p("ref-default-tree"), p("def"))):
+        try:
+            if tag == "mkdir":
+                os.mkdir(ref)
+            else:
+                os.makedirs(os.path.join(ref, "a", "b"))
+            a = stat.S_IMODE(os.stat(ref).st_mode)
+            b = stat.S_IMODE(os.stat(made).st_mode)
+        except OSError as e:
+            bad.append(f"{tag} default-mode comparison could not run: {e}")
+            continue
+        if a != b:
+            bad.append(f"{tag} with the mode OMITTED left mode {b:o}, "
+                       f"CPython's own default left {a:o}")
     if bad:
         return False, ("%d disagreements with the filesystem:\n      %s"
                        % (len(bad), "\n      ".join(bad[:20])))
