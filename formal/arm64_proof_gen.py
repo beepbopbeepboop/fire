@@ -3190,15 +3190,16 @@ _STEP_CONDS = [
     (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
     (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
     (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
-    # 66 CMN, 67 TST. **Both encoders are UNWIRED on this tree** — measured:
-    # `grep -c encode_cmn_xn_xm formal/arm64_codegen.py` is 0, the same for
-    # `encode_tst_xn_xm`, and both are in
-    # `tools/arm64_insn_audit.py::unwired_encoders`. That CORRECTS this file's own
-    # §2 measurement, which listed them among "every encoder in the table above is
-    # wired" and called `encode_cmn_xn_xm` "emitted by `formal/arm64_codegen.py`";
-    # no lowering emits either, so an image cannot contain them and by the
-    # distinguishing test this table exists for, a model that cannot step them
-    # costs nothing.
+    # 66 CMN, 67 TST. **Both encoders ARE emitted now, and this paragraph used
+    # to say they were not** — `arm64_codegen.py` calls `encode_cmn_xn_xm` at
+    # 8993 (a `(x + y) == 0` test lowers to CMN + B.cond) and
+    # `encode_tst_xn_xm` at 8921 (an `if x & y`), and `encode_adds_xd_xn_xm` at
+    # 8286 for `int_overflow_traps`'s `+`. The wiring landed after this comment,
+    # so both arms are reachable in a REAL image and a model that steps them
+    # wrongly is a soundness defect and not a completeness one.  The
+    # `0xab000000` class is shared by `ADDS Xd, Xn, Xm` and `CMN Xn, Xm`
+    # (`Rd = 31`), so its arm writes `Rd` and `arm64_set_reg 31` is what makes
+    # `CMN` write nothing.
     #
     # They are modelled anyway, and the reason is worth stating because it is not
     # the doc's: the audit's test is about IMAGES, and the other consumer of
@@ -3536,9 +3537,17 @@ def _step_rhs(w: int, idx: int):
     # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
     # memory helper is the one at that width — the widths are the whole point of
     # these arms: `LDRB` reads ONE byte where `LDR` reads eight.
-    if idx == 66:  # CMN Xn, Xm: the flags of Xn + Xm, which is not CMP's
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg "
-                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 66:  # ADDS Xd / CMN Xn, Xm: the flags of the SUM **and `Rd`**
+        # `CMN Xn, Xm` is `ADDS XZR, Xn, Xm`, and `arm64_set_reg 31` is the
+        # identity, so the same term states both spellings.  Dropping `Rd` (the
+        # old RHS) left every `ADDS Xd` with `Rd ≠ 31` — the form
+        # `encode_adds_xd_xn_xm` emits for `int_overflow_traps` — stepping to a
+        # state the machine never reached.
+        return (f"some (arm64_set_reg {(w & 0x1f)} "
+                f"{{ s with nzcv := arm64_adds_flags (arm64_reg "
+                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }} "
+                f"(arm64_reg {(w >> 5) & 0x1f} s + "
+                f"arm64_reg {(w >> 16) & 0x1f} s))")
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
@@ -3797,8 +3806,12 @@ def _step_rhs_generic(idx: int):
     if idx == 35:
         return "some s"
     if idx == 66:
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
-                f"(arm64_reg {_RM} s) }}")
+        # `CMN` is `ADDS XZR, Xn, Xm`; `arm64_set_reg 31` is the identity, so
+        # one term states both spellings and `_step_rhs` agrees with it.
+        return (f"some (arm64_set_reg {_RD} "
+                f"{{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
+                f"(arm64_reg {_RM} s) }} "
+                f"(arm64_reg {_RN} s + arm64_reg {_RM} s))")
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
@@ -4700,7 +4713,11 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 66, 67):
+    if idx == 66:
+        # ADDS writes `Rd`; CMN is the same class with `Rd = 31`, where
+        # `arm64_set_reg 31` is the identity, so it writes nothing.
+        return {rd} if rd != 31 else set()
+    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 67):
         return set()
     if idx == 15:
         return {30}

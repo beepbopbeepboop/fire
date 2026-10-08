@@ -713,6 +713,57 @@ class TestGeneratorSource(unittest.TestCase):
                       "too, or the two right-hand sides disagree about the same "
                       "instruction")
 
+    def test_adds_writes_its_destination_and_cmn_is_the_same_class(self):
+        """The `0xab000000` class is `ADDS Xd, Xn, Xm` AND `CMN Xn, Xm` (`Rd = 31`).
+
+        The model arm set the flags and dropped `Rd`, so `ADDS x11, x1, x15` —
+        the form `formal/arm64_codegen.py` emits for
+        `formal/model.py::int_overflow_traps`'s `+` — stepped to a state that
+        left `x11` at its old value: a SOUNDNESS defect, since a proof over an
+        image containing it reasons about a state the machine never reached.
+        The two spellings are pinned TOGETHER because the fix that writes `Rd`
+        unconditionally would clobber `sp` on a `CMN`, where `arm64_set_reg 31`
+        is the identity.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            w = fn(*args)
+            return (int.from_bytes(w, "little")
+                    if isinstance(w, (bytes, bytearray)) else w)
+
+        adds = word(A.encode_adds_xd_xn_xm, 11, 1, 15)
+        cmn = word(A.encode_cmn_xn_xm, 7, 4)
+        for w, what in ((adds, "ADDS x11, x1, x15"), (cmn, "CMN x7, x4")):
+            self.assertEqual(
+                G._step_branch_index(w), 66,
+                f"{what} does not resolve to the shared `0xab000000` row")
+        self.assertEqual(G._regs_written(adds, 66), {11},
+                         "ADDS writes its destination")
+        self.assertEqual(
+            G._regs_written(cmn, 66), set(),
+            "CMN is `ADDS XZR, Xn, Xm`; `arm64_set_reg 31` is the identity, so "
+            "a certificate claiming `sp` was clobbered would be false")
+        for w, rd, what in ((adds, 11, "ADDS"), (cmn, 31, "CMN")):
+            rhs = G._step_rhs(w, 66)
+            self.assertIn(f"arm64_set_reg {rd}", rhs,
+                          f"{what}: the step result must write `Rd`")
+            self.assertIn("arm64_adds_flags", rhs,
+                          f"{what}: the step result must still set the flags")
+        self.assertIn("arm64_reg 1 s + arm64_reg 15 s",
+                      G._step_rhs(adds, 66),
+                      "the value written is the SUM of the operands")
+        # The model's own arm must read `Rd`, not just the two sources — the
+        # generator agreeing with a model that still drops `Rd` would make a
+        # generated step-result lemma about the wrong machine.
+        src = open(os.path.join(HERE, "lib", "ProofLib.lean")).read()
+        arm = re.search(
+            r"= 0xab000000 then\n(.*?)\n  else if", src, re.S)
+        self.assertIsNotNone(arm, "the `0xab000000` arm is gone from the model")
+        self.assertIn("(insn &&& 0x1f)", arm.group(1),
+                      "the model's arm does not read `Rd`")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -5674,6 +5725,12 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # agreement about all four flag bits.
         ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
         ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
+        # `ADDS Xd, Xn, Xm` is the same `0xab000000` class as `CMN`, with `Rd`
+        # written — and it is what `int_overflow_traps`'s `+` emits. It is here
+        # rather than folded into the `CMN` row because the two pin each other:
+        # a model that wrote `Rd` unconditionally would clobber `sp` on the
+        # `CMN`, and one that dropped it (the defect) leaves `x11` unchanged.
+        ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
     )
 
     @classmethod
