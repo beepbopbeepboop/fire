@@ -240,6 +240,18 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
+    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
+    # first entries a worker can add with a measurement behind each rather than a
+    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
+    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
+    # this tree returns NO SPEC for each, which is the rule at the top of this
+    # section applied: the object is missing from the target. `_gdbm` and
+    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
+    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
+    # leading underscore), so this moves the PUBLIC unclassified count by zero;
+    # what it changes is that a name a coverage report used to count as "no
+    # verdict" now answers with the tier it belongs to.
+    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
