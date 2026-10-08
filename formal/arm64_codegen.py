@@ -6540,7 +6540,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
+        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
 
         A no-op for every callee the model's set does not name, and for a call
         whose format is not a LITERAL: a format in a variable cannot be scanned.
@@ -6549,9 +6549,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         x86-64's copy of this method is two lines of delegation and the two
         cannot come apart.
 
-        The two reasons are a `%s` conversion handed something that is not text,
-        and a conversion with no argument behind it; which one is reported when
-        both could apply is `printf_format_refusal`'s decision too.
+        The reasons are a `%s` conversion handed something that is not text, a
+        conversion with no argument behind it, a WIDTH on a non-ASCII `%s`, a
+        conversion whose class disagrees with its operand's kind, and a NUMBER
+        conversion handed a CONTAINER; which one is reported when more than one
+        could apply is `printf_format_refusal`'s decision too.
 
         **The format text handed over is the DECODED one**, and that is not a
         tidiness: `fire_compiler.decoded_literal` is what `_intern_string` runs

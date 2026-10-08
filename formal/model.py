@@ -9643,6 +9643,19 @@ SSE_CLASS = "sse"
 # and `a`. `%n` is not in it (it writes through a pointer) and `%p` is not
 # (Darwin's `%p` renders the ADDRESS, which is an integer word).
 PRINTF_FLOAT_CONVERSIONS = frozenset("aAeEfFgG")
+#: The conversions whose C reading is NOT a number, and it is an exclusion
+#: rather than an inclusion because a NUMBER conversion is every one that
+#: renders the word it is handed. `%s` reads it as TEXT, `%p` renders the
+#: ADDRESS (which is exactly what a container IS, so a container is the RIGHT
+#: operand for it), and `%n` writes the count THROUGH the vararg rather than
+#: rendering anything. Every other conversion — the integer family, `%c`, the
+#: floating family, and a `*` width, which reads an `int` — is a number.
+#:
+#: Spelled once and read by `printf_container_conversion_refusal`, because the
+#: question it answers ("does this conversion render a number") is the same one
+#: that decides whether a container operand is being read as an address by
+#: mistake or on purpose.
+PRINTF_NON_NUMBER_CONVERSIONS = frozenset("spn")
 # Eight XMM registers, and the boundary is the ABI's rather than this path's.
 PRINTF_SSE_REGISTERS = 8
 PRINTF_INTEGER_REGISTERS = 6
@@ -10518,6 +10531,44 @@ def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
     if isinstance(expr, F.CallExpr) or vk is None:
         return None
     return "int" if vk.kind_of(expr) == INT_KIND else None
+
+
+def printf_arg_container_evidence(expr, vk) -> str | None:
+    """The CONTAINER kind of a `printf` vararg, or None when it is not one.
+
+    The evidence axis the NUMBER conversions were missing. `printf_arg_text_evidence`
+    asks whether an operand is TEXT and `printf_arg_float_evidence` whether it is
+    a FLOAT or an INTEGER, and neither asks whether it is a CONTAINER — so
+    `printf("%d", xs)` placed the vararg from the format, read eight bytes of a
+    blob as a decimal and printed the blob's heap ADDRESS on both architectures,
+    from a green build, exit 0, where CPython raises
+
+        TypeError: %d format: a list is required, not int
+
+    It is the exact mirror of the refusal that already exists for the other
+    direction (`printf("%s", 42)`, whose operand is a number where text is
+    required), and it is the same table read from the other side.
+
+    The evidence is `ValueKinds.kind_of` and nothing else, because a container
+    is a KIND a word has and not a `None` a word is defaulted to: `is_list_kind`
+    is the one predicate that recognises it — `List`, `Tuple`, `Set`, `Dict`,
+    `bytearray` and `bytes` all classify as `list:…`, one spelling per element
+    kind, so asking it of the KIND rather than of a constructor's name is what
+    keeps `printf("%d", xs)`, `printf("%d", d)` and `printf("%d", b)` one answer
+    instead of three.
+
+    **A NAME's `own_shape` is deliberately not consulted**, and that is the one
+    place this hook differs from the text hook: there the question is "did this
+    function BIND the name to an integer on that statement's own shape", which
+    is evidence a word cannot otherwise carry, while a container is derived from
+    the construction or the declaration by `kind_of` itself. `None` is the
+    permissive direction, as it is for both sibling hooks: an unclassifiable
+    operand keeps whatever behaviour it had.
+    """
+    if vk is None:
+        return None
+    kind = vk.kind_of(expr)
+    return kind if is_list_kind(kind) else None
 
 
 def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,

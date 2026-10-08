@@ -4453,7 +4453,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
+        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
 
         Delegation, and nothing else: the callee sets, the format-argument
         index, the conversion scan, the three-way narrowing and the messages are
