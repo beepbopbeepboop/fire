@@ -240,18 +240,6 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
-    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
-    # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
-    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
-    # this tree returns NO SPEC for each, which is the rule at the top of this
-    # section applied: the object is missing from the target. `_gdbm` and
-    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
-    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
-    # leading underscore), so this moves the PUBLIC unclassified count by zero;
-    # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
-    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -2101,8 +2089,14 @@ def instantiation_demands(module_path: str, consumer_src: str,
     makes this a keyword a caller can leave alone.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
+    # The TYPE-argument demands, and the permissive superset that also sees a
+    # bare literal (`Tagged[Int, 0]`).  `all_bracketed_calls` is a superset of
+    # `all_instantiation_calls`, so this ONE walk serves both and the early
+    # "no type args" return has to key on the superset — keying it on `found`
+    # alone would drop a consumer whose only bracket is a literal.
     found = MM.all_instantiation_calls(consumer_src)
-    if not found:
+    loose = MM.all_bracketed_calls(consumer_src)
+    if not loose:
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2110,9 +2104,20 @@ def instantiation_demands(module_path: str, consumer_src: str,
         templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
     for p, names in templates.items():
-        got = MM.demands_from_calls(found, names, own=own_templates
-                                    if os.path.abspath(p) ==
-                                    os.path.abspath(module_path) else ())
+        own_here = (own_templates
+                    if os.path.abspath(p) == os.path.abspath(module_path) else ())
+        got = MM.demands_from_calls(found, names, own=own_here)
+        value_names = {n for n in names
+                       if any(a not in set(found.get(n, ()))
+                              for a in loose.get(n, ()))}
+        if value_names:
+            for name, args in MM.value_demands_for(
+                    consumer_src, module_source_text(p), names,
+                    own=own_here).items():
+                got.setdefault(name, [])
+                for a in args:
+                    if a not in got[name]:
+                        got[name].append(a)
         if got:
             out[p] = got
     return out
@@ -3326,18 +3331,13 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    source_of = {}
-    for src, (bindings, _why) in (library_free or {}).items():
+    for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.  The
-            # SOURCE is the defining module's, which is the key this table is
-            # built under — the refusal reads it to name the rule that applied.
+            # neither has a callee, so the refusal has to reach either.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
-            source_of.setdefault(bound, src)
-            source_of.setdefault(defining, src)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -3351,12 +3351,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
-            rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
-                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                M.imported_callee_refusal(callee.name, sym, scope))
 
 
 def _enclosing_scopes(stmts: list) -> list:

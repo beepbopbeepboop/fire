@@ -369,80 +369,6 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
-def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
-        tmpdir):
-    """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
-
-    `formal/model.py::specialization_call_refusal` is the bracket case, and the
-    two rows above it both name a concrete type argument as a DEMAND — a struct
-    template's instantiation and a function template's. This case is the third
-    shape and the one the message used to get wrong: a function of another
-    module whose generic parameter is IMPLICIT, written in the SIGNATURE
-    (`def unbox(t: Box[T])`) with no bracket to bind. There the type is inferred
-    from the call, so `unbox(b)` is the SAME PROGRAM and builds (run below,
-    against CPython on both architectures), while the source's `unbox[Int](b)`
-    has no declaration to bind its bracket against.
-
-    The old sentence answered it with "Write it as `unbox[<a type>](…)`", which
-    is the spelling already on the line — the `refuse_without:` class of defect,
-    a repair that is wrong about correct code. The refusal now names the bare
-    call instead, and this row is what keeps the two apart: a reword that put
-    the old advice back for this shape would pass every adjoining case, because
-    neither of them writes a bracket on an implicitly generic function at all.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from implib import Box\n"
-                 "from implib import unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 10\n"
-                 "    print(unbox[Int](b))\n")
-    bare = ("from implib import Box\n"
-            "from implib import unbox\n"
-            "\n"
-            "def main():\n"
-            "    var b = Box[Int]()\n"
-            "    b.v = 10\n"
-            "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 10\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_implicit_bracket", lib,
-                             bracketed, cpython, expect_ok=False,
-                             libname="implib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] `unbox[Int](b)` is not refused by the bracket "
-              f"sentence: {text.strip()[-300:]}")
-        check("Write it as `unbox[<a type>]" not in text,
-              f"[{arch}] the refusal still recommends `unbox[<a type>](…)`, "
-              f"which is the spelling already on the line: "
-              f"{text.strip()[-300:]}")
-        check("write `unbox(…)`" in text,
-              f"[{arch}] the refusal does not name the bare call, which is the "
-              f"same program for an implicitly generic function: "
-              f"{text.strip()[-300:]}")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_implicit_bare", lib, bare,
-                            cpython, libname="implib.mojo")
-        check(got == "10\n", f"[{arch}] printed {got!r}, expected 10")
-
-
 def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
     """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
     refused by name, on both architectures, for every struct template.
@@ -1823,6 +1749,52 @@ def main():
     print(a.size())
 """
 
+# The BARE-LITERAL value parameter: `Tagged[T, origin: Int]` applied as
+# `Tagged[Int, 0]`.  Different from every case above, whose value argument is a
+# DISPLAY (`[1, 2, 3]`) — a bare literal at the top level of a bracket is
+# `tile[2, 3]`'s shape, which the strict demand walk drops on purpose, so the
+# literal is admitted only when the declaration's own annotation says the
+# parameter is a VALUE (see the `a bare literal` case below).  `origin` is read
+# in the method body, so the two instantiations print the two values the source
+# passed and a mangling that collapsed them would print one twice.
+LITERAL_VALUE_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+    def origin_value(self) -> Int:
+        return origin
+"""
+
+LITERAL_VALUE_PROG = """\
+from taglib import Tagged
+
+def main():
+    var a = Tagged[Int, 0]()
+    a.v = 5
+    var b = Tagged[Int, 7]()
+    b.v = 9
+    print(a.v, a.origin_value())
+    print(b.v, b.origin_value())
+"""
+
+LITERAL_VALUE_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.v = 0
+        self.origin = origin
+
+    def origin_value(self):
+        return self.origin
+
+def main():
+    a = Tagged(0)
+    a.v = 5
+    b = Tagged(7)
+    b.v = 9
+    print(a.v, a.origin_value())
+    print(b.v, b.origin_value())
+"""
+
 # The CLASS-ATTRIBUTE read, which is the same subject one position over and was
 # refused for a different reason: `TypeDict.length` is a `MemberExpr` on the
 # TEMPLATE's own name, so the demand walk — which reads CALL SITES — never saw
@@ -2234,6 +2206,83 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
         check(got == "11\n17\n14\n",
               f"[{arch}] printed {got!r} for three instantiations whose first "
               f"elements are 1, 7 and 4 over a base of 10")
+
+
+def test_a_bare_literal_value_parameter_instantiates(tmpdir):
+    """`Tagged[Int, 0]` binds a comptime VALUE parameter, on both architectures.
+
+    The end-to-end half of `bugs/FORMAL_an_explicit_parameter_list_naming_a_
+    comptime_value.md` §4.1: a bracket whose element is a comptime ARGUMENT
+    rather than a type spelling.  A display already reached the boundary symbol
+    (`test_a_value_bracket_argument_reaches_the_boundary_symbol` above); a BARE
+    literal did not, because the strict demand walk drops one — it is
+    `tile[2, 3]`'s shape, a specialization the local machinery answers — and it
+    is admitted here only because `Tagged`'s declaration annotates `origin` as
+    `Int`.  The two instantiations read the value in the method body, so a
+    mangling that collapsed them would print `5 0 / 9 0` and this case would
+    catch it; CPython is the oracle, run against the same computation written
+    the way Python has to write it.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_litval", LITERAL_VALUE_LIB,
+                            LITERAL_VALUE_PROG, LITERAL_VALUE_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5 0\n9 7\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, 0]` and "
+              f"`Tagged[Int, 7]`, whose `origin_value()` reads the comptime "
+              f"value the bracket supplied")
+
+
+def test_a_bare_literal_is_only_a_value_when_the_declaration_says_so(tmpdir):
+    """The declaration decides: `Pair[2]` and `widen[3]` are still not demands.
+
+    `all_bracketed_calls` is a SUPERSET of `all_instantiation_calls` — it lets a
+    bare literal be a spelling — so the literal half is turned back off by
+    asking the DECLARATION whether the position is a value (`value_demands_for`,
+    whose admission test is `instantiate`'s kind check):
+
+    * `Tagged[T, origin: Int]` admits `("Int", "0")` — `origin` is a value;
+    * `Pair[T]` does not admit `("2",)` — `T` is a TYPE, and a value in a type's
+      position would substitute `2` for a type in the body;
+    * `widen[x: Int32]` is a FUNCTION template, whose value specialization the
+      local machinery already lowers, so demanding a boundary symbol for it
+      would publish a second copy of a body the build already emits.
+
+    The three answers come from one admission test, and the strict reader is
+    untouched — both pinned behaviours (`test_a_type_argument_that_is_computed_
+    is_not_a_demand`, `test_formal_specialization.py`'s `widen[3]` row) stay.
+    """
+    from formal import monomorph as MM
+    tagged = ("struct Tagged[T, origin: Int]:\n"
+              "    var v: T\n")
+    pair = ("struct Pair[T]:\n"
+            "    var first: T\n")
+    widen = ("def widen[x: Int32](v: Int32) -> Int32:\n"
+             "    return v * x\n")
+    prog = ("from taglib import Tagged\n"
+            "from pairlib import Pair\n"
+            "from wlib import widen\n"
+            "def main():\n"
+            "    var a = Tagged[Int, 0]()\n"
+            "    var b = Pair[2]()\n"
+            "    var c = widen[3](5)\n")
+    check(MM.all_instantiation_calls(prog) == {},
+          f"the strict reader still drops every bare literal: "
+          f"{MM.all_instantiation_calls(prog)}")
+    check(MM.all_bracketed_calls(prog) == {"Tagged": [("Int", "0")],
+                                           "Pair": [("2",)],
+                                           "widen": [("3",)]},
+          f"the permissive reader sees all three: "
+          f"{MM.all_bracketed_calls(prog)}")
+    check(MM.value_demands_for(prog, tagged, ["Tagged"])
+          == {"Tagged": [("Int", "0")]},
+          "a bare literal for a VALUE parameter is not admitted")
+    check(MM.value_demands_for(prog, pair, ["Pair"]) == {},
+          "a bare literal for a TYPE parameter was admitted, which would "
+          "substitute a value for a type")
+    check(MM.value_demands_for(prog, widen, ["widen"]) == {},
+          "a function template's value specialization was demanded as a "
+          "boundary symbol, which the local machinery already answers")
 
 
 # ── the artifact's identity ─────────────────────────────────────────────────
@@ -2990,8 +3039,6 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
-    ("a bracket on an implicitly generic function recommends the bare call",
-     test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a dotted application says which word is the module",
@@ -3034,6 +3081,10 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a bare literal value parameter instantiates",
+     test_a_bare_literal_value_parameter_instantiates),
+    ("a bare literal is only a value when the declaration says so",
+     test_a_bare_literal_is_only_a_value_when_the_declaration_says_so),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",
