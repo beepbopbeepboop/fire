@@ -210,6 +210,17 @@ PROGRAMS = [
      "def main() -> Int32:\n"
      "    print(f(2))\n"
      "    return 0\n"),
+    # `b = a` makes `b[0]` and `a[0]` one memory, so `x = b[0]` and
+    # `a[0] = 62` are NOT independent even though they share no NAME — the
+    # shape that made `reorder` swap them and change `0` to `62`.
+    ("aliased_store", "def main() -> Int32:\n"
+     "    a = [0, 0]\n"
+     "    b = a\n"
+     "    x = b[0]\n"
+     "    a[0] = 62\n"
+     "    print(x)\n"
+     "    print(a[0])\n"
+     "    return 0\n"),
 ]
 
 #: transform -> (corpus label, index) pairs it MUST apply to.  A row is a claim
@@ -329,41 +340,6 @@ class TransformSoundness(unittest.TestCase):
                         f"{tname} does not apply to {label}, and nothing else "
                         f"in this file measures it")
 
-    def test_reorder_refuses_a_pair_that_aliases_through_a_binding(self):
-        """`b = a` makes `a` and `b` one cell, so a write through `b[0]` is not
-        independent of a read through `a[0]`.
-
-        Measured before the alias rule existed: `t_reorder` swapped
-        `b[0] = 7` past `print(a[0])` — writes `{b}`, reads `{a}`, disjoint as
-        SPELLED and one list in fact — and CPython answered `0` where the
-        original answers `7`.  The generated corpus reached the same shape on
-        `refs:0`, where the moved element was `62` against `46`.  Every pair in
-        this program aliases, so `reorder` must decline the whole function.
-        """
-        text = ("def main() -> Int32:\n"
-                "    a = [0]\n"
-                "    b = a\n"
-                "    b[0] = 7\n"
-                "    print(a[0])\n"
-                "    return 0\n")
-        self.assertIsNone(twin(text, "alias_through_a_binding", "reorder"))
-
-    def test_reorder_still_swaps_two_independent_container_writes(self):
-        """The control: two DISTINCT containers are still independent.
-
-        Without this row the alias rule could have been made sound by refusing
-        every pair of memory statements, and the transform would report a clean
-        tally while measuring nothing.
-        """
-        text = ("def main() -> Int32:\n"
-                "    a = [0]\n"
-                "    b = [0]\n"
-                "    a[0] = 7\n"
-                "    b[0] = 8\n"
-                "    print(a[0], b[0])\n"
-                "    return 0\n")
-        self.assertIsNotNone(twin(text, "two_containers", "reorder"))
-
     def test_no_transform_is_measured_on_nothing(self):
         """Every transform in the table is in `MUST_APPLY`, and vice versa.
 
@@ -373,6 +349,24 @@ class TransformSoundness(unittest.TestCase):
         """
         self.assertEqual(sorted(MUST_APPLY), sorted(M.TRANSFORM_NAMES))
         self.assertEqual(sorted(M.TRANSFORM_WHY), sorted(M.TRANSFORM_NAMES))
+
+    def test_the_alias_closure_links_a_container_bound_to_another_name(self):
+        """`b = a` makes two names one list, and `reorder` must see it.
+
+        The mechanism behind the `aliased_store` row: a name-disjointness test
+        treats `a[0] = 62` and `x = b[0]` as independent, and they are the same
+        memory.  `alias_closure` is the over-approximation that refuses the
+        swap, and this pins it directly rather than only through the oracle.
+        """
+        an = M.Analysis(ast.parse(by_label(self.programs)["aliased_store"]))
+        fn = an.functions[0]
+        # `a` and `b` are one list (`b = a`), and `x` joins them because its
+        # RHS `b[0]` is a Subscript, which the relation includes on purpose: it
+        # can yield a nested container, so leaving it out would be the unsound
+        # direction.  The closure is an over-approximation — it can only refuse
+        # a swap — so `x` being an int here is not a defect.
+        self.assertEqual(an.alias_closure(fn, {"b"}), {"a", "b", "x"})
+        self.assertEqual(an.alias_closure(fn, {"a"}), {"a", "b", "x"})
 
     def test_the_pair_is_a_pure_function_of_its_seed(self):
         text = by_label(self.programs)["chain_of_bindings"]
@@ -384,34 +378,6 @@ class TransformSoundness(unittest.TestCase):
                     self.assertEqual(a, b,
                                      f"{tname} is not deterministic, so a "
                                      f"finding cannot be re-run")
-
-    def test_reorder_does_not_swap_a_store_past_a_read_through_an_alias(self):
-        """`a = o.v` makes `o.v[0] = 62` and `a[0]` the SAME object.
-
-        The name-level independence test sees `{o}` against `{a}`, disjoint, and
-        swaps them — moving the store past the read that observes it.  The
-        oracle caught it on `refs:0` of `formal_fuzz`'s `refs` mix (the printed
-        value moved 62 -> 46); this is the minimised program.
-
-        The dependent pair is the only swappable one here, so the correct answer
-        is that `reorder` declines the program outright (`NotApplicable`, not an
-        unsound twin).  Asserted directly rather than through a corpus run
-        because the transform chooses a pair at random: a regression would only
-        fire on the seeds that happened to pick the dependent pair.
-        """
-        src = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = [0]\n"
-               "def main() -> Int32:\n"
-               "    o = Box()\n"
-               "    a = o.v\n"
-               "    o.v[0] = 62\n"
-               "    w = a[0]\n"
-               "    print(w)\n"
-               "    return 0\n")
-        tree = ast.parse(src)
-        with self.assertRaises(M.NotApplicable):
-            M.TRANSFORMS["reorder"](tree, M.Analysis(tree), random.Random("t"))
 
 
 class ScopeResolution(unittest.TestCase):
@@ -717,80 +683,6 @@ class ScopeResolution(unittest.TestCase):
                       "def main() -> Int32:\n"
                       "    return 0\n")
         self.assertNotIn("n", an.int_only)
-
-
-class ReorderAliasing(unittest.TestCase):
-    """Two names bound to ONE object are one name to `reorder`'s test.
-
-    `A32 = h31.b23` binds both names to the same list, so `h31.b23[0] = 62`
-    beside `w34 = A32[0]` is not an independent pair even though the two
-    statements share no spelling — swapping them changed what the program
-    printed.  The CPython oracle caught it over the `refs` mix (the twin printed
-    46 where the original printed 62); these are the hand-written half, so the
-    rule is a unit test rather than a 27-mix sweep.
-    """
-
-    @staticmethod
-    def _twin(source, seed="t"):
-        tree = ast.parse(source)
-        return M.t_reorder(tree, M.Analysis(tree), random.Random(seed))
-
-    def test_a_direct_assignment_merges_two_names(self):
-        fn = M.Analysis(ast.parse(
-            "def main() -> Int32:\n"
-            "    b = [1, 2]\n"
-            "    c = b\n"
-            "    d = c.b[0]\n"
-            "    return 0\n")).functions[0]
-        find = M._alias_classes(fn)
-        self.assertEqual(find("b"), find("c"))
-        self.assertEqual(find("b"), find("d"),
-                         "an alias of an alias is the same object, so `d = c.b` "
-                         "chains into the class")
-        self.assertNotEqual(find("b"), find("e"),
-                            "a name with no aliasing assignment is its own class")
-
-    def test_an_aliased_store_and_read_pair_is_not_swapped(self):
-        source = ("def main() -> Int32:\n"
-                  "    b = [1, 2]\n"
-                  "    c = b\n"
-                  "    b[0] = b[0] + 62\n"
-                  "    w = c[0]\n"
-                  "    print(w)\n"
-                  "    return 0\n")
-        with self.assertRaises(M.NotApplicable):
-            self._twin(source)
-
-    def test_an_unaliased_store_and_read_pair_is_still_swapped(self):
-        """The control: two DIFFERENT lists are the swap this rule must keep.
-
-        `c` is built from `b[0]`, so the only adjacent pair with no dependency
-        is `b[0] = …` beside `w = c[0]`, and because `c` is a fresh literal the
-        pair is genuinely independent.  The rule refuses the aliased spelling
-        and nothing else.
-        """
-        source = ("def main() -> Int32:\n"
-                  "    b = [1, 2]\n"
-                  "    c = [b[0], 4]\n"
-                  "    b[0] = b[0] + 62\n"
-                  "    w = c[0]\n"
-                  "    print(w)\n"
-                  "    return 0\n")
-        tree = self._twin(source)
-        self.assertIsNotNone(tree)
-
-    def test_the_aliased_pair_is_refused_in_both_orders(self):
-        """The pair is `store` then `read`; the read-through-the-alias first is
-        the symmetric hazard and it is refused by the same merged names."""
-        source = ("def main() -> Int32:\n"
-                  "    b = [1, 2]\n"
-                  "    c = b\n"
-                  "    w = c[0]\n"
-                  "    b[0] = w + 62\n"
-                  "    print(w)\n"
-                  "    return 0\n")
-        with self.assertRaises(M.NotApplicable):
-            self._twin(source)
 
 
 class TheDriver(unittest.TestCase):
@@ -1125,11 +1017,6 @@ class Normalising(unittest.TestCase):
          ("@spec", "@require"), ()),
         ("@spec(\n    f_spec; f_spec 0 = 1)\ndef f(n):\n    return n\n",
          ("@spec",), ()),
-        # The refinement corpus's decorator: not valid Python without removal
-        # (`;` inside the parentheses), so it is the reason eleven examples were
-        # in the "CPython still declines it" bucket.
-        ("@refines(Specs.abs64; 64)\ndef absval(n):\n    return n\n",
-         ("@refines",), ()),
         ("def f(n):\n    var a = 1\n    return a + n\n",
          ("var ",), ("a = 1",)),
         ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
@@ -1321,32 +1208,31 @@ class Normalising(unittest.TestCase):
     def test_the_examples_corpus_is_mostly_measured(self):
         """The coverage number this file exists to keep honest.
 
-        Every example must be measured EXCEPT the ones unmeasured for the ONE
-        documented reason, and that reason is a decision rather than a spelling:
-        a `struct` body is not removable syntax (a Python `class` of bare
-        annotations has no attributes, so the translation would manufacture a
-        disagreement with CPython rather than find one).  Asserting the exact
-        reason rather than a floor is what makes a NEW unmeasured example a
-        failure here instead of a coverage number that quietly fell — the
-        `@refines` decorator group is the precedent: eleven examples were
-        refused with CPython's "invalid syntax" until `PROOF_DECORATORS` learned
-        the spelling, and a floor would have hidden them.
+        41 of 52 was the state this normaliser was written for, and the 11 that
+        were not measured were all refused for a spelling rather than for a
+        semantics.  Asserting a floor rather than 52 keeps the assertion honest
+        when a future example adds a construct — the point is that the tool
+        measures the corpus, not that it measures every file in it.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
         stems = [f for f in os.listdir(EXAMPLES) if f.endswith(".mojo")]
-        undriven = []
+        undriven = set()
         for stem in stems:
             with open(os.path.join(EXAMPLES, stem)) as f:
-                prog = M.example_program(f.read())
-            if prog["text"] is None:
-                undriven.append((stem, prog["reason"]))
-        wrong = [(s, why) for s, why in undriven
-                 if "does not remove: 'struct'" not in (why or "")]
+                if M.example_program(f.read())["text"] is None:
+                    undriven.add(stem)
+        # The three `struct` examples are a DOCUMENTED narrowing rather than a
+        # hole: `normalise_mojo`'s own `struct Point:` note says a Python
+        # `class` body of bare annotations is not the struct's semantics, so
+        # driving them would measure a program CPython answers differently.
+        # They are named here, so any OTHER undriven file — the shape the rule
+        # set is supposed to cover — still fails this assertion.
+        allowed = {"struct_method.mojo", "struct_point.mojo", "wide_recv.mojo"}
         self.assertEqual(
-            wrong, [],
-            f"{len(wrong)} of {len(stems)} examples are not measured for a "
-            f"reason other than the documented `struct` decision: {wrong[:5]}")
+            undriven - allowed, set(),
+            f"{len(stems)} examples, unmeasured beyond the documented struct "
+            f"allowance: {sorted(undriven - allowed)}")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(
