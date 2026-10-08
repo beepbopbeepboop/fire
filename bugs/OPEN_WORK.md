@@ -89,10 +89,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_wide_receiver_by_reference.md` | `formal161-docs` | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | `formal170-docs` | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 
-### `formal/build` — 14 documents, 13 claimed
+### `formal/build` — 15 documents, 14 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
+| `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | `formal171-docs` | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal174-docs` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `formal167-docs` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | `formal167-docs` | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
@@ -154,11 +155,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_x86_64_a_dylib_extern_call_segfaults.md` | `formal163-docs` | FORMAL/x86_64: a dylib's outbound call goes through the bound `__got` slot and dies under Rosetta |
 
-### `formal/model` — 26 documents, 23 claimed
+### `formal/model` — 25 documents, 22 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | `formal171-docs` | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | `formal171-docs` | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | `formal171-docs` | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `formal167-docs` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |

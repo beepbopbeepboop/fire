@@ -571,6 +571,24 @@ FILE_CASES = [
 # evidence the source can carry — through the one reader a field access already
 # uses.
 DECLARED = [
+    # A METHOD through a `with` ALIAS whose NAME a second struct also declares.
+    # The alias holds `Box.__enter__`'s result — the receiver — so the holder
+    # analysis knows the frame is a `Box`, and that binding is what resolves the
+    # ambiguity the name-only dispatch declines on purpose.  This row used to be
+    # a REFUSAL ("would be a guess about what it means on"); the alias's struct
+    # is now published (`_rewrite_holder_method_calls`), so it is answered and
+    # compared against CPython, which resolves it through the object's own type.
+    # See `bugs/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
+    # exception_words.md` §4.
+    ("a_method_through_the_alias_with_a_rival_owner_is_answered",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     CTX_PY + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n", 3),
     # `make()` returns a manager: the callee's own `-> T` says which struct, and
     # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
     # of every factory a reader writes for a resource.
@@ -919,24 +937,11 @@ REFUSALS = [
      "    return 0\n",
      "names somewhere this path cannot put the word",
      "this build cannot answer what type it is"),
-    # A METHOD through the alias whose NAME a second struct also declares.  The
-    # alias carries no declared type — `Box___enter__(tmp)` returns one word and
-    # nothing says which struct it is a frame of — so dispatch is by NAME, and
-    # `use` has two owners.  CPython resolves it through the object's own type.
-    # Here `_method_owners` pops an ambiguous name on purpose (a name TWO structs
-    # declare is absent, and that absence is what makes the lift decline), so
-    # the call lands in the receiverless arm and is refused rather than picked —
-    # with the "would be a guess about what it means" sentence, which IS the
-    # property: a build that picked silently would print this same program's
-    # answer against the OTHER struct's field layout, and a wrong layout is the
-    # failure nothing else on this path can see.  This row's whole claim is the
-    # refusal, so it passes "" for the forbidden clause.
-    ("a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     "would be a guess about what it means on", ""),
+    # The METHOD-through-the-alias-with-a-rival-owner row used to live HERE, as a
+    # refusal, and it moved to the DECLARED table: the alias's struct is now
+    # published from the frame holder the `with` established, so the ambiguity
+    # `_method_owners` declines is resolved by the BINDING and the program is
+    # answered against CPython.  `RIVAL` is still declared for that row.
     # A SUBSCRIPT alias, `as holder[0]`, is the third shape one word does not go
     # and the one a reader is most likely to try after the other two are
     # refused.
