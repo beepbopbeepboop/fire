@@ -4372,6 +4372,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
+    def _printf_arg_container_kind(self, arg):
+        """The operand's own KIND, or None — the evidence `printf_container_
+        conversion_refusal` reads.
+
+        The fourth hook of `model.printf_format_refusal`, and the one fact it
+        needs that the model cannot derive: this function's `ValueKinds`. A
+        container's kind is what says its one word is a blob's ADDRESS, so the
+        decision about which conversions may not read it as a number is the
+        model's, and this method is the same two lines arm64 and x86-64 both
+        write. None when there is no `ValueKinds` to ask, which is the
+        permissive direction the other hooks take and never refuses.
+        """
+        return None if self._vkinds is None else self._vkinds.kind_of(arg)
+
     def _refuse_word_position_kind_mismatch(self, name, e) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -4439,7 +4453,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class)
+            self._printf_arg_conversion_class,
+            self._printf_arg_container_kind)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -8491,6 +8506,13 @@ preference.
             raise CodegenError(reason)
         target = stmt.target
         self._emit_subscript_addr(target)             # RAX = address
+        # The element's width belongs to the TARGET, and the RHS below can
+        # itself be a subscript (`q[0] += r[1]`) whose address computation
+        # overwrites `_sub_width`. The store at the end would then write at the
+        # RHS's width — eight bytes into a `Pointer[Int32]` — so it is captured
+        # here, after the target's address is decided and before anything else
+        # can run, and restored before the store.
+        width = self._sub_width
         self._push_slot(Reg.RAX)                      # [rsp] = address
         self._emit_subscript_load(Reg.RAX)            # old element, at its width
         self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
@@ -8526,6 +8548,7 @@ preference.
         # happens, the function returns, and the damage only shows up as a
         # number that is a pointer. arm64's twin uses X9 for the same reason.
         self._pop_slot(Reg.R10)                       # R10 = address
+        self._sub_width = width                       # the TARGET's, not the RHS's
         self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:

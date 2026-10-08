@@ -6210,6 +6210,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
         self._emit_subscript_addr(target)
+        # The element's width and sign belong to the TARGET, and the RHS below
+        # can itself be a subscript (`q[0] += r[1]`) whose address computation
+        # overwrites `_sub_width`/`_sub_signed`. The store at the end would then
+        # write at the RHS's width — eight bytes into a `Pointer[Int32]` — so the
+        # two are captured here, after the target's address is decided and
+        # before anything else can run, and restored before the store.
+        width = self._sub_width
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
         self._emit_subscript_load(0, 9)           # X0 = old, at the element's width
@@ -6226,6 +6233,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
+        self._sub_width = width                   # the TARGET's, not the RHS's
         self._emit_subscript_store_at(9, 0)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -6519,6 +6527,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
+    def _printf_arg_container_kind(self, arg):
+        """The operand's own KIND, or None — the evidence `printf_container_
+        conversion_refusal` reads.
+
+        The fourth hook of `model.printf_format_refusal`, and the one fact it
+        needs that the model cannot derive: this function's `ValueKinds`. A
+        container's kind is what says its one word is a blob's ADDRESS, so the
+        decision about which conversions may not read it as a number is the
+        model's, and this method is the same two lines arm64 and x86-64 both
+        write. None when there is no `ValueKinds` to ask, which is the
+        permissive direction the other hooks take and never refuses.
+        """
+        return None if self._vkinds is None else self._vkinds.kind_of(arg)
+
     def _refuse_word_position_kind_mismatch(self, name, e: F.CallExpr) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -6614,7 +6636,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class)
+            self._printf_arg_conversion_class,
+            self._printf_arg_container_kind)
         if reason is not None:
             raise CodegenError(reason)
 

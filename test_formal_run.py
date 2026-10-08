@@ -15841,9 +15841,127 @@ POINTER_DEREF_CASES = [
      "    var mid = at(s, 1)\n"
      "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
      "        return 1\n"
-     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+      "        return 2\n"
+      "    return 0\n", 0, None),
+
+    # ── `p[i]` reads at the POINTEE'S width, the same width `p.value()` does ─
+    #
+    # `deref_four_widths_at_one_address` pins the width of `p.value()`. The
+    # SUBSCRIPT spelling had the same decision on the same reader and did not
+    # honor it: `_emit_subscript_load` was `width == 1 ? LDRB : LDR`, so a
+    # `Pointer[Int32]` subscript did a full 64-bit load and read the NEXT element
+    # into the high half. Measured on BOTH architectures, from a green build:
+    #
+    #     var q: Pointer[Int32] = malloc(16)
+    #     q[0] = 10
+    #     q[1] = 21
+    #     printf("%d", q[0])       ->  90194313226   (0x15_0000000A)
+    #
+    # where the source says 10. The two elements are NONZERO on purpose: with
+    # `q[1]` left at zero an eight-byte read of `q[0]` is 10 by accident, so the
+    # case cannot tell the widths apart. This reads the same `malloc`'d pair four
+    # ways and asks each width for its own answer.
+    ("deref_subscript_reads_at_the_pointee_width",
+     "def main(n: Int) -> Int:\n"
+     "    var i: Pointer[Int32] = malloc(32)\n"
+     "    i[0] = 10\n"
+     "    i[1] = 21\n"
+     "    if Int(i[0]) != 10:\n"
+     "        return 1\n"
+     "    if Int(i[1]) != 21:\n"
      "        return 2\n"
-     "    return 0\n", 0, None),
+     "    var s: Pointer[Int16] = malloc(32)\n"
+     "    s[0] = 300\n"
+     "    s[1] = 7\n"
+     "    if Int(s[0]) != 300:\n"
+     "        return 3\n"
+     "    if Int(s[1]) != 7:\n"
+     "        return 4\n"
+     "    var b: Pointer[UInt8] = malloc(32)\n"
+     "    b[0] = 200\n"
+     "    b[1] = 9\n"
+     "    if Int(b[0]) != 200:\n"
+     "        return 5\n"
+     "    if Int(b[1]) != 9:\n"
+     "        return 6\n"
+     "    return 42\n", 42, None),
+    # The STORE half of the same width, and the augmented assignment with it:
+    # `q[0] += 5` is the filed `aug_through_int32_pointer` failure, whose arm
+    # read and wrote eight bytes. A store that wrote a word into a `Pointer[
+    # Int32]` would clobber `q[1]`'s low half, so the program checks BOTH
+    # elements after the store — the value that should have changed and the
+    # neighbour that should not have.
+    ("deref_subscript_store_and_aug_write_at_the_pointee_width",
+     "def main(n: Int) -> Int:\n"
+     "    var q: Pointer[Int32] = malloc(32)\n"
+     "    q[0] = 10\n"
+     "    q[1] = 3\n"
+     "    q[0] += 5\n"
+     "    q[1] *= 7\n"
+     "    if Int(q[0]) != 15:\n"
+     "        return 1\n"
+     "    if Int(q[1]) != 21:\n"
+     "        return 2\n"
+     "    var s: Pointer[Int16] = malloc(32)\n"
+     "    s[0] = 1000\n"
+     "    s[1] = 2\n"
+     "    s[0] -= 1\n"
+     "    if Int(s[0]) != 999:\n"
+     "        return 3\n"
+     "    if Int(s[1]) != 2:\n"
+     "        return 4\n"
+     "    return 42\n", 42, None),
+    # SIGNEDNESS reaches the load, which is the half `deref_i8_signed` pins for
+    # `p.value()`. A `Pointer[Int8]` subscript must sign-extend (`-1`, not 255)
+    # and a `Pointer[UInt8]` must not; a one-byte `Pointer[UInt32]`-shaped read
+    # that zero-extended every width would answer 255 here and pass the two
+    # cases above, which is why this is a third case rather than a comment.
+    ("deref_subscript_sign_extends_a_signed_pointee",
+     "def main(n: Int) -> Int:\n"
+     "    var s: Pointer[Int8] = malloc(32)\n"
+     "    s[0] = -1\n"
+     "    s[1] = 100\n"
+     "    if Int(s[0]) != -1:\n"
+     "        return 1\n"
+     "    if Int(s[1]) != 100:\n"
+     "        return 2\n"
+     "    var i: Pointer[Int32] = malloc(32)\n"
+     "    i[0] = -5\n"
+     "    i[1] = 123456\n"
+     "    if Int(i[0]) != -5:\n"
+     "        return 3\n"
+     "    if Int(i[1]) != 123456:\n"
+     "        return 4\n"
+     "    var w: Pointer[UInt32] = malloc(32)\n"
+     "    w[0] = 4000000000\n"
+     "    w[1] = 3\n"
+     "    if Int(w[0]) != 4000000000:\n"
+     "        return 5\n"
+     "    if Int(w[1]) != 3:\n"
+     "        return 6\n"
+     "    return 42\n", 42, None),
+    # The augmented assignment's store width must be the TARGET's even when the
+    # RHS is itself a subscript. `q[0] += r[0]` evaluates `r[0]` between the
+    # target's address computation and the store, and `r`'s element width (1)
+    # overwrote `_sub_width` — so the store wrote one byte into a `Pointer[
+    # Int32]`. The program forces a CARRY (`255 + 1`) so a one-byte store lands
+    # 0 and the read-back is 0, not 256; without the capture-and-restore this
+    # case answers 0. `q[1]` is checked too, because a store that widened to the
+    # RHS would also clobber the neighbour.
+    ("deref_subscript_aug_keeps_the_target_width_when_the_rhs_is_a_subscript",
+     "def main(n: Int) -> Int:\n"
+     "    var q: Pointer[Int32] = malloc(32)\n"
+     "    var r: Pointer[Int8] = malloc(32)\n"
+     "    q[0] = 255\n"
+     "    q[1] = 7\n"
+     "    r[0] = 1\n"
+     "    q[0] += r[0]\n"
+     "    if Int(q[0]) != 256:\n"
+     "        return 1\n"
+     "    if Int(q[1]) != 7:\n"
+     "        return 2\n"
+     "    return 42\n", 42, None),
 
     # ── a STRUCT pointee, which is the IDENTITY rather than a load ─────────
     #
@@ -18197,6 +18315,84 @@ FLOAT_REFUSALS = [
      "    if a == b:\n"
      "        return 1\n"
      "    return 2\n", 2, None),
+]
+
+# The CONTAINER family, the other half of the same "the conversion and the
+# operand have to agree" rule `FLOAT_REFUSALS` is about. A container is neither
+# a double nor an integer: its one word is the address of its blob, so a NUMBER
+# conversion renders the heap address rather than a value. Measured on BOTH
+# architectures from a green build, `var xs = [1, 2, 3]; printf("v=%d", xs)`
+# printed `v=1809329920` on arm64 and `v=1870638832` on x86-64 — the address is
+# a property of the run, the defect is not — where CPython raises
+# `TypeError: %d format: a number is required, not list`. The fix is
+# `model.printf_container_conversion_refusal`, asked of the operand's KIND
+# (`ValueKinds.kind_of`) rather than of a name's `own_shape`, so a literal, a
+# construction and a name bound to either are one answer.
+PRINTF_CONTAINER_REFUSALS = [
+    # The filed shape: a LIST local at `%d`.
+    ("container_refuse_a_number_conversion_of_a_list",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n",
+     "refuse:the `%d` conversion in printf's format string reads `xs` as a "
+     "number, and `xs` is a CONTAINER", None),
+    # A `%f` is the other number class, and it is the same defect read the other
+    # way: the blob's address as a double is a denormal, not a list. A separate
+    # row because a fix that only understood the integer conversions would leave
+    # this one printing a number nobody wrote.
+    ("container_refuse_a_floating_conversion_of_a_list",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%.17g\", xs)\n"
+     "    return 0\n",
+     "refuse:the `%g` conversion in printf's format string reads `xs` as a "
+     "number, and `xs` is a CONTAINER", None),
+    # A DICT is the same shape and gets the same answer, which is why the row is
+    # asked of the KIND (`is_list_kind`, which a dict's `list:*` kind satisfies)
+    # and not of the constructor's name — a dict and a list are the same word on
+    # this path (`ValueKinds.is_dict_value`'s docstring is the measurement).
+    ("container_refuse_a_number_conversion_of_a_dict",
+     "def main() -> Int:\n"
+     "    var d = {\"a\": 1}\n"
+     "    printf(\"v=%d\", d)\n"
+     "    return 0\n",
+     "refuse:the `%d` conversion in printf's format string reads `d` as a "
+     "number, and `d` is a CONTAINER", None),
+    # A `bytearray` is a blob too, and `printf("%d", b)` is the same defect as
+    # the list's. A third spelling so the kind predicate cannot be narrowed to
+    # the list-literal constructor and stay green on the other two.
+    ("container_refuse_a_number_conversion_of_a_bytearray",
+     "def main() -> Int:\n"
+     "    var b = bytearray()\n"
+     "    printf(\"v=%d\", b)\n"
+     "    return 0\n",
+     "refuse:the `%d` conversion in printf's format string reads `b` as a "
+     "number, and `b` is a CONTAINER", None),
+    # A `%s` is the TEXT conversion and is refused by
+    # `printf_text_conversion_refusal`, which now takes a container as positive
+    # evidence of "not text" — the same defect one step further out, because a
+    # container's one word is its blob's address and `%s` walks the count header
+    # as a C string. The needle is the `%s` sentence, so this row pins that the
+    # TEXT function owns that conversion rather than the number one.
+    ("container_a_text_conversion_is_the_text_refusal",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%s\", xs)\n"
+     "    return 0\n",
+     "refuse:the `%s` conversion in printf's format string reads", None),
+    # The CONTROL, and the one that keeps the rule from over-refusing: an
+    # UNANNOTATED parameter is a word this build cannot classify, and `kind_of`
+    # answers `INT_KIND` (not a container) for it. `def show(xs):
+    # printf("%d", xs)` called `show(5)` must keep building — reading "not known
+    # to be a container" as "not a container" would refuse it.
+    ("container_an_unannotated_parameter_at_a_number_conversion_still_builds",
+     "def show(xs):\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return show(5)\n", 0, None),
 ]
 
 
@@ -24722,6 +24918,7 @@ def main():
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + FLOAT_REFUSALS
+                  + PRINTF_CONTAINER_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS

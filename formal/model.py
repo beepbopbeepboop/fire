@@ -10251,6 +10251,13 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
          decision cover both spellings. (`identity_conversion_operand`, looped
          so a conversion of a conversion is one question too.)
       2. **A STRING LITERAL, or anything `is_text` calls text.** Unchanged.
+      2b. **A CONTAINER, from its KIND.** `is_list_kind(vk.kind_of(arg))` is
+         positive evidence that the operand is NOT text: a container's one word
+         is its blob's address, whose first word is its count, so `%s` walked the
+         count header as a C string. Asked here rather than after step 3 because
+         a name bound to a list has no integer `own_shape` and would otherwise
+         reach `one_word_text`'s permissive None. `is_list_kind` covers a list, a
+         tuple, a set, a `bytearray` and a dict, so the answer is one answer.
       3. **A NAME, from the two positive-evidence sources**: a statement of this
          function bound it to an integer on that statement's own shape, or a
          one-field struct's declaration says what its only field holds. Both
@@ -10279,6 +10286,24 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
         return True
     if is_text is not None and is_text(arg):
         return True
+    # **A CONTAINER is positive evidence that the operand is NOT text, and it is
+    # the same defect as an integer at `%s` one step further out.** `%s` walks
+    # bytes at the address it is handed looking for a NUL; a container's one word
+    # is the address of its blob, whose FIRST word is its count, so `printf("%s",
+    # xs)` walked the count header as a C string. The evidence is the KIND and
+    # not a name's `own_shape`, because a literal, a construction and a name
+    # bound to either are one answer — and `is_list_kind` also covers a dict and
+    # a `bytearray`, which classify as `list:*` blobs on this path
+    # (`ValueKinds.is_dict_value`'s docstring is the measurement). It is asked
+    # before the name arm because a name bound to a list has no `own_shape` on
+    # the integer axis and would otherwise fall through to `one_word_text`'s
+    # permissive None. An unannotated parameter still answers `INT_KIND` (not a
+    # container), so a program whose container-ness this build cannot see keeps
+    # building.
+    if vk is not None and is_list_kind(vk.kind_of(arg)):
+        return ("a CONTAINER — its one word is the address of its blob, and the "
+                "blob's first word is its count, so it is not a `char *` for "
+                "`%s` to walk")
     if isinstance(arg, F.IdentExpr):
         if vk is not None and vk.own_shape_kind(arg.name) == INT_KIND:
             return ("a value this function bound to an integer on that "
@@ -10491,6 +10516,75 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
             f"the conversion is the source's decision and this path already "
             f"has both of them: `Int(x)` truncates toward zero and `float(x)` "
             f"rounds to the nearest double"
+        )
+    return None
+
+
+def printf_container_conversion_refusal(callee: str, fmt_text, args: list,
+                                        kind_of=None) -> str | None:
+    """Why a NUMBER conversion of a CONTAINER operand is refused.
+
+    The mirror of `printf_text_conversion_refusal` on the axis the two other
+    format checks do not cover. `printf_text_conversion_refusal` owns the `%s`
+    that DEREFERENCES its operand; `printf_kind_conversion_refusal` owns the
+    float/integer class disagreement. A container is neither a double nor an
+    integer: its one word is the address of its blob, so a conversion that reads
+    the word as a number renders the heap ADDRESS as a decimal. Measured on BOTH
+    architectures, from a green build and exit 0:
+
+        var xs = [1, 2, 3]
+        printf("v=%d\\n", xs)
+
+    prints `v=1809329920` on arm64 and `v=1870638832` on x86-64 — the address is
+    a property of the run, the defect is not — where CPython raises `TypeError:
+    %d format: a number is required, not list`. The two machines agreeing about
+    nothing but disagreeing with the program is the shape this table exists for.
+
+    `kind_of(arg)` is the emitter's own `ValueKinds.kind_of` over one argument,
+    and the evidence is the operand's own KIND rather than a name's
+    `own_shape`: a `[1, 2, 3]` literal, a `List[Int]()` construction and a name
+    bound to either are one answer. `is_list_kind` covers a list, a tuple, a set,
+    a `bytearray` AND a dict, because all of them classify as `list:*` blobs on
+    this path (`ValueKinds.is_dict_value`'s docstring is the measurement: a dict
+    and a list are the same word here), so `printf("%d", b)` for a `bytearray`
+    and `printf("%d", d)` for a `Dict` are the same shape and get the same
+    answer rather than three that disagree.
+
+    A `%s` operand is NOT this function's: `printf_text_conversion_refusal` owns
+    the conversion that dereferences, and a container reaching it has that
+    function's own answer. This one is every conversion that READS THE WORD AS A
+    NUMBER — the floating conversions plus every other non-`s` conversion — so
+    the two refusals cannot both fire on one conversion.
+
+    `None` never refuses, the same permissive direction the two siblings take:
+    `kind_of` answers `INT_KIND` (not a container) for an unannotated parameter
+    and for anything else this build cannot classify, so a program whose
+    container-ness is not visible keeps whatever behaviour it had rather than
+    being refused for a word.
+    """
+    if kind_of is None:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if j >= len(args) or conv == "s":
+            continue
+        kind = kind_of(args[j])
+        if kind is None or not is_list_kind(kind):
+            continue
+        return (
+            f"the `%{conv}` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as a number, and `{spelled(args[j])}` is a "
+            f"CONTAINER — its one word is the address of its blob, so the C "
+            f"library renders the heap address rather than a value. Measured on "
+            f"BOTH architectures, `printf(\"%d\", xs)` for `xs = [1, 2, 3]` "
+            f"printed the blob's address (1809329920 on arm64, 1870638832 on "
+            f"x86-64) from a green build and exit 0, where CPython raises "
+            f"`TypeError: %d format: a number is required, not list`. Refused "
+            f"rather than emitted, because an address is not the number the "
+            f"source asked for: pass the count (`len(xs)`), an element "
+            f"(`xs[0]`), or render the container to text and use `%s`"
         )
     return None
 
@@ -10828,27 +10922,30 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
 
 
 def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
-                         text_of_arg=None, class_of=None):
+                         text_of_arg=None, class_of=None, container_of=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now four ways a format string fails here — a `%s`
+    than two: there are now five ways a format string fails here — a `%s`
     handed something that is not text (`printf_text_conversion_refusal`), a
     conversion with no argument behind it
     (`printf_missing_operand_refusal`), a WIDTH on a `%s` whose argument is
-    text that is not ASCII (`printf_text_width_refusal`), and a conversion whose
+    text that is not ASCII (`printf_text_width_refusal`), a conversion whose
     CLASS disagrees with the kind of the argument behind it
-    (`printf_kind_conversion_refusal`) — and two emitters that each had to
+    (`printf_kind_conversion_refusal`), and a NUMBER conversion of a CONTAINER
+    (`printf_container_conversion_refusal`) — and two emitters that each had to
     remember them is exactly how arm64 and x86-64 come to disagree about what a
     `printf` means. One function, one order, one message table.
 
     The order is the one that matters if two could fire: a missing operand and
     a `%s` of a non-text argument are both more basic facts about the CALL than
     the width is, and naming them first is the more useful refusal, since the
-    fix is in the format rather than in the argument's text. The class check
-    comes last because it is the only one that needs the argument's VALUE rather
-    than its text, and a format already known to be unusable is not worth a
-    second, deeper question about the same call.
+    fix is in the format rather than in the argument's text. The last two come
+    last because they need the argument's VALUE rather than its text, and a
+    format already known to be unusable is not worth a second, deeper question
+    about the same call. They cannot both fire: the class check refuses only a
+    disagreement with `%f`/`%g`/`%e`, and a container is refused only by the
+    non-`s`, non-float conversions, whose class evidence is never `"float"`.
 
     `text_of_arg` is the fourth hook and it is the only one of the first two
     that is optional: it answers "what TEXT does this argument carry" (None for
@@ -10858,13 +10955,17 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     passes None — which is the permissive direction, exactly as `text_of`'s own
     None row is. **`class_of` is optional for the same reason**: it is
     `printf_arg_float_evidence`'s three-way answer, and a caller that has no
-    `ValueKinds` to hand passes None, which never refuses.
+    `ValueKinds` to hand passes None, which never refuses. **`container_of` is
+    the same**: it answers the OPERAND'S KIND (`ValueKinds.kind_of`) and a
+    caller with no `ValueKinds` passes None.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
                                              text_of_arg)
             or printf_kind_conversion_refusal(callee, fmt_text, args,
-                                              class_of))
+                                              class_of)
+            or printf_container_conversion_refusal(callee, fmt_text, args,
+                                                   container_of))
 
 
 

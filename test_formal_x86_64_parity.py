@@ -2122,6 +2122,22 @@ FAILING_CASES = [
      "    b = 0\n"
      "    a, b = t\n"
      "    return 0\n"),
+    # The same exit, reached by a `raise` rather than by a trap, and it is the
+    # shape the old arm64 divergence was: a `raise` used to leave through an
+    # inline `svc` (a raw Darwin `SYS_exit`),
+    # which never runs libc's `exit` and so never flushes stdout — the line was
+    # LOST on arm64 and printed on x86-64, whose exit is a call to `exit`. Both
+    # now go through `_emit_exit`, which flushes through the same `fflush(NULL)`
+    # the trap rows above exercise. A `raise` is a third path to that exit
+    # (`_emit_diverge`), so it is a third row rather than a third explanation of
+    # the first two.
+    ("printed_output_survives_a_raise",
+     "def main() -> int:\n"
+     "    print(\"before\")\n"
+     "    raise 7\n",
+     "def main() -> int:\n"
+     "    print(\"before\")\n"
+     "    raise 7\n"),
 ]
 
 # A NEEDLE SHARED by every row that pins the same sentence, declared once here
