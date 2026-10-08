@@ -1,8 +1,8 @@
 # CODEGEN: a generator that iterates a STRING PARAMETER and yields its characters produces nothing
 
-**State: OPEN, unfixed.** Found 2026-10-02 while fixing
-`CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md`'s
-generator half; that doc's own repro only masked it.
+**State: OPEN, unfixed.** Found 2026-10-02 while fixing the generator half of
+a callable-valued parameter called in a coroutine body returning garbage
+(fixed 2026-10-02); that fix's own repro only masked it.
 
 ## What I ran and what I saw
 

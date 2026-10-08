@@ -11792,6 +11792,79 @@ print(run('x/y.txt'))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_local_rebound_from_a_scalar_to_a_container_is_the_box():
+        """A local assigned a scalar and a container has no single C type,
+        so it must be declared `int64_t` (the box) and neither store may be
+        a pointer cast.
+
+        The lattice's pointer-wins join answered the CONTAINER, so `q = 5`
+        was emitted as `q = (MojoList *)5` and `q > 1` lowered as a
+        list-vs-int compare the codegen refuses at run time (exit 1,
+        `TypeError`), and `q = 2.5` in the same slot would not even build
+        ("pointer value used where a floating-point was expected"). CPython
+        is the oracle for every shape below. `double` is deliberately one of
+        them: it is the only scalar that made the un-boxed slot a hard gcc
+        error rather than a wrong value.
+        """
+        global _PASS, _FAIL
+        name = "a_local_rebound_from_a_scalar_to_a_container_is_the_box"
+        shapes = [
+            "def k():\n    q = 5\n    q = [1, 2]\n    return q\nprint(len(k()))\n",
+            "def k():\n    q = None\n    q = [1, 2]\n    return q\nprint(len(k()))\n",
+            "def k(c):\n    if c:\n        q = None\n    else:\n        q = [1, 2]\n    return q\nprint(len(k(0)))\n",
+            "def k():\n    q = 'ab'\n    if q:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
+            "def k():\n    q = 5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
+            "def k():\n    q = 2.5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
+            "def k(c):\n    q = 2.5\n    if c:\n        q = [1, 2]\n    return q\nprint(len(k(1)))\n",
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            for i, src in enumerate(shapes):
+                entry = os.path.join(td, f'rb_{i}.py')
+                with open(entry, 'w') as fh:
+                    fh.write(src)
+                py = subprocess.run([sys.executable, entry],
+                                    capture_output=True, text=True, cwd=td,
+                                    timeout=RUN_TIMEOUT_S)
+                if py.returncode != 0 or not py.stdout:
+                    print(f"FAIL  {name}: shape {i}: CPython exited "
+                          f"{py.returncode} printing {py.stdout!r} — the test "
+                          f"program itself is wrong, not the compiler")
+                    _FAIL += 1
+                    return
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry, do_imports=False)[0]
+                except Exception as e:
+                    print(f"FAIL  {name}: shape {i}: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                cf = os.path.join(td, f'rb_{i}.c')
+                exe = os.path.join(td, f'rb_{i}.exe')
+                with open(cf, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, cf,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name}: shape {i}: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:4]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=RUN_TIMEOUT_S)
+                if run.stdout != py.stdout or run.returncode != 0:
+                    print(f"FAIL  {name}: shape {i}: compiled printed "
+                          f"{run.stdout!r} (exit {run.returncode}), CPython "
+                          f"printed {py.stdout!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
@@ -11844,6 +11917,7 @@ print(run('x/y.txt'))
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
+    test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
@@ -11858,8 +11932,8 @@ print(run('x/y.txt'))
     # `-fgimple`'s strict verifier — a hard gcc error and no binary.
     #
     # The declaration is the whole reason this program exists. `info = None`
-    # types a local `int`, and a NESTED `def`'s local takes that path (the
-    # same source at module level declares `int64_t` and compiles), so
+    # types a local `int`, and a NESTED `def`'s local took that path (the
+    # same source at module level declared `int64_t` and compiled), so
     # `mojo/middle/coro.py`'s `_visit_call` — `pinfo = None` then
     # `pinfo = gen_params[gname]` then `len(pinfo)` — is four of them, plus one
     # in `myinterpreter.py`'s `MojoString`. `_ensure_local` is the chokepoint
@@ -11867,12 +11941,20 @@ print(run('x/y.txt'))
     # DECLARED type is a different scalar", and it emits nothing extra when
     # there is no mismatch.
     #
+    # The DECLARATION is fixed now, not only the cast: a lifted closure gets
+    # the same per-function local-type pre-pass a top-level `def` gets
+    # (`_gen_lifted_closure` now fills `_inferred_var_types[ci.lifted_name]`),
+    # so `info` is declared `int64_t` from the join over ALL its assignments
+    # and `info = table[key]` stores the full boxed pointer with no cast. The
+    # `(int64_t)info` must-have below is the `len()`-subject copy (still a
+    # cast, correctly), and `int info;` is the truncated declaration whose
+    # absence is the bug.
+    #
     # Asserted as the emitted TEXT and not only as "it compiles": a `len()`
     # that stopped routing through the registries at all would also compile,
     # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
     # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
-    # must-have list for that reason, and `(int64_t)info` is the exact text
-    # whose absence is the bug.
+    # must-have list for that reason.
     test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
 def outer(names, table):
     def visit(node, caller):
@@ -11890,8 +11972,9 @@ def main():
     t = {"a": [1, 2, 3]}
     print(outer("a", t))
 main()
-""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info"],
-       ["int64_t _t = info;"])
+""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info",
+      "int64_t info;"],
+       ["int info;", "int64_t _t = info;"])
 
 
     print()

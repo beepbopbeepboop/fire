@@ -5053,9 +5053,9 @@ def main():
 """, "k\n0\n")
 
     # A callable-valued PARAMETER, CALLED inside a coroutine body. This is
-    # the ordinary-path half of
-    # bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md,
-    # and it needs its own plumbing: the A3 rewrite moves every source
+    # the ordinary-path half of a callable-valued parameter called in a
+    # coroutine body returning garbage (fixed 2026-10-02), and it needs its
+    # own plumbing: the A3 rewrite moves every source
     # parameter into a `var p = __mojo_gen_arg(...)` local, so the body the
     # ordinary codegen emits carries NO `param_defaults` — so the fact cannot
     # be read off the body at all and has to travel with it. It travels as
