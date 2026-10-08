@@ -1106,7 +1106,8 @@ CASES = [
     # (`len=3 4`), so the fold reads the call-site table rather than a
     # fabricated class-body word. The bare `Box.length` spelling from a free
     # function is separately refused (no home), which is what the row below's
-    # control used to watch; see bugs/FORMAL_five_run_rows_refuse_at_a_different_point_than_they_pin.md.
+    # control used to watch; that no-home refusal is the binding-home
+    # classification defect filed as bugs/FORMAL_generic_local_binding_has_no_home.md.
     ("comptime_binding_reading_a_struct_parameter_now_folds_the_instantiation",
      "struct Box[T: AnyType, keys: List[T]]:\n"
      "    comptime length = len(keys)\n"
