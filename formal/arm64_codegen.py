@@ -9361,8 +9361,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     self._import_aliases, self._extern_decls,
                                     name)
 
-    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """`e`'s arguments in positional form, for a known callee.
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> tuple:
+        """`(slots, dropped)` for `e`, for a known callee.
+
+        `slots` is `e`'s arguments in positional form; `dropped` is the ones
+        with no register home — a variadic callee's positional tail, and any
+        keyword a `**kwargs` swallowed — which the caller MUST still evaluate
+        for their side effects (`M.bind_call_arguments`'s own docstring states
+        why).
 
         A THIN CALL into `M.bind_call_arguments`, which is the one
         implementation of the rule and the reason the two backends cannot
@@ -9391,11 +9397,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 names = [k for k, _v in e.kwargs]
                 raise CodegenError(
                     f"keyword arguments are not supported ({names})")
-            return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+            return list(e.args or []), []
+        slots, dropped, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
-        return slots
+        return slots, dropped
 
     def _emit_type_constructor(self, e: F.CallExpr, name: str,
                                tkind: tuple) -> None:
@@ -10594,12 +10601,16 @@ ctor_field_value=self._ctor_field_value_for(name),
                 name, name in self._dylib_syms
                 or self._aliased_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
+        dropped: list = []
         if is_extern and self._callee_decl(name) is None:
             # Unknown signature: AAPCS has no place for Python kwargs on a
             # raw BL. Drop them (they are almost always literals like
             # flush=True) and pass positional args only — same ABI the
-            # extern path already uses for zero-kwarg calls.
+            # extern path already uses for zero-kwarg calls. The dropped
+            # keyword VALUES are still evaluated for their side effects, the
+            # same rule `bind_call_arguments` applies to a variadic tail.
             args = list(e.args)
+            dropped = [v for _k, v in (e.kwargs or [])]
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
             # obey". `extern_call_count_refusal` is the shared rule and returns
@@ -10635,8 +10646,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `formal/monomorph.py::supplied_bracket_args`, so there is one
             # answer to "what does `f[a, b](x)` pass" rather than one per
             # backend and one per callee kind.
-            args = (monomorph.supplied_bracket_args(e) + list(e.args)
-                    if through_value else self._bind_call_args(name, e))
+            if through_value:
+                args = monomorph.supplied_bracket_args(e) + list(e.args)
+            else:
+                args, dropped = self._bind_call_args(name, e)
         # A comptime specialization `f[a, b](x)` binds the callee's comptime
         # parameters (which are leading arguments on this path), so the bracket
         # expressions are evaluated here, in the caller's scope, and passed
@@ -10829,6 +10842,22 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_frame_base(self._ret_frame_base + sret_site[1])
             self.asm.emit(encode_mov_zr_xn(0, 9))
             self.asm.emit(encode_stp_sp_pre(0, 31))
+        # Arguments with NO register home — a variadic callee's positional tail
+        # and any keyword a `**kwargs` swallowed — are evaluated HERE, after
+        # every fixed argument and before the registers are loaded, because
+        # CPython evaluates EVERY argument expression and their side effects are
+        # observable even though the callee cannot read the values (a body that
+        # reads the variadic parameter is refused earlier). Dropping them
+        # silently built `def f(x, *rest): return x` called as `f(1, g())` into
+        # an image that never ran `g`. Every fixed argument is already on the
+        # stack here, so a dropped expression that itself calls cannot disturb
+        # one. `*`/`**` markers are unwrapped exactly as `side_effects` above
+        # does.
+        for _d in dropped:
+            if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                self._emit_expr(_d.operand)
+            else:
+                self._emit_expr(_d)
         for i in range(min(nargs, _ABI_ARG_REGS) - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:

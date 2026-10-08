@@ -1,14 +1,28 @@
 # FORMAL_a_variadic_parameter_read_has_no_abi: the row was unowned, and the refusal in it is CORRECT
 
-**Status: NOT FIXED, and correctly so at the width it is written at.** The
-refusal is right and the ABI decision is still unmade — but the CORPUS half is
-now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
-DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
-sweep measures it instead of being unable to produce the construct at all. That
-was §5 step 5 and it was measured ABSENT; the measurement and what it now shows
-are in §5 below. Everything else on this list is untouched, and the reason is
-the doc's own: the emitters and `lib/ProofLib.lean` have to move together and
-the latter's 27 MB `.olean` peaks at 7.82 GB to rebuild.
+**Status: the READ half is NOT FIXED, and correctly so at the width it is
+written at; the CALLER-SIDE half had a real wrong answer and is FIXED
+(2026-10-08, this branch).** The read refusal is right and the ABI decision is
+still unmade. But §"Why the refusal is RIGHT" claimed "the caller side is
+already correct and needs no change", and that was FALSE: the extra arguments
+were dropped WITHOUT BEING EVALUATED, so a side effect in one was lost. CPython
+evaluates every argument expression before the call, so `def f(x, *rest):
+return x` called as `f(1, g())` (where `g` prints) printed only `x` here — `g`
+never ran — against CPython's `g-called / 1`. The same held for a keyword a
+`**kwargs` swallowed. `formal/model.py::bind_call_arguments` now returns the
+dropped argument NODES (`dropped`) and both emitters evaluate them for effect
+after the fixed arguments, before the registers are loaded;
+`test_formal_cross_module.py`'s `test_a_dropped_variadic_argument_is_still_
+evaluated` compares the WHOLE stdout with CPython and pins the ORDER (each `g`
+before its own call's `printf`) for both the same-module and the cross-module
+binder. The CORPUS half is also done (2026-10-04, `formal21-2`):
+`tools/formal_fuzz.py` can emit a `*rest` DEFINITION and a call site for it, so
+the day the ABI lands, a `--mix limits` sweep measures it instead of being
+unable to produce the construct at all. That was §5 step 5 and it was measured
+ABSENT; the measurement and what it now shows are in §5 below. The remaining
+work is the READ/ABI, and the reason it is untouched is the doc's own: the
+emitters and `lib/ProofLib.lean` have to move together and the latter's 27 MB
+`.olean` peaks at 7.82 GB to rebuild.
 
 **Area:** `formal/build.py::_refuse_variadic_reads` /
 `formal/model.py::variadic_read_refusal` (the refusal), and for the fix
@@ -65,8 +79,10 @@ Both backends, byte-identical apart from nothing (`test_formal_run.py::build_for
 
 This is the part worth writing down, because the obvious next step is a miscompile.
 
-**The caller side already drops the extra arguments**, and `variadic_read_refusal`'s own
-docstring says so: `_bind_call_args` passes the fixed parameters and truncates the rest. So it
+**The caller side gives the extra arguments no home**, and `variadic_read_refusal`'s own
+docstring says so: `_bind_call_args` passes the fixed parameters and the rest are `dropped`.
+(**It does not EVALUATE them — that was a real wrong answer and is now fixed; see the Status.
+The value is still unobservable, so the argument below is unchanged.**) So it
 is tempting to conclude that a variadic parameter's value is *the empty sequence* — every extra
 argument is discarded, therefore the read sees nothing — and to lower it as a constant of length
 0. **That is a wrong-but-exit-0 answer, and it is measurably wrong:**

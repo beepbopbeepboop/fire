@@ -48261,7 +48261,7 @@ def function_param_shape(fn) -> ParamShape:
 
 
 def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
-    """`(slots, error)` — a call's arguments in positional form, or why not.
+    """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
     both backends. It existed twice, once per file, and the two copies had
@@ -48269,6 +48269,21 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     the call had no keyword arguments, so the arity check only ever ran on a
     call with keywords. `f(1, 2, r)` against `def f(x, *rest)` therefore passed
     three arguments into a one-parameter function with no diagnostic at all.
+
+    `dropped` is the arguments that have NO register home — the positional tail
+    a variadic callee's `*name` would receive, and any keyword a `**kwargs`
+    would swallow. They are not discarded here: CPython evaluates EVERY argument
+    expression before the call, so a dropped argument's SIDE EFFECT is
+    observable even when the callee never reads its variadic parameter, and the
+    emitter runs each of these for effect. This is the fix for a real
+    wrong-but-exit-0 answer: `def f(x, *rest): return x` called as
+    `f(1, g())`, where `g` prints, printed only `1` — `g` was never run —
+    against CPython's `g-called / 1`. The old docstring here claimed the drop
+    was "exactly what the language observes when the callee's body never reads
+    its variadic parameter", and that was FALSE about the side effect; a body
+    that READS the parameter is refused earlier (`formal/build.py::
+    _refuse_variadic_reads`), so the value is unobservable but the evaluation is
+    not.
 
     Three rules, and they are the language's:
 
@@ -48292,13 +48307,13 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         passed", and the second half of that is the bug: it consumes ALL of
         them, it just only WRITES the ones it is passed;
       * everything from the variadic parameter's position onwards belongs to
-        `*name` / `**name`, and there is no register for it. It is DROPPED,
-        which is exactly what the language observes when the callee's body
-        never reads its variadic parameter — and `formal/build.py`'s
-        `check_module_symbols` refuses, by name, a body that does. So the
-        drop is not a gap in this function: it is a documented consequence of
-        a check that runs earlier, and the comment here is where a reader
-        should be told so."""
+        `*name` / `**name`, and there is no register for it. It is dropped from
+        `slots` and returned in `dropped` so the emitter can still EVALUATE it:
+        the callee's body cannot read the value (`formal/build.py::
+        _refuse_variadic_reads` refuses a body that does), but CPython runs the
+        expression, so its side effect has to happen. So the drop is not a gap
+        in this function: it is the placement decision, and the evaluation is
+        put back at the call site rather than lost."""
     shape = function_param_shape(fn)
     positional = shape.positional
     # A `**` SPREAD is folded in before the arity is counted, for the reason
@@ -48310,32 +48325,41 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
         list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
-        return None, spread_refusal
+        return None, [], spread_refusal
     slots: list = list(args or [])
+    dropped: list = []
     if len(slots) > len(positional):
         if not shape.variadic:
-            return None, (f"call {name}(): too many positional arguments "
-                          f"({len(slots)} for {len(positional)} parameter(s)"
-                          + (f"; the parameters are {positional}"
-                             if positional else ")"))
+            return None, [], (f"call {name}(): too many positional arguments "
+                              f"({len(slots)} for {len(positional)} "
+                              f"parameter(s)"
+                              + (f"; the parameters are {positional}"
+                                 if positional else ")"))
         # A variadic callee: the arguments past the fixed ones are `*name`'s
-        # and have nowhere to go. See the docstring.
+        # and have no register home. Kept in `dropped`, in SOURCE ORDER, so the
+        # emitter evaluates them for their side effects. See the docstring.
+        dropped.extend(slots[len(positional):])
         slots = slots[:len(positional)]
     slots.extend([None] * (len(positional) - len(slots)))
     for k, v in kwargs:
         idx = shape.index_of(k)
         if idx is None or shape.names[idx] not in positional:
             if shape.kwarg is not None:
-                continue        # **kwargs swallows it; no register to put it in
-            return None, f"call {name}(): unexpected keyword argument {k!r}"
+                # `**kwargs` swallows it; no register to put it in, but the
+                # VALUE is still evaluated by CPython, so it is kept in
+                # `dropped` for the same reason as the positional tail.
+                dropped.append(v)
+                continue
+            return None, [], f"call {name}(): unexpected keyword argument {k!r}"
         if idx < len(args):
-            return None, (f"call {name}(): multiple values for argument "
-                          f"{k!r}")
+            return None, [], (f"call {name}(): multiple values for argument "
+                              f"{k!r}")
         if slots[idx] is not None:
-            return None, (f"call {name}(): multiple values for argument "
-                          f"{k!r}")
+            return None, [], (f"call {name}(): multiple values for argument "
+                              f"{k!r}")
         slots[idx] = v
-    return _fill_gaps(name, shape, positional, slots)
+    slots, err = _fill_gaps(name, shape, positional, slots)
+    return slots, dropped, err
 
 
 def _fill_gaps(name: str, shape, positional: list, slots: list) -> tuple:

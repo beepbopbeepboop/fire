@@ -990,6 +990,46 @@ def test_every_argument_count_and_a_variadic_agree_with_cpython(tmpdir, _):
                         "prog.aout", expect_exit=0)
 
 
+DROPPED_SIDE_EFFECT_PROG = """\
+from varlib import variadic
+
+def local_var(head, *rest):
+    return head * 3
+
+def g():
+    printf("g@")
+    return 9
+
+def main(k):
+    printf("local=%d@", local_var(2, g()))
+    printf("cross=%d@@", variadic(4, g()))
+    return 0
+"""
+
+
+def test_a_dropped_variadic_argument_is_still_evaluated(tmpdir, _):
+    """A variadic tail's SIDE EFFECT runs, same-module and cross-module.
+
+    CPython evaluates EVERY argument expression before a call, so a `*rest`
+    argument the callee never reads is still evaluated. `bind_call_arguments`
+    used to drop the tail WITHOUT evaluating it, so `variadic(4, g())` — where
+    `g` prints — built an image that never ran `g`: a wrong answer with exit 0
+    (`1` where CPython prints `g` then `1`). The whole stdout is compared with
+    CPython, so the ORDER (each `g` before its own call's `printf`) is asserted
+    too, and `local_var` is the same-module binder beside `variadic`'s
+    cross-module one, because the two paths reach `_bind_call_args` separately.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "dropped_side_effect")
+    os.makedirs(root)
+    write_tree(root, {"varlib.mojo": VAR_LIB, "prog.mojo":
+                      DROPPED_SIDE_EFFECT_PROG})
+    text, rc = agrees_with_cpython(tmpdir, "a dropped variadic side effect",
+                                   root, "prog.aout", expect_exit=0)
+    check(text == "g@local=6@g@cross=8@@",
+          f"the dropped arguments did not run in source order: {text!r}")
+
+
 def test_a_local_default_and_a_cross_module_default_agree(tmpdir, _):
     """The two answers side by side, in one program.
 
@@ -2005,6 +2045,8 @@ TESTS = [
      test_too_few_arguments_to_a_re_exported_callee_is_refused),
     ("every argument count and a variadic agree with CPython",
      test_every_argument_count_and_a_variadic_agree_with_cpython),
+    ("a dropped variadic argument is still evaluated",
+     test_a_dropped_variadic_argument_is_still_evaluated),
     ("a local default and a cross-module default agree",
      test_a_local_default_and_a_cross_module_default_agree),
     ("a linked dylib's struct is usable with no import",
