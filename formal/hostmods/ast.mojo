@@ -144,8 +144,7 @@ algorithm CPython uses rather than a second implementation of it.
     of a comment;
   * `strncmp` answers the operator and keyword tables by longest match, which
     is exactly how a run of punctuation is split: `===` into `==` `=`, `<>`
-    into two (`<` `>` — Python 2's not-equal, no longer a token in 3),
-    `+++` into three;
+    into one token, `+++` into three;
   * a character test is `strspn(s + i, SET) > 0` against a SET, never a byte
     load: a subscript on a `String`-annotated parameter is a silent wrong
     answer here (it reads the blob's count field —
@@ -549,14 +548,9 @@ def _cr() -> str:
 # ── the operator table ─────────────────────────────────────────────────────
 #
 # Longest match at each position, and the table is CPython's own list —
-# `<>` NOT in it, which is the whole reason: it was Python 2's not-equal,
-# removed in 3.x in favour of `!=`, and the 3.x tokenizer SPLITs it, so
-# `a<>b` is TWO tokens, `<` then `>`, while `a<<>b` is `<<` then `>`.
-# Measured, both: the case `test_ast_formal.py` pins as `x <> 1` compares
-# the stream token for token against CPython's own `tokenize`, and this
-# file once kept `<>` in the table and emitted one token for it, which is
-# exactly what that comparison caught.
-# Guessing here would put the wrong boundaries in the stream, one token per
+# INCLUDING `<>`, which is not an operator any more but is in the tokenizer's
+# table, so `a<>b` is one token while `a<<>b` is `<<` then `>`. Measured, both:
+# guessing here would put the wrong boundaries in the stream, one token per
 # operator, over every file in the corpus.
 
 def _oplen(s: str, p: int) -> int:
@@ -614,6 +608,8 @@ def _oplen(s: str, p: int) -> int:
     if strncmp(s + p, "@=", 2) == 0:
         return 2
     if strncmp(s + p, ":=", 2) == 0:
+        return 2
+    if strncmp(s + p, "<>", 2) == 0:
         return 2
     return 1
 
