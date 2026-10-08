@@ -5310,20 +5310,22 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     The boxed word is fetched with `_ensure_local`, not `_new_val`, and that
     is not a style choice — it is what makes the closure compile. This
     helper's subject is a value whose C type is NOT statically known, so the
-    expression handed to it is regularly declared as something else:
-    `mojo/middle/coro.py`'s `_visit_call` declares `int pinfo` (from
-    `pinfo = None`) and then assigns a boxed dict into it, so `len(pinfo)`
-    arrives here as the expression `pinfo`, declared `int`. `_new_val` casts
-    only a bare integer LITERAL, so it emitted `int64_t _tN = pinfo;` — and
-    under `-fgimple`'s strict verifier that is `non-trivial conversion in
-    'var_decl'`, a hard gcc error with no binary at all: measured, four of
-    them in that function plus one in `myinterpreter.py`'s `MojoString`, i.e.
-    `fire.py build fire.py` stopped building (see
-    `bugs/CODEGEN_a_local_declared_from_None_holds_a_boxed_pointer.md`).
-    `_ensure_local` is the existing chokepoint for exactly this question —
-    "give me this value in a temp of MY type, casting when its DECLARED type
-    is a different scalar" — and it emits nothing extra when there is no
-    mismatch, so every input that compiled before compiles the same.
+    expression handed to it is regularly declared as something else. The
+    nested-`def` local declared from `None` (which used to truncate a boxed
+    pointer to `int`) is fixed at its DECLARATION now — `_gen_lifted_closure`
+    gives a lifted closure the same per-function local-type pre-pass a
+    top-level `def` gets — but `_ensure_local` remains the right fetch for
+    every subject whose declared type is genuinely a different scalar.
+    `_new_val` casts only a bare integer LITERAL, so on such a subject it
+    emitted `int64_t _tN = <var>;`, and under `-fgimple`'s strict verifier
+    that is `non-trivial conversion in 'var_decl'`, a hard gcc error with no
+    binary at all: measured, four of them in `mojo/middle/coro.py`'s
+    `_visit_call` plus one in `myinterpreter.py`'s `MojoString`, i.e.
+    `fire.py build fire.py` stopped building. `_ensure_local` is the existing
+    chokepoint for exactly this question — "give me this value in a temp of
+    MY type, casting when its DECLARED type is a different scalar" — and it
+    emits nothing extra when there is no mismatch, so every input that
+    compiled before compiles the same.
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)

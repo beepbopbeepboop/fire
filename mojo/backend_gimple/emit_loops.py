@@ -3150,6 +3150,18 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen._seed_addressed_locals(node.body)
     gen._emit_mut_local_box_allocs()
 
+    # A lifted closure is an ordinary function and owes the same per-function
+    # local-type pre-pass a top-level `def` gets (`gen_module`'s Pass 1.3b,
+    # which populates `_inferred_var_types`). Without it, a nested `def`'s
+    # locals were typed by the FIRST assignment alone: `info = None` declares
+    # the slot `int` (`_lower_IdentExpr`'s None case), and a later
+    # `info = table[key]` (a boxed `MojoDict *`) is then emitted as
+    # `info = (int)_tN;` — the pointer truncated to 32 bits on arm64.
+    # `_gen_stmt_AssignStmt` already consults
+    # `_inferred_var_types[current_func_name]` to widen such a slot before the
+    # first `_declare_var`; this just makes that table exist for a closure.
+    gen._inferred_var_types[ci.lifted_name] = gen._infer_local_var_types(node)
+
     gen._emit_label("bb_2")
     # `{mut}`-capture-spec names (ClosureInfo.mut_names): the env
     # struct field is a POINTER (see the struct-typedef emission's own

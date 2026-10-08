@@ -11858,8 +11858,8 @@ print(run('x/y.txt'))
     # `-fgimple`'s strict verifier — a hard gcc error and no binary.
     #
     # The declaration is the whole reason this program exists. `info = None`
-    # types a local `int`, and a NESTED `def`'s local takes that path (the
-    # same source at module level declares `int64_t` and compiles), so
+    # types a local `int`, and a NESTED `def`'s local took that path (the
+    # same source at module level declared `int64_t` and compiled), so
     # `mojo/middle/coro.py`'s `_visit_call` — `pinfo = None` then
     # `pinfo = gen_params[gname]` then `len(pinfo)` — is four of them, plus one
     # in `myinterpreter.py`'s `MojoString`. `_ensure_local` is the chokepoint
@@ -11867,12 +11867,20 @@ print(run('x/y.txt'))
     # DECLARED type is a different scalar", and it emits nothing extra when
     # there is no mismatch.
     #
+    # The DECLARATION is fixed now, not only the cast: a lifted closure gets
+    # the same per-function local-type pre-pass a top-level `def` gets
+    # (`_gen_lifted_closure` now fills `_inferred_var_types[ci.lifted_name]`),
+    # so `info` is declared `int64_t` from the join over ALL its assignments
+    # and `info = table[key]` stores the full boxed pointer with no cast. The
+    # `(int64_t)info` must-have below is the `len()`-subject copy (still a
+    # cast, correctly), and `int info;` is the truncated declaration whose
+    # absence is the bug.
+    #
     # Asserted as the emitted TEXT and not only as "it compiles": a `len()`
     # that stopped routing through the registries at all would also compile,
     # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
     # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
-    # must-have list for that reason, and `(int64_t)info` is the exact text
-    # whose absence is the bug.
+    # must-have list for that reason.
     test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
 def outer(names, table):
     def visit(node, caller):
@@ -11890,8 +11898,9 @@ def main():
     t = {"a": [1, 2, 3]}
     print(outer("a", t))
 main()
-""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info"],
-       ["int64_t _t = info;"])
+""", ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info",
+      "int64_t info;"],
+       ["int info;", "int64_t _t = info;"])
 
 
     print()

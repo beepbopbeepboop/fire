@@ -40,5 +40,6 @@ module -- including those inside functions that declare it `global` -- instead
 of letting the first one (here `None`) fix the type. `_phase17_scan_try_branches`
 already joins across try/except branches with `TypeLattice.join`; this wants the
 same treatment for `global`-declared stores, with `None` joining to the other
-side's pointer type (the local-variable twin is
-`CODEGEN_a_local_declared_from_None_holds_a_boxed_pointer.md`).
+side's pointer type (the local-variable twin — a nested `def`'s local declared
+from `None` — was fixed 2026-10-07 by giving a lifted closure the same
+per-function local-type pre-pass a top-level `def` gets).
