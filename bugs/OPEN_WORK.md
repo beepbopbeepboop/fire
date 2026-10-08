@@ -248,11 +248,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | **unclaimed** | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
 | `FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_decode.md` | **unclaimed** | An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py` |
 
-### `formal/x86_64_endtoend_test` — 4 documents, 0 claimed
+### `formal/x86_64_endtoend_test` — 3 documents, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_shift_successor_leaves_cf_and_of_alone.md` | **unclaimed** | the `shift_imm8:*` successors set only ZF and SF, and `x86_shift_post` sets four |
 | `FORMAL_x86_64_end_to_end_proof.md` | **unclaimed** | a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both |
 | `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` | **unclaimed** | the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable |
 | `FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` | **unclaimed** | the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses |

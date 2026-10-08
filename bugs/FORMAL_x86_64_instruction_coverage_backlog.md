@@ -80,11 +80,12 @@ right one.  Shape 2's fourth row, `encode_movq_xmm_rm64`, was closed with
 
 **Measured, this pass.**  `formal/x86_64_model_coverage_test.py`: 193 samples
 over 71 forms, **all steppable** (was 185/67).  Its successor comparison is
-**RED on three rows** — `shift_imm8:shl` / `:shr` / `:sar`, whose successors
-set only ZF and SF where `x86_shift_post` sets four — and that is a real
-finding with its own doc,
-`bugs/FORMAL_shift_successor_leaves_cf_and_of_alone.md`, which the rows added
-here found.  The other four checks are green.
+green now — it was red on three rows, `shift_imm8:shl` / `:shr` / `:sar`,
+whose successors set only ZF and SF where `x86_shift_post` sets four, and the
+rows added here found that.  Three stale successor rows were subsequently
+fixed to quote `x86_shift_post` itself, and
+`test_formal_sweep_truth.py::TestX86EndToEndTables` now pins the copy against
+the model so a stale row cannot return silently.
 `formal/x86_64_model_fuzz.py --census --per-form 3 --seed 11`: 206 AGREE,
 11 HARNESS, 1 FAULT, 1 NORUN, **0 WRONG**.  `-n 16 --ninstr 6 --seed 5`:
 11 AGREE, 5 HARNESS, 0 WRONG.  `test_x86_64_decode.py`,
