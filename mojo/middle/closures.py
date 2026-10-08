@@ -32,7 +32,7 @@ from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
 from mojo.middle.solvers import ClosureInfo
 
 
-def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
+def _selfhost_fn_reassigns_method(_fn) -> bool:
     """True if `_fn`'s body monkey-patches a METHOD on the `gen`/`self` param
     (`gen._emit = intercepted_emit` — the `_gen_stmt_TryStmt` emit-
     interception idiom). Those functions must keep the param OPAQUE in the
@@ -48,6 +48,11 @@ def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
     closure pre-pass, so `_scan_for_closures`'s capture of `self` typed
     `int64_t` -> `self._mutated_free_names(...)` stubbed -> `mojo_set_union
     (self, ...)` -> SEGV compiling any program with a nested `def`."""
+    # The receiver names are a local, not a defaulted parameter: a default is
+    # padded at a cross-module call site, and the padding for a TUPLE default is
+    # the integer 0 once self-hosted -- `_n.target.obj.name in 0` was a SIGSEGV
+    # for every input that defines a function (no caller ever passed one).
+    _pnames = ('gen', 'self')
     _local_defs = {_d.name for _d in _walk_ast(getattr(_fn, 'body', []) or [])
                    if isinstance(_d, FunctionDef)}
     for _n in _walk_ast(getattr(_fn, 'body', []) or []):

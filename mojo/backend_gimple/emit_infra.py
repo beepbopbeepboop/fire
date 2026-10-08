@@ -2875,8 +2875,14 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
         # declared `int64_t` -- `char * = mojo_set_iter_val_str(...)` then
         # failed to gimplify. Distinct variables per loop, always.
         gen._shadow_seq_box[0] += 1
-        import re as _re
-        safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
+        # Module-level `re` (imported at the top of this file), NOT a
+        # function-local `import re as _re`: the self-hosted lowering routes
+        # `re.sub` with a literal pattern through its own regex engine but
+        # raises "module 're' is not compiled into this binary" for an aliased
+        # local import -- which made every self-shadowing loop target (any
+        # input with a second `for x in ...` over the same name) fail with
+        # "compile_to_gimple failed".
+        safe = re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
         if safe and safe[0].isdigit():
             safe = '_' + safe
         c_name = f"_shadow{gen._shadow_seq_box[0]}_{safe}"
@@ -2894,8 +2900,7 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
             inner = name[1:-1]
             if inner and inner[0].isdigit():
                 inner = '_' + inner
-            import re as _re
-            c_name = _re.sub(r'[^a-zA-Z0-9_]', '_', inner)
+            c_name = re.sub(r'[^a-zA-Z0-9_]', '_', inner)
             gen._c_names[name] = c_name
             gen.decls.append(f"  {ctype} {c_name};")
             gen.var_types[name] = ctype

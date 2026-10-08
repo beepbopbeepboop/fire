@@ -5210,6 +5210,9 @@ class GimpleGen:
     # through the frozen method-signature table instead, which does not depend
     # on the order the cycle was entered, and these have always been the
     # architecture's answer to exactly this (see `_reset_func` above).
+    def _kwarg_param_names(self, fname_raw: str, fname: str, n_expected: int,
+                           kwarg_dict: dict) -> list:
+        return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
     def _begin_function(self, fn) -> None:
         return ginf.begin_function(self, fn)
     def _emit_fallthrough_frees(self, fn) -> None:
@@ -5968,8 +5971,17 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
     if not names:
         return
     cpp = getattr(gen, 'generated_cpp', '') or ''
-    missing = [n for n in names
-               if f'__mgco_{n}_' not in code and f'__mojogen_{n}_' not in cpp]
+    # An explicit loop through `_as_str`, not a comprehension over the raw
+    # element: `names` comes back from `desugar_genexps` as a list of erased
+    # words on the self-hosted path, and the f-string below stringified the
+    # POINTER as a decimal -- `__mgco_93825122318464_` is in no output, so every
+    # generator expression was reported "could not be compiled" and the whole
+    # dump failed.
+    missing = []
+    for _vn in names:
+        _vname = _as_str(_vn)
+        if f'__mgco_{_vname}_' not in code and f'__mojogen_{_vname}_' not in cpp:
+            missing.append(_vname)
     if missing:
         raise RuntimeError(
             f"generator expression could not be compiled into a generator: "

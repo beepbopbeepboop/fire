@@ -210,8 +210,15 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     if not ipt:
         return
     names = getattr(gen, '_func_param_names', {})
-    # (func, param) -> {ctype, ...} for unambiguous literal arguments only
+    # "<func>\x1f<param>" -> "\x1f"-joined DISTINCT ctypes of the unambiguous
+    # literal arguments seen for that parameter. FLAT, not a tuple-keyed dict of
+    # sets: a tuple key hashes by its heap address once self-hosted (see
+    # `_pair_key`), and `for (fname, pname), ctypes in evidence.items()` bound
+    # the key's content string where a list was read by index -- a SIGSEGV in
+    # `mojo_list_get_int` for any input with a call to a function it defines.
+    # `evidence_keys` keeps the first-seen order the dict had.
     evidence: dict = {}
+    evidence_keys: list = []
     for call in _gmi_iter_calls(stmts):
         if not isinstance(call.func, gimple_ctypes.IdentExpr):
             continue
@@ -227,10 +234,23 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         for pname, arg in zip(params, args):
             ctype = _gmi_literal_ctype(arg)
             if ctype is not None:
-                evidence.setdefault((fname, pname), set()).add(ctype)
+                _ek = fname + '\x1f' + _as_str(pname)
+                if _ek not in evidence:
+                    evidence[_ek] = ''
+                    evidence_keys.append(_ek)
+                _ev = _as_str(evidence[_ek])
+                if ('\x1f' + _as_str(ctype) + '\x1f') not in ('\x1f' + _ev + '\x1f'):
+                    if _ev:
+                        evidence[_ek] = _ev + '\x1f' + _as_str(ctype)
+                    else:
+                        evidence[_ek] = _as_str(ctype)
 
     containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
-    for (fname, pname), ctypes in evidence.items():
+    for _ek in evidence_keys:
+        _ekp = _as_str(_ek).split('\x1f')
+        fname = _as_str(_ekp[0])
+        pname = _as_str(_ekp[1])
+        ctypes = _as_str(evidence[_ek]).split('\x1f')
         if len(ctypes) != 1:
             continue  # not unanimous
         # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
@@ -240,8 +260,11 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # `_gmi_apply_call_site_param_evidence`). The set is known to hold
         # exactly one element here, so a literal subscript is both equivalent
         # and linkable.
-        call_type = list(ctypes)[0]
-        cur = ipt.get(fname, {}).get(pname)
+        call_type = _as_str(ctypes[0])
+        _ipf = _as_dict(ipt.get(fname))
+        cur = None
+        if _ipf:
+            cur = _ipf.get(pname)
         # Every UNANIMOUS literal container also grounds the callee's
         # `==` / `!=` lowering, which cannot see through an erased
         # int64_t parameter: record the KIND separately, in a table of its
@@ -391,7 +414,17 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
     # snapshot taken before the first round, and a CHAIN would then resolve one
     # hop and stop (`mid1` -> `mid2` -> `leaf` left `mid1` on the name-based
     # guess, measured, and printed `0` where CPython prints `1`).
+    # FLAT, not `{(func, param): {(callee, cparam), ...}}`: a tuple key hashes
+    # by its heap address once self-hosted (see `_pair_key`), `for _key in fwd`
+    # over such a dict binds the key's content string where a tuple was read
+    # by index, and the inner set of tuples has no static element type -- the
+    # `for _hop in fwd[_key]` below was lowered as "'for' loop over unsupported
+    # iterable type int64_t", so the fixed point silently never ran. Keys are
+    # "<func>\x1f<param>" strings, hops are "<callee>\x1f<cparam>" strings in a
+    # first-seen-order list without duplicates (the set's only observable
+    # behaviour here), and `fwd_keys` keeps the key order the dict had.
     fwd: dict = {}
+    fwd_keys: list = []
     for s in all_functions:
         if not isinstance(s, gimple_ctypes.FunctionDef):
             continue
@@ -418,39 +451,52 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
                     continue
                 if _as_str(arg.name) != _as_str(params[_i]):
                     continue
-                fwd.setdefault((fname, _as_str(params[_i])), set()).add(
-                    (callee, _as_str(cparams[_i])))
+                _fk = fname + '\x1f' + _as_str(params[_i])
+                _fh = callee + '\x1f' + _as_str(cparams[_i])
+                if _fk not in fwd:
+                    fwd[_fk] = []
+                    fwd_keys.append(_fk)
+                _fhl = _as_list(fwd[_fk])
+                if _fh not in _fhl:
+                    _fhl.append(_fh)
     if not fwd:
         return
     ann = getattr(gen, '_annotated_params', {}) or {}
     changed = True
     while changed:
         changed = False
-        for _key in fwd:
-            _fname = _key[0]
-            _pname = _key[1]
+        for _fk in fwd_keys:
+            _fkp = _as_str(_fk).split('\x1f')
+            _fname = _as_str(_fkp[0])
+            _pname = _as_str(_fkp[1])
             # The callees' CURRENT conclusions, re-read every round — which is
-            # what lets a chain resolve from its real end backwards. A set, so
-            # two forwards disagreeing leave the parameter exactly as it was,
-            # which is the same rule as everywhere else in this file.
-            _cts = set()
-            for _hop in fwd[_key]:
-                _ct = (ipt.get(_hop[0]) or {}).get(_hop[1])
-                if _ct in containers:
-                    _cts.add(_ct)
+            # what lets a chain resolve from its real end backwards. Distinct
+            # conclusions are collected, so two forwards disagreeing leave the
+            # parameter exactly as it was, which is the same rule as everywhere
+            # else in this file.
+            _cts: list = []
+            for _hop in _as_list(fwd[_fk]):
+                _hp = _as_str(_hop).split('\x1f')
+                _hipt = _as_dict(ipt.get(_as_str(_hp[0])))
+                if not _hipt:
+                    continue
+                _ct = _hipt.get(_as_str(_hp[1]))
+                if _ct is not None and _as_str(_ct) in containers:
+                    if _as_str(_ct) not in _cts:
+                        _cts.append(_as_str(_ct))
             if len(_cts) != 1:
                 continue
-            # `list(...)[0]`, NOT `next(iter(...))`: this function is inside
-            # the self-host closure and `next` is not a symbol the compiled
-            # path links (see the identical note in
-            # `_gmi_apply_call_site_param_evidence`).
-            _want = list(_cts)[0]
-            _cur = (ipt.get(_fname) or {}).get(_pname)
-            if _cur is not None and _cur not in containers:
+            _want = _as_str(_cts[0])
+            _fipt = _as_dict(ipt.get(_fname))
+            _cur = None
+            if _fipt:
+                _cur = _fipt.get(_pname)
+            if _cur is not None and _as_str(_cur) not in containers:
                 continue
-            if (ann.get(_fname) or {}).get(_pname):
+            _fann = _as_dict(ann.get(_fname))
+            if _fann and _fann.get(_pname):
                 continue
-            if _cur == _want:
+            if _cur is not None and _as_str(_cur) == _want:
                 continue
             ipt.setdefault(_fname, {})[_pname] = _want
             # The KIND the callee concluded, recorded for the `==`/`!=`
@@ -6551,8 +6597,9 @@ def gen_module_impl(self, stmts):
             _k = id(body)
             _v = _mk_cache.get(_k)
             if _v is None:
-                _v = _mk_cache[_k] = _infer_return_maybe_kinds(
+                _v = _infer_return_maybe_kinds(
                     self, body, params, callee_kinds)
+                _mk_cache[_k] = _v
             _maybe, _slotkinds = _v
             if _maybe:
                 self._return_maybe_kinds.add(name)
@@ -10554,6 +10601,8 @@ def gen_module_impl(self, stmts):
     # real producer is known. Bounded at four rounds for the same reason:
     # `self._multi_kind_return_funcs` only ever GROWS, so the bound is a
     # depth limit rather than a convergence guess.
+    _mkrf_callee_kinds: dict = {}
+
     def _mkrf_round(callee_set):
         _mkrf_cache: dict = {}
         # Each KNOWN function's single container return kind, filled as this
@@ -10570,11 +10619,14 @@ def gen_module_impl(self, stmts):
             # Memo key includes the sibling map's ID: the answer depends on
             # it, and two functions can share a body node identity while
             # their enclosing scopes give different maps.
-            _k = (id(body), id(sibling_lifted))
+            # `_pair_key`, not the tuple `(id(body), id(sibling_lifted))`: a tuple key
+            # hashes by its heap address once self-hosted, so every lookup missed.
+            _k = _pair_key(str(id(body)), str(id(sibling_lifted)))
             _kinds = _mkrf_cache.get(_k)
             if _kinds is None:
-                _kinds = _mkrf_cache[_k] = _infer_multi_kind_return(
+                _kinds = _infer_multi_kind_return(
                     self, body, params, callee_set, _cg, sibling_lifted)
+                _mkrf_cache[_k] = _kinds
             if len(_kinds) > 1:
                 self._multi_kind_return_funcs[name] = True
             elif len(_kinds) == 1:
@@ -10634,7 +10686,9 @@ def gen_module_impl(self, stmts):
 
     # Round 1 reads an empty set and an empty kind map -- it is the round that
     # finds the producers; rounds 2+ read what the earlier rounds filed.
-    _mkrf_callee_kinds: dict = {}
+    # (`_mkrf_callee_kinds` itself is bound BEFORE `_mkrf_round` is defined,
+    # above: a nested function captures a name's value when its environment is
+    # built, so a binding that comes after the `def` was NULL inside it.)
     _mkrf_round(set())
     for _mkrf_iter in range(3):
         _mkrf_before = len(self._multi_kind_return_funcs)

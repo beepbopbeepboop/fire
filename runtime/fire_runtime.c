@@ -95,6 +95,14 @@ void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLO
 void mojo_cleanup_cancel_n(int64_t n)
 {
     _mojo_cleanup_top -= (int)n;
+    /* A cancel the matching pushes did not cover (a free emitted on a path
+     * that never ran its push) must not drive the top below the empty state:
+     * the NEXT push would index the arrays at a negative offset and scribble
+     * over whatever static data precedes them -- measured, the self-hosted
+     * compiler's own regex group-name table, which then crashed the tokenizer
+     * far from the cause. Clamping makes the imbalance a harmless no-op. */
+    if (_mojo_cleanup_top < -1)
+        _mojo_cleanup_top = -1;
 }
 
 void mojo_cleanup_checkpoint_save(void)

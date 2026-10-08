@@ -1799,39 +1799,52 @@ def nested_def_env_owned(fn_body, name: str) -> bool:
     refuses to look at" — this one asks nothing about a callable VALUE,
     because there is none.
     """
-    # The `def` must not sit inside a `try`. The env's cleanup thunk is pushed
-    # at the `def` statement, so an exception raised after it unwinds (frees
-    # and pops) that thunk BEFORE the handler runs; a `return` in the handler
-    # then frees the env a second time ("pointer being freed was not
-    # allocated"). The handler cannot know whether the thunk is still live --
-    # the `def` is not definitely executed on the way into it -- and "owned on
-    # every path to every exit" is exactly what this rule has to prove. Real:
-    # `ModuleLoader.load_module_from_path`'s whole body is a `try`, with the
-    # nested `_scan_source` inside it and `return {}` in the handler.
-    if _def_inside_try(fn_body, name, False):
+    # The `def` must be a DIRECT statement of the owning function's body, not
+    # nested in an `if`/loop/`try`/`with`. The env's cleanup thunk is pushed
+    # at the `def` statement and `emit_return_frees` frees-and-cancels it at
+    # EVERY later `return` in the function -- which is only sound when the `def`
+    # has run on every path to that return. A `def` inside one arm of an `if`
+    # (or a loop that may not iterate, or a `try` whose handler returns after
+    # the unwind already freed it) breaks that: the other arms' returns freed an
+    # env that was never allocated and cancelled a thunk nobody pushed, driving
+    # the cleanup-stack top below -1 so the next push wrote BEFORE the array --
+    # onto an unrelated static table. Real: `lower_binary`'s nested
+    # `class_member_and_name` (the self-hosted compiler's own `a == b` lowering)
+    # and `ModuleLoader.load_module_from_path`'s `_scan_source`, whose whole
+    # body is a `try`. A top-level `def` is executed before anything after it,
+    # which is the dominance the free needs.
+    if not _def_is_toplevel_statement(fn_body, name):
         return False
     return _lambda_uses_ok(fn_body, name)
 
 
-def _def_inside_try(node, name: str, in_try: bool) -> bool:
-    """True iff a nested `def name` is lexically inside some `try` (body,
-    handler, else or finally) of `node`."""
+def _def_is_toplevel_statement(fn_body, name: str) -> bool:
+    """True iff `fn_body` (the owner's statement list) has exactly one `def
+    name` and it is one of that list's own statements."""
+    top = 0
+    for st in fn_body:
+        if isinstance(st, N.FunctionDef) and _as_str(st.name) == name:
+            top += 1
+    if top != 1:
+        return False
+    return _count_defs_named(fn_body, name) == 1
+
+
+def _count_defs_named(node, name: str) -> int:
+    """How many `def name` statements `node` contains at any depth."""
     if isinstance(node, (list, tuple)):
+        n = 0
         for item in node:
-            if _def_inside_try(item, name, in_try):
-                return True
-        return False
+            n += _count_defs_named(item, name)
+        return n
     if not _is_node(node):
-        return False
-    if isinstance(node, N.FunctionDef):
-        if in_try and _as_str(node.name) == name:
-            return True
-        return _def_inside_try(node.body, name, in_try)
-    inside = in_try or isinstance(node, N.TryStmt)
+        return 0
+    n = 0
+    if isinstance(node, N.FunctionDef) and _as_str(node.name) == name:
+        n = 1
     for f in dataclasses.fields(node):
-        if _def_inside_try(getattr(node, f.name), name, inside):
-            return True
-    return False
+        n += _count_defs_named(getattr(node, f.name), name)
+    return n
 
 
 def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:

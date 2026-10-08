@@ -32,6 +32,7 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.backend_gimple.emit_funcs as _ggf
+from fire_compiler import _as_set
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -6317,8 +6318,15 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # emitted the real `int64_t __GIMPLE lm_helper_Thing_show (Thing * self)`.
     # The struct-typedef pass's OWN guard is `_MOJO_STUB_<Struct>` (no method
     # name), so it could never have suppressed this one.
-    _methods_here = (getattr(gen, '_struct_method_names', {}) or {}).get(
-        struct_name) or []
+    # `_as_set`: `_struct_method_names` is `dict[str, set[str]]`, but the value
+    # type is not recorded on the self-hosted path, so the bare lookup was
+    # compiled as a LIST and `method not in _methods_here` ran
+    # `mojo_list_contains_str` over a `MojoSet` -- a strcmp on garbage, the
+    # SIGSEGV that killed every self-hosted compile that lowered a method call.
+    _mh_raw = (getattr(gen, '_struct_method_names', {}) or {}).get(struct_name)
+    _methods_here: set = set()
+    if _mh_raw:
+        _methods_here = _as_set(_mh_raw)
     if (mangled not in gen._KNOWN_SIGS
             and mangled not in gen.func_return_types
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types

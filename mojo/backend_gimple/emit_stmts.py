@@ -3859,8 +3859,18 @@ def _gen_stmt_ExprStmt(gen, node):
                       or gen._func_param_defaults.get(raw_name) or [])
             _n_req = len(expected_params) - len(_dflts)
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
+            # By parameter NAME when the callee's names line up with its C
+            # parameters -- see `_kwarg_param_names` (this twin used to append
+            # keyword values in call-site order, to whatever slot was next).
+            _kwn_names = gen._kwarg_param_names(raw_name, fname,
+                                                len(expected_params), kwarg_dict)
             while len(arg_pairs) < len(expected_params):
-                if kwarg_values:
+                if _kwn_names is not None:
+                    _kwn_here = _as_str(_kwn_names[len(arg_pairs)])
+                    if _kwn_here in kwarg_dict:
+                        arg_pairs.append(kwarg_dict[_kwn_here])
+                        continue
+                elif kwarg_values:
                     arg_pairs.append(kwarg_values.pop(0))
                     continue
                 _pos = len(arg_pairs)
