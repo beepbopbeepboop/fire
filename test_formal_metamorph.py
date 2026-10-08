@@ -350,6 +350,30 @@ class TransformSoundness(unittest.TestCase):
                                      f"{tname} is not deterministic, so a "
                                      f"finding cannot be re-run")
 
+    def test_reorder_refuses_a_pair_that_aliases_through_an_assignment(self):
+        """`A = h.b` makes `A[0]` and `h.b[0]` one memory, so a store through
+        one is not independent of a read through the other.
+
+        Measured on `refs:0` of the generated corpus: swapping `h.b[0] = 62`
+        past `w = A[0]` changed the printed value 62 → 46, and the two
+        statements mention no name in common.  This program has that pair as
+        its ONLY swappable adjacency, so the assertion is that `reorder`
+        declines outright (`twin` is None) rather than swapping it.
+        """
+        source = ("class H:\n"
+                  "    def __init__(self):\n"
+                  "        self.b = [0]\n"
+                  "def main() -> Int32:\n"
+                  "    h = H()\n"
+                  "    A = h.b\n"
+                  "    h.b[0] = 62\n"
+                  "    w = A[0]\n"
+                  "    print(w)\n"
+                  "    return 0\n")
+        self.assertIsNone(twin(source, "alias_through_a_field", "reorder"),
+                          "reorder swapped a store through `h.b` past a read "
+                          "through its alias `A`")
+
 
 class ScopeResolution(unittest.TestCase):
     """The predicates `Analysis` computes, one case each.
@@ -672,8 +696,12 @@ class TheDriver(unittest.TestCase):
         prog = {"text": "def main() -> Int32:\n    return 0\n",
                 "verbatim": None, "driver_args": "", "test_input": None,
                 "notes": (), "reason": None}
+        # `OracleAnswer`, not a bare `(exit, stdout)` tuple: `has_oracle` reads
+        # the first element through `oracle_answer`, which returns None for
+        # anything that is not the type, so a tuple mock makes every one of
+        # these pairs `not-answerable` before the backends are ever asked.
         with mock.patch.object(F, "cpython_answer",
-                               return_value=((0, ""), "")), \
+                               return_value=(F.OracleAnswer(0, ""), "")), \
              mock.patch.object(M.F, "run_on",
                                lambda b, t, d, n, test_input=None:
                                base_by_backend[b]):
@@ -1184,18 +1212,34 @@ class Normalising(unittest.TestCase):
         semantics.  Asserting a floor rather than 52 keeps the assertion honest
         when a future example adds a construct — the point is that the tool
         measures the corpus, not that it measures every file in it.
+
+        The floor is the corpus minus the DOCUMENTED `struct` gap, and nothing
+        else.  `struct Point:` cannot be translated by removing syntax — a
+        Python `class` body of bare annotations has no attributes, so the
+        translation manufactures a disagreement with CPython (see
+        `normalise_mojo`'s "NOT here" paragraph) — so those examples are
+        excused BY NAME.  Every other undriven file fails, which is what stops
+        the number drifting: the eleven `@refines` examples this test used to
+        count as undriven were a real normaliser hole, not a floor, and the
+        `@refines` rule closes them.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
+        #: The `struct`-shaped examples, excused one by one.  A NEW file that
+        #: needs a `struct` added here is a deliberate act, not a silent drift.
+        STRUCT_EXAMPLES = {"wide_recv.mojo", "struct_point.mojo",
+                           "struct_method.mojo"}
         stems = [f for f in os.listdir(EXAMPLES) if f.endswith(".mojo")]
         driven = 0
         for stem in stems:
             with open(os.path.join(EXAMPLES, stem)) as f:
                 if M.example_program(f.read())["text"] is not None:
                     driven += 1
-        self.assertGreaterEqual(driven, len(stems) - 1,
+        allowance = len(STRUCT_EXAMPLES & set(stems))
+        self.assertGreaterEqual(driven, len(stems) - allowance,
                                 f"{len(stems) - driven} of {len(stems)} examples "
-                                f"are not measured")
+                                f"are not measured (allowance is the "
+                                f"{allowance} struct examples)")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(
