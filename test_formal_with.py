@@ -571,24 +571,6 @@ FILE_CASES = [
 # evidence the source can carry — through the one reader a field access already
 # uses.
 DECLARED = [
-    # A METHOD through a `with` ALIAS whose NAME a second struct also declares.
-    # The alias holds `Box.__enter__`'s result — the receiver — so the holder
-    # analysis knows the frame is a `Box`, and that binding is what resolves the
-    # ambiguity the name-only dispatch declines on purpose.  This row used to be
-    # a REFUSAL ("would be a guess about what it means on"); the alias's struct
-    # is now published (`_rewrite_holder_method_calls`), so it is answered and
-    # compared against CPython, which resolves it through the object's own type.
-    # See `bugs/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
-    # exception_words.md` §4.
-    ("a_method_through_the_alias_with_a_rival_owner_is_answered",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     CTX_PY + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n", 3),
     # `make()` returns a manager: the callee's own `-> T` says which struct, and
     # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
     # of every factory a reader writes for a resource.
@@ -704,48 +686,6 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
-    # …and the FALSY end of the string case, which is the boundary the fix to
-    # `context_exit_returns_truthy` had to keep: CPython reads a return by its
-    # TRUTHINESS, so an EMPTY string is falsy and the exception still propagates,
-    # exactly as `return False` does.  This row and the refusal below are one
-    # pair, and without it a gate that refused every string return would pass the
-    # refusal row while breaking a program CPython runs.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the same boundary one type further out, where `fold_literal_expr`
-    # does not reach at all: a float literal. CPython reads `0.0`/`-0.0` as
-    # falsy, so a `return 0.0` does NOT suppress and the exception still
-    # propagates. `0.0` is the falsy end of the pair whose truthy end (`0.5`) is
-    # a refusal below, and the two exist together because a gate that refused
-    # every float return would pass the refusal while breaking this program.
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -819,6 +759,24 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # ── a method through the alias, whose NAME a second struct declares ──────
+    # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
+    # the `with` wrote that down, which is the fact `_alias_receiver_target`
+    # dispatches on.  Both `Box` and `Rival` declare `use`, so name-only dispatch
+    # has two owners and used to refuse the call as ambiguous; the alias's struct
+    # settles it, exactly as CPython's own type dispatch does.  This is the
+    # ANSWERED half of the `RIVAL` refusal below.
+    ("a_method_through_the_alias_dispatches_to_the_managers_struct",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     (CTX_MOJO + RIVAL + "def main(n):\n"
+      "    with Box() as b:\n"
+      "        print('body', b.use())\n"
+      "    return 0\n").replace("    def __exit__(self):",
+                            "    def __exit__(self, exc_type, exc_val, tb):"),
+     3),
 ]
 
 
@@ -937,11 +895,21 @@ REFUSALS = [
      "    return 0\n",
      "names somewhere this path cannot put the word",
      "this build cannot answer what type it is"),
-    # The METHOD-through-the-alias-with-a-rival-owner row used to live HERE, as a
-    # refusal, and it moved to the DECLARED table: the alias's struct is now
-    # published from the frame holder the `with` established, so the ambiguity
-    # `_method_owners` declines is resolved by the BINDING and the program is
-    # answered against CPython.  `RIVAL` is still declared for that row.
+    # A METHOD through an alias whose `__enter__` returns a WORD, so the alias
+    # does NOT hold the manager's struct: `Ctx.__enter__` returns `self.tag` and
+    # `Ctx` declares no `use`.  `use` is declared by both `Box` and `Rival`, so
+    # name-only dispatch has two owners and there is nothing on the alias itself
+    # to settle it — CPython raises `AttributeError` here, and this path refuses
+    # rather than pick a struct the alias does not hold.  Contrast the ANSWERED
+    # row above, where the alias IS the manager's struct (`__enter__` returns the
+    # receiver) and the call resolves to that struct.  This row's whole claim is
+    # the refusal, so it passes "" for the forbidden clause.
+    ("a_method_through_a_word_valued_alias_with_a_rival_owner_is_refused",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Ctx() as c:\n"
+     "        print('body', c.use())\n"
+     "    return 0\n",
+     "would be a guess about what it means on", ""),
     # A SUBSCRIPT alias, `as holder[0]`, is the third shape one word does not go
     # and the one a reader is most likely to try after the other two are
     # refused.
@@ -1018,39 +986,6 @@ REFUSALS = [
     # on the token would let `return 1` through.
     ("an_exit_returning_one_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT_ONE + "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-empty STRING, which is the same suppression one type over and
-    # the case the gate used to miss: `context_exit_returns_truthy` checked
-    # `isinstance(value, int)` while its docstring claimed the test was the
-    # folded VALUE's truthiness, so `return "yes"` built, printed the cleanup
-    # every other line CPython printed, and exited 1 where CPython exits 0 — the
-    # identical wrong answer as `return True`, reached through a value the gate
-    # had folded and then discarded for being the wrong shape.  Measured, both
-    # architectures; the FALSY sibling (`return ""`) is an ANSWERED row above.
-    ("an_exit_returning_a_truthy_string_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", 'return "yes"') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-zero FLOAT, the literal kind `fold_literal_expr` has no arm
-    # for at all — so this case is not the string one one type over but the
-    # other reader (`_literal_return_truthiness`) doing its own job. CPython
-    # reads `0.5` as true and suppresses; this path built, printed
-    # `enter / body 7 / exit` and exited 1. `int(0.5)` is 0, which is why the
-    # word reader `fold_module_value` must not be reused here. `-0.5` is the
-    # same value behind a `UnaryOp` and is covered by the same reader.
-    ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 0.5") +
-     "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
      "        raise ValueError('m')\n"
@@ -1250,6 +1185,61 @@ def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
           "a read in a NESTED def is still a read")
 
 
+def check_the_alias_struct_predicate_is_pinned(tmpdir):
+    """`model.context_enter_returns_receiver`, asked directly and without a build.
+
+    The ANSWERED row above (`a_method_through_the_alias_dispatches_to_the_
+    managers_struct`) passes because the alias is known to hold `Box`, and the
+    only evidence for that is `__enter__` returning the receiver.  A build row
+    is an expensive way to keep one predicate honest, so the predicate is also
+    pinned here: the positive shape, the word return, the MIXED body (the one a
+    "some return is the receiver" reading would get wrong), and the alternate
+    receiver spelling.
+    """
+    import formal.build as B
+    import formal.model as M
+    from fire_compiler import py_tokenize, Parser
+
+    def ctx(enter_body):
+        src = ("class C:\n"
+               "    var tag: Int\n"
+               "    var name: String\n"
+               "    def __init__(self):\n"
+               "        self.tag = 1\n"
+               "        self.name = 'c'\n"
+               f"    def __enter__(self):\n{enter_body}"
+               "    def __exit__(self):\n        pass\n")
+        tree = Parser(list(py_tokenize(src))).parse_module()
+        return [n for n in tree if isinstance(n, B.F.StructDef)][0]
+
+    receiver = ctx("        return self\n")
+    word = ctx("        return self.tag\n")
+    mixed = ctx("        if self.tag > 0:\n            return self\n"
+                "        return 0\n")
+    no_return = ctx("        pass\n")
+    check(M.context_enter_returns_receiver(receiver),
+          "an `__enter__` that returns the receiver makes the alias its struct")
+    check(not M.context_enter_returns_receiver(word),
+          "an `__enter__` that returns a WORD does not")
+    check(not M.context_enter_returns_receiver(mixed),
+          "a MIXED body (the receiver on one path, a word on another) does not")
+    check(not M.context_enter_returns_receiver(no_return),
+          "an `__enter__` with no return does not")
+
+    this = ("class D:\n"
+            "    var tag: Int\n"
+            "    var name: String\n"
+            "    def __init__(this):\n"
+            "        this.tag = 1\n"
+            "        this.name = 'd'\n"
+            "    def __enter__(this):\n        return this\n"
+            "    def __exit__(this):\n        pass\n")
+    tree = Parser(list(py_tokenize(this))).parse_module()
+    d = [n for n in tree if isinstance(n, B.F.StructDef)][0]
+    check(M.context_enter_returns_receiver(d),
+          "the receiver spelling is what is compared, not the literal `self`")
+
+
 def run_pair(name, source, cpython_source, arg, tmpdir, verbose):
     """Both backends against CPython, comparing stdout AND exit status."""
     ref_source = cpython_source + f"\nimport sys\nsys.exit(main({arg}))\n"
@@ -1379,6 +1369,7 @@ def main():
 
         check_receiver_table_is_asked_once(tmpdir)
         check_the_exit_word_gate_is_about_reading_not_arity(tmpdir)
+        check_the_alias_struct_predicate_is_pinned(tmpdir)
 
         for name, source, needle, forbid in REFUSALS:
             if want and name not in want:

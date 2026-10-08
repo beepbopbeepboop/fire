@@ -9,6 +9,31 @@ unwinder: a `__exit__` that READS any of the three words is still refused, by
 name, because there is no exception value to pass and a fabricated one would be
 a lie the method then acted on.**
 
+**Status 2026-10-08 (`work/formal210-docs`): §4's third boundary — the method
+through the alias whose NAME a second struct declares — is FIXED, and it is the
+one thing in this document a light worker could close.** The alias is bound to
+`__enter__`'s RESULT, and when that is the receiver itself (`__enter__` returning
+`self`) the alias IS the manager's struct, which the `with` wrote down. That fact
+was previously unused, so a name two structs declared was refused as ambiguous
+even where CPython's own type dispatch answers it. The fix is two pieces:
+`formal/model.py::context_enter_returns_receiver` (the ONE reader of "does
+`__enter__` hand its receiver back": every return must yield the receiver, so the
+mixed body and the word return both answer False) and
+`formal/build.py::_alias_receiver_target`, asked by `_rewrite_method_calls` after
+name-only dispatch declines, which lifts `b.m(x)` to the alias's own struct. The
+alias's struct is recorded on the function by `_with_protocol`
+(`fn._with_alias_structs`), so the method rewrite in the same pass can read it.
+Measured: `test_formal_with.py` **363 checks, PASS=363 FAIL=0** (was 352), the
+new ANSWERED row
+`a_method_through_the_alias_dispatches_to_the_managers_struct` running Box/Rival
+(the exact fixture the REFUSED row used) against CPython on both backends, and
+the REFUSED row that replaces it is the WORD-valued alias
+(`Ctx.__enter__` returns `self.tag`, so the alias is not the struct) — the
+boundary is now "the alias's `__enter__` returns the receiver", not "by name".
+`test_formal_run.py` PASS=1187 FAIL=0 and `test_formal_hostmods_census.py`
+74/74 rows build are unchanged. The unwinder below is untouched and is still
+what the HEADLINE of this document is about.**
+
 **What landed, and why it is not the signature change §3 warns against.** The
 three words still have nowhere to come from; the fix does not invent them. It
 distinguishes the shape that USES them from the shape that does not, and lowers
@@ -51,13 +76,11 @@ workaround §3 points the reader at, applied by the COMPILER instead of by the
 reader, and it is safe precisely because the arguments are provably unused.
 
 **Area:** FORMAL, context managers. Claim `project:with-statements`, measured
-2026-10-05 on `work/formal56-with-statements`. **PARTIAL: the §4 alias-dispatch
-limit is CLOSED (2026-10-07, `work/formal118-docs`); the three-exception-word
-signature below is still OPEN**, because it needs the unwinder. One of three
-limits this project measured and did not close; the other two are
+2026-10-05 on `work/formal56-with-statements`. One of three limits
+this project measured; the other two are
 `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` (the narrow half of
 the same missing unwinder, which IS now refused when the value is foldable) and
-the alias-dispatch note in §4, which is no longer one of them.
+the alias-dispatch note in §4.
 
 **Read this before planning the rest of the work.** What is left is the
 unwinder, and §3 is why the same missing unwinder is
@@ -197,32 +220,23 @@ second is the same missing unwinder seen through a narrower door:
     dropped on the floor). See
     `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` for the
     remaining half of that;
-  * ~~a method call through the alias whose NAME a second struct also declares.~~
-    **CLOSED 2026-10-07 (`work/formal118-docs`).** The alias's struct is now
-    published into `formal/build.py`'s frame-holder table — the alias is bound to
-    `S.__enter__(tmp)`, and when `__enter__` returns its receiver that call is a
-    frame-returning call, so the holder fixpoint already knows the alias is an
-    `S` (which is why `b.tag` lowered while `c.tag` for an `__enter__` that
-    returns a field still refuses). `_rewrite_holder_method_calls` runs beside
-    `_rewrite_nested_method_calls` against the same `by_name` table and lifts the
-    bare-name receiver the name-only dispatch declined, with
-    `_derived_overrides`'s guard copied so a child that overrides the member is
-    still refused. `test_formal_with.py`'s
-    `a_method_through_the_alias_with_a_rival_owner_is_answered` is the row (it
-    moved from the REFUSED table to the DECLARED one, against CPython on both
-    architectures), and `test_formal_run.py`'s
-    `ambiguous_name_a_derived_struct_also_declares_is_still_refused` still pins
-    the one clause that must not be waived. The context-manager-to-a-value
-    spelling and the `__enter__`-returns-a-word spelling both stay refused, which
-    is what keeps a wrong layout unreachable.
+  * a method call through an alias whose `__enter__` returns a WORD
+    (`Ctx.__enter__` returns `self.tag`), so the alias is not the manager's
+    struct and there is nothing on it to settle a name two structs declare. It
+    is REFUSED, not picked — deliberately, because a build that picked silently
+    would read the other struct's layout. **The receiver-returning case is no
+    longer here**: when `__enter__` returns the receiver the alias IS the
+    manager's struct, `formal/model.py::context_enter_returns_receiver` says so,
+    and `formal/build.py::_alias_receiver_target` dispatches the method to that
+    struct (2026-10-08, `work/formal210-docs`; the ANSWERED row
+    `a_method_through_the_alias_dispatches_to_the_managers_struct` is the
+    Box/Rival program this bullet used to be the refusal of).
 
 ## 5. The reproduce line for the whole table
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py
 
-338 checks, both architectures (measured 2026-10-07). §1's "ANSWERED" rows are
-its 28 ANSWERED + 7 DECLARED + 3 resource rows; §4's remaining shapes are among
-its 16 REFUSED rows. The former two-owner alias row is now the seventh DECLARED
-row (`a_method_through_the_alias_with_a_rival_owner_is_answered`), not a
-refusal: its alias's `Box` receiver is published by the holder analysis, so the
-ambiguity the name-only dispatch declines is settled by the binding.
+363 checks, both architectures (2026-10-08). §1's "ANSWERED" rows are its
+ANSWERED + DECLARED + resource rows; §4's shapes are its REFUSED rows, and the
+receiver-returning alias moved from the REFUSED side to the ANSWERED side on
+2026-10-08 (`a_method_through_the_alias_dispatches_to_the_managers_struct`).
