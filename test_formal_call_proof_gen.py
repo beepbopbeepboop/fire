@@ -6666,7 +6666,7 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
         for name, _source, sym, _reached in self.PROBES:
             with self.subTest(probe=name):
                 entry = self.infos[name].get("func_offset")
-                stub = [c for c in self.calls[name]
+                stub = [c for c in self.infos[name]["extern_calls"]
                         if c["addr"] is not None and entry is not None
                         and c["addr"] < entry]
                 self.assertEqual([c["sym"] for c in stub], ["getrlimit"],
