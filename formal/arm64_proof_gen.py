@@ -10115,6 +10115,13 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     not, plus `mod_by_var` itself through Lean's kernel.
     """
     exit_addr = base + len(code)
+    # **From the entry FUNCTION, not the startup stub** — the stub's
+    # `bl getrlimit` goes through a `__TEXT,__stubs` trampoline the model cannot
+    # follow, so a run started there stops before the program.  `func_entry` is
+    # the entry function's label; `base` remains the code's base address, which
+    # `exit_addr` and the addresses below are measured from.
+    if func_entry is None:
+        func_entry = base
     # The entry function's ARGUMENT words as the startup stub materialized
     # them (`model.entry_arg_values`, already widened to `arity`), so a
     # two-parameter entry's run starts from the same x0/x1 the binary was
@@ -11128,10 +11135,10 @@ def generate_arm64_proof(prog, code, info) -> str:
     if extern_calls:
         run_test, step_tests = _gen_extern_test(
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            func_entry=info["labels"].get(func_name, base_addr),
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
-            admitted_names=_admitted_used_names, scope=_vscope,
-            func_entry=info["labels"].get(func_name, base_addr))
+            admitted_names=_admitted_used_names, scope=_vscope)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),

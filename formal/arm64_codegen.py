@@ -57,15 +57,12 @@ _SCRATCH_CHUNK = 4080
 DARWIN_SYS_WRITE = 4
 DARWIN_SYS_EXIT = 1
 
-# `RLIMIT_STACK`, the resource whose soft limit is how much stack the process
-# may use. It is a `getrlimit(2)` SELECTOR rather than a constant this backend
-# subtracts anything from, so it is one number with two consumers — the
-# selector in the guard, and `model.STACK_FLOOR_MARGIN_BYTES`'s docstring, which
-# quotes the measurement it comes from. It is 3 on Darwin (`sys/resource.h`) and
-# on Linux (`RLIMIT_STACK` in `bits/resource.h`), and those are the two targets
-# this path emits for; a third would need its own value here rather than a
-# silent reuse of this one.
-_RLIMIT_STACK = 3
+# `RLIMIT_STACK` — the `getrlimit(2)` SELECTOR whose soft limit is how much
+# stack the process may use — lives in `model.RLIMIT_STACK` rather than here:
+# both backends' startup stubs read it, and a copy in each module is how they
+# came to disagree about the arm64 threshold once already. See
+# `_emit_stack_floor_init` for the read and `model.STACK_FLOOR_MARGIN_BYTES` for
+# the measurement behind the budget.
 
 
 # ── IEEE-754 binary64 ─────────────────────────────────────────────────────
@@ -1017,6 +1014,22 @@ dylib_exports: list = None, globals_base: int = None,
         first_func_name = functions[0].name
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
+            # **The stack floor is read ONCE, here in the startup stub — and
+            # AFTER the `stp` that saves X29/X30.** The read is a `getrlimit`
+            # CALL, and a `bl` clobbers X30 (the link register); emitting it
+            # before the save makes the stub's own `ret` jump back to just after
+            # the call and run the body forever (measured: `printf("hi")` in a
+            # non-terminating loop). After the `stp` the real link register is on
+            # the stack and the final `ldp` restores it, exactly as it already
+            # protects the `bl` to the entry function below.
+            #
+            # It has to be here rather than in a guarded prologue because this is
+            # the only place a `call` can live that no path tree walks: a
+            # `getrlimit` inside a prologue is a call on a path a conditional
+            # selects, and `formal/arm64_proof_gen.py`'s universal theorem refuses
+            # that. It runs before the entry arguments are materialised because it
+            # needs X0/X1 and clobbers the caller-saved set. See
+            # `_emit_stack_floor_init`.
             self.asm.emit(encode_stp_sp_pre(29, 30))
             # The stack floor is read here, before any entry argument is
             # materialised: `getrlimit` needs X0/X1 and clobbers every
@@ -1909,6 +1922,10 @@ dylib_exports: list = None, globals_base: int = None,
             ADD X17, SP, #0 ; CMP X17, X16
             B.HS ok                                    SP >= floor: carry set
             <message> ; movz x0, 2 ; movz x16, 1 ; svc #0x80   SP < floor
+
+        There is **no call in this sequence**, and that is deliberate as well as
+        necessary: the `getrlimit` that fills `&limit` lives in the startup stub
+        (`_emit_stack_floor_init`), where no path tree walks it.
 
 **Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way

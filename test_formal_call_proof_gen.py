@@ -6627,6 +6627,7 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-extcall-")
         cls.proofs = {}
         cls.calls = {}
+        cls.infos = {}
         for name, source, sym, _reached in cls.PROBES:
             src = os.path.join(cls.tmp, name + ".mojo")
             with open(src, "w", encoding="utf-8") as f:
@@ -6647,17 +6648,36 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_each_probe_reaches_the_extern_test_at_all(self):
-        """The premise: both images carry exactly one extern call, and it is the
-        one this class is about.  Without this a change that stopped emitting
-        `fflush` for the div0 guard, or stopped emitting a `printf` call, would
-        make every assertion below pass by there being nothing to look at.
+        """The premise: both images carry exactly one PROGRAM extern call, and
+        it is the one this class is about.  Without this a change that stopped
+        emitting `fflush` for the div0 guard, or stopped emitting a `printf`
+        call, would make every assertion below pass by there being nothing to
+        look at.
+
+        **The image carries a second call now — the startup stub's
+        `getrlimit`** (`arm64_codegen.py::_emit_stack_floor_init`) — so the
+        premise is stated about `_program_extern_calls`, which subtracts a call
+        below `func_offset`.  The raw `extern_calls` is asserted too, and that
+        is what keeps this row from passing because the subtraction swallowed a
+        real program call.
         """
+        from formal.arm64_proof_gen import _program_extern_calls
         for name, _source, sym, _reached in self.PROBES:
             with self.subTest(probe=name):
-                self.assertEqual([c["sym"] for c in self.calls[name]], [sym],
-                                 f"{name}: the image's extern calls changed, so "
-                                 f"this class is no longer about the shape it "
-                                 f"was written for: {self.calls[name]}")
+                entry = self.infos[name].get("func_offset")
+                stub = [c for c in self.calls[name]
+                        if c["addr"] is not None and entry is not None
+                        and c["addr"] < entry]
+                self.assertEqual([c["sym"] for c in stub], ["getrlimit"],
+                                 f"{name}: the only call below the entry must "
+                                 f"be the startup stub's `getrlimit`: "
+                                 f"{self.calls[name]}")
+                self.assertEqual(
+                    [c["sym"] for c in _program_extern_calls(self.infos[name])],
+                    [sym],
+                    f"{name}: the image's PROGRAM extern calls changed, so this "
+                    f"class is no longer about the shape it was written for: "
+                    f"{self.calls[name]}")
 
     def test_no_reachability_obligation_is_emitted(self):
         """`…_pre_reaches_{i}` is GONE, and it is the absence that matters.
@@ -6759,7 +6779,11 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
         """
         for name, _source, _sym, _reached in self.PROBES:
             with self.subTest(probe=name):
-                addr = self.calls[name][0]["addr"]
+                # The PROGRAM call's address, not `[0]`: the startup stub's
+                # `getrlimit` is emitted at a lower address, so `[0]` is the
+                # stub and this row would look for the wrong `BL`.
+                addr = next(c["addr"] for c in self.calls[name]
+                            if c["sym"] == _sym)
                 self.assertIn(f"have hpc : ({name}_pre_0).pc = {addr}",
                               self.proofs[name],
                               f"{name}: the BL step theorem's `hpc` is not the "
