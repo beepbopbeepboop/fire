@@ -1692,7 +1692,18 @@ dylib_exports: list = None, globals_base: int = None,
         self._current_function = None
 
     def _emit_epilogue(self) -> None:
-        _emit_add_imm(self.asm, 31, 31, _SCRATCH)
+        # The flush pushes X0 on the stack around the finally bodies, and a
+        # `return` inside one of those bodies tears the frame down WHILE the
+        # pushes are still outstanding — so SP is `16 * _flush_push_depth`
+        # below the frame base here.  Add that back with `_SCRATCH`, or the
+        # post-index LDPs reload the saved x19..x28/x29/x30 from 16 bytes too
+        # low and `ret` jumps to garbage (measured: SIGBUS on arm64 for
+        # `try: return 1 finally: print(); return 2`).  x86-64 is immune
+        # because its epilogue resets RSP from RBP (`leave`); this is arm64's
+        # equivalent, and it is a no-op when no flush is active, which is
+        # every ordinary return.
+        _emit_add_imm(self.asm, 31, 31,
+                      _SCRATCH + 16 * self._flush_push_depth)
         for i in reversed(range(self._npairs)):
             self.asm.emit(encode_ldp_sp_post(19 + 2 * i, 20 + 2 * i))
         self.asm.emit(encode_ldp_sp_post(29, 30))
