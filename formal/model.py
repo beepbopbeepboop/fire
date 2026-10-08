@@ -23048,7 +23048,7 @@ def function_returns_a_value(fn) -> bool:
     return fn_returns_a_value(fn) or fn_declares_a_return(fn)
 
 
-def returnless_value_refusal(callee: str) -> str:
+def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:
     """Why rendering the result of `callee(…)`, which returns nothing, is wrong.
 
     One message for both backends, and it is asked from `_print_call` in each of
@@ -23056,6 +23056,9 @@ def returnless_value_refusal(callee: str) -> str:
     value this path cannot carry becomes TEXT: the arithmetic case computes with
     the word and the `x = f()` case is silent until somebody prints `x`, but a
     printed `None` is the shape CPython answers and the one a reader recognises.
+    `printf` is the second such position and asks the same question through
+    `returnless_printf_argument_refusal`, so `rendering` names which call is
+    doing the rendering.
 
     The wording discipline is `string_concat_refusal`'s: name the callee, say
     what CPython answers, say what this path has instead, and say what to do. A
@@ -23064,7 +23067,7 @@ def returnless_value_refusal(callee: str) -> str:
     a number the source wrote.
     """
     return (
-        f"print() is asked to render the value of {callee}(…), and {callee} "
+        f"{rendering} is asked to render the value of {callee}(…), and {callee} "
         f"returns nothing: CPython evaluates that call to `None` and prints "
         f"`None`, and a value on this path is one 64-bit word with no way to "
         f"say `no value` — the epilogue writes no return register, so the word "
@@ -23075,6 +23078,36 @@ def returnless_value_refusal(callee: str) -> str:
         f"plausible number is worse than a refusal. Give {callee} a `return`, "
         f"or do not use its value"
     )
+
+
+def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
+    """The refusal for a printf vararg that renders a return-less call, or None.
+
+    **`printf` is the other position where a value this path cannot carry
+    becomes TEXT, and it was unguarded.** `print` builds its format from its own
+    operands and refuses each of them in `_print_call`; a `printf` the SOURCE
+    wrote was only checked for a usable FORMAT, so `printf("%d", g(…))` for a `g`
+    with no `return` built and printed the leftover word — the same divergence
+    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
+    None.md` refuses for `print(g(…))`, at the same position (the value's word
+    becoming text) and one call spelling away.
+
+    `no_value_callee_of` is the caller's `ValueKinds` hook, the one reader of
+    "this expression's value is the result of a function that returns nothing";
+    it is passed in rather than re-derived so `print` and `printf` cannot answer
+    that question differently. The format's index comes from
+    `printf_format_arg_index`, so `sprintf`'s buffer argument is not mistaken for
+    an operand. Both emitters ask this at the same line they ask the format
+    check, so the two architectures cannot disagree about one call.
+    """
+    idx = printf_format_arg_index(name)
+    if idx is None:
+        return None
+    for a in list(args)[idx + 1:]:
+        callee = no_value_callee_of(a)
+        if callee is not None:
+            return returnless_value_refusal(callee, "printf()")
+    return None
 
 
 class ValueKinds:
