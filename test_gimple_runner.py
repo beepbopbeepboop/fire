@@ -6722,6 +6722,24 @@ fn main():
     print('a=b'.rpartition(''))
 """, "ValueError: empty separator")
 
+    # The four escapes the shared decoder used to leave verbatim (`\uXXXX`,
+    # `\UXXXXXXXX`, `\N{…}` and a multi-digit octal run). The compiled path
+    # hands a literal's body to the C compiler and passes known escapes
+    # through, so these need `_c_escape` to pass them through too — and
+    # `\N{…}` has no C spelling at all, so it is decoded there. Equality with
+    # the character is the pin: before the fix each spelling was a
+    # six/ten/thirty-five-character string of source text. The `\x41` control
+    # is the escape that already worked, so a fix that broke the pass-through
+    # would go red here.
+    test_gimple_stdout("gimple_named_and_octal_escapes_decode", """\
+fn main():
+    print('é' == '\\u00e9')
+    print('😀' == '\\U0001F600')
+    print('é' == '\\N{LATIN SMALL LETTER E WITH ACUTE}')
+    print('A' == '\\101')
+    print('A' == '\\x41')
+""", "True\nTrue\nTrue\nTrue\nTrue\n")
+
     # The doc's item 6a residue: `partition`'s container TYPE. The doc
     # concluded it was unfixable for want of a tuple type; re-tested, that
     # premise is STALE. A tuple type has existed for some time — a

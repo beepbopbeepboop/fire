@@ -1769,6 +1769,19 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
         j += 1
     return -1
 
+def _hex_run(s: str, start: int, count: int):
+    r"""`s[start:start+count]` when all `count` characters are hex digits, else
+    None. The one place the `\x`/`\u`/`\U` "a short or non-hex run is not an
+    escape" rule is spelled, so the three arms cannot drift apart."""
+    if start + count > len(s):
+        return None
+    k = start
+    while k < start + count:
+        if s[k] not in '0123456789abcdefABCDEF':
+            return None
+        k += 1
+    return s[start:start + count]
+
 def decode_c_escapes(s: str) -> str:
     r"""Decode C-style backslash escapes in a string literal's BODY.
 
@@ -1785,12 +1798,22 @@ def decode_c_escapes(s: str) -> str:
 
         The set: the C simple escapes, plus \xHH.
 
-    \n \t \r \\ \" \' \0 \a \b \f \v, then \x followed by two hex digits. An
-    UNKNOWN escape keeps its backslash (`"\d"` is a backslash and a d, which is
-    CPython's own behaviour and what `gimple_codegen._c_escape` passes through),
-    and a trailing lone backslash is kept verbatim. That is deliberately
-    permissive: a recognised escape it gets WRONG is a wrong answer, while an
-    unrecognised one it leaves alone is what the source most likely meant.
+    \n \t \r \\ \" \' \a \b \f \v, then \xHH (two hex digits), \uXXXX (four),
+    \UXXXXXXXX (eight), \N{NAME} (through `unicodedata.lookup`), and an octal
+    run of one to three digits. An UNKNOWN escape keeps its backslash (`"\d"`
+    is a backslash and a d, which is CPython's own behaviour and what
+    `gimple_codegen._c_escape` passes through), and a trailing lone backslash is
+    kept verbatim. That is deliberately permissive: a recognised escape it gets
+    WRONG is a wrong answer, while an unrecognised one it leaves alone is what
+    the source most likely meant.
+
+    `\u`, `\U`, `\N{...}` and a multi-digit octal run were the four escapes
+    MISSING from the table, and each was a silent wrong answer (a `"\u00e9"`
+    was six characters). The octal run is also why `\0` cannot stay a one-char
+    table entry: a bare `\0` and `\101` are the same two characters of input,
+    so the run has to be consumed whole. `\x` keeps its "refuse a short one"
+    rule (CPython's `"\x41"` is `A`, `"\x4"` is a literal backslash-x-4); the
+    named escapes likewise only fire on a complete, all-hex run.
 
     Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
     that no engine here preserves `r"..."`, so a literal's body arriving here has
@@ -1801,18 +1824,49 @@ def decode_c_escapes(s: str) -> str:
     if '\\' not in s:
         return s
     simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
-              "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+              "'": "'", 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
     out = []
     i, n = 0, len(s)
     while i < n:
         c = s[i]
         if c == '\\' and i + 1 < n:
             nxt = s[i + 1]
+            if nxt in '01234567':
+                # An octal run of one to three digits — and this arm MUST come
+                # before `simple`, because a bare `\0` is the same two source
+                # characters as the start of `\101` and only one of them is an
+                # escape. CPython: `"\0"` is NUL, `"\101"` is `A`, `"\08"` is
+                # NUL then `8` (the run stops at the non-octal digit).
+                j = i + 1
+                digits = ''
+                while j < n and len(digits) < 3 and s[j] in '01234567':
+                    digits += s[j]; j += 1
+                out.append(chr(int(digits, 8))); i = j; continue
             if nxt in simple:
                 out.append(simple[nxt]); i += 2; continue
-            if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
-                    and s[i + 3] in '0123456789abcdefABCDEF':
-                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
+            if nxt == 'x':
+                h = _hex_run(s, i + 2, 2)
+                if h is not None:
+                    out.append(chr(int(h, 16))); i += 4; continue
+            if nxt == 'u':
+                h = _hex_run(s, i + 2, 4)
+                if h is not None:
+                    out.append(chr(int(h, 16))); i += 6; continue
+            if nxt == 'U':
+                h = _hex_run(s, i + 2, 8)
+                if h is not None:
+                    out.append(chr(int(h, 16))); i += 10; continue
+            if nxt == 'N' and i + 2 < n and s[i + 2] == '{':
+                close = s.find('}', i + 3)
+                if close != -1:
+                    # `unicodedata` through `_python_import`, not a top-level
+                    # `import`: a static import would add the module to the
+                    # self-host compile closure, while the dynamic one keeps it
+                    # a runtime lookup. An unknown name raises, exactly as
+                    # CPython's `unicodedata.lookup` does — a decoder that
+                    # invented a character would be a second wrong answer.
+                    _ud = _python_import('unicodedata')
+                    out.append(_ud.lookup(s[i + 3:close])); i = close + 1; continue
             # Unknown escape — leave the backslash as-is (CPython's own
             # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
             # `\\` passthrough.
