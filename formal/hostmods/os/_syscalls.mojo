@@ -1219,7 +1219,10 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 #
 # Every field this module reads is read ONE BYTE AT A TIME through
 # `le16`/`le32`/`le64` below, so each load has the width the field declares.
-# That is the difference from the state
+# The SIGN is the field's too: `st_dev` and `st_rdev` are `int32` (`dev_t`) and
+# CPython sign-extends them, while `st_uid`/`st_gid` are `uint32` — which is why
+# there is a `le32s` beside `le32` rather than one reader for every 32-bit
+# field. That is the difference from the state
 # `FORMAL_stat_out_parameter_is_unreadable` describes: it was not the
 # offsets that made the struct unreadable, it was that a read of it was a
 # COUNT-WALK — a bounds check against whatever word was at offset 0. A byte
@@ -1240,6 +1243,23 @@ def le16(b: Pointer[UInt8], i) -> int:
 def le32(b: Pointer[UInt8], i) -> int:
     """The little-endian 32-bit field at byte `i` of `b`."""
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
+
+
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` zero-extends, which is right for `st_uid`/`st_gid` (`uid_t`/`gid_t`
+    are unsigned) and wrong for `st_dev`: `dev_t` is `int32_t` on this target,
+    so a device number at or above `2**31` is NEGATIVE and CPython sign-extends
+    it into the 64-bit `st_dev` it reports — `os.stat("/dev/null").st_dev` is
+    `0xffffffffa8fb1a80`, whose high half is all ones. A zero-extended read
+    answers the low word and disagrees on every device the kernel numbers that
+    way, which is most of them.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        v = v - 4294967296
+    return v
 
 
 def le64(b: Pointer[UInt8], i) -> int:
@@ -1597,12 +1617,28 @@ def fs_stat_field32(p, follow, at) -> int:
 
     `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
     and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    width is the field's and not the alignment's. ZERO-extended: `uid_t` and
+    `gid_t` are unsigned, so this is the right reader for them; `st_dev` is a
+    signed `dev_t` and has `fs_stat_field32_signed` beside this one.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32_signed(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    One field uses it — `st_dev`, a `dev_t`, which is `int32_t` here — and the
+    sign-extension is the whole of the difference from `fs_stat_field32`: a
+    device number above `2**31` is negative and CPython reports it as the
+    64-bit value with all-ones in its high half. See `le32s`.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:

@@ -786,11 +786,24 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def word(v):
+        """`v` as the SIGNED 64-bit word the image holds and `%d` renders.
+
+        CPython reports `st_dev` as an UNSIGNED 64-bit int — `dev_t` is
+        `int32_t` here and `os.stat("/dev/null").st_dev` is
+        `18446744072249612928` — while the image's `%d` (which this path widens
+        to `%lld`) renders the same bit pattern signed. The oracle has to read
+        the value the same way the program prints it, or the two disagree on the
+        rendering and not on the device.
+        """
+        v &= 0xFFFFFFFFFFFFFFFF
+        return v - (1 << 64) if v >= (1 << 63) else v
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), word(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
