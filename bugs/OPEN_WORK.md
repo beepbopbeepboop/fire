@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_arm64_instruction_coverage.md` | `formal158-docs` | the arm64 encoder survey, and what wiring the new instructions actually bought |
+| `FORMAL_arm64_instruction_coverage.md` | `formal178-docs` | the arm64 encoder survey, and what wiring the new instructions actually bought |
 | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` | `formal164-docs` | The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register |
 | `FORMAL_model_fuzz_ledger.md` | `formal160-docs` | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal165-docs` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
@@ -54,9 +54,9 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `formal173-docs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | `formal173-docs` | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
-| `FORMAL_arm64_ieee754_has_no_step_arms.md` | `formal158-docs` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
+| `FORMAL_arm64_ieee754_has_no_step_arms.md` | `formal178-docs` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | `formal163-docs` | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
-| `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal158-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
+| `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal178-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | `formal164-docs` | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal176-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | `formal160-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
@@ -74,17 +74,17 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal174-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `formal167-docs` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `formal167-docs` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
-| `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` | `formal158-docs` | `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach |
-| `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` | `formal158-docs` | FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it |
-| `FORMAL_arm64_known_proof_gaps.md` | `formal158-docs` | the arm64 examples whose proof is a documented gap |
+| `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` | `formal178-docs` | `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach |
+| `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` | `formal178-docs` | FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it |
+| `FORMAL_arm64_known_proof_gaps.md` | `formal178-docs` | the arm64 examples whose proof is a documented gap |
 | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` | `formal164-docs` | the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it |
 | `FORMAL_ast_bridge_carries_one_argument_per_call.md` | `formal164-docs` | `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | `formal176-docs` | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
-| `FORMAL_float_step_functions.md` | `formal172-docs` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
+| `FORMAL_float_step_functions.md` | `formal179-docs` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
 | `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | `formal168-docs` | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | `formal177-docs` | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
-| `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | `formal166-docs` | twelve red examples nobody could see, because the suite raised before it generated one |
-| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | `formal166-docs` | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
+| `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | `formal180-docs` | twelve red examples nobody could see, because the suite raised before it generated one |
+| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | `formal180-docs` | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow.md` | `formal161-docs` | the div0 residual goal the zero-divisor class pins is no longer REACHED, so three `test_formal_call_proof_gen.py` rows are red on any tree with a built library |
 | `FORMAL_three_examples_fail_their_proofs_on_master.md` | `formal170-docs` | `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES` |
 | `FORMAL_wide_receiver_by_reference.md` | `formal161-docs` | the one-word value model, and the by-reference receiver that fits inside it |
@@ -99,8 +99,8 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `formal167-docs` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | `formal167-docs` | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | `FORMAL_build_cost_2026-10-03.md` | `formal164-docs` | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
-| `FORMAL_env_family_next_terminal.md` | `formal172-docs` | where the 55-file family stands, and what the next reader needs |
-| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | `formal172-docs` | what `==` still does not reach |
+| `FORMAL_env_family_next_terminal.md` | `formal179-docs` | where the 55-file family stands, and what the next reader needs |
+| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | `formal179-docs` | what `==` still does not reach |
 | `FORMAL_generic_local_binding_has_no_home.md` | `formal168-docs` | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
 | `FORMAL_module_state_no_storage.md` | `formal160-docs` | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | `formal177-docs` | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
@@ -128,8 +128,8 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | `formal177-docs` | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
 | `FORMAL_stdlib_module_names_are_not_classified.md` | `formal175-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal165-docs` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
-| `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | `formal166-docs` | what is left, which of it is reachable, and why four of the next six are not this wave's |
-| `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | `formal166-docs` | what is left of the 203-file host-import row, and why each remaining name is out of reach |
+| `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | `formal180-docs` | what is left, which of it is reachable, and why four of the next six are not this wave's |
+| `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | `formal180-docs` | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
 ### `formal/lean` — 14 documents, 12 claimed
 
@@ -143,10 +143,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | `formal164-docs` | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_contract_ladder_reach.md` | `formal176-docs` | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | `formal176-docs` | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
-| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `formal172-docs` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
+| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `formal179-docs` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
 | `FORMAL_nested_short_circuit_chain_in_a_condition.md` | `formal160-docs` | `((a or b) or c)` is still unproved |
 | `FORMAL_proof_coverage_census_2026-10-03.md` | `formal165-docs` | FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on |
-| `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | `formal166-docs` | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
+| `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | `formal180-docs` | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
 | `FORMAL_proof_census_baseline_has_a_stale_fact_row.md` | **unclaimed** | `formal-proof-census-tool` is red because `fact.mojo` changed after the baseline was written, and the write that banked the 41 new rows did not refresh it |
 | `LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody.md` | **unclaimed** | one careless `repo_root` poisons the CAS for every other caller |
 
@@ -164,7 +164,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | `formal171-docs` | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `formal167-docs` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | `formal167-docs` | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
-| `FORMAL_float_binary64_only.md` | `formal172-docs` | binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice |
+| `FORMAL_float_binary64_only.md` | `formal179-docs` | binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice |
 | `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | `formal168-docs` | A call through a VALUE is not proved to be a call: the word might not be an address |
 | `FORMAL_functools_is_unbuildable_as_a_host_module.md` | `formal168-docs` | every name in CPython's `functools` needs a capability this path lacks, and a module that exports nothing is refused |
 | `FORMAL_fuzz_ledger.md` | `formal168-docs` | what `tools/formal_fuzz.py` has measured, and what came of it |
@@ -178,7 +178,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_std_builtin_sys_time_slice_2026-10-04.md` | `formal165-docs` | FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's |
 | `FORMAL_stdlib_optional_needs_a_representation.md` | `formal175-docs` | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
 | `FORMAL_string_composition_has_no_buffer.md` | `formal165-docs` | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
-| `FORMAL_sweep_singles_second_half.md` | `formal166-docs` | four of §3.2's eight remaining single-file causes are not patches, measured |
+| `FORMAL_sweep_singles_second_half.md` | `formal180-docs` | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md` | `formal161-docs` | FORMAL_the_stack_floor_budget_is_in_BYTES_so_x86_64_allows_8x_the_recursion_depth_arm64_does |
 | `FORMAL_time_struct_shaped_answers.md` | `formal170-docs` | five `time` names are absent because their answer is a struct |
 | `FORMAL_type_name_as_a_value.md` | `formal170-docs` | a bare TYPE name in a value position is refused as a name with no register |
