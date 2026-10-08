@@ -23,19 +23,18 @@ reasons, and the first two are about what the construct can express at all:
     prints are the subject.
   * **the refusals are a contract too.**  `with C() as (a, b)` and `with C() as
     obj.attr` are refused on both backends, and so is a `with` over a
-    one-field struct or over a `__exit__` that READS CPython's own three
+    one-field struct or over a `__exit__` written with CPython's own three
     exception parameters.  The needle is checked on BOTH architectures for
     each: "the two architectures refuse identically, and say the same thing
     about which half is missing" is itself the property, and it is the one a
     sweep reading one architecture's text cannot establish.
 
 **CPython is the oracle wherever the construct runs.**  No hand-written expected
-constant: the same program text goes to `python3` and asks.  `__exit__` written
-with CPython's own `(self, exc_type, exc_val, exc_tb)` is accepted WHEN THE
-BODY IGNORES THE THREE WORDS — the common cleanup-only manager, and the reason
-the ANSWERED table can run CPython's own spelling verbatim — and stays refused
-when the body READS one of them, which is a LIMITS row below rather than a
-translation, because this path has no unwinder to hand those three words to.
+constant: the same program text goes to `python3` and asks.  The one spelling
+difference between the two halves is stated per row — `__exit__` takes
+`(self, exc_type, exc_val, exc_tb)` in CPython and `(self)` here, which is a
+LIMITS row below rather than a translation, because this path has no unwinder
+to hand those three words to.
 
 **Both architectures, always.**  arm64 and x86-64 have answered `with` from two
 private lowerings all along (each emitter's `WithStmt` arm names the other as
@@ -571,24 +570,6 @@ FILE_CASES = [
 # evidence the source can carry — through the one reader a field access already
 # uses.
 DECLARED = [
-    # A METHOD through a `with` ALIAS whose NAME a second struct also declares.
-    # The alias holds `Box.__enter__`'s result — the receiver — so the holder
-    # analysis knows the frame is a `Box`, and that binding is what resolves the
-    # ambiguity the name-only dispatch declines on purpose.  This row used to be
-    # a REFUSAL ("would be a guess about what it means on"); the alias's struct
-    # is now published (`_rewrite_holder_method_calls`), so it is answered and
-    # compared against CPython, which resolves it through the object's own type.
-    # See `bugs/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
-    # exception_words.md` §4.
-    ("a_method_through_the_alias_with_a_rival_owner_is_answered",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     CTX_PY + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n", 3),
     # `make()` returns a manager: the callee's own `-> T` says which struct, and
     # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
     # of every factory a reader writes for a resource.
@@ -704,48 +685,6 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
-    # …and the FALSY end of the string case, which is the boundary the fix to
-    # `context_exit_returns_truthy` had to keep: CPython reads a return by its
-    # TRUTHINESS, so an EMPTY string is falsy and the exception still propagates,
-    # exactly as `return False` does.  This row and the refusal below are one
-    # pair, and without it a gate that refused every string return would pass the
-    # refusal row while breaking a program CPython runs.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the same boundary one type further out, where `fold_literal_expr`
-    # does not reach at all: a float literal. CPython reads `0.0`/`-0.0` as
-    # falsy, so a `return 0.0` does NOT suppress and the exception still
-    # propagates. `0.0` is the falsy end of the pair whose truthy end (`0.5`) is
-    # a refusal below, and the two exist together because a gate that refused
-    # every float return would pass the refusal while breaking this program.
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -766,58 +705,6 @@ DECLARED = [
      "\n"
      "def main(n):\n"
      "    use(Ctx())\n"
-     "    return 0\n", 3),
-    # ── `__exit__` written the way CPython writes it ───────────────────────
-    # `(self, exc_type, exc_val, tb)` is CPython's own signature and what every
-    # context manager in the wild declares.  The three words have nowhere to come
-    # from on this path (no unwinder), but a cleanup-only `__exit__` IGNORES them
-    # — so the signature is not a question about the unwinder at all and the
-    # protocol lowers with the receiver plus three words the method never looks
-    # at (`model.context_exit_ignores_its_exception_words`).  The source is the
-    # SAME text on both engines here, and that is the assertion: the spelling a
-    # reader copied from CPython's docs is the spelling this compiler builds.
-    ("an_exit_that_ignores_cpythons_three_words_runs_the_protocol",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "    print('after')\n"
-     "    return 0\n",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the exit still runs on every way out, which is the half a lowering
-    # that accepted the signature but dropped the `finally` would get wrong.  A
-    # `return` from inside the block must run the ignored-words exit and keep the
-    # value.
-    ("an_ignoring_exit_still_runs_on_return_from_the_block",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "        return 9\n"
-     "    return 0\n",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "        return 9\n"
-     "    return 0\n", 3),
-    # …and on an exception leaving the block, where CPython passes the real
-    # exception words.  The method ignores them and returns falsy, so CPython
-    # re-raises after the cleanup and exits 1 — which is what the image must do
-    # too, because a `raise` here leaves through the same `finally`.
-    ("an_ignoring_exit_still_runs_before_an_exception_leaves",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     CTX_PY + "def main(n):\n"
-     "    with Ctx() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
      "    return 0\n", 3),
 ]
 
@@ -878,22 +765,6 @@ THREE_ARGS = """class ThreeArgs:
         print('exit')
 """
 
-# CPython's own signature, but the body READS one of the three words.  This is
-# the shape that stays refused: the words have nowhere to come from, so any value
-# this path supplied would be a lie the method then acted on.
-THREE_ARGS_READS = """class ReadsArgs:
-    def __init__(self):
-        self.tag = 7
-        self.log = 0
-
-    def __enter__(self):
-        print('enter')
-        return self.tag
-
-    def __exit__(self, exc_type, exc_val, tb):
-        print('exit', exc_val)
-"""
-
 VARIADIC_EXIT = """class Variadic:
     def __init__(self):
         self.tag = 7
@@ -937,11 +808,24 @@ REFUSALS = [
      "    return 0\n",
      "names somewhere this path cannot put the word",
      "this build cannot answer what type it is"),
-    # The METHOD-through-the-alias-with-a-rival-owner row used to live HERE, as a
-    # refusal, and it moved to the DECLARED table: the alias's struct is now
-    # published from the frame holder the `with` established, so the ambiguity
-    # `_method_owners` declines is resolved by the BINDING and the program is
-    # answered against CPython.  `RIVAL` is still declared for that row.
+    # A METHOD through the alias whose NAME a second struct also declares.  The
+    # alias carries no declared type — `Box___enter__(tmp)` returns one word and
+    # nothing says which struct it is a frame of — so dispatch is by NAME, and
+    # `use` has two owners.  CPython resolves it through the object's own type.
+    # Here `_method_owners` pops an ambiguous name on purpose (a name TWO structs
+    # declare is absent, and that absence is what makes the lift decline), so
+    # the call lands in the receiverless arm and is refused rather than picked —
+    # with the "would be a guess about what it means" sentence, which IS the
+    # property: a build that picked silently would print this same program's
+    # answer against the OTHER struct's field layout, and a wrong layout is the
+    # failure nothing else on this path can see.  This row's whole claim is the
+    # refusal, so it passes "" for the forbidden clause.
+    ("a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     "would be a guess about what it means on", ""),
     # A SUBSCRIPT alias, `as holder[0]`, is the third shape one word does not go
     # and the one a reader is most likely to try after the other two are
     # refused.
@@ -973,21 +857,27 @@ REFUSALS = [
      "        print('body')\n"
      "    return 0\n",
      "it declares no __enter__", "is a struct of ONE field"),
-    # ── `__exit__` that READS CPython's three exception words ──────────────
-    # `(self, exc_type, exc_val, tb)` is CPython's own signature, and it is
-    # ACCEPTED when the method ignores the three words (the ANSWERED rows in
-    # DECLARED above).  It stays refused when the body READS one — here, `exc_val`
-    # in the print — because there is no unwinder to supply an exception value:
-    # any word this path passed would be a lie the method then acted on.  The
-    # needle names the reads and the missing runtime, and the forbidden clause is
-    # the old pre-2026-10-05 lie ("it declares no __enter__") about a class that
-    # has one.
-    ("an_exit_that_reads_cpythons_three_words_is_refused_by_name",
-     THREE_ARGS_READS + "def main(n):\n"
-     "    with ReadsArgs() as v:\n"
+    # ── `__exit__` written the way CPython writes it ───────────────────────
+    # **This is the refusal a reader hits first in real code**, because
+    # `(self, exc_type, exc_val, tb)` is CPython's own signature and every
+    # context manager in the wild has it.  The three words are a question about
+    # an UNWINDER: this path has none, so there is nothing to pass them and a
+    # `__exit__` that acted on them could not act anyway.  The needle has to
+    # name `__exit__` and the parameter count, because the pre-2026-10-05
+    # wording for this shape said "it declares no __enter__" — FALSE about a
+    # class that has one — and sent the reader to add a dunder it already had.
+    ("an_exit_with_cpythons_three_exception_parameters_is_refused_by_name",
+     THREE_ARGS + "def main(n):\n"
+     "    with ThreeArgs() as v:\n"
      "        print('body')\n"
      "    return 0\n",
-     "READS them", "it declares no __enter__"),
+     "3 parameters", "it declares no __enter__"),
+    ("an_exit_with_cpythons_three_exception_parameters_blames_the_receiver_arity",
+     THREE_ARGS + "def main(n):\n"
+     "    with ThreeArgs() as v:\n"
+     "        print('body')\n"
+     "    return 0\n",
+     "__exit__", "it declares no __enter__"),
     # `*args` is the variadic form of the same question, and it cannot even be
     # COUNTED from the tree, so it is refused rather than assumed — the same rule
     # a variadic call is refused by.
@@ -1018,39 +908,6 @@ REFUSALS = [
     # on the token would let `return 1` through.
     ("an_exit_returning_one_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT_ONE + "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-empty STRING, which is the same suppression one type over and
-    # the case the gate used to miss: `context_exit_returns_truthy` checked
-    # `isinstance(value, int)` while its docstring claimed the test was the
-    # folded VALUE's truthiness, so `return "yes"` built, printed the cleanup
-    # every other line CPython printed, and exited 1 where CPython exits 0 — the
-    # identical wrong answer as `return True`, reached through a value the gate
-    # had folded and then discarded for being the wrong shape.  Measured, both
-    # architectures; the FALSY sibling (`return ""`) is an ANSWERED row above.
-    ("an_exit_returning_a_truthy_string_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", 'return "yes"') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-zero FLOAT, the literal kind `fold_literal_expr` has no arm
-    # for at all — so this case is not the string one one type over but the
-    # other reader (`_literal_return_truthiness`) doing its own job. CPython
-    # reads `0.5` as true and suppresses; this path built, printed
-    # `enter / body 7 / exit` and exited 1. `int(0.5)` is 0, which is why the
-    # word reader `fold_module_value` must not be reused here. `-0.5` is the
-    # same value behind a `UnaryOp` and is covered by the same reader.
-    ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 0.5") +
-     "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
      "        raise ValueError('m')\n"
@@ -1203,53 +1060,6 @@ def check_receiver_table_is_asked_once(tmpdir):
               f"it was asked {len(asks)} time(s)")
 
 
-def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
-    """The predicate the whole `__exit__(self, exc_type, exc_val, tb)` fix rests
-    on, asked directly rather than through a build.
-
-    A four-parameter `__exit__` is a context manager this path lowers EXACTLY
-    WHEN the body never reads one of the three words
-    (`model.context_exit_ignores_its_exception_words`), and the call arity the
-    lowering uses (`model.context_exit_arity`) has to agree with that gate.  The
-    two build rows above cover the happy path and the read path end to end; this
-    is the cheap in-process half, so a future edit to the gate cannot move the
-    boundary while the two builds keep passing for an unrelated reason.
-    """
-    import formal.build as B
-    import formal.model as M
-    from fire_compiler import py_tokenize, Parser
-
-    def ctx(src):
-        tree = Parser(list(py_tokenize(src))).parse_module()
-        return [n for n in tree if isinstance(n, B.F.StructDef)][0]
-
-    def body(exit_body):
-        return ("class C:\n"
-                "    var tag: Int\n"
-                "    var name: String\n"
-                "    def __init__(self):\n"
-                "        self.tag = 1\n"
-                "        self.name = 'c'\n"
-                "    def __enter__(self):\n        return self.tag\n"
-                f"    def __exit__(self, exc_type, exc_val, tb):\n{exit_body}")
-
-    ignoring = ctx(body("        pass\n"))
-    reading = ctx(body("        print(exc_val)\n"))
-    reading_nested = ctx(body("        def inner():\n"
-                              "            return exc_val\n"
-                              "        pass\n"))
-    check(M.struct_is_context_manager(ignoring),
-          "an `__exit__` with CPython's three words that ignores them is a "
-          "context manager this path lowers")
-    check(M.context_exit_arity(ignoring) == 4,
-          "the ignoring `__exit__` is called with its three words",
-          f"arity {M.context_exit_arity(ignoring)}")
-    check(not M.struct_is_context_manager(reading),
-          "an `__exit__` that READS one of the three words is refused")
-    check(not M.struct_is_context_manager(reading_nested),
-          "a read in a NESTED def is still a read")
-
-
 def run_pair(name, source, cpython_source, arg, tmpdir, verbose):
     """Both backends against CPython, comparing stdout AND exit status."""
     ref_source = cpython_source + f"\nimport sys\nsys.exit(main({arg}))\n"
@@ -1378,7 +1188,6 @@ def main():
             ), tmpdir, args.verbose)
 
         check_receiver_table_is_asked_once(tmpdir)
-        check_the_exit_word_gate_is_about_reading_not_arity(tmpdir)
 
         for name, source, needle, forbid in REFUSALS:
             if want and name not in want:
