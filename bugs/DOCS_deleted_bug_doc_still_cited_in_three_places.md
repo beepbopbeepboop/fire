@@ -24,11 +24,10 @@ moved, which is this doc's subject happening again rather than a new bug:**
 ```
 $ python3 tools/dangling_doc_refs.py
 7 citations of 6 bugs/ docs that are not there, across 2 files
-     1  <the -b13 sweep map>            # spelled WITHOUT the `bugs/` prefix on
-         <the one-character-prefix doc>:59  # purpose: quoting a walk's own
-                                        # output. Both the citing doc and the
-                                        # -b13 map are gone now (the first
-                                        # fixed and deleted 2026-10-07).
+     1  <the -b13 sweep map>            # both halves of this entry are spelled
+         FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md:59
+                                        # BARE on purpose: quoting a walk's output
+                                        # must not itself become a citation
      1  NEVER_WRITTEN.md                # reproduces a citation, which is how
          test_suite.py:2653             # this measurement found itself, once
          test_suite.py:5216

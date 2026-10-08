@@ -8,10 +8,13 @@ landed.
 **Status: PARTIAL — the emptiness as a PREDICATE is FIXED (2026-10-04,
 `formal/model.py`: `_for_emptiness` is the one reader, `_range_is_nonempty`
 reads the preheader's literals, and `_build_cfg` seeds the body's first block
-with the target). What is left is the case whose emptiness is a RUN-TIME fact
-and cannot be one by any build-time decision — a range bound a PARAMETER, which
-is §"What is left" and which now carries the measurement that closes option 1
-below.**
+with the target), and the NAMED-LITERAL iterable is FIXED too (2026-10-08:
+`_preheader_facts` carries a second table, `{name: literal-node}`, and
+`xs = []` then `for i in xs` is the same `'never'` as `for i in []`, so the
+read after it is refused where it used to print the caller's leftover). What is
+left is the case whose emptiness is a RUN-TIME fact and cannot be one by any
+build-time decision — a range bound a PARAMETER, which is §"What is left" and
+which now carries the measurement that closes option 1 below.**
 
 Found 2026-10-03 while fixing the empty-range counter bug (that doc is deleted
 with its fix, `0340e4fc`), whose fix moved the loop's store so that an empty
@@ -24,22 +27,33 @@ nothing else stores is read out of a register nothing wrote.
 Three pieces in `formal/model.py`, and the third is the one that was not
 obvious:
 
-1. **`_for_emptiness(stmt, consts)` is the ONE reader of "does this loop's
-   iterable yield a value"** — `'always'` / `'never'` / `'maybe'`. It replaces
-   the iterable half of `_loop_body_always_runs` and all of
+1. **`_for_emptiness(stmt, consts, seqs)` is the ONE reader of "does this
+   loop's iterable yield a value"** — `'always'` / `'never'` / `'maybe'`. It
+   replaces the iterable half of `_loop_body_always_runs` and all of
    `_for_target_never_binds`, which were the same question asked twice (and the
    second time without the preheader). It also widens the decidable set to a
    literal SEQUENCE: `for i in []` and `for c in ""` bind no target, which they
-   did not before, because only a `range` call was ever read.
-2. **`_range_is_nonempty(args, consts)` reads `_preheader_literals`' table**, so
-   `k = 0` then `range(0, k)` is an emptiness this build decides. That is the
-   doc's option 2, and the table was already there — `_loop_body_always_runs`
-   was reading `while i < 3:` with it and ignoring its own `consts` for the
-   `for` arm. Both directions now fall out of the same predicate:
-   `k = 0` is `'never'` (the header's definition is dropped and a read after the
-   loop is the refusal CPython's `UnboundLocalError` already is) and `k = 3` is
-   `'always'` (the header's zero-iteration edge is dropped, so a store in the
-   body dominates the read after it).
+   did not before, because only a `range` call was ever read. **AND, since
+   2026-10-08, to a NAME the preheader decides is such a literal** (`seqs`,
+   below): `xs = []` then `for i in xs` was `'maybe'`, so the header's
+   definition survived and the read after the loop returned the caller's
+   leftover — measured on both architectures as `6159200192` where CPython
+   raises `UnboundLocalError`. `_iterable_literal_emptiness` is the one reader
+   of "what does this literal yield", shared by the literal at the `for` and
+   the name.
+2. **`_range_is_nonempty(args, consts)` reads `_preheader_facts`' integer
+   table** (it was `_preheader_literals`), so `k = 0` then `range(0, k)` is an
+   emptiness this build decides. That is the doc's option 2, and the table was
+   already there — `_loop_body_always_runs` was reading `while i < 3:` with it
+   and ignoring its own `consts` for the `for` arm. Both directions now fall out
+   of the same predicate: `k = 0` is `'never'` (the header's definition is
+   dropped and a read after the loop is the refusal CPython's
+   `UnboundLocalError` already is) and `k = 3` is `'always'` (the header's
+   zero-iteration edge is dropped, so a store in the body dominates the read
+   after it). `_preheader_facts` is now ONE walk returning TWO tables — the
+   integer table above and a `{name: literal-node}` table for the sequence
+   case — because the two facts are the same intersections along the same
+   edges; `_cfg_literal_effects` records both in a `(int, node)` lattice.
 3. **`_build_cfg` seeds the loop TARGET into the body's first block**
    (`_Block.seed`), instead of leaving it to the header's `defs`. Reaching the
    body means the head test passed, which means the loop bound the target — a
@@ -57,6 +71,8 @@ Measured, both architectures, `fire.py build --formal --no-prove`:
 | `k = 0` then `for q in range(0, k)` then `printf("q=%d", q)` | `UnboundLocalError` | **refused** (was `q=9`) | **refused** (was `q=9`) |
 | `k = 3` then the same | `2` | `2` | `2` |
 | `last(k)` with `for i in range(0, k): s = s + i` then `return i` | `3` | `3` | `3` |
+| `xs = []` then `for q in xs` then `printf("q=%d", q)` | `UnboundLocalError` | **refused** (was `q=6159200192`) | **refused** (was `q=6159200192`) |
+| `xs = [10, 20]` then the same | `20` | `20` | `20` |
 | `for q in range(0, n)`, `n` a parameter | `UnboundLocalError` | `q=9` | `q=9` — **the residual** |
 
 **And the corpus does not move, which is why this survived four rounds**: over
@@ -67,8 +83,8 @@ class this fixes does not occur in the code the compiler is pointed at; what
 that means for a gate is the good direction (no `stdlib-dylib` skip count can
 move), and what it means for the bug is that the only witnesses are new code.
 
-`test_formal_read_before_store.py` pins all of it: nine new rows, each with the
-CPython oracle in both directions — `preheader_zero_range_target_is_not_a_definition`,
+`test_formal_read_before_store.py` pins all of it, each row with the CPython
+oracle in both directions — `preheader_zero_range_target_is_not_a_definition`,
 `preheader_nonzero_range_target_is_still_a_definition`,
 `preheader_nonzero_range_body_store_ok`, `preheader_zero_range_body_store_refused`,
 `preassigned_target_survives_a_preheader_zero_range`,
@@ -77,7 +93,16 @@ CPython oracle in both directions — `preheader_zero_range_target_is_not_a_defi
 `empty_literal_list_target_is_not_a_definition`,
 `empty_string_target_is_not_a_definition` — plus
 `preheader_range_bound_from_a_parameter_keeps_the_target`, which pins the
-residual as a case so it cannot rot.
+residual as a case so it cannot rot. The NAMED-literal half added 2026-10-08 is
+pinned by `preheader_empty_list_target_is_not_a_definition`,
+`preheader_nonempty_list_target_is_still_a_definition`,
+`preheader_empty_tuple_target_is_not_a_definition`,
+`preheader_nonempty_list_body_store_ok`,
+`preheader_empty_list_body_store_refused`, and the soundness row
+`a_named_literal_reassigned_off_a_literal_keeps_the_target` (a name rebound to
+something that is not a literal must not keep the sequence fact).
+`python3 test_formal_read_before_store.py` is 175 checks, 0 fail, and
+`test_formal_run.py` is 1187/0 with the change.
 
 ## What is wrong
 
@@ -108,6 +133,27 @@ rather than answering).
 this defect is exactly the question of whether a PARAMETER's value can be a
 build-time fact. It cannot: nothing in the program states it, and the honest
 answer is that the loop's emptiness is a property of the call.
+
+**A second residual, measured 2026-10-08 while landing the named-literal half
+above: a MODULE-level literal sequence.** The preheader table is per FUNCTION,
+so `XS = []` at module level is not in it, and
+
+```mojo
+XS = []
+def main():
+    for q in XS:
+        x = 1
+    printf("q=%d", q)
+    return 0
+```
+
+builds and prints `6094614288` where CPython raises `UnboundLocalError` — the
+same defect through a different binding. (The non-empty `XS = [10, 20]` answers
+`20`, because the loop runs and binds `q`.) This one is NOT the parameter case's
+"no build-time fact exists": the literal IS in the module, and closing it means
+carrying the module's literal constants into `_preheader_facts` the way the
+function's own preheader is carried — a change to what `_build_cfg` is handed
+rather than to the predicate, and it is recorded here rather than guessed at.
 
 ## What is ruled out, measured
 
@@ -140,8 +186,9 @@ in the fixpoint; the first is a property of the bound.
    architectures and CPython answers `3`. The row is also the reason the
    `'maybe'` answer keeps the header's definition: it is ordinary code, not a
    corner.
-2. **Carry the emptiness as a predicate.** **DONE** (§0): `_preheader_literals`
-   decides `range(0, k)` for a `k` a path states, which is the scope this option
+2. **Carry the emptiness as a predicate.** **DONE** (§0): `_preheader_facts`
+   decides `range(0, k)` for a `k` a path states — and, since 2026-10-08, a
+   `xs = []`/`xs = [4, 5]` a path states — which is the scope this option
    named, and the rest stays a divergence — now measured and pinned rather than
    described.
 
