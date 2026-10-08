@@ -33,11 +33,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1283,31 +1278,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return gen.lower_expr(node.obj)
 
     # Check if obj is a simple identifier (module access)
-    # `os.path.sep` / `os.path.pathsep` / `os.path.curdir` / `os.path.pardir`:
-    # `os.path` itself lowers to a bare module MARKER (the int 0), so the outer
-    # `.sep` fell to the dynamic-getattr dispatch with obj=NULL and raised a
-    # fatal `AttributeError: sep` at RUN time -- which is what
-    # `imports.cpython_lib_root`'s `d == os.path.sep` did, caught by the module
-    # loader's blanket `except`, so every import of a sibling module silently
-    # resolved to nothing in the self-hosted compiler. The four are `posixpath`'s
-    # literals and `os`'s own (this platform is POSIX), i.e. the same table
-    # `os.sep` is answered from.
-    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
-            and node.obj.member == 'path'
-            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
-            and node.member in ('sep', 'pathsep', 'curdir', 'pardir')):
-        _opc = _as_str(node.obj.obj.name)
-        _opb = gen.imported_symbols.get(_opc)
-        if _opb:
-            _opm = _opb.get('module')
-            if _opm:
-                _opc = _as_str(_opm)
-        if _opc == 'os':
-            _opk = builtin_module_constant('os', node.member)
-            if _opk is not None:
-                _opk_ctype, _opk_val = _opk
-                _opk_text = gen._intern_string(gimple_ctypes._c_escape(_opk_val))
-                return _opk_ctype, gen._new_val(_opk_ctype, _opk_text)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
         # The REAL module this identifier is bound to, for `import X as Y`.
@@ -5528,34 +5498,45 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         if et == 'MojoDict *' and ev in gen._dict_val_types:
             gen._dict_val_types[t] = gen._dict_val_types[ev]
     # Record the per-slot kinds on the VALUE (runtime/fire_runtime.c's
-    # mojo_list_set_kinds) when they are not all the same, so every read of
-    # this literal — the whole-result repr, a copy, a slice, iteration, a
-    # computed subscript — describes each slot by what it actually holds
-    # instead of by one list-wide ctype. A homogeneous literal normally
-    # records nothing: its single accessor is already exact, and the
-    # side-table probe is the only cost a program that never builds a
-    # heterogeneous list ever pays.
+    # mojo_list_set_kinds) so every read of this literal — the whole-result
+    # repr, a copy, a slice, iteration, a computed subscript — describes each
+    # slot by what it actually holds instead of by one list-wide ctype.
     #
-    # `None` is the ONE exception, and it is an exception because of what the
-    # runtime's default is, not because this literal is heterogeneous. An
-    # undescribed slot reads as 'i' (mojo_list_slot_kind's fallback), so a
-    # homogeneous `[None]` recorded nothing and was indistinguishable from a
-    # homogeneous `[0]` — which is CPython's `False` for `==` and a TypeError
-    # for `<`. Measured on this tree: `[None] == [0]` answered True, and
-    # `[1] < [None]` answered False where CPython raises. The literal's own
-    # single accessor being "exact" is true of the C TYPE (both are int64_t)
-    # and useless for the value: nothing downstream of the store can recover
-    # which of the two it was. So a literal containing `None` records its
-    # kinds however homogeneous it is; every other homogeneous kind keeps the
-    # old no-side-table behaviour.
+    # A HETEROGENEOUS literal has always recorded them, and so has a
+    # homogeneous `None` one: an undescribed slot reads as 'i'
+    # (mojo_list_slot_kind's fallback), so `[None]` was indistinguishable from
+    # `[0]` — CPython's `False` for `==` and a TypeError for `<`. Measured:
+    # `[None] == [0]` answered True, and `[1] < [None]` answered False where
+    # CPython raises.
+    #
+    # A homogeneous SCALAR literal (int / float / bool / bytes) records them
+    # now too, and for the same reason: the literal's single accessor is exact
+    # about the C TYPE and useless to a walker that reaches the value by a
+    # runtime path. The measured case is a literal nested in a container the
+    # runtime walks generically — `print({'k': [0, 1]})` rendered `[None, 1]`,
+    # and a float or bool sibling faulted — because `_mojo_repr_dict` hands
+    # the value to `_mojo_generic_elem_repr` -> `_mojo_repr_list`, whose
+    # generic walker answers "None" for a zero word and reads a double's bits
+    # as an integer. The literal is the only place those kinds are known, so
+    # it is the only place that can record them. A list of strings or of
+    # registered containers still records nothing: the generic walker names
+    # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
-    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
+    if _literal_needs_kinds(elem, _kinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
-        # Reads with no compile-time slot index (iteration, `t[i]`) have to
-        # go through the runtime to learn the kind, and this value is one
-        # where that is possible — see gen._maybe_kinds_vals.
+    # The `_maybe_kinds_vals` marker is a SEPARATE decision from the kinds row,
+    # and it must stay that way: it tells readers that this value's slots
+    # really differ, so a read with no compile-time index has to ask the
+    # runtime (`mojo_list_get_boxed`) rather than pick one typed accessor. A
+    # HOMOGENEOUS scalar list is not that — its single accessor is exact — so
+    # marking one sent `u[0]` on a plain `[7, 8]` through the boxed reader,
+    # whose box the arithmetic resolver then read as a double (`print(u[0]+1)`
+    # printed `8.0`). The kinds row alone is what a container that walks the
+    # value later (a dict display) needs; only a genuinely mixed or
+    # `None`-bearing literal needs the read-side marker too.
+    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
         gen._maybe_kinds_vals.add(t)
     # Record how to REPR one element, for the same reason and independently of
     # the kinds above: a list of a REGISTERED STRUCT has one element ctype, so
@@ -5593,7 +5574,60 @@ def _list_literal_slot_kind(gen, el, et) -> str:
     if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
             isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
         return 'n'
+    # A Python bool is the same 0/1 word an int is, so only the EXPRESSION
+    # separates them (the same reason `is_python_bool_expr` exists for a dict
+    # slot). The runtime's alphabet already has its own byte for it
+    # (MOJO_KIND_BOOL), and `mojo_repr_slot_kind` renders it True/False, so a
+    # bool literal's kinds row must say 'b' rather than the 'i' an
+    # int64_t/_Bool storage type maps to via slot_kind_byte.
+    if gimple_exprtypes.is_python_bool_expr(gen, el):
+        return 'b'
     return gimple_ctypes.TypeLattice.slot_kind_byte(et)
+
+
+# The slot kinds the runtime's GENERIC walker (`_mojo_generic_elem_repr` /
+# `_mojo_repr_list`) already names correctly every time, with no kinds row: a
+# `char *` through mojo_repr_str, and a registered list/dict through a runtime
+# dispatch. Every other kind is a SCALAR whose raw int64 word that walker
+# cannot describe — it answers "None" for a zero word (an int 0, or a boxed
+# None), prints a double's IEEE-754 bits as an integer, a bool's 1/0 as an int,
+# and a bytes pointer as a string.
+_GENERIC_SAFE_SLOT_KINDS = frozenset('pl')
+
+
+def _is_scalar_elem_kind(elem: str) -> bool:
+    """True when a literal's joined element ctype is a scalar/Bytes, i.e. one
+    whose slots `_mojo_generic_elem_repr` cannot name from the word alone."""
+    return (elem in ('int', 'int64_t', 'char', '_Bool')
+            or elem in gimple_ctypes._FLOAT_TYPES
+            or elem == 'MojoBytes *')
+
+
+def _literal_needs_kinds(elem: str, kinds: str) -> bool:
+    """Whether a list/tuple LITERAL must record `mojo_list_set_kinds`.
+
+    Two independent reasons, both of which the runtime already supports:
+
+    * the slots are HETEROGENEOUS (more than one kind byte) — the long-standing
+      rule, needed so a comparison lowering can ask the value what each slot
+      holds;
+    * every slot is a homogeneous SCALAR (int / float / bool / bytes) — the
+      generic walker is wrong for those, and the literal is the only point
+      where their kinds are statically known. A container that walks the value
+      later (a dict display's value is the measured case) has nothing else to
+      consult.
+
+    A homogeneous `None` is the same scalar shape and records 'n'. A list of
+    strings or of registered containers needs no row: the generic walker names
+    those slots correctly already, and recording one would only add a runtime
+    allocation to lists that never needed it.
+    """
+    if not kinds:
+        return False
+    ks = set(kinds)
+    if len(ks) > 1 or 'n' in ks:
+        return True
+    return _is_scalar_elem_kind(elem)
 
 
 # `_lower_list_literal`'s spread test and `_lower_tuple_literal`'s identical
@@ -6054,11 +6088,11 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # is exactly what placing it last says.
     gen._emit(f"  mojo_mark_as_tuple ({t});")
     # Record the per-slot kinds on the VALUE (runtime's mojo_list_set_kinds)
-    # when they are not all the same, so every consumer that has to learn what
-    # a slot holds AT RUNTIME can: `_eq_elem_code` returns MOJO_EQ_UNKNOWN for
-    # such a value (the list-wide `_elem_types` entry is a lossy summary of a
-    # heterogeneous literal — for `('a', 1)` it says `char *`) and the
-    # comparison lowerings then ask the value itself.
+    # so every consumer that has to learn what a slot holds AT RUNTIME can:
+    # `_eq_elem_code` returns MOJO_EQ_UNKNOWN for such a value (the list-wide
+    # `_elem_types` entry is a lossy summary of a heterogeneous literal — for
+    # `('a', 1)` it says `char *`) and the comparison lowerings then ask the
+    # value itself.
     #
     # This was the missing half of the tuple-literal lowering and it cost a
     # real answer: with no record, `('a', 1) < ('a', 2)` compared the INTEGER
@@ -6067,11 +6101,22 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # strcmp'd them). `_lower_list_literal` has recorded this since it was
     # needed for the whole-result repr; a tuple is the same MojoList and
     # needed it for the same reasons plus these.
+    #
+    # `_literal_needs_kinds` also covers the homogeneous SCALAR case that the
+    # old `len(set(...)) > 1` test missed — a `(0, 1)` nested in a dict
+    # display rendered `(None, 1)` — for the reason that predicate's own
+    # docstring gives, and it is the same rule the list lowering applies.
     _tkinds = _literal_slot_kinds(gen, lowered)
-    if _tkinds and len(set(_tkinds)) > 1:
+    if _literal_needs_kinds(elem, _tkinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])
+    # The read-side marker is decided separately and stays as it was — a
+    # heterogeneous tuple needs the runtime kind for an unindexed read, and a
+    # homogeneous scalar one does not (its accessor is exact); see the list
+    # lowering's identical split for the `print(u[0]+1)` -> `8.0` regression
+    # that coupling them caused.
+    if _tkinds and len(set(_tkinds)) > 1:
         gen._maybe_kinds_vals.add(t)
     return 'MojoList *', t
 
@@ -6097,8 +6142,8 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
     # re-lowered comprehension lands the same way.
     for _gen0 in node.generators:
-        if isinstance(_gen0.target, str) and not for_target_is_tuple(_gen0.target):
-            _gen0.target = for_target_single_name(_gen0.target)
+        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
+            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
 
     gen0 = node.generators[0]
 
@@ -6184,7 +6229,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # declines it for the `for`-statement form.
     _cur = None
     if (isinstance(gen0.iterable, gimple_ctypes.IdentExpr)
-            and not for_target_is_tuple(_as_str(gen0.target))):
+            and not gimple_ctypes.for_target_is_tuple(_as_str(gen0.target))):
         _cur = itc.cursor_for(gen, gen._cname(gen0.iterable.name))
     if _cur is not None:
         gen._compr_cursor_loop(node, gen0, res, res_type, _cur)

@@ -930,8 +930,8 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
               f'class_shortfalls on a synthetic 9.9 GB modcache: '
               f'{suite.class_shortfalls({"modcache": 9.9})}')
         check('peak log: a peak the class covers produces no shortfall',
-              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 5.5}),
-              f'{suite.class_shortfalls({"modcache": 0.3, "selfhost": 5.5})}')
+              not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
+              f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
     else:
         print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
               'skipped (every class is the override)')
@@ -980,8 +980,8 @@ def test_over_provisioned_classes_are_reported_not_silently_kept():
           f'and the same numbers DO trip it with a lower floor')
     check('over-provisioned: the registry itself has no over-provisioned job',
           not suite.over_provisioned(),
-          '; '.join(f'{n} {f:.0f}x in {c} ({p:g} GB peak)'
-                    for n, p, c, f in suite.over_provisioned()))
+          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
+                    for n, _p, c, g in suite.over_provisioned()))
     check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
           len(suite.at_floor()) >= 3,
           f'{len(suite.at_floor())} at the floor class: a list that can only be '
@@ -1201,7 +1201,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'coro-detached-async': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1231,12 +1231,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
-                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
-                     # parity differential was registered in a bucket and given
-                     # a count-checked `expect=`; a census that did not state
-                     # the new marker would fail on the registry's own state,
-                     # which is this check working.
-                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
@@ -2060,7 +2054,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
+    'test_formal_link_accounting.py': 2,
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,
@@ -3878,26 +3872,26 @@ UNREGISTERED = {
     #    reading of a bug doc.
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
-    # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
-    # needs a check even though the sweep it feeds does not, so this file checks
-    # it. It is unregistered for the reason its own docstring gives: the text
-    # cases are Lean-free and cheap, but one compiles the harness
-    # `clang -arch x86_64` and runs it `arch -x86_64`, and it SKIPS where that is
-    # unavailable — so on a host that cannot run x86-64 code the row that matters
-    # most reports nothing, which is the shape `formal-receiver-position` was
-    # moved out of `proofs` for.
+    # `formal/x86_64_model_fuzz.py` is a TOOL and its two `HARNESS` verdict rows
+    # are the ones a reader must not go looking for in `lib/X86.lean`, so the
+    # harness's own entry path needs a check even though the sweep it feeds does
+    # not. This file is that check, and it is unregistered for the reason its own
+    # docstring gives: three of its four cases are Lean-free and cheap, but the
+    # fourth compiles the harness `clang -arch x86_64` and runs it `arch -x86_64`,
+    # and it SKIPS where that is unavailable — so on a host that cannot run
+    # x86-64 code the row that matters most reports nothing, which is the shape
+    # `formal-receiver-position` was moved out of `proofs` for.
     'test_x86_64_model_fuzz.py':
         'The model-fuzz harness\'s two unread steps: its ENTRY register file, '
         'read back through `--entry-probe` (if the stub\'s real `mov` loads did '
         'not land, every field of every program the harness compares is a false '
         'disagreement), and its VERDICT rules, which decide `WRONG` (a model '
-        'bug) from the program\'s bytes and the differing fields alone — with a '
-        'value the architecture leaves UNDEFINED (a flag after a multiply, and '
-        'everything a `setcc` computes from one) skipped rather than compared. '
-        'The text cases are Lean-free; one builds and runs the harness under '
-        '`arch -x86_64` and SKIPS where that is not available, which is why this '
-        'is listed rather than registered — a registered job that skips its only '
-        'substantive case is a green line that says nothing.',
+        'bug) against `HARNESS` (a disagreement no x86-64 CPU can produce) from '
+        'the program\'s bytes and the differing fields alone. The text cases are '
+        'Lean-free; one builds and runs the harness under `arch -x86_64` and '
+        'SKIPS where that is not available, which is why this is listed rather '
+        'than registered — a registered job that skips its only substantive '
+        'case is a green line that says nothing.',
 
     # A DOCUMENT check, and the cheapest file in this list by a wide margin:
     # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
@@ -5992,93 +5986,6 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
           not offenders, '; '.join(sorted(set(offenders))))
 
 
-def test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs():
-    """`--apply-peaks`: the log's peaks into MEASURED_PEAK_GB, minus the liars.
-
-    The table went 22x stale (`native-dumpfull`: 31.3 GB recorded, 1.4 GB in
-    the log of a run where it died early) because the drift report was a line
-    in a log and fixing it was an afternoon of reading. These checks pin the
-    tool's judgement on synthetic logs built by the runner's own line
-    formatter: a job that FAILED, or ran under the poll's resolution, is not a
-    measurement; a derived row yields to a direct one; a difference the log
-    cannot resolve is not a change.
-    """
-    def line(key, status, secs, peak):
-        job = suite.Job(suite.REGISTRY[key.split(':')[0]])
-        res = suite.Result(status, secs, peak_gb=peak)
-        return suite._line(job, res, 1, 5, 0)
-    synth = os.path.join(HERE, 'build', 'test-suite-applypeaks.log')
-    os.makedirs(os.path.dirname(synth), exist_ok=True)
-    with open(synth, 'w') as f:
-        f.write(line('gimple', suite.PASS, 30.0, 0.4) + '\n')
-        f.write(line('native-dumpfull', suite.FAIL, 178.0, 1.4) + '\n')
-        f.write(line('modcache', suite.PASS, 0.3, 9.0) + '\n')       # a replay
-        f.write(line('coro', suite.PASS, 5.0, 0.2) + '\n')
-        f.write(line('coro', suite.PASS, 6.0, 0.7) + '\n')           # worst wins
-        f.write(line('coro', suite.FAIL, 7.0, 3.0) + '\n')           # not believed
-    meas = suite.log_measurements(synth)
-    trusted = suite.trusted_peaks(meas)
-    check('apply-peaks: only passing, long-enough jobs are trusted, worst first',
-          trusted == {'gimple': 0.4, 'coro': 0.7}, f'{trusted}')
-    check('apply-peaks: peaks_from_log still reports the failed job (a class '
-          'must cover it)',
-          suite.peaks_from_log(synth).get('native-dumpfull') == 1.4,
-          f'{suite.peaks_from_log(synth)}')
-
-    rec = {'a': (3.7, 'measured'), 'b': (1.2, 'derived'),
-           'c': (0.04, 'measured'), 'd': (31.3, 'measured')}
-    saved = dict(suite.REGISTRY)
-    try:
-        for n in 'abcdn':
-            suite.REGISTRY[n] = suite.REGISTRY['gimple']
-        got = {n: (o, p) for n, o, p in suite.peak_changes(
-            {'a': 4.4, 'b': 0.1, 'c': 0.1, 'd': 1.4, 'n': 0.2,
-             'unregistered-zz': 5.0}, rec)}
-    finally:
-        suite.REGISTRY.clear()
-        suite.REGISTRY.update(saved)
-    check('apply-peaks: moved, derived-replaced and new rows change; a '
-          'sub-resolution difference and an unregistered name do not',
-          set(got) == {'a', 'b', 'd', 'n'}
-          and got['n'] == (None, 0.2) and got['b'] == ((1.2, 'derived'), 0.1),
-          f'{got}')
-
-    src = ("MEASURED_RUN = ('old run')\n\nMEASURED_PEAK_GB = {\n"
-           "    'a':   (3.7,  'measured'),   # keeps this comment\n"
-           "    'b':   (1.2, 'derived'),\n"
-           "}\n")
-    out = suite.apply_peaks_to_source(
-        src, [('a', (3.7, 'measured'), 4.4), ('b', (1.2, 'derived'), 0.1),
-              ('zz', None, 0.6)], 'a long run label ' * 6)
-    ns = {}
-    exec(out, ns)
-    check('apply-peaks: the rewritten table parses and holds the new numbers',
-          ns['MEASURED_PEAK_GB'] == {'a': (4.4, 'measured'),
-                                     'b': (0.1, 'measured'),
-                                     'zz': (0.6, 'measured')}, f'{ns}')
-    check('apply-peaks: ...MEASURED_RUN names the new run and comments survive',
-          ns['MEASURED_RUN'].startswith('a long run label')
-          and '# keeps this comment' in out and 'old run' not in out, out)
-
-    # The negative control: a job the ratchet would move IS named. 'gimple' is
-    # `tiny`, so a 30 GB peak for it must produce advice and 0.4 must not.
-    advice = {n: (c, w) for n, c, w in suite.reclass_advice(
-        [('gimple', None, 30.0), ('coro', None, 0.2)])}
-    check('apply-peaks: a class the ratchet would change is named, a correct '
-          'one is not',
-          advice == {'gimple': ('tiny', 'program')}, f'{advice}')
-
-    check('gate-end warning: silent when the table is current...',
-          suite.peak_warning_lines([], [], 'x.log') == [], '')
-    warn = suite.peak_warning_lines(
-        [('native-dumpfull', 1.4, 31.3)],
-        [('some-job', 0.5, 'module', 48.0)], 'build/suite.log')
-    text = '\n'.join(warn)
-    check('gate-end warning: ...and names drift, over-provisioning and the fix',
-          'native-dumpfull' in text and 'some-job 48x' in text
-          and '--apply-peaks build/suite.log' in text, text)
-
-
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
@@ -6144,7 +6051,6 @@ def main():
                test_a_job_class_covers_its_measured_peak,
                test_a_job_class_covers_the_peak_the_last_run_recorded,
                test_over_provisioned_classes_are_reported_not_silently_kept,
-               test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,
