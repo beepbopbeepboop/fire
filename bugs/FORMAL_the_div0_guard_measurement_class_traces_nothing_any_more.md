@@ -145,3 +145,39 @@ extern-call and subscript diagnostics, and re-scoping a doc-truth measurement
 class (plus the `_unfollowable_calls` change, which reaches the universal
 theorem for the whole corpus) is a different piece of work with a whole-corpus
 Lean sweep attached.
+
+## Status 2026-10-07: step 1 landed, and it now names the REAL cause
+
+`work/formal128-docs` landed step 1 only. `setUpClass` records, per spelling,
+why the class's own mechanism did not fire (`cls.blind`), and
+`test_the_measurement_class_can_still_see_what_it_measures` fails on it by
+NAME, so the bare `assertIn("⊢ 1 =")` can no longer report "the residual
+moved" when the truth is "there is no residual here to move". Measured with
+`lib/*.olean` materialised from the cas:
+
+    $ python3 tools/memslot.py --gb 8 --label t -- \
+          python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean
+    FAIL: test_the_measurement_class_can_still_see_what_it_measures
+    AssertionError: as_emitted: the fixture no longer generates a proof at all,
+      so the residual this class exists for cannot be traced: FormalBuildError:
+      … universal theorem: 2 calls this walk cannot follow
+      (0x100000424 -> 0x10000088c (opaque), 0x100000514 -> 0x100000880 (opaque)),
+      every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge
+      them. …
+
+**And the cause it names is NOT this doc's line-6 diagnosis.** The fixture does
+not "dissect a file with no theorem": `_symbolic_divisor_proof` now REFUSES at
+generation. The two opaque calls are the arm64 compiler's own — the
+stack-floor guard's `getrlimit` and the div0 arm's `fflush` — read as calls the
+PROGRAM makes because `info["compiler_traps"]` is published and never filled on
+arm64 (a merge lost the recording), and because the walk cannot discharge a
+compiler call on a conditional path
+(`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`).
+Step 2's option 1 ("subtract `compiler_traps` in `_unfollowable_calls`") is
+necessary and not sufficient.
+
+**So this doc's premise — that the class goes blind while proof generation
+still succeeds — is superseded by that regression.** The step-1 check is what
+made the difference visible; the class stays red until the emitter (formal115)
+and walk (the conditional-halt doc's owner) land, and no part of that is this
+branch's to change.

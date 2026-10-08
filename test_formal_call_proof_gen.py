@@ -5582,8 +5582,33 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-div0-lean-")
         from formal import lean as FLEAN
         cls.out = {}
+        #: label -> why this class's own mechanism did not fire, or None.
+        #: The class measures a residual goal by replacing the walk terminal's
+        #: admission (`_ADMIT`) with `trace_state`.  That replacement is a
+        #: NO-OP whenever the fixture stops generating a theorem that carries
+        #: the admission — the fixture refusing outright, or the universal
+        #: theorem being replaced by a reachability statement — and a no-op
+        #: leaves `out[label]` with no goal printed, which is what makes the
+        #: bare `assertIn("⊢ 1 =")` below report "the residual moved" when the
+        #: truth is "there is no residual here to move".  The check is
+        #: `test_the_measurement_class_can_still_see_what_it_measures`.
+        cls.blind = {}
         for label, patch in (("as_emitted", False), ("doc_next_step", True)):
-            head, tail = _symbolic_divisor_proof(cls.tmp)
+            try:
+                head, tail = _symbolic_divisor_proof(cls.tmp)
+            except Exception as e:                      # noqa: BLE001
+                cls.blind[label] = (
+                    f"the fixture no longer generates a proof at all, so the "
+                    f"residual this class exists for cannot be traced: "
+                    f"{type(e).__name__}: {e}")
+                cls.out[label] = ""
+                continue
+            if _ADMIT not in tail:
+                cls.blind[label] = (
+                    f"the fixture generates no `q_compiles_correctly_universal` "
+                    f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is "
+                    f"a no-op and no goal can be traced: whatever the div0 "
+                    f"residual is today, this class is not looking at it")
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -5599,6 +5624,22 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         if hasattr(cls, "tmp"):
             shutil.rmtree(cls.tmp, ignore_errors=True)
 
+    def test_the_measurement_class_can_still_see_what_it_measures(self):
+        """Fail by NAME when this class's own mechanism did not fire.
+
+        The doc's step 1 (`bugs/FORMAL_the_div0_guard_measurement_class_traces_
+        nothing_any_more.md`): a class that reports "the residual moved" while
+        its fixture stopped producing a residual is the failure
+        `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_
+        it.md` records for `bootstrap-stage2-dumps` — a check that did not look
+        at what it produced.  This row is the one that says so.
+        """
+        for label in ("as_emitted", "doc_next_step"):
+            with self.subTest(spelling=label):
+                self.assertIsNone(
+                    self.blind.get(label),
+                    f"{label}: {self.blind.get(label)}")
+
     def test_the_false_goal_survives_the_documented_next_step(self):
         """Both spellings leave `⊢ 1 =`, and adding `hc_N` changes nothing.
 
@@ -5608,6 +5649,13 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """
         for label in ("as_emitted", "doc_next_step"):
             with self.subTest(spelling=label):
+                # Distinguish "the residual moved" from "there is no residual
+                # here to move": the misleading diagnosis is the defect this
+                # class is being repaired for, so the bare `assertIn` below
+                # must not be the first thing a reader sees when the fixture
+                # stopped generating the theorem.
+                self.assertIsNone(self.blind.get(label),
+                                  f"{label}: {self.blind.get(label)}")
                 self.assertIn("⊢ 1 =", self.out[label],
                               f"{label}: the div0 path's residual is no longer "
                               f"the `1 = …` goal — fdiv64's div0 arm or the "
@@ -5618,6 +5666,8 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
         for label in ("as_emitted", "doc_next_step"):
+            self.assertIsNone(self.blind.get(label),
+                              f"{label}: {self.blind.get(label)}")
             got, keep = [], False
             for line in self.out[label].splitlines():
                 if line.strip().startswith("⊢"):
