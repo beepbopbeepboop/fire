@@ -5634,6 +5634,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # guessing a nested receiver there is exactly the name-dispatch bug
         # `_check_method_receiver_types` exists for.
         _rewrite_nested_method_calls(fn, nested_fields)
+        # …and the BARE-name half of the same dispatch: a local or parameter
+        # this fixpoint settled as a frame holder, whose method's name a second
+        # struct also declares, is answered from that binding here.  A `with`
+        # alias is the shape that needed it (`with Box() as b: b.use()`), because
+        # its binding is `Box___enter__(tmp)` rather than a construction and the
+        # construction-binding table the earlier pass reads therefore lacks it.
+        _rewrite_holder_method_calls(fn, by_name, structs_by_name)
         # …and the `len` spelling of the same receiver, which is the second
         # route to one `__len__` decision rather than a second decision about
         # it.  It asks `_typed_nested_frame` rather than reading
@@ -6767,6 +6774,67 @@ def _rewrite_nested_method_calls(fn, nested_fields) -> None:
             continue
         node.func = F.IdentExpr(name=M.method_function_name(st.name,
                                                             node.func.member))
+        node.args = [obj] + list(node.args)
+
+
+def _rewrite_holder_method_calls(fn, by_name, structs_by_name) -> None:
+    """`recv.m(x)` -> `Struct_m(recv, x)` for a BARE name that holds a frame.
+
+    **The bare-name half of `_rewrite_nested_method_calls`, and it closes the
+    `with`-alias hole `_lift_one_word_field_method` cannot reach.**  That
+    function's bare-receiver arm dispatches a name whose method's name is
+    declared by two structs of the image — the ambiguity `_method_owners` pops
+    on purpose — but it is handed `_bound_receiver_structs`, which is a
+    CONSTRUCTION-binding table and is built before any frame analysis exists.
+    A `with EXPR as b:` alias is bound to `S.__enter__(tmp)`, not to `S()`, so
+    the name is absent from that table and `b.use()` (with `use` declared by
+    `Box` and one other struct) fell through to the emitter's value-receiver
+    arm and was refused as "a method call on a value … a guess about what it
+    means on 'int'".
+
+    The holder fixpoint has already answered the question by the time this runs:
+    `by_name` maps every name that holds a FRAME to the struct whose layout that
+    frame has, and a `with` alias whose `__enter__` returns the receiver is one
+    of them (which is why `b.tag` already lowered while `c.tag` for an
+    `__enter__` that returns a field still refuses). So the alias's own struct is
+    known here, the name's two-owner ambiguity disappears, and the receiver's
+    struct is the binding evidence this file makes every lowering decision from.
+
+    Runs beside `_rewrite_nested_method_calls` and reads the SAME `by_name`, for
+    the same reason: `_rewrite_method_calls` ran two passes earlier, so any call
+    it could resolve by name alone is already an `IdentExpr` and can never reach
+    here — reaching here means the name-only path declined it, which is exactly
+    the case a binding can answer and a bare name cannot.
+
+    It only fires for a name with EXACTLY ONE frame candidate, a method the
+    struct DECLARES, and a method that takes a receiver; anything else is left
+    for the diagnostic that already describes it.
+    """
+    if not by_name:
+        return
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
+                                                             F.MemberExpr):
+            continue
+        obj = node.func.obj
+        if not isinstance(obj, F.IdentExpr):
+            continue
+        cands = by_name.get(obj.name)
+        if not cands or len(cands) != 1:
+            continue
+        st = cands[0]
+        member = node.func.member
+        decl = next((m for m in M.struct_methods(st) if m.name == member), None)
+        if decl is None or not M.method_declares_receiver(decl):
+            continue
+        # The SAME exception `_lift_one_word_field_method` carries: a struct
+        # deriving from the binding's struct and declaring the member makes the
+        # lift a wrong answer, because the base's method is compiled against the
+        # base's layout and the value may be the child's.  Python dispatches on
+        # the value; this path can only see the declaration.
+        if _derived_overrides(st, member, structs_by_name):
+            continue
+        node.func = F.IdentExpr(name=M.method_function_name(st.name, member))
         node.args = [obj] + list(node.args)
 
 

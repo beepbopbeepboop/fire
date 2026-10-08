@@ -2,11 +2,13 @@
 # words, so every context manager written the way CPython writes one is refused
 
 **Area:** FORMAL, context managers. Claim `project:with-statements`, measured
-2026-10-05 on `work/formal56-with-statements`. **OPEN.** One of three limits
-this project measured and did not close; the other two are
+2026-10-05 on `work/formal56-with-statements`. **PARTIAL: the §4 alias-dispatch
+limit is CLOSED (2026-10-07, `work/formal118-docs`); the three-exception-word
+signature below is still OPEN**, because it needs the unwinder. One of three
+limits this project measured and did not close; the other two are
 `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` (the narrow half of
 the same missing unwinder, which IS now refused when the value is foldable) and
-the alias-dispatch note in §4.
+the alias-dispatch note in §4, which is no longer one of them.
 
 **Read this before planning the work.** The refusal is CORRECT and its message
 says why, so nothing here is a wrong answer — the cost is that the most common
@@ -135,18 +137,32 @@ second is the same missing unwinder seen through a narrower door:
     dropped on the floor). See
     `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` for the
     remaining half of that;
-  * a method call through the alias whose NAME a second struct also declares. The
-    alias holds one word with no declared type, so dispatch is by name, and
-    `_method_owners` pops a name two structs declare on purpose. It is REFUSED,
-    not picked — but a *fix* here is available and cheap: publish the alias's
-    struct from `__enter__`'s declared return type (or from the receiver round
-    trip `_returned_frame_construction` already recognises), the same way a
-    `with`'s CONTEXT is now published, and the ambiguity disappears for every
-    manager that annotates `__enter__`.
+  * ~~a method call through the alias whose NAME a second struct also declares.~~
+    **CLOSED 2026-10-07 (`work/formal118-docs`).** The alias's struct is now
+    published into `formal/build.py`'s frame-holder table — the alias is bound to
+    `S.__enter__(tmp)`, and when `__enter__` returns its receiver that call is a
+    frame-returning call, so the holder fixpoint already knows the alias is an
+    `S` (which is why `b.tag` lowered while `c.tag` for an `__enter__` that
+    returns a field still refuses). `_rewrite_holder_method_calls` runs beside
+    `_rewrite_nested_method_calls` against the same `by_name` table and lifts the
+    bare-name receiver the name-only dispatch declined, with
+    `_derived_overrides`'s guard copied so a child that overrides the member is
+    still refused. `test_formal_with.py`'s
+    `a_method_through_the_alias_with_a_rival_owner_is_answered` is the row (it
+    moved from the REFUSED table to the DECLARED one, against CPython on both
+    architectures), and `test_formal_run.py`'s
+    `ambiguous_name_a_derived_struct_also_declares_is_still_refused` still pins
+    the one clause that must not be waived. The context-manager-to-a-value
+    spelling and the `__enter__`-returns-a-word spelling both stay refused, which
+    is what keeps a wrong layout unreachable.
 
 ## 5. The reproduce line for the whole table
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py
 
-336 checks, both architectures. §1's "ANSWERED" rows are its 28 ANSWERED + 6
-DECLARED + 3 resource rows; §4's three shapes are three of its 17 REFUSED rows.
+338 checks, both architectures (measured 2026-10-07). §1's "ANSWERED" rows are
+its 28 ANSWERED + 7 DECLARED + 3 resource rows; §4's remaining shapes are among
+its 16 REFUSED rows. The former two-owner alias row is now the seventh DECLARED
+row (`a_method_through_the_alias_with_a_rival_owner_is_answered`), not a
+refusal: its alias's `Box` receiver is published by the holder analysis, so the
+ambiguity the name-only dispatch declines is settled by the binding.
