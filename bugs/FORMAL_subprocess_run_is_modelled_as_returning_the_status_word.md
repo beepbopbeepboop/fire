@@ -134,8 +134,8 @@ is a real fix.
 1. **A one-field struct returned from a function could not be read through a
    local at all, and now can.** A one-field struct's receiver IS its field
    (`struct_fits_one_word`), so a function that returns one returns that field's
-   WORD — but `formal/build.py::_one_word_field_map` acknowledged only the
-   CONSTRUCTOR binding (`var r = CP()`), not a call (`var r = make()`), so
+   WORD — but the one-word field map acknowledged only the CONSTRUCTOR binding
+   (`var r = CP()`), not a call (`var r = make()`), so
    `r.<sole field>` was refused with *"this path has no way to say what 'r'
    holds"* about a binding the callee's declared `-> CP` states exactly.
    Measured both backends:
@@ -186,7 +186,7 @@ is a real fix.
 **What is left.**  For option 1: resolve a module-qualified callee's declared
 return type (the `MemberExpr`-over-a-module arm of the same map), then decide
 whether `formal/hostmods/subprocess.mojo`'s `run`/`CompletedProcess` should
-return a one-field struct — with the `@admitted` machinery's `UInt64 -> UInt64`
-declaration (`formal/admitted.py`) as the thing to check first.  For option 2:
-name `r.returncode` in `formal/model.py::field_access_refusal`'s family.  The
-decision itself is still this doc's next step.
+return a one-field struct — with the admitted-contract machinery's
+`UInt64 -> UInt64` declaration as the thing to check first.  For option 2:
+name `r.returncode` in the field-access refusal family.  The decision itself is
+still this doc's next step.
