@@ -8,6 +8,39 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-08 (`work/formal201-docs`): the x86-64 `BACKLOG` is EMPTY — the last three rows are resolved and the table is honest again
+
+**This doc's own subject is closed.** The 2026-10-06 entry below claimed "the
+x86-64 backend now has no `BACKLOG` row at all, only the three
+`HARNESS_LIMITS`-attributed ones" — and that was false of the tree: three x86-64
+rows were still in `tools/formal_isa_census.BACKLOG`, all pointing at this doc,
+and the anti-rot half of `test_formal_isa_census.py` was RED on two of them. What
+landed:
+
+| row | was | now |
+|---|---|---|
+| `encode_and_r8_r8`, `encode_or_r8_r8` | `BACKLOG` (the byte-wise ALU) | **removed**: both read `yes yes yes`. The defect was this tree's own encoder omitting the REX prefix for SPL/BPL/SIL/DIL, fixed by `_byte_rex_required`, and the pool draws every `rm`/`reg` pair — so the entry was a fixed gap that kept its exemption, which is exactly what `test_every_backlog_entry_still_describes_a_gap` exists to catch |
+| `encode_call_r64` | `BACKLOG` (`FF /2` mod=11) | **moved to `HARNESS_LIMITS`**: the decoder arm, model arm, `samples()` row and `as` check are all `yes`; the one remaining column is FUZZ, and it is a property of the HARNESS — `callq *%r` jumps to a register's CONTENTS, outside the fuzzer's one `MAP_FIXED` region — the same reason that keeps `encode_jmp_rm64` and arm64's `encode_br_xn` out |
+
+`python3 tools/formal_isa_census.py --arch x86_64` now reads
+`0 form(s) with no LEAN/FUZZ/AS and no exemption; 6 exempt (6 harness, 0
+backlog)`, and `test_formal_isa_census.py` grew
+`test_the_x86_64_backend_has_no_backlog_row_left` so the empty backlog cannot be
+re-opened by adding a row. **The x86-64 backend has no `BACKLOG` row at all.**
+
+**What is still open in this file is the INSTRUMENT half, and it is not a
+per-form exemption.** The EX column still matches a form by DISASSEMBLY MNEMONIC,
+so two encodings of one instruction are indistinguishable — which is why the doc
+below reports an "8 examples" attribution for `encode_imul_r64_r64_imm` that the
+2026-10-06 entry already measured false (those images contain only `0F AF`). The
+fix is to key the column on (mnemonic, operand shape) and report `ambiguous`
+where that does not separate two encodings, and it needs the `--examples` cache
+re-measured for both architectures (cheap: 104 compiles, ~5 s). That is a change
+to `tools/formal_isa_census.py`'s EX logic and is NOT made here. The
+`encode_cmov_r64_r64` false positive the 2026-10-06 entry named is a SEPARATE
+instrument defect (the EMITTED column counted a docstring mention) and is fixed
+on the integration branch by `formal116-docs`' AST-based `call_sites`.
+
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
 This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed
