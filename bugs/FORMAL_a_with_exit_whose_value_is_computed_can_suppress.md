@@ -11,17 +11,27 @@ module the corpus depends on.
 
 **Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself
 incomplete, and is now complete.** The gate's own docstring said the test was the
-folded VALUE's truthiness, but the code tested `isinstance(value, int)`, so a
-`__exit__` returning a non-empty STRING literal — a value `fold_literal_expr`
-folds to a str, not an int, and CPython reads as true — was not refused. Measured
-on both architectures: `return "yes"` built, printed `enter / body 7 / exit` and
-exited 1 where CPython exits 0, the identical wrong answer as `return True`. The
-test is now `if value`, i.e. CPython's own `bool(returned)` over every value this
-can fold, so `return "yes"` is refused and `return ""` (falsy, like `return 0`)
-still lowers. Pinned by `test_formal_with.py`'s
-`an_exit_returning_a_truthy_string_is_refused_for_the_same_reason` and its
-falsy pair `an_exit_returning_an_empty_string_still_runs_the_protocol`. **§2's
-computed case is untouched and is still the whole of what is left.**
+returned value's truthiness, but the code tested `isinstance(value, int)` over
+`fold_literal_expr`'s answer, so two whole literal kinds were let through:
+
+* a non-empty STRING — `fold_literal_expr` folds it to a `str` and the gate then
+  discarded it for being the wrong type; and
+* a non-zero FLOAT — `fold_literal_expr` has no float arm at all (it is the word
+  reader, and a float is not an integer word), so a float never reached the test.
+
+Both are the same wrong answer as `return True`, measured on both architectures:
+`return "yes"` and `return 0.5` each built, printed `enter / body 7 / exit` and
+exited 1 where CPython prints `after` and exits 0. The decision now goes through
+`model._literal_return_truthiness`, which decides an int/bool/string from its
+folded value and a float (and a `+`/`-` over one) from its own — NOT through
+`fold_module_value`, whose `int(0.5)` is 0 and would answer the truthiness the
+wrong way. `return ""`, `return 0.0`, `return 0`, `return False` and `return
+None` all still lower. Pinned by `test_formal_with.py`'s truthy-string and
+truthy-float REFUSAL rows and their falsy siblings
+(`an_exit_returning_an_empty_string_still_runs_the_protocol`,
+`an_exit_returning_zero_point_zero_still_runs_the_protocol`). **§2's computed
+case is untouched and is still the whole of what is left.**
+
 
 
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of

@@ -48289,6 +48289,38 @@ def struct_is_context_manager(struct_def) -> bool:
     return not context_exit_returns_truthy(methods[CONTEXT_EXIT])
 
 
+def _literal_return_truthiness(node):
+    """CPython's truthiness of a `return`'s value when it is a literal, else None.
+
+    The one reader `context_exit_returns_truthy` asks, and it exists because
+    "which literals can this build decide" is not the same question for a
+    TRUTHINESS as it is for a WORD.  `fold_literal_expr` is the word reader: it
+    folds the integers, the `bool`s (to 0/1) and the strings, and it has no
+    float arm on purpose — that folder is also the struct-field, class-constant
+    and default-parameter reader, where a float is not an integer word.
+    `fold_module_value` is the one that turns a float literal into a word, by
+    `int(...)`, and that truncation is exactly what must NOT be used here:
+    `int(0.5)` is 0 while CPython reads the returned 0.5 as TRUE, so a gate
+    built on it would answer the wrong way for every fraction.  So a float
+    literal is decided from its own value here, a unary `+`/`-` over one
+    following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), and
+    everything else is None — which every caller reads as "not decided" and
+    leaves the return where it was, the one-sided direction this gate is
+    deliberately in.
+    """
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return float(node.value) != 0.0
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, F.UnaryOp) and node.op in ("+", "-"):
+        return _literal_return_truthiness(node.operand)
+    value = fold_literal_expr(node)
+    if value is None:
+        return None
+    return bool(value)
+
+
 def context_exit_returns_truthy(method) -> bool:
     """True when some `return` in `__exit__` folds to a value CPython reads as TRUE.
 
@@ -48315,18 +48347,23 @@ def context_exit_returns_truthy(method) -> bool:
     wrong answer takes on this path: the visible half is right.
 
     **The test is FOLDABILITY, deliberately, and the direction is one-sided.**
-    `fold_literal_expr` answers a `return` whose value the build can decide —
-    `return True`, `return 1`, `return 2` are all suppressions; a bare `return`,
-    `return False`, `return None` and `return 0` are all not — and answers None
-    for anything computed.  **The test is the folded value's TRUTHINESS and not
-    its being a non-zero integer**: CPython reads any true return as a
-    suppression, so a non-empty string literal (`return "yes"`) suppresses
-    exactly as `return 1` does and is refused here too, where an earlier wording
-    of this function checked `isinstance(value, int)` and let it through —
-    measured, both architectures: the image built, printed
+    `_literal_return_truthiness` answers a `return` whose value the build can
+    decide — `return True`, `return 1`, `return 2` are all suppressions; a bare
+    `return`, `return False`, `return None` and `return 0` are all not — and
+    answers None for anything computed.  **The test is the returned value's
+    TRUTHINESS and neither its type nor its word**: CPython reads any true return
+    as a suppression, so a non-empty string literal (`return "yes"`) and a
+    non-zero float literal (`return 0.5`) both suppress exactly as `return 1`
+    does and are both refused here, where earlier wordings of this function
+    checked `isinstance(value, int)` and let the first through.  Both are
+    measured on both architectures — the image built, printed
     `enter / body 7 / exit` and exited 1 where CPython exits 0, the same wrong
-    answer as the `return True` case above.  `return ""`, `return 0`, `return
-    False` and `return None` are all falsy in CPython and all still lower.  So a
+    answer as the `return True` case above.  `return ""`, `return 0.0`, `return
+    0`, `return False` and `return None` are all falsy in CPython and all still
+    lower.  **The word reader is deliberately not reused for the float**:
+    `fold_literal_expr` has no float arm, and `fold_module_value`'s truncation
+    (`int(0.5)` is 0) would answer the truthiness the wrong way, which is why
+    `_literal_return_truthiness` reads a float's own value.  So a
     COMPUTED return is not counted here and stays
     as it was: that is the remaining limit, it is cross-FIELD flow (`nullcontext`
     returns `self.exit_result`, and whether that is true depends on a constructor
@@ -48341,15 +48378,15 @@ def context_exit_returns_truthy(method) -> bool:
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if not isinstance(node, F.ReturnStmt):
             continue
-        value = fold_literal_expr(getattr(node, "value", None))
-        # `value` is the folded VALUE, so the test is its TRUTHINESS rather
-        # than its type: `fold_literal_expr` answers an int for a number or a
-        # `bool`, a STRING for a string literal, and Python `None` for both a
-        # bare `return` and an unfoldable expression.  `if value` is therefore
-        # exactly CPython's own `bool(returned)` for every value this can fold,
-        # and `None` (unfoldable) is falsy, which is the refusal-to-decide
-        # direction this gate is deliberately one-sided in.
-        if value:
+        # `_literal_return_truthiness` is the ONE reader of "what would CPython
+        # read this return as", so the test is the value's TRUTHINESS rather
+        # than its type or its word: `fold_literal_expr` answers an int for a
+        # number or a `bool` and a STRING for a string literal, `0.5` is a float
+        # literal it does not fold, and every one of those is decided there.
+        # Python `None` means "not decided" — a bare `return` and a computed
+        # expression both — and is falsy here, the refusal-to-decide direction
+        # this gate is deliberately one-sided in.
+        if _literal_return_truthiness(getattr(node, "value", None)):
             return True
     return False
 

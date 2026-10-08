@@ -706,6 +706,27 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # …and the same boundary one type further out, where `fold_literal_expr`
+    # does not reach at all: a float literal. CPython reads `0.0`/`-0.0` as
+    # falsy, so a `return 0.0` does NOT suppress and the exception still
+    # propagates. `0.0` is the falsy end of the pair whose truthy end (`0.5`) is
+    # a refusal below, and the two exist together because a gate that refused
+    # every float return would pass the refusal while breaking this program.
+    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -945,6 +966,22 @@ REFUSALS = [
     # architectures; the FALSY sibling (`return ""`) is an ANSWERED row above.
     ("an_exit_returning_a_truthy_string_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", 'return "yes"') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and a non-zero FLOAT, the literal kind `fold_literal_expr` has no arm
+    # for at all — so this case is not the string one one type over but the
+    # other reader (`_literal_return_truthiness`) doing its own job. CPython
+    # reads `0.5` as true and suppresses; this path built, printed
+    # `enter / body 7 / exit` and exited 1. `int(0.5)` is 0, which is why the
+    # word reader `fold_module_value` must not be reused here. `-0.5` is the
+    # same value behind a `UnaryOp` and is covered by the same reader.
+    ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 0.5") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
