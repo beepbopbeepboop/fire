@@ -106,8 +106,8 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_module_state_no_storage.md` | `formal160-docs` | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | `formal177-docs` | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | `formal177-docs` | what a pointer IS on the formal path, and why the 54-file group was never about that |
-| `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | `formal175-docs` | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
-| `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal175-docs` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
+| `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | `formal181-docs` | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
+| `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal181-docs` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
 | `FORMAL_string_value_model.md` | `formal165-docs` | what a string IS on the formal path, and the two things that want to be one |
 | `TEST_the_formal_doc_truth_census_is_in_no_bucket.md` | **unclaimed** | `FORMAL.md`'s numbers are 8 rows stale and the file that measures them runs in no gate |
 
@@ -127,7 +127,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_binary_heap_mojo_after_the_len_value.md` | `formal164-docs` | `std/collections/binary_heap.mojo` builds nothing yet, and the 165 files behind it have TWO walls |
 | `FORMAL_dotted_base_bracket_list_is_not_classified.md` | `formal176-docs` | the predicate answers no for every dotted base, and the asking pass cannot have the table it needs |
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | `formal177-docs` | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
-| `FORMAL_stdlib_module_names_are_not_classified.md` | `formal175-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
+| `FORMAL_stdlib_module_names_are_not_classified.md` | `formal181-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal165-docs` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | `formal180-docs` | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | `formal180-docs` | what is left of the 203-file host-import row, and why each remaining name is out of reach |
@@ -178,7 +178,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_set_value_model.md` | `formal165-docs` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 | `FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` | `formal174-docs` | CLOSED for programs — every prologue of an image that has an entry carries the guard |
 | `FORMAL_std_builtin_sys_time_slice_2026-10-04.md` | `formal165-docs` | FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's |
-| `FORMAL_stdlib_optional_needs_a_representation.md` | `formal175-docs` | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
+| `FORMAL_stdlib_optional_needs_a_representation.md` | `formal181-docs` | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
 | `FORMAL_string_composition_has_no_buffer.md` | `formal165-docs` | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
 | `FORMAL_sweep_singles_second_half.md` | `formal180-docs` | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_time_struct_shaped_answers.md` | `formal170-docs` | five `time` names are absent because their answer is a struct |
