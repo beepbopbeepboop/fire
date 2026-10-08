@@ -5582,9 +5582,12 @@ def gen_module_impl(self, stmts):
             # make the answer depend on declaration order.
             if self.struct_bool_fields.get(s.name):
                 for _bm in s.methods:
-                    _rets = [_rn for _rn in _walk_ast(_bm.body)
+                    # `_bm_rets`, not `_rets`: this function also binds `_rets` to a DICT
+                    # further down (`_rets: dict = {}`), and first-declaration-wins would
+                    # have lowered this list comprehension's result as that dict.
+                    _bm_rets = [_rn for _rn in _walk_ast(_bm.body)
                              if isinstance(_rn, ReturnStmt)]
-                    if not _rets:
+                    if not _bm_rets:
                         continue
                     # Which bare receiver names in this method denote a
                     # struct: `self`, and any parameter annotated with a
@@ -5600,7 +5603,7 @@ def gen_module_impl(self, stmts):
                         if _pt2 and _as_str(_pt2).strip() in self.struct_field_types:
                             _recv_sn[_as_str(_mpj2[0])] = _as_str(_pt2).strip()
                     _all_bool_field = True
-                    for _rn2 in _rets:
+                    for _rn2 in _bm_rets:
                         _rv = _rn2.value
                         _rname = ''
                         if isinstance(_rv, MemberExpr) and isinstance(_rv.obj, IdentExpr):
@@ -7388,8 +7391,30 @@ def gen_module_impl(self, stmts):
     for name, body in _caller_bodies:
         _method_caller_bodies.append((name, None, body))
 
+    # The method-call scalar observations, FLATTENED. This used to be
+    # `{(struct, method): {param: {ctype, ...}}}` -- a tuple-keyed dict of dicts
+    # of sets, consumed by `for (rstruct, mname), pmap in obs.items()` -- and
+    # every part of that is a self-host trap: a tuple key hashes by its heap
+    # ADDRESS once compiled (`_pair_key`'s docstring), a nested-tuple `for`
+    # target over `.items()` binds the key's content-hash string where a list
+    # was expected (`mojo_list_get_int` on it was a SIGSEGV for any input with a
+    # method call), and the inner dict/set have no static type, so the
+    # `types not in ({'double'}, {'char *'})` set comparison was not a set
+    # comparison either. The evidence is only ever asked "was it unanimously
+    # double / unanimously char *", so each (struct, method, param) cell is a
+    # bitmask: 1 = a `double` was observed, 2 = a `char *`, 4 = anything else.
+    # Iteration order is preserved exactly (struct/method groups in first-seen
+    # order, params in first-seen order within a group), so the order
+    # `_inferred_param_types` is filled in -- and therefore the emitted C -- is
+    # what the nested form produced.
+    _msobs: dict = {}          # "<struct>\x1f<method>\x1f<param>" -> bitmask
+    _msobs_groups: list = []   # "<struct>\x1f<method>", first-seen order
+    _msobs_params: dict = {}   # group -> "\x1f<param>\x1f<param>...", first-seen order
+
     def _collect_method_scalar_obs():
-        obs: dict = {}
+        _msobs.clear()
+        _msobs_groups.clear()
+        _msobs_params.clear()
         for caller_name, caller_struct, cbody in _method_caller_bodies:
             calls = []
             self._calls_in_stmts(cbody, calls)
@@ -7442,13 +7467,27 @@ def gen_module_impl(self, stmts):
                     st = _arg_scalar_type(caller_name, a, deep_str=True,
                                           prefer_refined_param=True)
                     if st:
-                        obs.setdefault((rstruct, call.func.member), {}) \
-                            .setdefault(pnames[i], set()).add(st)
-        return obs
+                        _msg = _as_str(rstruct) + '\x1f' + _as_str(call.func.member)
+                        if _msg not in _msobs_params:
+                            _msobs_groups.append(_msg)
+                            _msobs_params[_msg] = ''
+                        _msk = _msg + '\x1f' + _as_str(pnames[i])
+                        if _msk not in _msobs:
+                            _msobs[_msk] = 0
+                            _msobs_params[_msg] = _as_str(_msobs_params[_msg]) + '\x1f' + _as_str(pnames[i])
+                        _msbit = 4
+                        if st == 'double':
+                            _msbit = 1
+                        elif st == 'char *':
+                            _msbit = 2
+                        _msobs[_msk] = int(_msobs[_msk]) | _msbit
 
-    def _apply_method_scalar_obs(obs):
+    def _apply_method_scalar_obs():
         changed = False
-        for (rstruct, mname), pmap in obs.items():
+        for _msg in _msobs_groups:
+            _msg_parts = _as_str(_msg).split('\x1f')
+            rstruct = _as_str(_msg_parts[0])
+            mname = _as_str(_msg_parts[1])
             meth = _method_scalar_ann.get(rstruct, {}).get(mname)
             if meth is None:
                 continue
@@ -7468,9 +7507,15 @@ def gen_module_impl(self, stmts):
             for _ap, _at in (meth.params or []):
                 ann[_ap] = _at
             defaults = getattr(meth, 'param_defaults', {}) or {}
-            for pname, types in pmap.items():
-                if types not in ({'double'}, {'char *'}):
+            _msps = _as_str(_msobs_params[_msg]).split('\x1f')
+            for _mspi in range(1, len(_msps)):
+                pname = _as_str(_msps[_mspi])
+                _msbits = int(_msobs[_msg + '\x1f' + pname])
+                # Unanimous double (1) or unanimous char * (2); a cell that also
+                # saw anything else (bit 4) or both scalars (3) is not.
+                if _msbits != 1 and _msbits != 2:
                     continue                 # not unanimous double / char *
+                types_is_double = (_msbits == 1)
                 if ann.get(pname) is not None:
                     continue                 # respect explicit annotation
                 if pname in defaults:
@@ -7497,14 +7542,15 @@ def gen_module_impl(self, stmts):
                 # compiler error: in build2, at tree.cc" (bugs/
                 # COMPILE_FAIL_Tools_gdb_libpython.md).
                 if cur in (None, 'int', 'int64_t') \
-                        or (cur == 'MojoList *' and types == {'char *'}):
+                        or (cur == 'MojoList *' and not types_is_double):
                     self._inferred_param_types.setdefault(key, {})[pname] = (
-                        'double' if types == {'double'} else 'char *')
+                        'double' if types_is_double else 'char *')
                     changed = True
         return changed
 
     for _mse_round in range(4):
-        if not _apply_method_scalar_obs(_collect_method_scalar_obs()):
+        _collect_method_scalar_obs()
+        if not _apply_method_scalar_obs():
             break
 
     # Refresh Pass 2b-bis's precomputed per-overload signature ctypes for
@@ -10339,9 +10385,16 @@ def gen_module_impl(self, stmts):
     for _round in range(4):
         _changed = False
         for _cl_name, _cl_body in _caller_bodies:
-            _calls = []
-            self._calls_in_stmts(_cl_body, _calls)
-            for _call in _calls:
+            # `_cl_calls`, not `_calls`: this function already binds `_calls`
+            # to a DICT (`_calls: dict = {}`, the closure-call table above),
+            # `_declare_var` is first-declaration-wins, and the self-hosted
+            # path therefore lowered this `[]` as `mojo_dict_new ()` -- a dict
+            # handed to `_calls_in_stmts`' `out.extend(...)`, which corrupted the
+            # heap and killed the compile with "pointer being freed was not
+            # allocated" for any input that defines a function.
+            _cl_calls = []
+            self._calls_in_stmts(_cl_body, _cl_calls)
+            for _call in _cl_calls:
                 if not isinstance(_call.func, IdentExpr):
                     continue
                 _callee = _call.func.name

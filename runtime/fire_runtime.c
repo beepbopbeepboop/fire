@@ -5309,6 +5309,14 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
+    /* A NULL key is Python's `None` (or an erased `str` that was never set):
+     * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
+     * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
+     * `x in TABLE` over a `dict.get(...)` result that came back None is
+     * everywhere in the compiler's own codegen (`eq_operand_kind`'s
+     * `at in _EQ_CTYPE_KIND`), and was the SIGSEGV every self-hosted compile of
+     * a program with an `==` hit. */
+    if (!key) return NULL;
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_lookup_ik(d, iv);
     /* cap is always a power of two (mojo_dict_init: 8, _dict_grow: doubles). */

@@ -113,6 +113,7 @@ documented tradeoffs):
 
 import dataclasses
 import fire_compiler as N
+from fire_compiler import is_fstring_literal
 from ownership_check import _terminates, _block_terminates
 
 
@@ -213,12 +214,12 @@ def _is_fresh_string_expr(node) -> bool:
     `receiver_results_consumed` decide those, per call site, and the receiver
     may not even be a string), and any other call (whether it is fresh is
     exactly the question being asked)."""
-    # `N.is_fstring_literal(node)` as well as the (never-constructed, see its
+    # `is_fstring_literal(node)` as well as the (never-constructed, see its
     # own definition) `TstringLiteral`: an f-string is a plain `StringLiteral`
     # whose value keeps its `f` prefix and quotes, so without this an
     # interpolated string read as a CONSTANT here and the name that holds it
     # was never credited with owning anything.
-    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or N.is_fstring_literal(node):
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or is_fstring_literal(node):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
@@ -236,7 +237,7 @@ def _is_maybe_fresh_expr(node) -> bool:
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
     if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension,
-                         N.TstringLiteral)) or N.is_fstring_literal(node):
+                         N.TstringLiteral)) or is_fstring_literal(node):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
@@ -1798,7 +1799,39 @@ def nested_def_env_owned(fn_body, name: str) -> bool:
     refuses to look at" — this one asks nothing about a callable VALUE,
     because there is none.
     """
+    # The `def` must not sit inside a `try`. The env's cleanup thunk is pushed
+    # at the `def` statement, so an exception raised after it unwinds (frees
+    # and pops) that thunk BEFORE the handler runs; a `return` in the handler
+    # then frees the env a second time ("pointer being freed was not
+    # allocated"). The handler cannot know whether the thunk is still live --
+    # the `def` is not definitely executed on the way into it -- and "owned on
+    # every path to every exit" is exactly what this rule has to prove. Real:
+    # `ModuleLoader.load_module_from_path`'s whole body is a `try`, with the
+    # nested `_scan_source` inside it and `return {}` in the handler.
+    if _def_inside_try(fn_body, name, False):
+        return False
     return _lambda_uses_ok(fn_body, name)
+
+
+def _def_inside_try(node, name: str, in_try: bool) -> bool:
+    """True iff a nested `def name` is lexically inside some `try` (body,
+    handler, else or finally) of `node`."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if _def_inside_try(item, name, in_try):
+                return True
+        return False
+    if not _is_node(node):
+        return False
+    if isinstance(node, N.FunctionDef):
+        if in_try and _as_str(node.name) == name:
+            return True
+        return _def_inside_try(node.body, name, in_try)
+    inside = in_try or isinstance(node, N.TryStmt)
+    for f in dataclasses.fields(node):
+        if _def_inside_try(getattr(node, f.name), name, inside):
+            return True
+    return False
 
 
 def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:

@@ -33,6 +33,11 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
+# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
+# re-export is invisible to the self-hosted call lowering while this module is
+# inside the compiler's own import cycle, and the call became a weak
+# "unavailable in compiled mode" stub returning 0.
+from fire_compiler import for_target_is_tuple, target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -4407,7 +4412,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # print `(0,)` where CPython prints `0`.
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if gimple_ctypes.for_target_is_tuple(target_str):
+    if for_target_is_tuple(target_str):
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -4711,7 +4716,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # target is spelled `'(a,)'` and the comma is the only thing that says so,
     # so a comma test here has to be the one that knows about it (see
     # fire_compiler.py's "Unpacking-target representation").
-    is_tuple_target = (gimple_ctypes.for_target_is_tuple(_target_str)
+    is_tuple_target = (for_target_is_tuple(_target_str)
                        and tuple_slot_ctypes is not None)
     # `[x for x, in gen()]` binds ONE name, and `gen0.target` is the literal
     # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
@@ -4730,7 +4735,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _tgt = _one if _one is not None else gen0.target
     saved_target = None
     if is_tuple_target:
-        var_names = gimple_ctypes.target_slots(_inner_str)
+        var_names = target_slots(_inner_str)
     else:
         var_names = None
         saved_target = _compr_bind_target(gen, _tgt, vct)
@@ -5945,7 +5950,7 @@ def _split_top_level_comma(s: str) -> list[str]:
     owns the target representation (see its "Unpacking-target
     representation" section) and this is where the empty-slot rule is paid
     for once."""
-    return gimple_ctypes.target_slots(s)
+    return target_slots(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.

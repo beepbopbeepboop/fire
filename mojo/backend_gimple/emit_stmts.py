@@ -31,6 +31,11 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
+# re-export is invisible to the self-hosted call lowering while this module is
+# inside the compiler's own import cycle, and the call became a weak
+# "unavailable in compiled mode" stub returning 0.
+from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -3247,8 +3252,8 @@ def _gen_stmt_ForStmt(gen, node):
     #
     # Idempotent, so a module compiled twice (as an import and again inline)
     # lands on the same target both times.
-    if isinstance(node.target, str) and not gimple_ctypes.for_target_is_tuple(node.target):
-        node.target = gimple_ctypes.for_target_single_name(node.target)
+    if isinstance(node.target, str) and not for_target_is_tuple(node.target):
+        node.target = for_target_single_name(node.target)
     # `for i in reversed(range(...))` — rewrite to an equivalent descending
     # `range(...)` ForStmt and take the fast integer-loop path, instead of
     # `_lower_builtin_reversed` (which only materializes list/str/bytes and

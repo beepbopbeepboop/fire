@@ -24,7 +24,7 @@ from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
     TryStmt, VarDecl,
-    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
+    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
@@ -556,7 +556,8 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                             _stack.append(_nb)
                 if len(_members) < 2:
                     continue
-                _member_cis = [ctx._all_closures[outer_name][_m] for _m in _members]
+                _member_map = _as_dict(ctx._all_closures[outer_name])
+                _member_cis = [_member_map[_m] for _m in _members]
                 _merged_caps: dict[str, str] = {}
                 _merged_mut: list = []
                 for _mci in _member_cis:
@@ -714,7 +715,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
         # in the generated .ci, a hard GCC parse failure). Mirrors the
         # closure-typedef-emission loops' identical fix.
         for _outer_name in list(ctx._all_closures):
-            _inner_map = ctx._all_closures[_outer_name]
+            # `_as_dict`: `ctx` is an untyped parameter, so `ctx._all_closures` has
+            # no recorded value type on the self-hosted path and its subscript
+            # was lowered as a LIST read (`mojo_list_get_int` with a string
+            # index -- a SIGSEGV for any input containing a nested `def`).
+            _inner_map = _as_dict(ctx._all_closures[_outer_name])
             for _inner_name in list(_inner_map):
                 _ci = _inner_map[_inner_name]
                 _sub_closures = ctx._all_closures.get(_ci.lifted_name, {})
