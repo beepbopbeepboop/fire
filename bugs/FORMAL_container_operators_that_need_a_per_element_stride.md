@@ -1,10 +1,62 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
-that stand in for them are landed.** `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green; this doc
-is about the rows in it that are green *as refusals*, which is a different thing
+**Status: PARTIALLY FIXED 2026-10-08 (`work/formal197-docs`). ITEM 3 — set
+algebra `&`, `^`, `-` — IS LOWERED ON arm64, with its augmented forms; the five
+rows that were refusals are answers now. The x86-64 half of item 3 and items 1,
+2 and 4 are still open, and this document is the record of exactly what
+landed and what did not.** `test_formal_container_methods.py` measures the
+whole surface against CPython on both architectures and is green; this doc is
+about the rows in it that are green *as refusals*, which is a different thing
 from green as answers.
+
+## What landed 2026-10-08: item 3 on arm64
+
+`arm64_codegen.py::_emit_set_algebra`, with `_emit_set_select`/`_emit_set_append`
+beside it, lowers `a & b`, `a - b` and `a ^ b` over two set blobs to CPython's
+answers element-wise over the 8-byte element stride: `&` keeps every element of
+`a` also in `b`, `-` keeps every element of `a` not in `b`, and `^` is both
+directions of `-` (the two appended sequences are disjoint because both operands
+hold unique elements, so — unlike `_emit_set_union` — no dedup pass is needed).
+It shares `_emit_set_union`'s reservation, `_emit_blob_growth_guard` and
+`_emit_list_base`, so a site's frame cost does not depend on which of the four
+operators it is. The augmented spellings `s &= {2}`, `s -= {2}`, `s ^= {2}` reach
+the same emitter through the existing container desugaring.
+
+**The gate became per-backend, because the answer is.** `&`, `^` and `-` stay in
+`model.CONTAINER_GATED_OPS` — x86-64 still has no emitter and still refuses them
+— and arm64 passes `lowered_container_ops=model.SET_ALGEBRA_OPS` to
+`string_binary_refusal` at its two call sites (`_emit_binop` and the augmented
+`_emit_aug`), which makes `container_operator_refusal` stand aside for exactly
+those three. Arm64 then asks the new `model.container_setop_refusal`, which
+lowers only `set OP set` and refuses a LIST/dict/other operand by name — CPython
+raises `TypeError` for every one of those, so refusing is the correct answer,
+not a missing feature. `o_sub` (two LISTS) is still a refusal on both backends
+and pins that.
+
+**Measured, `test_formal_container_methods.py set operator`, both backends,
+green:**
+
+| | before | after |
+|---|---|---|
+| `set` group, arm64 answers | 8 | **13** |
+| `set` group, x86-64 answers | 4 | 4 (unchanged) |
+| the five `s_*_r` rows | refusals on both | **answers on arm64**, arm64-only |
+
+The five moved rows are `s_intersection_r`, `s_difference_r`, `s_symdiff_r`,
+`s_sub_r` and `s_andassign_r`; each now proves the CONTENTS (`sum` and `len`)
+rather than only the length, and each is `BACKEND_ONLY['…'] = 'x86_64'`. The
+operator group's `o_xor`/`o_and` are now arm64-refused-x86-64 rows
+(`BACKEND_ONLY = 'arm64'`), since arm64 answers them.
+
+**What is left on item 3**: the x86-64 emitter. That backend has no set union
+either (`_emit_set_union` does not exist there; `s_union` and its siblings are
+arm64-only), so the x86-64 half is four emitters written from scratch over
+`_emit_list_concat`'s reservation/copy machinery, not a port of the arm64 one.
+
+- Original status follows.
+
+**Status (pre-2026-10-08): NOT FIXED — four lowerings, one shared obstacle, and
+the refusals that stand in for them are landed.**
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
@@ -79,14 +131,13 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3). arm64 only, then x86-64; both
-   already have `_set_vars` and `container_union_refusal` to gate on, so the
-   gate narrows from "refuse" to "lower" without new machinery. Each row in
-   `test_formal_container_methods.py`'s `set` group
+1. **`&`, `^`, `-` between two sets** (item 3). **arm64 DONE 2026-10-08**
+   (`_emit_set_algebra`); **x86-64 still open**, and it is the four-emitter job
+   the landing note above sizes. Both backends already have `_set_vars` and the
+   union gate to key on. The five `set`-group rows
    (`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r`,
-   `s_andassign_r`) becomes an answer case, and `container_operator_refusal`
-   loses that operator from `CONTAINER_GATED_OPS` — the table is the only place
-   the operator set is written, which is why widening it was one line.
+   `s_andassign_r`) moved from `probe=None` to a probe and are arm64-only; the
+   operator group's `o_xor`/`o_and` moved to arm64-refused-x86-64.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and

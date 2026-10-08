@@ -12911,6 +12911,36 @@ def set_union_refusal(left: str, right: str) -> str:
         f"membership test. arm64 lowers this operator correctly, for two SETS")
 
 
+def container_setop_refusal(op: str, left: str, right: str, left_is_set: bool,
+                            right_is_set: bool, left_is_dict: bool = False,
+                            right_is_dict: bool = False) -> str | None:
+    """Why `left {op} right` is not a set-algebra lowering, or None when it is.
+
+    The gate a backend asks once it has TOLD `container_operator_refusal` that
+    it lowers `&`, `^`, `-` (via `lowered=SET_ALGEBRA_OPS`), for the same reason
+    `container_union_refusal` exists: CPython defines these three for two SETS
+    and for nothing else — `[1, 2] - [3]`, `[1] & [2]` and `{"a": 1} ^ {}` all
+    raise `TypeError` — so a backend that lowered them by their integer ALU
+    meaning would answer a program CPython rejects with the address arithmetic
+    `container_operator_refusal`'s transcript measures.
+
+    Only the both-sets shape returns None. Everything else is refused with the
+    meaning `CONTAINER_OP_MEANING` states, so the message names what the source
+    meant rather than only that the path cannot lower it.
+    """
+    if left_is_set and right_is_set:
+        return None
+    which = ("the left operand" if not left_is_set else
+             "the right operand" if not right_is_set else "an operand")
+    return (
+        f"{left} {op} {right} is refused because {which} is not established to "
+        f"be a SET. Python defines `{op}` for two sets — between two sets it is "
+        f"{CONTAINER_OP_MEANING.get(op, 'set algebra')} — and for nothing else: "
+        f"a list, a tuple or a dict operand is a `TypeError` there. Build the "
+        f"operation with an explicit membership loop, or compare the elements "
+        f"you mean (`xs[i] {op} ys[i]`)")
+
+
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 
@@ -13766,7 +13796,8 @@ def blob_growth_overflow_message(what: str, capacity: int) -> str:
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
-                          untyped_callee=None) -> str | None:
+                          untyped_callee=None,
+                          lowered_container_ops=frozenset()) -> str | None:
     """The ONE place a binary operator with a string operand is decided not to
     be lowered, so both backends ask the same question in the same order.
 
@@ -13804,7 +13835,8 @@ def string_binary_refusal(op: str, left_kind, right_kind,
         if word is not None:
             return word
     blob = container_operator_refusal(op, left_kind, right_kind,
-                                     spelled_op)
+                                     spelled_op,
+                                     lowered=lowered_container_ops)
     if blob is not None:
         return blob
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
@@ -13864,9 +13896,20 @@ CONTAINER_OP_MEANING = {
 #: same defect wearing different operators, so they belong in one gate.
 CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
 
+#: The set-algebra operators whose CPython meaning is defined ONLY for two
+#: sets (`set & set`, `set ^ set`, `set - set`), and which a backend that has
+#: the emitters LOWERs rather than refuses.  They are named separately from
+#: `CONTAINER_GATED_OPS` because the gate is still the right answer for every
+#: backend without the lowering: `container_operator_refusal` returns None for
+#: one of these only when the caller passes it in `lowered`, and the backend
+#: that does so must ask `container_setop_refusal` next to keep refusing the
+#: shapes CPython itself rejects (a LIST, a dict, or a non-set operand).
+SET_ALGEBRA_OPS = frozenset({"&", "^", "-"})
+
 
 def container_operator_refusal(op: str, left_kind, right_kind,
-                               spelled_op: str | None = None) -> str | None:
+                               spelled_op: str | None = None,
+                               lowered=frozenset()) -> str | None:
     """Why `a {op} b` must not be lowered when an operand is a BLOB, or None.
 
     **The wrong answers are measured, and they are WORSE than the ordering ones
@@ -13911,6 +13954,12 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
+        return None
+    if bare in lowered:
+        # The CALLING backend has the emitters for this set-algebra operator
+        # and has taken responsibility for refusing the shapes CPython itself
+        # rejects (`container_setop_refusal`).  Only the set-algebra three can
+        # ever be here: `==`/`!=` and the orderings are never in `lowered`.
         return None
     if not (container_operand_is_blob(left_kind)
             or container_operand_is_blob(right_kind)):
