@@ -8,6 +8,23 @@ had gone stale in three separate ways, and a census that is stale in the
 direction of "more broken than it says" is as wrong as one that is stale the
 other way.**
 
+**Re-measured 2026-10-08 (`work/formal213-docs`), and the five dec1 examples now
+PASS.** The cause is the stack-floor guard's `getrlimit` moving out of the
+prologue into the startup stub (`arm64_codegen.py::_emit_stack_floor_init`): the
+guard is now a load and compare with no call on the walked path, so the dec1
+walk no longer stops at an opaque call and the `x30` return-frame obligation is
+discharged. Measured one at a time with
+`python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py -j 1 <stem>`
+(3.9 GB peak): `fact`, `sqsum`, `sum`, `count`, `pow2` are each **PASS**. So the
+table's `count`/`pow2` KNOWN-GAP rows and the `fact`/`sqsum`/`sum` FAIL row are
+superseded, and `FORMAL_arm64_x30_is_reloaded_from_the_frame.md`'s subject is
+fixed by that move. **The `count`/`pow2` entries in
+`test_formal.py::EXPECTED_FAILURES` are now STALE**, and they belong to that
+document's claim (`formal214-docs`, no commits yet at the time of this
+measurement) — so they are reported here rather than edited from this branch. A
+run of `test_formal.py` over either stem exits 1 with "STALE expected-failure
+entries (now passing — remove them)", which is the anti-rot check doing its job.
+
 **Measured, `python3 test_formal.py -j 1 <stem>`, one at a time (each is a
 150-300 s Lean run, which is why this is a sample of the corpus and not all of
 it — the full sweep is a heavy run and belongs to the integrator):**
