@@ -9526,6 +9526,19 @@ SSE_CLASS = "sse"
 # and `a`. `%n` is not in it (it writes through a pointer) and `%p` is not
 # (Darwin's `%p` renders the ADDRESS, which is an integer word).
 PRINTF_FLOAT_CONVERSIONS = frozenset("aAeEfFgG")
+#: The conversions whose C reading is NOT a number, and it is an exclusion
+#: rather than an inclusion because a NUMBER conversion is every one that
+#: renders the word it is handed. `%s` reads it as TEXT, `%p` renders the
+#: ADDRESS (which is exactly what a container IS, so a container is the RIGHT
+#: operand for it), and `%n` writes the count THROUGH the vararg rather than
+#: rendering anything. Every other conversion — the integer family, `%c`, the
+#: floating family, and a `*` width, which reads an `int` — is a number.
+#:
+#: Spelled once and read by `printf_container_conversion_refusal`, because the
+#: question it answers ("does this conversion render a number") is the same one
+#: that decides whether a container operand is being read as an address by
+#: mistake or on purpose.
+PRINTF_NON_NUMBER_CONVERSIONS = frozenset("spn")
 # Eight XMM registers, and the boundary is the ABI's rather than this path's.
 PRINTF_SSE_REGISTERS = 8
 PRINTF_INTEGER_REGISTERS = 6
@@ -10378,6 +10391,44 @@ def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
     return "int" if vk.kind_of(expr) == INT_KIND else None
 
 
+def printf_arg_container_evidence(expr, vk) -> str | None:
+    """The CONTAINER kind of a `printf` vararg, or None when it is not one.
+
+    The evidence axis the NUMBER conversions were missing. `printf_arg_text_evidence`
+    asks whether an operand is TEXT and `printf_arg_float_evidence` whether it is
+    a FLOAT or an INTEGER, and neither asks whether it is a CONTAINER — so
+    `printf("%d", xs)` placed the vararg from the format, read eight bytes of a
+    blob as a decimal and printed the blob's heap ADDRESS on both architectures,
+    from a green build, exit 0, where CPython raises
+
+        TypeError: %d format: a list is required, not int
+
+    It is the exact mirror of the refusal that already exists for the other
+    direction (`printf("%s", 42)`, whose operand is a number where text is
+    required), and it is the same table read from the other side.
+
+    The evidence is `ValueKinds.kind_of` and nothing else, because a container
+    is a KIND a word has and not a `None` a word is defaulted to: `is_list_kind`
+    is the one predicate that recognises it — `List`, `Tuple`, `Set`, `Dict`,
+    `bytearray` and `bytes` all classify as `list:…`, one spelling per element
+    kind, so asking it of the KIND rather than of a constructor's name is what
+    keeps `printf("%d", xs)`, `printf("%d", d)` and `printf("%d", b)` one answer
+    instead of three.
+
+    **A NAME's `own_shape` is deliberately not consulted**, and that is the one
+    place this hook differs from the text hook: there the question is "did this
+    function BIND the name to an integer on that statement's own shape", which
+    is evidence a word cannot otherwise carry, while a container is derived from
+    the construction or the declaration by `kind_of` itself. `None` is the
+    permissive direction, as it is for both sibling hooks: an unclassifiable
+    operand keeps whatever behaviour it had.
+    """
+    if vk is None:
+        return None
+    kind = vk.kind_of(expr)
+    return kind if is_list_kind(kind) else None
+
+
 def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
                                    class_of=None) -> str | None:
     """Why a conversion whose CLASS disagrees with its operand's kind is refused.
@@ -10448,6 +10499,78 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
             f"the conversion is the source's decision and this path already "
             f"has both of them: `Int(x)` truncates toward zero and `float(x)` "
             f"rounds to the nearest double"
+        )
+    return None
+
+
+def printf_container_conversion_refusal(callee: str, fmt_text, args: list,
+                                       container_of=None) -> str | None:
+    """Why a NUMBER conversion of a CONTAINER operand is refused.
+
+    `printf_kind_conversion_refusal`'s sibling, and it exists because the two
+    volatile faces of a `printf` vararg are not the two the float table covers:
+    a `%d` handed a `Float64` is the bit pattern rendered as a decimal, and a
+    `%d` handed a `List` is the blob's ADDRESS rendered as a decimal. Both are a
+    wrong number that prints from a green build, and only the first had a row.
+
+    Measured on both architectures, before this existed:
+
+        def main() -> Int:
+            var xs = [1, 2, 3]
+            printf("v=%d\\n", xs)
+            return 0
+
+    arm64 printed `v=1809329920` and x86-64 printed `v=1870638832` — a heap
+    address, different on each run and on each machine. CPython raises
+    `TypeError: %d format: a list is required, not int`, which is the sentence
+    this mirrors.
+
+    **A NUMBER conversion is every conversion whose C reading is a number**, and
+    the two that are not are said rather than assumed: `%s` reads its vararg as
+    TEXT (and a `bytearray` is legitimately text through it, which is why the
+    exclusion is the conversion and not the kind), and `%p` renders the ADDRESS
+    — which is exactly what a container IS, so a container is the RIGHT operand
+    for it and refusing it would refuse a correct program. `%n` writes the count
+    through the vararg and is not a render at all; it is left to whichever
+    refusal owns it.
+
+    `container_of` is `printf_arg_container_evidence`'s answer — the container's
+    kind or None — and the permissive direction is the same one every evidence
+    hook here takes: **None never refuses.** A byte blob (`list:byte`) is a
+    container for this question and a `bytearray` at `%d` prints its address,
+    so it is refused; the same blob at `%s` is bytes and is not.
+
+    `None` for a format this does not parse, the permissive direction
+    `printf_conversion_specifiers` takes.
+    """
+    if container_of is None:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if j >= len(args) or conv in PRINTF_NON_NUMBER_CONVERSIONS:
+            continue
+        kind = container_of(args[j])
+        if kind is None:
+            continue
+        return (
+            f"the `%{conv}` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as a number, and `{spelled(args[j])}` is a "
+            f"CONTAINER (`{kind}`) whose value is the ADDRESS of a blob, not "
+            f"the number under it. A container on this path is a counted block "
+            f"of elements in `malloc`'d memory, so its word is the block's "
+            f"base — what `%{conv}` renders is that address, and it differs "
+            f"between the two architectures and between runs. Measured on BOTH "
+            f"architectures, `printf(\"v=%d\", xs)` for `var xs = [1, 2, 3]` "
+            f"printed `v=1809329920` on arm64 and `v=1870638832` on x86-64 from "
+            f"a green build, exit 0, where CPython raises `TypeError: %d "
+            f"format: a list is required, not int`. Refused rather than "
+            f"emitted, because the address is not a rendering of the value the "
+            f"source asked for. What the same source can do instead: print the "
+            f"COUNT (`len(xs)`) or an ELEMENT (`xs[i]`), which are integers; a "
+            f"container itself has no number, and neither `String(xs)` nor "
+            f"`print(xs)` gives it one on this path"
         )
     return None
 
@@ -10785,27 +10908,30 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
 
 
 def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
-                         text_of_arg=None, class_of=None):
+                         text_of_arg=None, class_of=None, container_of=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now four ways a format string fails here — a `%s`
+    than two: there are now five ways a format string fails here — a `%s`
     handed something that is not text (`printf_text_conversion_refusal`), a
     conversion with no argument behind it
     (`printf_missing_operand_refusal`), a WIDTH on a `%s` whose argument is
-    text that is not ASCII (`printf_text_width_refusal`), and a conversion whose
+    text that is not ASCII (`printf_text_width_refusal`), a conversion whose
     CLASS disagrees with the kind of the argument behind it
-    (`printf_kind_conversion_refusal`) — and two emitters that each had to
-    remember them is exactly how arm64 and x86-64 come to disagree about what a
-    `printf` means. One function, one order, one message table.
+    (`printf_kind_conversion_refusal`), and a NUMBER conversion handed a
+    CONTAINER (`printf_container_conversion_refusal`) — and two emitters that
+    each had to remember them is exactly how arm64 and x86-64 come to disagree
+    about what a `printf` means. One function, one order, one message table.
 
     The order is the one that matters if two could fire: a missing operand and
     a `%s` of a non-text argument are both more basic facts about the CALL than
     the width is, and naming them first is the more useful refusal, since the
     fix is in the format rather than in the argument's text. The class check
-    comes last because it is the only one that needs the argument's VALUE rather
-    than its text, and a format already known to be unusable is not worth a
-    second, deeper question about the same call.
+    and the container check come last because they are the only two that need
+    the argument's VALUE rather than its text, and a format already known to be
+    unusable is not worth a second, deeper question about the same call. Those
+    two cannot fire on the same operand: a container's kind is not the integer
+    or float kind `class_of` answers about.
 
     `text_of_arg` is the fourth hook and it is the only one of the first two
     that is optional: it answers "what TEXT does this argument carry" (None for
@@ -10813,15 +10939,18 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     argument text at all". The width question needs the first and the conversion
     question needs the second, and a caller that has no way to answer the first
     passes None — which is the permissive direction, exactly as `text_of`'s own
-    None row is. **`class_of` is optional for the same reason**: it is
-    `printf_arg_float_evidence`'s three-way answer, and a caller that has no
+    None row is. **`class_of` and `container_of` are optional for the same
+    reason**: they are `printf_arg_float_evidence`'s three-way answer and
+    `printf_arg_container_evidence`'s kind-or-None, and a caller that has no
     `ValueKinds` to hand passes None, which never refuses.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
                                              text_of_arg)
             or printf_kind_conversion_refusal(callee, fmt_text, args,
-                                              class_of))
+                                              class_of)
+            or printf_container_conversion_refusal(callee, fmt_text, args,
+                                                   container_of))
 
 
 

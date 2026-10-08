@@ -175,8 +175,10 @@ Both numbers are `0x400F3333333333 34` / `…35`, which is 3.9's bit pattern —
 first with `+ 1` applied to it **as a word**, and the tell is that the callee's
 arithmetic is *exact*: it computed a right answer to the wrong question. So a
 `Float64` reaching a call boundary anywhere, not only through a dereference, was
-a silent wrong answer; `bugs/FORMAL_printf_d_of_a_container_prints_its_address.md`
-filed in the same commit is the container-shaped sibling of the same hole.
+a silent wrong answer; the container-shaped sibling of the same hole — a NUMBER
+`printf` conversion reading a blob's address — is refused now too, by
+`formal/model.py::printf_container_conversion_refusal` (`printf("%d", xs)` used
+to print a different heap address on each architecture and each run).
 
 **The check is safe to add at a call boundary because of what it is allowed to
 use: only a disagreement the SOURCE states.** `word_annotation_is_int` reads the

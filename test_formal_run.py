@@ -18148,6 +18148,74 @@ FLOAT_REFUSALS = [
 ]
 
 
+# The CONTAINER family refusals, the mirror of `FLOAT_REFUSALS`: a `printf`
+# conversion states what the C library will do with the word it is handed, and
+# a container's word is the ADDRESS of a blob. **There was a refusal for the
+# TEXT direction (`printf("%s", 42)`, `PRINTF_TEXT_CASES`) and none for this
+# one**, so `printf("%d", xs)` placed the vararg from the format, rendered the
+# address as a decimal, and printed a different number on each architecture and
+# each run — green build, exit 0.
+#
+# `model.printf_container_conversion_refusal` is the row, and the evidence is
+# `ValueKinds.kind_of` read through `model.is_list_kind`, which is why the three
+# rows below are ONE rule rather than three: a `List`, a `Dict` and a
+# `bytearray` all classify as `list:…`, so the fix cannot be asked of a
+# constructor's name. The two controls at the end are the two halves the
+# exclusion rests on — a STRING is not a container (the text path is untouched)
+# and a container's COUNT or ELEMENT is an ordinary integer.
+CONTAINER_REFUSALS = [
+    # THE reproducer. Measured on BOTH architectures before the refusal: arm64
+    # printed `v=1809329920` and x86-64 printed `v=1870638832` — a heap address,
+    # where CPython raises `TypeError: %d format: a list is required, not int`.
+    ("printf_d_of_a_list_is_refused",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%d\\n\", xs)\n"
+     "    return 0\n",
+     "refuse:as a number, and `xs` is a CONTAINER (`list:int`)", None),
+    # A DICT is the same rule and NOT the same constructor: its kind is
+    # `list:int` (the VALUES are what a subscript yields), so a fix keyed on
+    # `ListExpr` would leave this row printing the pair blob's address.
+    ("printf_d_of_a_dict_is_refused",
+     "def main() -> Int:\n"
+     "    var d = {\"a\": 1, \"b\": 2}\n"
+     "    printf(\"v=%d\\n\", d)\n"
+     "    return 0\n",
+     "refuse:as a number, and `d` is a CONTAINER (`list:int`)", None),
+    # A BYTE blob, and the reason the exclusion is the CONVERSION rather than
+    # the kind: `list:byte` is a container for `%d` (its word is the block's
+    # base) and is NOT one for `%s` (its elements ARE bytes). A rule that
+    # refused the kind would refuse a `%s` of a bytearray that is correct.
+    ("printf_d_of_a_bytearray_is_refused",
+     "def main() -> Int:\n"
+     "    var b = bytearray(3)\n"
+     "    printf(\"v=%d\\n\", b)\n"
+     "    return 0\n",
+     "refuse:as a number, and `b` is a CONTAINER (`list:byte`)", None),
+    # CONTROL: a container's COUNT is an integer and must keep printing. If the
+    # refusal were asked of the expression's SHAPE rather than of its kind it
+    # would catch `len(xs)` too.
+    ("printf_a_containers_count_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"[%d]\", len(xs))\n"
+     "    return 0\n", 0, "[3]"),
+    # CONTROL: a container's ELEMENT is an integer and must keep printing, which
+    # is the other spelling the refusal message hands the reader.
+    ("printf_a_containers_element_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"[%d]\", xs[0])\n"
+     "    return 0\n", 0, "[1]"),
+    # CONTROL: a STRING is not a container — `str` is `STR_KIND`, not `list:…`
+    # — so the container hook must leave the text path exactly as it was.
+    ("printf_s_of_a_string_is_unaffected_by_the_container_rule",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\", \"hi\")\n"
+     "    return 0\n", 0, "[hi]"),
+]
+
+
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
 
@@ -24566,6 +24634,7 @@ def main():
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + FLOAT_REFUSALS
+                  + CONTAINER_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS

@@ -4261,6 +4261,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
+    def _printf_arg_container_kind(self, arg):
+        """The container kind of a `printf` vararg, or None — see
+        `model.printf_arg_container_evidence`.
+
+        The fourth hook of `model.printf_format_refusal`, and the one the
+        NUMBER conversions were missing: `printf("%d", xs)` on a blob printed
+        its heap ADDRESS. The evidence is `ValueKinds.kind_of`, the same reader
+        the float hook consults, and the DECISION is the model's, so arm64's
+        copy of this method is the same two lines and the two architectures
+        cannot disagree about what a container operand means.
+        """
+        return M.printf_arg_container_evidence(arg, self._vkinds)
+
     def _refuse_word_position_kind_mismatch(self, name, e) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -4311,7 +4324,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
+        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
 
         Delegation, and nothing else: the callee sets, the format-argument
         index, the conversion scan, the three-way narrowing and the messages are
@@ -4328,7 +4341,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class)
+            self._printf_arg_conversion_class, self._printf_arg_container_kind)
         if reason is not None:
             raise CodegenError(reason)
 
