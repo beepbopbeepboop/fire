@@ -7,6 +7,20 @@ rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
 this file is about is NOT built and §5 says what building it takes.**
 
+**Status update 2026-10-08 (`work/formal165-docs`): §5 form 1's ONE-FIELD half is
+built.** `formal/build.py::_call_returns_one_word_struct` now lets a local bound
+from a callee whose declared `-> T` names a one-field struct be read through
+(`r = f(); r.field`), on both backends, pinned by two `test_formal_run.py`
+BOTH_ARCH_CASES rows. That is the shape `r = subprocess.run(...); r.returncode`
+needs and the prerequisite §5 form 1 names for `os.stat(p).st_mode` and the
+`FIELD` rows — but it is only the prerequisite: those rows need their host module
+to DECLARE a reader that returns a one-field struct (or the re-spelled reader §5
+already recommends), so the `importlib`/`resource`/`pwd`/`datetime` files stay
+refused until a hostmod declares the type. The MULTI-field half is unchanged:
+`f().field` where `f` returns a multi-field struct is the returned-frame
+convention's, not this one's. Nothing in §0's per-module ranking moves on this
+change alone.
+
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
 next 4-6 of them. The ranking is the deliverable and it is negative; §4 is the
