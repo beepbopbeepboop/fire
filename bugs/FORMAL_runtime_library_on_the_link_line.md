@@ -41,10 +41,11 @@ Fixed by `formal/model.py::check_runtime_void_results`, asked from
 still builds, links and runs** on both architectures. Taking `void` out of
 `_WORD_SCALARS` would have been the one-line version and would have BROKEN
 §0.3; it is not there for that reason. `test_formal_runtime_link.py` gained 18
-checks; its 4 failures are pre-existing and unrelated (the two
-published-count rows: `FORMAL.md §6 phase 2 publishes 206` against a measured
+checks; its 4 failures at that time were pre-existing and unrelated (the two
+published-count rows: `FORMAL.md §6 phase 2 published 206` against a measured
 210), verified identical with this reverted — 155/4/159 before, 173/4/177
-after.
+after. **Those four are since fixed** (the figure sweep landed and the job now
+passes 183/0).
 
 **What this does NOT do, and it is the honest shape of the remaining work:
 the three ceilings below are unchanged.** This was a defect in the admission
@@ -108,14 +109,14 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
+**`FORMAL.md` §2.2/§6's published figures WERE behind the tree** — it published
 206 exported / 166 reachable where the same census measures 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
-exactly that. Pre-existing, measured on this document's base, and filed as
-`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
-fixed here: `FORMAL.md`'s figure sweep is another branch's project
-(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
-have nothing to do with the link line.
+`test_formal_doc_truth.py` and `test_formal_runtime_link.py` were both red on
+exactly that. The figure sweep has since landed: `FORMAL.md` now publishes the
+tree's own census (683 / 272 / 411 entry points, 216 exported / 176 reachable),
+and the two jobs pass 434/0 and 183/0. That sweep is `1dd68a48`/`ca50560f`
+("DOCS vs REALITY") plus the later reconciliation; it was never the link line's
+subject.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
@@ -733,12 +734,13 @@ python3 tools/memslot.py --gb 8 --label t -- \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py`'s **4 failures at that time were pre-existing and
+were not this document's**: they compared the live count against `FORMAL.md` §6
+phase 2's published `206`/`166`, which the tree had outgrown (`1dd68a48`
+published them on 2026-10-04; `runtime/` and `build_stdlib_dylib.py` changed
+since, and this branch touched neither). **They are since fixed**: the figure
+sweep landed, `FORMAL.md` now publishes 216/176, and both this job and
+`test_formal_doc_truth.py` are green (183/0 and 434/0). `.tmp/ceilings.py` is scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as

@@ -116,7 +116,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | `formal114-docs` | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
 | `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal114-docs` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
 | `FORMAL_string_value_model.md` | `formal115-docs` | what a string IS on the formal path, and the two things that want to be one |
-| `FORMAL_the_published_surface_figures_are_behind_the_tree.md` | `formal116-docs` | `FORMAL.md` §1/§2.2/§6/§12 publish numbers the tree has outgrown, and TWO registered gate jobs are red on exactly that |
+
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | **unclaimed** | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |

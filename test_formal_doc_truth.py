@@ -428,8 +428,17 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 262,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 262')
+    # The published figure is READ out of §6's table rather than written here.
+    # A literal here is a second copy of a number that moves whenever an entry
+    # point lands, and it went stale by ten (262 published, 272 in the tree) —
+    # the exact drift this file exists to catch, held in the oracle instead of
+    # the document.
+    m = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)', text)
+    check(m is not None,
+          'FORMAL.md §6 phase 2 still publishes the word-shaped entry-point row')
+    check(m is not None and int(m.group(1)) == len(word),
+          f'{len(word)} word-shaped entry points in `runtime_abi()`, FORMAL.md '
+          f'§6 phase 2 publishes {m and m.group(1)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
