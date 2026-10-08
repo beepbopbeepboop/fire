@@ -29,6 +29,16 @@ step. The relocation is pinned by `test_formal_run.py`'s
 (against CPython); the sibling document it used to cross-reference is deleted,
 its subject fixed.
 
+**What the copy has to beat, preserved from the deleted sibling.** Its census
+counted **113 files carrying 323 comprehension sites whose element BUILDS a
+container** — 53 files and 189 sites in `formal/` and the `test_formal_*`
+suites — which is why refusing all of them was never acceptable and why the
+relocation was worth building: a NAME element is excluded from that count on
+purpose, because `[inner for y in ys]` where `inner` is one object gives N
+references to ONE list in CPython too, so aliasing a name is the right answer
+and only a container the element position BUILDS is the bug. The copy now
+serves the flat share of those 323; the boundary above is what remains.
+
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
 comprehension's element site reserves through the ONE sequential frame ledger
