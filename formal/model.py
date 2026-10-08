@@ -12911,6 +12911,36 @@ def set_union_refusal(left: str, right: str) -> str:
         f"membership test. arm64 lowers this operator correctly, for two SETS")
 
 
+def set_algebra_unsupported_refusal(left: str, right: str, op: str) -> str:
+    """Why `left OP right` between two SETS is not lowered on the backend that
+    asks, for `OP` one of `&`, `-`, `^`.
+
+    The SECOND question, asked only once the operator is established to be a
+    set operation between two sets -- the same split `set_union_refusal` above
+    makes for `|`, and the reason is the same: the first question ("is this a
+    set operation at all?") is `container_operator_refusal`'s, and a backend
+    that answers it with a lowering needs a second answer for the backend that
+    does not have the emitter.
+
+    It is not "not supported" but a named capability, and it says which
+    machine has it: arm64 lowers `&`, `-` and `^` between two sets through the
+    same per-element scan its union uses (`formal/arm64_codegen.py`'s
+    `_emit_set_algebra`).  x86-64 has no set-algebra emitter, and without one
+    the operator reaches the integer ALU holding the two blobs' ADDRESSES --
+    the measured defect this gate exists to refuse (`container_operator_refusal`
+    records the numbers).  `op` is the BARE operator; `left`/`right` are the
+    spelled operands.
+    """
+    return (
+        f"{left} {op} {right} is a SET OPERATION (CPython's "
+        f"{CONTAINER_OP_MEANING[op]}) and this backend has no emitter for it: "
+        f"the result needs a per-element scan of the other blob, and without "
+        f"one `{op}` combines the two blobs' ADDRESSES, which is a number "
+        f"neither side computed. arm64 lowers `&`, `-` and `^` between two "
+        f"SETS. Build the result with an explicit loop and a membership test "
+        f"(`if x in other`)")
+
+
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 

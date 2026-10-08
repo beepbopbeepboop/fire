@@ -3071,11 +3071,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # BOTH backends refused, from the same line of source. `stmt.op` is
         # the spelling to quote, so the diagnostic names the `+=` the reader
         # is looking at rather than the `+` the table is keyed on.
-        reason = M.string_binary_refusal(
-            op, self._expr_str_kind(stmt.target),
-            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
-        if reason is not None:
-            raise CodegenError(reason)
+        # `s &= {2}` / `s -= {2}` / `s ^= {2}` between two SETS are the set
+        # operators, refused below by name once the desugar reaches
+        # `_emit_binop`; skipping the kind-based refusal here is what lets that
+        # one be the message instead of the generic blob-address sentence.
+        if not (op in ("&", "-", "^")
+                and self._expr_is_set_like(stmt.target)
+                and self._expr_is_set_like(stmt.value)):
+            reason = M.string_binary_refusal(
+                op, self._expr_str_kind(stmt.target),
+                self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+            if reason is not None:
+                raise CodegenError(reason)
         # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
         # the divide is a ONE-operand instruction whose zero arm is a trap, and
         # `**` is an unroller or a loop. Both are already lowered by THIS
@@ -7439,6 +7446,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        # `&`, `-` and `^` between two SETS are CPython's set operations, and
+        # this backend has no emitter for any of them (it has none for `|`
+        # either).  Asked BEFORE `string_binary_refusal` so the refusal names
+        # the missing capability rather than the generic blob-address one --
+        # both are refusals, but only this one tells the reader which machine
+        # does lower it.  A SET is told from a list by `_expr_is_set_like`,
+        # which the kinds cannot do (`model.is_set_expr`).
+        if (op in ("&", "-", "^")
+                and self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            raise CodegenError(M.set_algebra_unsupported_refusal(
+                M.spelled(e.left), M.spelled(e.right), op))
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -10111,11 +10130,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         if isinstance(e, F.IdentExpr):
             return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "-", "&", "^"):
+            # `+` is a concatenation, `|` a union and `&`/`-`/`^` the set
+            # operations, and each leaves a SET a set — but only where one side
+            # is one, and the mixed shapes are CPython `TypeError`s whose
+            # refusals are `container_union_refusal`'s and
+            # `container_operator_refusal`'s answers rather than this one's.
+            # The question matters for a BINDING: `c = s & t` has to record `c`
+            # as a set, or the next `c ^ {2}` is refused with no reason.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
         return False

@@ -624,21 +624,37 @@ SET_CASES = [
     ("s_union_ior", ["s = {1, 2}", "s |= {3}"], "len(s)",
      "the AUGMENTED union, which reached the integer ALU before the desugaring: "
      "it answered 1 on arm64 and 0 on x86-64 where CPython answers 3"),
-    ("s_intersection_r", ["s = {1, 2}", "t = s & {2}"], None,
-     "`&` is INTERSECTION and needs a per-element membership scan per element. "
-     "Measured before the operator gate: 2 on arm64 and 163061056 on x86-64 "
-     "where CPython answers 1"),
-    ("s_difference_r", ["s = {1, 2}", "t = s - {2}"], None,
-     "`-` is SET DIFFERENCE. Measured before the gate: SIGSEGV on both "
-     "architectures, no output, because the result is a word nowhere near a "
-     "blob and `len` read a count out of it"),
-    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^` is SYMMETRIC DIFFERENCE. Measured before the gate: SIGSEGV on both"),
-    ("s_sub_r", ["s = {1, 2}", "s -= {2}"], None,
-     "the augmented difference, which is where the SIGSEGV was reproduced "
-     "through the SECOND emitter as well"),
-    ("s_andassign_r", ["s = {1, 2}", "s &= {2}"], None,
-     "the augmented intersection: 2 on arm64 and garbage on x86-64"),
+    ("s_intersection_r", ["s = {1, 2}", "t = s & {2}", "u = 0",
+                          "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`&` is INTERSECTION, lowered on arm64 through "
+     "`_emit_set_algebra`'s per-element scan. It was refused, and before the "
+     "gate answered 2 on arm64 and 163061056 on x86-64 where CPython answers "
+     "1; x86-64 still has no emitter and refuses by name. Observed through a "
+     "SUM because the set walk is insertion-ordered here and hash-ordered in "
+     "CPython"),
+    ("s_difference_r", ["s = {1, 2}", "t = s - {2}", "u = 0",
+                        "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`-` is SET DIFFERENCE, lowered on arm64 and refused by name on x86-64. "
+     "Before the gate: SIGSEGV on both architectures, no output, because the "
+     "result was a word nowhere near a blob and `len` read a count out of it"),
+    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}", "u = 0",
+                     "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`^` is SYMMETRIC DIFFERENCE, lowered on arm64 and refused by name on "
+     "x86-64. Before the gate: SIGSEGV on both"),
+    ("s_sub_r", ["s = {1, 2}", "s -= {2}", "u = 0",
+                 "for x in s:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
+     "the augmented difference, which reaches the same `_emit_set_algebra` "
+     "through the desugar onto `_emit_binop` (the SECOND emitter), and refuses "
+     "by name on x86-64"),
+    ("s_andassign_r", ["s = {1, 2}", "s &= {2}", "u = 0",
+                       "for x in s:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
+     "the augmented intersection, same path; was 2 on arm64 and garbage on "
+     "x86-64"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
@@ -775,8 +791,15 @@ OPERATOR_CASES = [
      "different, which is the one time an address comparison is CPython's "
      "answer rather than an accident"),
     ("o_sub", ["a = [1, 2]", "t = a - [2]"], None,
-     "`-` between two containers: a TypeError in CPython, and measured as a "
-     "SIGSEGV here before the gate"),
+     "`-` between two LISTS: a TypeError in CPython, and measured as a "
+     "SIGSEGV here before the gate. It is NOT the set difference — that is "
+     "`o_set_sub` below, which is why the two rows must not be merged"),
+    ("o_set_sub", ["s = {1, 2}", "t = s - {2}"], None,
+     "`-` between two SETS: lowered on arm64 (the answer is pinned in the set "
+     "group) and refused BY NAME on x86-64, which has no set-algebra emitter. "
+     "This operator-group row is the one that pins the x86-64 refusal, because "
+     "the set group's `s_difference_r` is a `BACKEND_ONLY` answer case and is "
+     "never run there"),
     ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
      "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate"),
     ("o_and", ["s = {1, 2}", "t = s & {2}"], None,
@@ -857,6 +880,20 @@ BACKEND_ONLY = {
     "s_union_elems": "x86_64",
     "s_union_str": "x86_64",
     "s_union_ior": "x86_64",
+    # arm64 lowers `&`, `-` and `^` between two sets now; x86-64 has no
+    # set-algebra emitter and refuses each by name.  The answer cases are the
+    # `s_intersection_r` / `s_difference_r` / `s_symdiff_r` / `s_sub_r` /
+    # `s_andassign_r` rows in the set group; these two operator-group rows are
+    # the same programs observed as refusals, so on arm64 they are no longer
+    # refusals and the set group is where the answer is pinned.
+    "s_intersection_r": "x86_64",
+    "s_difference_r": "x86_64",
+    "s_symdiff_r": "x86_64",
+    "s_sub_r": "x86_64",
+    "s_andassign_r": "x86_64",
+    "o_and": "arm64",
+    "o_xor": "arm64",
+    "o_set_sub": "arm64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
@@ -967,6 +1004,7 @@ def compare(group, cases, backend, verbose):
 _NAMED_REFUSAL_FRAGMENTS = (
     "is refused when",                  # container_operator_refusal
     "is refused because",               # container_union_refusal
+    "is a SET OPERATION",               # set_algebra_unsupported_refusal
     "as the NEEDLE of",                 # container_membership_refusal
     "is not lowered on this path",      # slice_store_refusal
     "writes",                           # slice_store_static_length_refusal

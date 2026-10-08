@@ -1,5 +1,23 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
+**Status update (2026-10-08, `work/formal176-docs`): item 3 — the set algebra
+`&`, `-`, `^` between two SETS — is LOWERED on arm64; `|`'s old emitter and the
+three new operators now share one per-element-scan implementation
+(`formal/arm64_codegen.py::_emit_set_algebra`, `_emit_set_member_scan`,
+`_emit_set_append`).** `s & {2}`, `s - {2}`, `s ^ {2}` and their augmented
+spellings answer CPython on arm64, verified by
+`test_formal_container_methods.py` (the five `s_*_r` rows are answer cases on
+arm64 now, `sum`/`len` observations). **x86-64 still refuses all three, by
+name** (`model.set_algebra_unsupported_refusal`: "arm64 lowers `&`, `-` and
+`^` between two SETS"), because it has no set emitter — not even for `|`, which
+is why its union is `BACKEND_ONLY` too. So item 3's arm64 half is done and its
+x86-64 half, plus items 1 (`==`/`!=`), 2 (ordering) and 4 (length-changing
+slice store), remain. The operator is NOT dropped from
+`model.CONTAINER_GATED_OPS`: `container_operator_refusal` is still the refusal
+for `&`/`-`/`^` on a LIST, a DICT or a mixed pair (CPython raises `TypeError`
+for every one), and the codegen asks the set question first with
+`_expr_is_set_like`, exactly the split `|` already used. The old Status follows.
+
 **Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
 that stand in for them are landed.** `test_formal_container_methods.py` measures
 the whole surface against CPython on both architectures and is green; this doc
@@ -87,6 +105,9 @@ the second reason this is a project rather than a rewrite.
    `s_andassign_r`) becomes an answer case, and `container_operator_refusal`
    loses that operator from `CONTAINER_GATED_OPS` — the table is the only place
    the operator set is written, which is why widening it was one line.
+   **DONE for arm64 (2026-10-08): the five rows ARE answer cases, and the gate
+   is asked AFTER the set question rather than losing the operators — see the
+   Status update at the top.** x86-64 remains.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
