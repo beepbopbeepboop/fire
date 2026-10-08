@@ -1,5 +1,25 @@
 # The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12`
 
+**Status update 2026-10-07 (`work/formal125-docs`): FIXED IN SOURCE; the
+`lib/ProofLib.lean` build is still owed to the integrator.** One helper,
+`arm64_ext_imm12 (insn : UInt32) : Nat := (((insn >>> 10) &&& 0xfff).toNat) <<< (((insn >>> 22) &&& 0x3).toNat * 12)`,
+is called by ALL FIVE `imm12` arms (ADD 32/64, SUB 32/64, CMP), so the shift
+cannot be present in one and absent from another; `work_step_add_imm32/64`,
+`work_step_sub_imm32/64` and `work_step_cmp_imm` state the shifted value, and
+`_step_rhs`/`_step_rhs_generic` for indices 9-13 scale the literal the same way.
+On the `sh = 2`/`sh = 3` decision §1 asks for: the `Nat` shift is total and the
+model spells the architectural decode for all four; only `sh ∈ {0,1}` can be
+assembled (the encoder is `encode_add_xd_xn_imm_sh`/`encode_sub_xd_xn_imm_sh`),
+so no image reaches the reserved encodings and there is nothing to refuse. The
+CPU-vs-model rows `add x12, x29, #1675, lsl #12`,
+`sub x25, x14, #545, lsl #12` and — the anti-rot a helper that always shifted
+would fail — an UNSHIFTED `add x12, x29, #1675` are in
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`. **The library rebuild
+is the one step this worker may not run** (it breaches the 8 GB worker ceiling);
+the model change was verified in isolation against the served `ProofLib.olean`,
+where the scratch `arm64_step` + the five lemmas elaborate (rc=0, 1.4 GB) and
+`#eval`s `x29 + (1675 << 12) = 6860805` and a wrapped `x14 - (545 << 12)`.
+
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
 **Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
 returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and

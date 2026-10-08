@@ -5622,6 +5622,23 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # agreement about all four flag bits.
         ("cmn x7, x4", lambda A: A.encode_cmn_xn_xm(7, 4)),
         ("tst x7, x4", lambda A: A.encode_tst_xn_xm(7, 4)),
+        # `ADDS Xd, Xn, Xm` with `Rd != 31` is the SAME `0xab000000` class as the
+        # `cmn` above, and the model's arm used to read only the flags -- so this
+        # case and the `cmn` beside it are pinned TOGETHER: a model that fixed one
+        # and broke the other would pass a test that pinned either alone. `x11`
+        # is written, which the `cmn` spelling must NOT do.
+        ("adds x11, x1, x15", lambda A: A.encode_adds_xd_xn_xm(11, 1, 15)),
+        # The `lsl #12` scale of the `imm12` field: the model's `ADD`/`SUB`
+        # immediate arms used to read only bits 21:10 and drop the `sh` field
+        # (bits 23:22), so every `..., lsl #12` was stepped as if unshifted. The
+        # two scaled rows and the UNSHIFTED row below are one test on purpose: a
+        # helper that always shifts would pass the scaled two and fail the third.
+        ("add x12, x29, #1675, lsl #12",
+         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 1)),
+        ("sub x25, x14, #545, lsl #12",
+         lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
+        ("add x12, x29, #1675",
+         lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 0)),
     )
 
     @classmethod
