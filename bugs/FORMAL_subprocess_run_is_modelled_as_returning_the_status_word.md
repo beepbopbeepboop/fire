@@ -124,3 +124,69 @@ Decide between 1, 2 and 3 above, and record it in
 docstring is currently silent on whether `run`'s word return is a deliberate
 simplification or an accident of modelling `CompletedProcess` as a word, and
 `version.py` is not the only file that will need to know.
+
+## Partial progress 2026-10-08: option 1's `.returncode` half, for a same-image
+## free function, is LANDED — and option 3 is not spellable
+
+Three measurements this doc's three options did not distinguish, and the first
+is a real fix.
+
+1. **A one-field struct returned from a function could not be read through a
+   local at all, and now can.** A one-field struct's receiver IS its field
+   (`struct_fits_one_word`), so a function that returns one returns that field's
+   WORD — but `formal/build.py::_one_word_field_map` acknowledged only the
+   CONSTRUCTOR binding (`var r = CP()`), not a call (`var r = make()`), so
+   `r.<sole field>` was refused with *"this path has no way to say what 'r'
+   holds"* about a binding the callee's declared `-> CP` states exactly.
+   Measured both backends:
+
+   ```
+   struct CP:
+       var returncode: Int
+   def make(v: Int) -> CP:
+       return CP(v)
+   def main(n: Int) -> Int:
+       var r = make(7)
+       printf("rc=%d", r.returncode)   # rc=7 after; refused before
+   ```
+
+   The map now reads a callee's declared return type through
+   `M.call_result_type_name` — the same reader `receiver_struct`'s CALL row
+   already used — so the two cannot disagree about what an annotation says.
+   Pinned by `test_formal_run.py`'s
+   `both_arch_one_field_struct_returned_from_a_function_read_through_a_local`
+   and `…_is_its_field` (both backends).  **This is the `.returncode`-lowers-
+   through-the-one-field-convention half of option 1**, and it is necessary.
+   0 sweep files move: it is a capability, not a caller rewrite.
+
+2. **It is NOT sufficient for `run`, for two independent reasons, both
+   measured.**
+   * `subprocess.run` is MODULE-QUALIFIED (`r = subprocess.run(...)`), and
+     `mod.f()` is a `MemberExpr` whose "receiver" is a module name, not a value:
+     `call_result_type_name`'s method arm reads the receiver's struct and a
+     module is not one.  Reading a module-qualified callee's `-> T` is its own
+     question (the same one `model.call_callee_name` names and excludes).
+   * A one-field struct return across a DYLIB boundary is refused outright —
+     measured on a two-file program:
+     `libcp.mojo: make returns a frame address, so it cannot be compiled into a
+     dylib`.  A hostmod is compiled in-image, so the model change might avoid
+     this, but it is not free to assume.
+
+3. **Option 3, as written, is not spellable.**  It asks for "the model and
+   CPython to agree" on `completed_process_returncode`, but that name exists
+   only on the model side: CPython's `subprocess` module has no such attribute,
+   so a single source spelling cannot resolve to it under CPython and to the
+   model's function under `--formal`.  The one spelling that compiles on both
+   sides would have to be a name in the CALLER's own module, which the formal
+   build then compiles and lowers — and its body is the `r.returncode` this doc
+   is about, so the shim does not escape the question.  So option 3 is not the
+   "cheapest, no capability change" answer this doc called it; the real choice
+   is 1 or 2.
+
+**What is left.**  For option 1: resolve a module-qualified callee's declared
+return type (the `MemberExpr`-over-a-module arm of the same map), then decide
+whether `formal/hostmods/subprocess.mojo`'s `run`/`CompletedProcess` should
+return a one-field struct — with the `@admitted` machinery's `UInt64 -> UInt64`
+declaration (`formal/admitted.py`) as the thing to check first.  For option 2:
+name `r.returncode` in `formal/model.py::field_access_refusal`'s family.  The
+decision itself is still this doc's next step.
