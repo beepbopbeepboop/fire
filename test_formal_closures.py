@@ -166,16 +166,16 @@ CASES = [
     # arm spelled for the single-identifier form would leave the capture filter
     # dropping `k`, and this case would be refused with `'k' has no home`.
     #
-    # **NESTED groups (`for a, (b, c) in …`) are a row below.** They used to be
-    # absent, because a separate x86-64 defect in the UNPACK itself — not in the
-    # capture — made the shape print nothing and exit 1 there while arm64
-    # answered; a closure row on it would have gone red for a reason its own
-    # name did not say. That defect is FIXED (both backends now unpack
-    # `fire_compiler.for_target_tree`; see `test_formal_run.py`'s
-    # `both_arch_a_for_target_nested_two_groups_deep`), so the row is here and
-    # it is a capture row again: `loop_target_names` flattens nested groups
-    # through `for_target_names`, and this is what says a leaf two groups deep
-    # is captured.
+    # **NESTED groups (`for a, (b, c) in …`) were NOT a row here for a while,
+    # and the reason was a separate x86-64 defect in the UNPACK itself rather
+    # than in the capture**: `for a, (b, c) in [(1, (20, 300))]` — a program
+    # with NO nested `def` in it at all — printed 21 on arm64 and printed
+    # NOTHING and exited 1 on x86-64. That defect is fixed by the shared shape
+    # reader (`formal/model.py::for_target_tree`, commit `6b27eb42`) and pinned
+    # by `test_formal_run.py`'s `both_arch_a_nested_for_target_unpacks_like_
+    # arm64_and_cpython`. The row below stays a FLAT group because the capture's
+    # subject is the loop target's names, not the nesting; a nested row here
+    # would re-measure the unpack.
     ("a_nested_def_capturing_an_unpacked_loop_target",
      "def outer():\n"
      "    s = 0\n"
@@ -183,32 +183,6 @@ CASES = [
      "        def get():\n"
      "            return k\n"
      "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    # The leaf is two groups deep — `b` inside `(b, (c, d))` inside the outer
-    # target — and it is `b` and not `a`/`c`/`d` because only `b` is read, so a
-    # reader that captured the wrong leaf (or none of the nested ones) would
-    # answer a different number or refuse with `'b' has no home`.
-    ("a_nested_def_capturing_a_leaf_two_groups_deep_in_a_for_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, (c, d)) in [(1, (20, (300, 4000)))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get()\n"
-     "    return s\n"
-     "def main():\n"
-     "    print(outer())\n"
-     "    return 0\n"),
-    ("a_nested_def_capturing_a_nested_group_loop_target",
-     "def outer():\n"
-     "    s = 0\n"
-     "    for a, (b, c) in [(1, (20, 300))]:\n"
-     "        def get():\n"
-     "            return b\n"
-     "        s = s + get() + a\n"
      "    return s\n"
      "def main():\n"
      "    print(outer())\n"
