@@ -23882,7 +23882,7 @@ def check_interpolated_literal_census(verbose=False):
                     rows.append(dict(
                         path=path, spelled=spelled,
                         is_t=any(c in ('t', 'T') for c in spelled[
-                            :_TYPE_VALUE_MODEL.interpolated_literal_prefix(
+                            :_TYPE_VALUE_MODEL.interpolated_literal_quote_start(
                                 spelled)]),
                         nfield=len(fields),
                         specs=sum(1 for f in fields if f[2]),
