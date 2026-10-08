@@ -59,8 +59,6 @@ class TestSuite:
                 print(f"{passed} passed, {failed} failed")
         return 0  # Return dummy value for C compilation
 
-from abc import abstractmethod
-
 # ── Mojo reflection shims ──────────────────────────────────────────
 def struct_field_count(T): return 0
 def struct_field_names(T): return []

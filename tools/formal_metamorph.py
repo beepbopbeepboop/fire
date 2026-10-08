@@ -145,7 +145,6 @@ import os
 import random
 import re
 import shutil
-import subprocess  # noqa: F401  — re-exported for callers that shim this module
 import sys
 import tempfile
 import time
