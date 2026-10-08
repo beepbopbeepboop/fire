@@ -11583,6 +11583,68 @@ def _interpolated_shape_sentence(segs: list) -> str:
     return out
 
 
+def fold_constant_interpolated_literals(stmts) -> int:
+    """Rewrite every f-string that interpolates NOTHING into the string it denotes.
+
+    **An f-string with no replacement field is a CONSTANT**: its value is its
+    text with `{{`/`}}` unescaped, and nothing has to be composed at run time.
+    The build refuses interpolated literals wholesale because there is no buffer
+    to compose one in (`interpolated_literal_refusal`), and this is the one case
+    that refusal cannot be about — the message itself says so
+    (`_interpolated_shape_sentence`'s "This one has NO field at all … so its
+    value is a CONSTANT"). Refusing it is a divergence: CPython prints `abc` for
+    `print(f"abc")` where this path refused the program.
+
+    **`t`-strings are NOT folded.** A `t"…"`'s value is a `Template` object and
+    not a `str`, so there is no constant for it to become; the refusal's second
+    reason covers that construct. Only an f-string prefix is rewritten.
+
+    The rewrite is IN PLACE and it is the WHOLE literal: `value` becomes the
+    composed text and `is_interpolated` becomes `False`, which is exactly the
+    shape an ordinary string literal of the same text has. Every downstream
+    reader — both backends' expression walks, the proof generators, the
+    non-ASCII scan — then sees a plain literal and no other rule has to learn
+    about this one. `is_raw` carries the `r` of an `rf"…"`, because
+    `interpolated_literal_segments` leaves escape text undecoded (as it does for
+    an ordinary literal) and the shared decoder `fire_compiler.decoded_literal`
+    needs the flag to know `rf"a\\nb"` is four characters wide.
+
+    `interpolated_literal_segments` is the ONE reader of the token, so a chunk
+    boundary the reader refuses is not folded either: `CodegenError` is left
+    for `refuse_interpolated_literals` to report as the reader's own reason,
+    because guessing a text there would compose a string with a character in the
+    wrong place. Returns the number folded, so the caller can report it.
+    """
+    folded = 0
+    for node in iter_nodes(stmts):
+        if not is_interpolated_literal(node):
+            continue
+        spelled = getattr(node, "value", "")
+        if not isinstance(spelled, str):
+            continue
+        _prefix_end = interpolated_literal_quote_start(spelled)
+        _is_t = False
+        _is_raw = False
+        for _ch in spelled[:_prefix_end]:
+            if _ch == 't' or _ch == 'T':
+                _is_t = True
+            if _ch == 'r' or _ch == 'R':
+                _is_raw = True
+        if _is_t:
+            continue
+        try:
+            segs = interpolated_literal_segments(spelled)
+        except CodegenError:
+            continue
+        if any(s[0] == 'field' for s in segs):
+            continue
+        node.value = ''.join(s[1] for s in segs if s[0] == 'lit')
+        node.is_interpolated = False
+        node.is_raw = _is_raw
+        folded += 1
+    return folded
+
+
 def refuse_interpolated_literals(stmts) -> None:
     """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
 

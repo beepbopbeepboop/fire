@@ -15682,6 +15682,68 @@ def run_cpython_pair_case(name, source, cpython_source, tmpdir, verbose):
     return True, ""
 
 
+# ── an f-string that interpolates NOTHING is a constant ─────────────────────
+#
+# `formal/model.py::fold_constant_interpolated_literals` rewrites an f-string
+# with no replacement field into the ordinary string literal it denotes, BEFORE
+# the refusal (`refuse_interpolated_literals`) can see it. The refusal is about
+# the missing buffer, and a literal with nothing to interpolate needs no buffer
+# — the refusal's own sentence says so ("This one has NO field at all … so its
+# value is a CONSTANT"). These are CPython pairs rather than four-column rows
+# because the property being held is EXACT TEXT: the value is the source body
+# with `{{`/`}}` unescaped and every other escape decoded exactly as an ordinary
+# literal of the same text would decode it, and only CPython's own answer for
+# the same text is evidence of that.
+#
+# The `t`-string half is deliberately ABSENT: `t"abc"` is a `Template` object and
+# not a `str`, so the fold skips it and the refusal (with its second reason)
+# still stands — `tstring_literal_refused` is that row.
+INTERPOLATED_FOLD_CASES = [
+    # The plainest case, and the one the refusal was written around: `f"abc"`
+    # is `abc`. Before the fold this did not build at all.
+    ("interpolated_with_no_field_folds_to_its_text",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\\n\", f\"abc\")\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"[%s]\" % \"abc\")\n"),
+    # The empty one: no chunk and no field, so the value is the empty string and
+    # not a missing literal.
+    ("interpolated_with_no_field_can_be_empty",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\\n\", f\"\")\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"[%s]\" % \"\")\n"),
+    # `{{` and `}}` are the ESCAPES they are in CPython, so the value holds one
+    # brace each. A fold that copied the body verbatim would print two.
+    ("interpolated_with_no_field_unescapes_braces",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\\n\", f\"{{literal}}\")\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"[%s]\" % \"{literal}\")\n"),
+    # An ordinary escape is decoded exactly as the same text would be in a plain
+    # string: `f\"a\\nb\"` is a newline. This is the check that the folded literal
+    # is an ordinary literal and not raw text.
+    ("interpolated_with_no_field_decodes_escapes",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\\n\", f\"a\\tb\")\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"[%s]\" % \"a\\tb\")\n"),
+    # The `r` of `rf\"…\"` survives the fold: a raw f-string is four characters
+    # where the decoded one is three, and `StringLiteral.is_raw` is what carries
+    # that through the shared decoder.
+    ("raw_interpolated_with_no_field_stays_raw",
+     "def main() -> Int:\n"
+     "    printf(\"[%s]\\n\", rf\"a\\nb\")\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"[%s]\" % r\"a\\nb\")\n"),
+]
+
+
 # ── the POINTER VALUE MODEL (wave 6, F2) ────────────────────────────────────
 #
 # `bugs/FORMAL_pointer_value_model.md` is the long form; the model is
@@ -23444,11 +23506,13 @@ def check_interpolated_literal_census(verbose=False):
     the two shapes §6 and §7.3 name as absent, which are the two that would make
     a future lowering's scope claim false:
 
-      * **no literal with NO field**: §6's first "NOT the fix" bullet measured
-        this at 0 of 114 and said folding one "is worth 0 files here even
-        though it is correct in itself". If a non-zero count appeared, the
-        "fold what interpolates nothing" half of the feature would have become
-        worth something, and this row is what would say so.
+      * **no FILE whose every literal has NO field**: §6's first "NOT the fix"
+        bullet measured this at 0 of 114 and said folding one "is worth 0 files
+        here even though it is correct in itself". The per-LITERAL half landed
+        2026-10-08 (`formal/model.py::fold_constant_interpolated_literals`), so
+        what this row now measures is the FILE-level count: folding helps a file
+        only when it holds no literal with a field, and a non-zero count is what
+        would make it worth a file. It is still 0.
       * **no `t` prefix**: §7.3 says "0 corpus files are affected today (no
         `t"` literal appears in any of the 114)", and the t-string refusal's
         second reason exists because of it. A non-zero count makes that reason
@@ -24731,12 +24795,13 @@ def main():
                   | {c[0] for c in SOLE_FIELD_CALLEE_CASES}
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
-                  | {c[0] for c in CONCAT_CASES}
-                  | {c[0] for c in REPEAT_CASES}
-                  | {c[0] for c in SET_UNION_CASES}
-                  | {c[0] for c in CTOR_RECEIVER_CASES}
-                  | {c[0] for c in CALL_RECEIVER_CASES}
-                  | {c[0] for c in FLOAT_CASES})
+                   | {c[0] for c in CONCAT_CASES}
+                   | {c[0] for c in INTERPOLATED_FOLD_CASES}
+                   | {c[0] for c in REPEAT_CASES}
+                   | {c[0] for c in SET_UNION_CASES}
+                   | {c[0] for c in CTOR_RECEIVER_CASES}
+                   | {c[0] for c in CALL_RECEIVER_CASES}
+                   | {c[0] for c in FLOAT_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + SPREAD_CONSTRUCTION_CASES
@@ -24745,6 +24810,7 @@ def main():
                      + ONE_FIELD_MUTATOR_CASES
                      + SOLE_FIELD_CALLEE_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
+                     + INTERPOLATED_FOLD_CASES
                      + REPEAT_CASES + SET_UNION_CASES
                      + CTOR_RECEIVER_CASES + CALL_RECEIVER_CASES
                      + FLOAT_CASES

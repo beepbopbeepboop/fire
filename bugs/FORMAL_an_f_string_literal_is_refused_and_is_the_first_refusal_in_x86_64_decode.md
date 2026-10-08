@@ -7,7 +7,14 @@ itself is still the right answer and still stands. Filed by `work/formal23-1`
 exposes it belongs to another doc's reproduction). PARTIAL WORK 2026-10-05 on
 `work/formal27-2`, in "What landed" at the end: the refusal's ADVICE was false
 and is now true and pinned by a test, and the ceiling for this file was measured
-(it is `**kw`, not composition).**
+(it is `**kw`, not composition). PARTIAL WORK 2026-10-08 (this branch): the ONE
+case the refusal cannot be about — an f-string with NO replacement field — is
+now FOLDED to the constant it denotes (`model.fold_constant_interpolated_
+literals`, `{{`/`}}` unescaped, `rf"…"`'s `r` carried through `is_raw`) instead
+of refused, pinned by five CPython pairs in `test_formal_run.py`'s
+`INTERPOLATED_FOLD_CASES` built on BOTH architectures. A literal with any field
+still refuses, and a `t"…"` still refuses (its value is a Template, not a str),
+so **the buffer below is still the real fix and the rest of this doc stands.**
 
 Found 2026-10-04 while re-measuring
 `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose

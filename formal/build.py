@@ -17559,6 +17559,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `interpolated_literal_refusal`), so it is a refusal, and a refusal asked
     # from either backend would be a second copy of one decision — which is how
     # the executable and dylib paths come to answer differently about one file.
+    #
+    # The fold runs FIRST and handles the one case the refusal cannot be about:
+    # an f-string with NO replacement field is its own text, so it is lowered to
+    # the ordinary string literal it denotes rather than refused. A `t`-string
+    # with no field is NOT folded (its value is a Template, not a `str`), and
+    # neither is any literal with a field — those reach the refusal, which names
+    # the missing buffer.
+    M.fold_constant_interpolated_literals(stmts)
     M.refuse_interpolated_literals(stmts)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
