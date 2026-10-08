@@ -30,19 +30,20 @@ by a merge. Both are filed as
 `wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
 row).
 
-**Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
-not this doc's fix that regressed.** The census this doc pins — "all twelve
-generate" — is measured green when written, and on this tree
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 12
-failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
-`both`, `either` and `wdiff` now REFUSE at
-`formal/arm64_proof_gen.py::_reached_without_a_condition` (the
-conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
-`sum_range` refuses there instead of at its owned loop-contract refusal. The
-cause is a logic bug in that check, not a reopened gap, and it is filed with
-the reproduction and the fix as
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`.
-That doc is another claim's code, so nothing here was edited.
+**Status 2026-10-08 (`work/formal205-docs`): the PIN class is GREEN again, and
+the split is now TEN generate / TWO refuse.** `test_formal_call_proof_gen.py::
+TestTheRecursionFamiliesStillGenerate` had `wdiff` in its `GENERATE` tuple while
+it refused at generation — the census above (2026-10-06) already records why — so
+`test_every_one_of_them_still_generates` was red on `master`. `wdiff` is moved
+back to `REFUSED`, with the two needles its refusal actually carries
+(`unsupported edge to …` and `loop back-edge / continuation; no loop contract
+matches`) and `REFUSED_OWNER` naming
+`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, which
+is where the `getrlimit` halt-boundary defect is filed. The class docstring's
+"all twelve generate" and the census total are corrected to 10 + 2. The
+underlying bug is still that other doc's; what this pins is the honest split, and
+`test_the_owner_of_the_one_refusal_still_exists` will fail if the owning doc is
+deleted (i.e. when the fix lands), which is the cue to move `wdiff` back.
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
