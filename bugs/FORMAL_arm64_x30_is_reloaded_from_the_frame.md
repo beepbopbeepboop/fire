@@ -10,6 +10,38 @@ what has to be added first. Everything else in this file — the two error sites
 the measurement table, the five affected examples, the peel machinery that
 exists — was re-confirmed on this tree and still stands.
 
+**RE-MEASURED 2026-10-08 (`work/formal164-docs`): the examples now GENERATE,
+and the `hx30fr` obligation this file is about is no longer among their errors,
+so the FALSE-theorem correction below is MOOT on this tree rather than fixed in
+place.** Three things moved under it since the 2026-10-05 measurement:
+
+* the reached-walk masking is gone (`caa3d1a7`: `_reached_without_a_condition`
+  asks about the halt's own path, not about any conditional anywhere), so
+  `count`/`fact`/`pow2`/`sqsum`/`sum` reach a proof file again;
+* a NEW blocker stood in front of `hx30fr` — the step-RESULT emitter's
+  sign-extend `hb` read bit 13 of the WORD instead of the 14-bit immediate's own
+  bit 18, so `count.mojo`'s `tbz x4, #6, +9228` (word `0x36312064`) emitted
+  `have hb : ¬ (0 = 0)` and `native_decide` refused the step lemma. **Fixed this
+  branch** (`formal/arm64_proof_gen.py`, pinned by `test_formal_call_proof_gen.
+  py::TestBitTestBranches::test_the_sign_extend_decision_reads_the_immediate_s_
+  own_sign_bit`);
+* with that closed, `count`'s proof's error list is five errors — `3600` (max
+  recursion depth), `5904`/`5909`/`5935` (the followed call's value flow and the
+  halt-avoidance obligation), `6435` (the Lean kernel's own `-M` ceiling) — and
+  **neither `hx30fr_12` nor `hx30fr_17` is among them**. The absolute
+  `stack_floor_address` store the correction rests on is gone from the chain
+  (the guard now reads `RLIMIT_STACK` in the startup stub and issues no call,
+  `70b76755`), which is why the emitted `(…).x30 = st.x30` is now true.
+
+So the defect this file NAMES is not reachable on this tree, and the five
+examples are red for the same-image/halt obligations owned by
+`FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
+and `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, not for
+this one. The file stays because those examples are still red and the peel
+machinery they will need is written down here; a Lean run is what would confirm
+the obligation closes for all five, and it is not affordable from a bounded
+worker.
+
 **RE-MEASURED 2026-10-05 (`work/formal42-2`) on this tree: five diagnostics,
 all five goals quoted, and the next step is now PRICED — this one is NOT behind
 the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
