@@ -240,6 +240,25 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
+    # **Five more decided by the same measurement (2026-10-07)** — the entries
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 said a worker
+    # could add "with a measurement behind each". `find_spec` returns no spec for
+    # every one of them here, and the object each is missing is one a freestanding
+    # image cannot have:
+    #
+    #   * `_gdbm` — the GNU dbm library, which libSystem does not carry (a
+    #     library-outside-libSystem fact about the TARGET, like `zlib` above, so
+    #     the placement does not depend on this host having gdbm);
+    #   * `_tkinter` — Tk, a windowing library outside libSystem, and a terminal
+    #     besides (the heading above);
+    #   * `_overlapped`, `_winapi`, `_wmi` — Windows' I/O completion ports, the
+    #     Win32 API and WMI, none of which exists on this target at all, so their
+    #     no-spec measurement is host-independent.
+    #
+    # All five are private (leading `_`), so classifying them moves the PUBLIC
+    # unclassified count by zero — the honest reading of this change: five
+    # per-name judgements done with an oracle, not a moved row.
+    "_gdbm", "_tkinter", "_overlapped", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure

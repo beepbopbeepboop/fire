@@ -647,6 +647,22 @@ HOST_SET_ADDED_TIERS = {
     "genericpath": "modelled",
     "ntpath": "modelled",
     "nturl2path": "modelled",
+    # ── 2026-10-07: five PRIVATE names, decided by `find_spec` ──
+    #
+    # The first entries `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    # §0.5 said a worker could add "with a measurement behind each": CPython's
+    # own `importlib.util.find_spec` returns no spec for every one of them here,
+    # and the object each is missing is one a freestanding image (libSystem and
+    # nothing else) cannot have. `_gdbm` needs libgdbm and `_tkinter` needs Tk,
+    # both libraries outside libSystem; `_overlapped`/`_winapi`/`_wmi` are
+    # Windows-only. All five are private, so the public unclassified count does
+    # not move, which is why this is five per-name judgements rather than a moved
+    # row.
+    "_gdbm": "unreachable",
+    "_tkinter": "unreachable",
+    "_overlapped": "unreachable",
+    "_winapi": "unreachable",
+    "_wmi": "unreachable",
 }
 
 

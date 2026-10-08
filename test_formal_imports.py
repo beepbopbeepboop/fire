@@ -2189,6 +2189,46 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
           "unclassified names only if there are many of them")
 
 
+def test_the_five_gdbm_style_names_are_unreachable(tmpdir, _shared):
+    """The first entries `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    §0.5 said a worker could add "with a measurement behind each".
+
+    CPython's own `importlib.util.find_spec` returns no spec for every one of
+    them here, and the object each is missing is one a freestanding image
+    (libSystem and nothing else) cannot have. Three are Windows-only, so the
+    no-spec measurement is host-independent; the other two need a library
+    outside libSystem, which is a fact about the TARGET and so does not turn on
+    this host having Tk or gdbm. All five are private (leading `_`), so
+    classifying them moves the PUBLIC unclassified count by zero — five per-name
+    judgements done with an oracle, not a moved row.
+    """
+    import importlib.util
+    import sys as _sys
+    win = ("_overlapped", "_winapi", "_wmi")
+    lib = ("_gdbm", "_tkinter")
+    for name in win + lib:
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module")
+        tier = I.host_module_tier(name)
+        check(tier == "unreachable",
+              f"host_module_tier({name!r}) is {tier!r}, not 'unreachable' — it "
+              f"needs an object this target does not have")
+        answer, _detail = I.host_module_verdict(name)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) is {answer!r}, not 'unreachable'")
+    # The no-spec measurement itself, for the three whose absence is a fact
+    # about any POSIX host rather than about this one.
+    for name in win:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            spec = None
+        check(spec is None,
+              f"precondition: CPython cannot find {name!r} on this host, which "
+              f"is the measurement the `unreachable` placement rests on — "
+              f"measured {spec!r}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5194,6 +5234,8 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
+    ("the five find_spec-decided names are unreachable",
+     test_the_five_gdbm_style_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",
