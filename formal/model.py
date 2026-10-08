@@ -44321,7 +44321,97 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+#: `export_rule_for`'s fifth answer: the defining module DECLARES NO NAME of
+#: that spelling at all, as against declaring it and excluding it by one of
+#: `reflect.export_exclusions`' four rules. It is the answer the export-rule
+#: sentence cannot currently state, and the one `runtime/stdlib_wrapper.mojo`'s
+#: `from time import now` needs: `formal/hostmods/time.mojo` declares no `now`,
+#: so every one of the four candidate rules the sentence lists is FALSE about
+#: it and the reader is sent looking for an underscore, a bracket, a second
+#: definition or a libSystem name in a module that has none of them.
+EXPORT_RULE_UNDECLARED = "no-such-declaration"
+
+
+def export_rule_for(module: str, name: str, link_line) -> str:
+    """WHY the module `module` does not export `name`, from its own SOURCE.
+
+    Returns one of — and the caller distinguishes them by identity:
+
+      * `reflect.EXCL_PRIVATE` / `EXCL_CLIB` / `EXCL_OVERLOADED` / `EXCL_GENERIC`
+        — the one rule `reflect.export_exclusions` applied, which is the rule
+        the export table itself was built by;
+      * `EXPORT_RULE_UNDECLARED` — the module declares no name of that spelling;
+      * `None` — the module is not on `link_line`, has no recorded `source`, its
+        source cannot be read, or it DOES declare and export the name. `None` is
+        "cannot say", so the caller keeps the general sentence rather than
+        guessing a rule.
+
+    **The `source` path is the whole mechanism.** A module NAME is not a file,
+    and the same name can be a host module (`formal/hostmods/time.mojo`) or a
+    source module; the manifest records the file the library was BUILT from, so
+    the rule is asked of the same bytes the export table was filtered from. That
+    is why `formal/build.py::dylib_export_lists` now carries `source` — without
+    it the three call sites that have only a module name have no path to read.
+
+    A name that is declared but NOT excluded is exported, so the export rule is
+    not what stops the call and this returns `None`; the caller then has a real
+    bug on its hands rather than an explanation to print. The declaration set is
+    the parser's own top-level `FunctionDef`/`StructDef` names, which is the same
+    pass `export_exclusions` walks, so the two cannot disagree about whether a
+    name exists.
+    """
+    if not module or not link_line:
+        return None
+    src_path = None
+    for d in link_line:
+        if isinstance(d, dict) and (d.get("module") or "") == module:
+            src_path = d.get("source")
+            break
+    if not src_path:
+        return None
+    try:
+        with open(src_path, encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return None
+    try:
+        import reflect
+        parsed = reflect.Parser(reflect.py_tokenize(src)).parse_module()
+        excluded = reflect.export_exclusions(src, parsed)
+    except Exception:                       # pragma: no cover - parser refusal
+        return None
+    if name in excluded:
+        return excluded[name]
+    declared = {s.name for s in parsed
+                if type(s).__name__ in ("FunctionDef", "StructDef")}
+    if name in declared:
+        return None
+    return EXPORT_RULE_UNDECLARED
+
+
+#: `{rule: clause}` for `imported_callee_refusal`, keyed by
+#: `reflect.export_exclusions`' own values. The clause names the ONE rule that
+#: applied rather than listing four candidates, and the generic entry carries
+#: the bare-call repair the sentence below it has always carried.
+def _export_rule_clause(name: str, rule: str) -> str:
+    import reflect
+    if rule == reflect.EXCL_PRIVATE:
+        return (f"a leading `_` makes the name private, and a private "
+                f"declaration has no boundary symbol")
+    if rule == reflect.EXCL_CLIB:
+        return ("a C library name like `exit` or `write` is provided by "
+                "libSystem, not by the module that declares the prototype")
+    if rule == reflect.EXCL_OVERLOADED:
+        return ("an overload has more than one definition, so no single symbol "
+                "denotes it")
+    if rule == reflect.EXCL_GENERIC:
+        return ("a generic template is not one symbol but one per "
+                "instantiation (`_get_kgen_string[asm]()` is the measured case "
+                "— a leading `_` and a template at once)")
+    return "the export rule excludes it"
+
+
+def imported_callee_refusal(name: str, sym, fn_name: str, rule: str = None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     Distinct from `module_global_refusal` because the two are different facts,
@@ -44369,6 +44459,32 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
+    if rule == EXPORT_RULE_UNDECLARED:
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. **`{mod}` "
+                f"declares no `{name}` at all** — so this is not `doc/ABI.md`'s "
+                f"export rule, which can only exclude a name that exists, and "
+                f"the four reasons that sentence lists (a leading `_`, a "
+                f"generic template, an overload, a C library name) are each "
+                f"false about a name the module does not declare. The "
+                f"declaration is missing rather than hidden: write `{name}` in "
+                f"`{mod}`, or import it from the module that really defines it. "
+                f"A host module is the common case — "
+                f"`formal/hostmods/time.mojo` declares no `now`, so `from time "
+                f"import now` names a function `time` does not have on this "
+                f"target, and its own source is the list of what it offers")
+    _reflect = __import__("reflect")
+    if rule in (_reflect.EXCL_PRIVATE, _reflect.EXCL_CLIB,
+                _reflect.EXCL_OVERLOADED):
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. It does not "
+                f"export it, and the reason is `doc/ABI.md`'s export rule: "
+                f"{_export_rule_clause(name, rule)}. That is the rule "
+                f"`reflect.export_exclusions` applied when the export table was "
+                f"built (bugs/FORMAL_known_limits.md §1.1), and it is a fact "
+                f"about the DECLARATION rather than about this call. Write the "
+                f"operation in this module, or call a public function that does "
+                f"it — the same program with a definition this image can bind")
     return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
             f"call has to bind a symbol `{mod}` exports. That module does not "
             f"export it, and the reason is `doc/ABI.md`'s export rule rather "

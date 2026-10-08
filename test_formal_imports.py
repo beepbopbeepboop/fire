@@ -3779,6 +3779,68 @@ def test_the_bare_call_refusal_names_the_method_the_call_is_in(tmpdir, _shared):
           f"the refusal named neither scope it walked: {text.strip()[-300:]}")
 
 
+def test_a_name_the_module_does_not_declare_is_not_given_the_export_rule(
+        tmpdir, _shared):
+    """A call the module declares NO name of is told THAT, not the four rules.
+
+    `runtime/stdlib_wrapper.mojo`'s `from time import now` + `now()` is the
+    measured case: `formal/hostmods/time.mojo` declares no `now`, so each of the
+    four candidate reasons `imported_callee_refusal` used to list (a leading
+    `_`, a generic template, an overload, a libSystem name) is FALSE about it,
+    and the reader is sent after an underscore, a bracket, a second definition or
+    a C name in a module that has none of them. `model.export_rule_for` reads the
+    defining module's own source (`dylib_export_lists` now carries `source`) and
+    answers `EXPORT_RULE_UNDECLARED`, which the sentence states instead.
+    """
+    root = os.path.join(tmpdir, "undeclared_callee")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": "def other() -> Int:\n  return 1\n",
+                      "prog.mojo": "from mylib import absent\n"
+                                   "def main() -> Int:\n  return absent()\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a call to a name the module does not declare built successfully")
+    check("declares no `absent` at all" in text,
+          f"the refusal did not say the module declares no such name: "
+          f"{text.strip()[-300:]}")
+    check("doc/ABI.md" in text,
+          f"the refusal stopped naming the rule it is NOT: {text.strip()[-300:]}")
+
+
+def test_the_export_rule_reader_tells_the_rules_apart(tmpdir, _shared):
+    """`model.export_rule_for` answers from the defining module's SOURCE.
+
+    Asked DIRECTLY, because a build can show only the one the source happens to
+    reach and the reader has five answers: one per `reflect.export_exclusions`
+    rule, `None` for a name the module declares AND exports (the export rule is
+    then not the cause), and `EXPORT_RULE_UNDECLARED` for a name it declares not
+    at all. The last is the answer the message had no way to state before.
+    """
+    sys.path.insert(0, HERE)
+    import reflect
+    from formal import model as M
+    d = os.path.join(tmpdir, "rulemap")
+    os.makedirs(d)
+    src = os.path.join(d, "m.mojo")
+    with open(src, "w") as f:
+        f.write("def plain(x: Int) -> Int:\n  return x\n"
+                "def _private(x: Int) -> Int:\n  return x\n"
+                "def tmpl[T: Intable](x: T) -> T:\n  return x\n")
+    link = [{"module": "m", "source": src}]
+    check(M.export_rule_for("m", "_private", link) == reflect.EXCL_PRIVATE,
+          "the reader did not report the private rule")
+    check(M.export_rule_for("m", "tmpl", link) == reflect.EXCL_GENERIC,
+          "the reader did not report the template rule")
+    check(M.export_rule_for("m", "plain", link) is None,
+          "the reader reported a rule for a name the module exports")
+    check(M.export_rule_for("m", "absent", link) == M.EXPORT_RULE_UNDECLARED,
+          "the reader did not report an undeclared name")
+    check(M.export_rule_for("not_on_the_line", "absent", link) is None,
+          "the reader answered for a module that is not on the link line")
+
+
 def test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store(
         tmpdir, _shared):
     """`_enclosing_scopes` is asked directly: a trait method is `Trait.method`,
@@ -5158,6 +5220,10 @@ TESTS = [
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
     ("the bare-call refusal names the method the call is in",
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
+    ("a name the module does not declare is not given the export rule",
+     test_a_name_the_module_does_not_declare_is_not_given_the_export_rule),
+    ("the export-rule reader tells the rules apart",
+     test_the_export_rule_reader_tells_the_rules_apart),
     ("the enclosing-scope reader names a trait method and a module store",
      test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store),
     ("a generic template is not exported under its base name",

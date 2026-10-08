@@ -3,13 +3,14 @@
 
 **Area:** `formal/imports.py` (`check_library_free_calls`) · **Status: PARTIAL —
 §3's half is FIXED (2026-10-05): every refusal the row's gate produces now
-names the function or method the call is in, on both architectures. §4 is NOT
-fixed and is the whole of what is left: the message names four candidate rules
-for `doc/ABI.md`'s export rule, and for one file of the row none of the four
-applies. §2 is the measurement and §5 is why the row itself is not this
-branch's to close.** Measured 2026-10-05 on `master` 80cea3bd, claim
-`sweep43:export-gate`, over the row's OWN 148-file scope rather than a sample ·
-**Layer:** 1/5 of the formal work
+names the function or method the call is in, on both architectures. §4 is NOW
+FIXED (2026-10-08): the refusal asks the defining module's own SOURCE which rule
+applied, names that ONE rule, and says "declares no such name at all" for the
+one file where none of the four rules applies (see §4's "Status" note). §2 is
+the measurement and §5 is why the row itself — one FEATURE, template
+type-argument inference — is still its owner's.** Measured 2026-10-05 on
+`master` 80cea3bd, claim `sweep43:export-gate`, over the row's OWN 148-file
+scope rather than a sample · **Layer:** 1/5 of the formal work
 
 Found by taking the export-gate row — `a call to a name the defining module does
 not export`, the largest codegen cause in the corpus for a fifth round running
@@ -256,7 +257,25 @@ artefact of the intermediate state. `git apply -R` of `git diff` is only the
 original when the diff is taken from the commit the change is measured against.
 
 
-## 4. NOT fixed: the sentence names four rules, and for one file none applies
+## 4. FIXED 2026-10-08: the sentence names the ONE rule that applied, or "declares no such name"
+
+**Status: fixed.** All three steps below are in the tree: `dylib_export_lists`
+carries `source`; `model.py::export_rule_for(module, name, link_line)` reads the
+defining module's source and returns the one `reflect.export_exclusions` rule, or
+`None` for a name the module exports, or `model.EXPORT_RULE_UNDECLARED` for a
+name it declares not at all; and `imported_callee_refusal` takes that as `rule=`
+and words the sentence from it (the general sentence remains only for the cases
+where no path could be read). The four `imported_callee_refusal` call sites pass
+it (`check_library_free_calls` builds a minimal link line from the resolved
+module paths, since its dependency libraries are not built yet). Pinned by
+`test_formal_imports.py::test_a_name_the_module_does_not_declare_is_not_given_the_export_rule`
+(a build: the message says "declares no `absent` at all" and still names
+`doc/ABI.md` as the rule it is NOT) and
+`::test_the_export_rule_reader_tells_the_rules_apart` (the reader directly: the
+private and template rules, `None` for an exported name, `EXPORT_RULE_UNDECLARED`
+for an absent one, `None` for a module not on the line). Measured on the
+`time`/`now` shape: the message now says `` `mylib` declares no `now` at all ``
+rather than listing four false candidates.
 
 `runtime/stdlib_wrapper.mojo` does `from time import now, sleep` and calls
 `now()`. The refusal says the reason "is `doc/ABI.md`'s export rule rather than
@@ -295,10 +314,10 @@ manifest itself records `source` (measured: `"source":
    `formal/hostmods/time.mojo`, and which also turns the 144-file enumeration
    into the one rule that applied.
 
-**Step 1 is one line and step 2 is one function; the reason this branch did not
-do them is that it would have touched the emitter's own constructor argument,
-which is a different claim's neighbourhood, and the row's gate — the thing §2
-found — was already fixed.**
+**The reason the branch that wrote this did not do them was that it would have
+touched the emitter's own constructor argument, which was a different claim's
+neighbourhood, and the row's gate — the thing §2 found — was already fixed. They
+are done now (2026-10-08), by the branch whose claim included this document.**
 
 ## 5. Why the ROW is not closed here, in the words that matter
 

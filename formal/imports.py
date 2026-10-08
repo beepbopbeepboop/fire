@@ -3278,7 +3278,8 @@ def library_free_edges(importer_path: str, stmts: list,
 
 
 def check_library_free_calls(importer_path: str, stmts: list,
-                             library_free: dict) -> None:
+                             library_free: dict,
+                             module_sources: dict = None) -> None:
     """Refuse a BARE call to a name an exempt edge binds; raise `ImportBuildError`.
 
     The one thing an exempt edge can still be asked for, and it is a refusal
@@ -3311,8 +3312,19 @@ def check_library_free_calls(importer_path: str, stmts: list,
     file, and it is unused here: the message names the CALL and the module as
     the reader spelled it, which `library_free_edges` carried over, and inventing
     a path here would be a second spelling of the same fact.
+
+    `module_sources` is `{module name: source path}` for the modules this
+    import resolved to, and it exists so the refusal can say WHY the module does
+    not export the name (`model.export_rule_for`) instead of listing four
+    candidate rules. At THIS call site the dependency libraries have not been
+    built yet, so there is no manifest to read `source` from — the caller has the
+    resolved paths, which are the same files. Absent (the default), the sentence
+    keeps its general wording: this is an explanation, not a check.
     """
     from formal import model as M                   # lazy — cycle
+    link_line = ([{"module": m, "source": p}
+                  for m, p in (module_sources or {}).items()]
+                 if module_sources else None)
     exempt = {}
     for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
@@ -3335,7 +3347,9 @@ def check_library_free_calls(importer_path: str, stmts: list,
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope))
+                M.imported_callee_refusal(
+                    callee.name, sym, scope,
+                    rule=M.export_rule_for(sym.module, callee.name, link_line)))
 
 
 def _enclosing_scopes(stmts: list) -> list:
@@ -3794,7 +3808,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # The refusal the exemption owes, asked BEFORE the loop so a module whose
     # own body calls one of these names bare fails with the sentence that names
     # the construct rather than with the link-time bind audit's.
-    check_library_free_calls(source_path, stmts, library_free)
+    check_library_free_calls(source_path, stmts, library_free,
+                             module_sources=dict(depends))
     for _mod, dep_path in depends:
         if os.path.abspath(dep_path) in library_free:
             continue

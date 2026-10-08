@@ -1733,7 +1733,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         library_free = library_free_edges(source_path, stmts,
                                           project_root=source_path,
                                           demands=demands)
-        check_library_free_calls(source_path, stmts, library_free)
+        check_library_free_calls(source_path, stmts, library_free,
+                                 module_sources=dict(resolved))
         for mod, path in resolved:
             if os.path.abspath(path) in library_free:
                 continue
@@ -14701,7 +14702,10 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
     published = _module_published_names(module, link_line)
     if not published or base_name in published:
         return None
-    return M.imported_callee_refusal(base_name, sym, fn_name)
+    return M.imported_callee_refusal(
+        base_name, sym, fn_name,
+        rule=M.export_rule_for(module, base_name,
+                               dylib_export_lists(link_line)))
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None) -> None:
@@ -15893,7 +15897,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name))
+                        cname, csym, fn.name,
+                        rule=M.export_rule_for(
+                            getattr(csym, "module", None), cname,
+                            dylib_export_lists(link_line))))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16025,7 +16032,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # `bracket_callees` note above for why this is refused here
                     # rather than allowed to reach a dangling `BL`.
                     raise CodegenError(M.imported_callee_refusal(
-                        name, sym, fn.name))
+                        name, sym, fn.name,
+                        rule=M.export_rule_for(
+                            getattr(sym, "module", None), name,
+                            dylib_export_lists(link_line))))
                 # A module-level name with no slot, refused for the reason a
                 # module-level name is refused: nothing writes it, so its value
                 # is the module-level one, and the build can only know that if
@@ -20342,8 +20352,14 @@ def load_dylib_manifests(dylib_paths: list) -> list:
 
 
 def dylib_export_lists(dylibs: list) -> list:
-    """The `[{"module", "exports", "reexports", "constants", "variables",
-    "containers"}]` view of a link line.
+    """The `[{"module", "source", "exports", "reexports", "constants",
+    "variables", "containers"}]` view of a link line.
+
+    `source` is the file the library was BUILT from, carried so a refusal that
+    has only a module NAME can ask `model.export_rule_for` why the module does
+    not export a name — the same bytes the export table was filtered from.
+    Dropped here, the export-rule sentence has no path to read and can only list
+    its four candidate reasons, which is what it did until this key landed.
 
     What both emitters are constructed with, and one iteration over the link
     line rather than the two it used to be: `_dylib_syms` (the flat bare-name
@@ -20360,6 +20376,7 @@ def dylib_export_lists(dylibs: list) -> list:
     which of the two shapes it is (`model.dylib_module_variables`,
     `model.dylib_module_containers`)."""
     return [{"module": d.get("module") or "",
+             "source": d.get("source"),
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},
