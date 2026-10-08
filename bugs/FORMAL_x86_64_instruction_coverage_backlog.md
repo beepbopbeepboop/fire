@@ -8,6 +8,40 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-08 (`work/formal170-docs`): the x86-64 ROWS are effectively closed; the two things left are both in the census tool, which another claim holds
+
+Measured on master `python3 tools/formal_isa_census.py --arch x86_64 | tail -1`:
+
+    1 form(s) with no LEAN/FUZZ/AS and no exemption; 8 exempt (5 harness, 3 backlog)
+    encode_cmov_r64_r64            missing lean, fuzz, as_check
+
+so the "18 forms" the intro above states is now **one**, and that one is the
+census tool's own false positive, not an x86-64 gap: `call_sites` reads emission
+with the regex `\b<encoder>\b` over the emitter's TEXT (see the function at
+`tools/formal_isa_census.py:248`), and `encode_cmov_r64_r64` is named only in
+`formal/x86_64_codegen.py`'s prose (`:1803`, a docstring). Commit `d4cf9fd0`
+already switched the **AS** column to AST for exactly this reason; the **LEAN**
+column's emission gate is still the regex.
+
+And `test_formal_isa_census.py` is RED on master for the anti-rot half:
+
+    test_every_backlog_entry_still_describes_a_gap …
+    ['encode_and_r8_r8', 'encode_or_r8_r8']
+
+Both are `BACKLOG` entries pointing at THIS doc, and both rows are fully covered
+now (`_byte_rex_required`, `work/x86-hw-fuzz`), so the entries are a fixed gap
+that kept its exemption — exactly what that test exists to catch. The arm64
+failures in the same run (`encode_tst_xn_xm` missing fuzz) are `formal178-docs`'s
+arm64-coverage row, not this doc's.
+
+**Both remaining items are edits to `tools/formal_isa_census.py` — the regex
+emission gate and the two stale `BACKLOG` entries — and that file is the arm64
+coverage instrument claimed by `formal178-docs` (`bug:FORMAL_arm64_instruction_
+coverage`), so they are reported and not edited here.** Nothing else in the
+x86-64 census is open: every emitted x86-64 form has a model sample and an `as`
+differential, and the only harness limit left is `encode_call_r64`'s
+register-target one.
+
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
 This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed
