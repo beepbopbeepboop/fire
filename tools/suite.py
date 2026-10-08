@@ -492,6 +492,7 @@ MEASURED_PEAK_GB = {
     'formal-receiver-position': (0.07, 'measured'),  # 16 s, 38 cases (was "2 s, 12 cases")
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
+    'formal-x86-64-parity':   (0.07, 'measured'),   # 44 s, 83 cases, 3 red
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
     # by anything: `formal/x86_64_model_test.py` is spelled `*_test.py` and the
     # estate check's walk counted only `test_*.py`, so it was in no bucket and
@@ -3062,6 +3063,28 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='an x86-64 module dylib that calls out, built, signed and run')
 
+# `test_formal_x86_64_parity.py`: the x86-64 backend compared against arm64 AND
+# CPython on 83 programs. It was excused by `_DECLARED_BY_RULE`'s
+# `test_formal_*.py` family, so no gate ran it and its three red rows were
+# invisible; the estate check could not name it for the same reason.
+# Registered 2026-10-07 at 44 s / 0.07 GB measured. It is `proofs` rather than
+# `check` because 44 s is past what the everyday loop is for and because it
+# carries known reds — the `expect=` states the count. Two of the three are the
+# same 32-bit pointer-load class as
+# `bugs/FORMAL_os_backing_pointer_and_stat_widths.md`; the third is the
+# variadic-double row `bugs/TEST_a_parity_row_pins_an_xmm_float_operand_the_
+# tree_refuses.md` is about.
+test('formal-x86-64-parity', [PY, 'test_formal_x86_64_parity.py'], mem='tiny',
+     deps=['preflight'],
+     expect='3 of 83: aug_through_int32_pointer and aug_every_operator (a '
+            '32-bit pointer load not sign-extended — bugs/FORMAL_os_backing_'
+            'pointer_and_stat_widths.md) and '
+            'printf_float_operand_read_from_an_xmm_register (arm64 refuses a '
+            'double through a variadic — bugs/TEST_a_parity_row_pins_an_xmm_'
+            'float_operand_the_tree_refuses.md)',
+     extra=['test_formal_x86_64_parity.py'] + FORMAL_BUILD_INPUTS,
+     desc='the x86-64 formal backend against arm64 and CPython')
+
 # ── the two the estate check caught on master, 2026-10-02 ──────────────────
 # The same check, the same hole, one landing later: `formal/model.py`'s CFG
 # dominance fix (`f1ad7dc7`) and the ONE-rule-for-receiver change before it
@@ -3852,8 +3875,11 @@ BUCKETS = {
                 'formal-method-param-field', 'formal-receiver-position',
                 'formal-small-hosts', 'formal-specialization',
                 'formal-monomorph',
-                'formal-target-queries', 'formal-value-model',
-                'formal-x86-dylib',
+                 'formal-target-queries', 'formal-value-model',
+                 'formal-x86-dylib',
+                 # Registered 2026-10-07 out of `_DECLARED_BY_RULE`'s
+                 # `test_formal_*.py` family; 44 s, 3 known reds.
+                 'formal-x86-64-parity',
                 # …and the one the estate check named on the merge of the
                 # formal5 batch: `test_formal_core_hostmods.py` came with
                 # `work/formal5-hostmods-core` and was named by no bucket.

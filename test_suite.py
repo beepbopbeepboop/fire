@@ -1246,10 +1246,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # registered with no marker and red 30 of 58 (its own doc), and is now
     # `expect=`-marked with the re-measured 6 of 70. Its harness had to start
     # printing a `PASS=n FAIL=m` shape for the count to be checkable at all.
+    #
+    # `formal-x86-64-parity` (3) is a second ADDITION on 2026-10-07: it was
+    # excused by the `test_formal_*.py` rule rather than registered, so no gate
+    # ran it; registered with its three known reds stated.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
                      'formal-os-backing': 6,
+                     'formal-x86-64-parity': 3,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
