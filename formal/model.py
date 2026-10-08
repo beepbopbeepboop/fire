@@ -44617,11 +44617,11 @@ class GlobalSlot:
     """
 
     __slots__ = ("name", "index", "init", "site", "filled_by_body", "body_site",
-                 "kind", "is_dict", "mutable")
+                 "kind", "is_dict", "mutable", "holds_function")
 
     def __init__(self, name: str, index: int, init, site=None,
                  filled_by_body=False, body_site=None, kind=None,
-                 is_dict=False, mutable=False):
+                 is_dict=False, mutable=False, holds_function=False):
         self.name = name
         self.index = index
         self.init = init
@@ -44631,6 +44631,13 @@ class GlobalSlot:
         self.kind = kind
         self.is_dict = is_dict
         self.mutable = mutable
+        # True when the module-level initializer is a NAME bound to a function
+        # of this unit (`var g = dbl`). The slot's value is then a CODE ADDRESS
+        # the module body stores at run time, and a call through the name is an
+        # indirect branch — see `module_slot_holds_a_function`. It is EVIDENCE
+        # from the initializer rather than a kind, because `_static_initializer`
+        # has no static value for a function and the slot is `("unknown", …)`.
+        self.holds_function = holds_function
 
     @property
     def is_address(self) -> bool:
@@ -45976,8 +45983,25 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
                                  body_site=body_sites.get(name),
                                  kind=kind, is_dict=is_dict,
                                  mutable=(name in written
-                                          or name in body_written))
+                                          or name in body_written),
+                                 holds_function=_binds_a_function(value,
+                                                                  by_name))
     return slots
+
+
+def _binds_a_function(value, by_name: dict) -> bool:
+    """Whether a module-level initializer names a function of THIS unit.
+
+    `var g = dbl` binds `g` to a function, so the slot the module body fills
+    holds a CODE ADDRESS and a call through `g` is an indirect branch. This is
+    the evidence `_static_initializer` cannot give — a function is a link-time
+    address, not an integer or a literal, so the slot is `("unknown", …)` and
+    `GlobalSlot.kind` is None. `by_name` is the unit's own function table, so a
+    name bound to an imported function is deliberately not this (the address
+    would be another image's, which this one cannot call through a bare word);
+    that spelling keeps its own refusal.
+    """
+    return (isinstance(value, F.IdentExpr) and value.name in by_name)
 
 
 def _body_store_shape(value, by_name: dict, rets: dict, int_names, string_names,
@@ -46865,6 +46889,20 @@ def module_slots() -> dict:
 def module_slot(name: str):
     """The `GlobalSlot` for a written module-level `name`, or None."""
     return _MODULE_SLOTS.get(name)
+
+
+def module_slot_holds_a_function(name: str) -> bool:
+    """Whether `name`'s `__DATA` slot holds a function of this unit.
+
+    The reader both emitters ask before a call through a module global. True for
+    `var g = dbl` (`GlobalSlot.holds_function`, decided from the initializer by
+    `collect_global_slots`), so `g(21)` becomes an indirect branch through the
+    slot instead of a `bl g` against a symbol nothing defines. False for every
+    other slot, so a call through a module global that holds an integer or a
+    container keeps whatever verdict it had.
+    """
+    slot = _MODULE_SLOTS.get(name)
+    return bool(slot is not None and getattr(slot, "holds_function", False))
 
 
 def global_slot_kind(name: str):

@@ -769,6 +769,49 @@ CASES = [
      "\n"
      "main(0)\n", "42\n43\n43\n"),
 
+    # ── a module global whose value is a FUNCTION ──
+    #
+    # `var g = dbl` binds `g` to a function of this unit, so the `__DATA` slot
+    # the module body fills holds a CODE ADDRESS. A call through the name used
+    # to emit a `BL g` against a symbol nothing defines and was refused by the
+    # bind audit with a message about the link line — the construct that is
+    # missing is the INDIRECT branch, not a library. The slot now carries
+    # `holds_function` (decided from the initializer by `collect_global_slots`),
+    # and the emitter loads it and branches through the word, exactly as it does
+    # for a function parameter.
+    ("call_through_a_module_global_holding_a_function",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n"
+     "\n"
+     "var g = dbl\n"
+     "\n"
+     "def main(n):\n"
+     "    global g\n"
+     "    r: Int = g(21)\n"
+     "    print(r)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n"),
+
+    # The same word read into a local first, then called. This is the spelling
+    # that already worked (the value path), and it is here so a regression in
+    # the new direct-call arm cannot hide behind it — and so the two spellings
+    # are pinned to the same answer.
+    ("read_a_module_global_function_into_a_local_then_call",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n"
+     "\n"
+     "var g = dbl\n"
+     "\n"
+     "def main(n):\n"
+     "    global g\n"
+     "    h = g\n"
+     "    r: Int = h(21)\n"
+     "    print(r)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n"),
+
     # The KIND of a body-filled slot, which is the third source of a value's
     # kind beside a folded literal and a container literal. `len(G)` is the
     # consumer that needs it and the one that was refused: `("unknown", …)`

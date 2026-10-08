@@ -10393,7 +10393,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         through_value = through_value and (
             e.func.name == name if isinstance(e.func, F.IdentExpr)
             else comptime_eval.specialization_name(e.func) == name)
-        if through_value:
+        # A MODULE GLOBAL whose slot holds a function of this unit — `var g =
+        # dbl`, then `global g; g(21)`. `callee_is_a_bound_value` is FALSE here
+        # (the name is not a local of the caller; its docstring says `global f;
+        # f()` "really is a call to the module's function"), so without this the
+        # call took the extern path and emitted a `BL g` against a symbol nothing
+        # defines — refused four stages later by the bind audit with a message
+        # about the link line. The slot holds the code address the module body
+        # stored, so this is the SAME indirect branch as a bound value and the
+        # `_emit_expr` below loads the slot.
+        module_slot_fn = (not is_extern_call and name not in self._functions
+                          and isinstance(e.func, F.IdentExpr)
+                          and e.func.name == name
+                          and M.module_slot_holds_a_function(name))
+        through_value = through_value or module_slot_fn
+        if through_value and not module_slot_fn:
             ann = M.param_annotation(self._cur_fn, name)
             # A keyword, or a bracket this build cannot read as a
             # specialization, is the construct's own refusal; a parameter whose

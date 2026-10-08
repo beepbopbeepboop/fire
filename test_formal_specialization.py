@@ -1598,16 +1598,17 @@ def test_a_write_through_a_name_is_a_site_the_value_call_reader_can_see(tmpdir):
     the same subscript of a dict literal holding a FUNCTION builds and answers 6,
     which is what says the reader reads the values and not the spelling.
 
-    **The `global` row is here for the integer slot and NOT for the function
-    one, and the reason is a defect of its own.** `var g = dbl` at module level
-    with `global g` in `main` builds, runs, and prints NOTHING where
-    `fire.py run` prints 6 — measured on both architectures — so a module global
-    does not read back as the address of a function value. That is the
-    `__DATA` slot's initializer for a function value rather than anything this
-    reader decides, it is filed as
-    `bugs/FORMAL_a_module_global_holding_a_function_reads_back_as_zero.md`, and
-    putting a row here that asserted 6 would be asserting a build this path does
-    not do.
+    **The `global` row here is the INTEGER slot.** A module global holding a
+    FUNCTION (`var g = dbl`, then `global g`) used to be a defect of its own —
+    the read was the `__DATA` slot's initializer for a function value rather
+    than anything this reader decides — and it is fixed now: the slot records
+    that its initializer names a function of the unit
+    (`GlobalSlot.holds_function`), so both the read and a direct `g(21)` are
+    lowered. `test_formal_globals.py`'s
+    `call_through_a_module_global_holding_a_function` and
+    `read_a_module_global_function_into_a_local_then_call` are the rows that pin
+    it; the integer refusal stays here because a slot holding `17` still is not
+    a code address.
     """
     for label, src in NOT_AN_ADDRESS_WRITES_THROUGH_A_NAME:
         root = os.path.join(tmpdir, f"wtan_{label.replace('/', '_')}")
