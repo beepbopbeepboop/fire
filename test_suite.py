@@ -1241,9 +1241,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # path constant behind, so all ten async suites died at link with `name
     # 'mojo' is not defined`; with that fixed, these six run and pass, and a
     # marker on a passing test is reported as a FAILURE.
+    #
+    # `formal-os-backing` (6) is an ADDITION rather than a drop: it was
+    # registered with no marker and red 30 of 58 (its own doc), and is now
+    # `expect=`-marked with the re-measured 6 of 70. Its harness had to start
+    # printing a `PASS=n FAIL=m` shape for the count to be checkable at all.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
+                     'formal-os-backing': 6,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '

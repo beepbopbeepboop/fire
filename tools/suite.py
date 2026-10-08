@@ -2784,6 +2784,16 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     # Re-measured 2026-10-07: three cases, each on both backends. The
+     # non-ASCII string-subscript refusal this marker's original doc named is
+     # gone (the front end now decodes `\\u`/`\\U`/`\\N{}`/octal, and the
+     # file's rows were rewritten); what is left is `pointer_subscript_i32`
+     # (a 32-bit load not sign-extended: 8589934593000 for 1000),
+     # `pointer_subscript_augmented`, and `stat_null`'s `dev` field (32-bit vs
+     # 64-bit width). Each is a real formal-path value-model gap, not one class.
+     expect='6 of 70: pointer_subscript_i32 and pointer_subscript_augmented '
+            '(32-bit loads not sign-extended) and stat_null dev width, each on '
+            'both backends — bugs/FORMAL_os_backing_pointer_and_stat_widths.md',
      desc='the syscalls under the os host module, through real images')
 
 # ── the ten the batch merge left unregistered ──────────────────────────────
