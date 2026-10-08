@@ -161,17 +161,21 @@ BOUNDARY_REFUSALS = [
     # The documented give-up, kept as a test rather than as a comment:
     # `subscript_callee_names` only recognises a base that is a bare
     # IdentExpr, so `xs[0](5)` — a genuine value, subscripted, then called — is
-    # not a type application and is refused by the specialization refusal, which
-    # names the brackets rather than the allocator. If a future change widens the
-    # recogniser to every subscripted callee, this is the row that says it went
-    # too far.
+    # not a type application and must be refused. The refusal that fires is the
+    # CALL-TIME one (the subscripted value is a container being called as a
+    # function), which is a BETTER answer than the specialization refusal this
+    # row used to pin: it names the construct at the call site rather than the
+    # brackets. The value of the row is unchanged and is what its needle now
+    # checks — the program must NOT build, because building it is the
+    # "value subscripted then called" shape a widened recogniser would exempt
+    # and silently miscompile.
     ("a_subscripted_value_called_is_not_a_type_application",
      "def main(n: Int) -> Int:\n"
      "    var xs = [1, 2, 3]\n"
      "    var y = xs[0](5)\n"
      "    printf(\"y=%d\", y)\n"
      "    return 0\n",
-     "calls a name this unit does not compile"),
+     "is called as a FUNCTION and the source says it holds a container"),
     # …and the type's own ARGUMENT is compile-time by construction, so it is
     # exempt as part of the bracket rather than as a value. `Self.T` inside
     # `List[Self.T]()` is a MemberExpr, not an IdentExpr, and `Subscript` names
