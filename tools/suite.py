@@ -446,6 +446,7 @@ MEASURED_PEAK_GB = {
     'formal-hashlib':   (0.10, 'measured'),   # 390 s cold, 36 s warm
     'formal-struct':    (0.08, 'measured'),
     'formal-os':        (0.06, 'measured'),
+    'formal-doc-truth': (0.08, 'measured'),   # registered 2026-10-07, import-and-compare
     'formal-sys':       (0.06, 'measured'),
     'formal-time':      (0.06, 'measured'),
     'formal-frame-len': (0.05, 'measured'),
@@ -1492,6 +1493,23 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
      desc='no file cites a deleted bug doc more than it used to')
+# Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
+# function names, limits, refusal messages, ABI signatures, tool flags) out of
+# the documents and compares them with the tree, both directions. Registered
+# 2026-10-07: it was in no bucket, so the one file whose job is "does the
+# document still say what the code says" was a test nobody ran, and eight of
+# its rows had drifted. 0.17 s / 0.08 GB measured, no build and no Lean, which
+# is the everyday `check` cost shape. `extra` names the runtime headers and
+# `lib/` because two of its groups read them.
+test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=True,
+     extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
+            'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
+            'formal/lean.py', 'formal/build.py',
+            'formal/arm64_proof_gen.py',
+            'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
+            'reflect.py'],
+     desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
@@ -3603,7 +3621,7 @@ BUCKETS = {
               # so it already runs in almost every gate — as a dependency
               # rather than as a counted test, which is why an estate failure
               # is a FAIL on a test the tally does not mention.
-'preflight', 'suite-self-test', 'doc-refs',
+'preflight', 'suite-self-test', 'doc-refs', 'formal-doc-truth',
               'doc-refs-stale-verdicts', 'comprehension-parse-shape',
               # The four cheapest of the eight formal host-module suites, and
               # the only formal BUILD-AND-RUN coverage in the gate. 4-7 s and

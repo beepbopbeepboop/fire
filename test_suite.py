@@ -3912,43 +3912,12 @@ UNREGISTERED = {
         'than registered — a registered job that skips its only substantive '
         'case is a green line that says nothing.',
 
-    # A DOCUMENT check, and the cheapest file in this list by a wide margin:
-    # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
-    # files. 0.17 s wall and 81 MB maximum RSS measured three times on
-    # 2026-10-04 (`/usr/bin/time -l`, because at 0.17 s memcap's own poll cannot
-    # see a process that is gone before the first tick), no build and no Lean.
-    #
-    # It is listed rather than registered because its branch's task says not to
-    # touch the registry — NOT because it is expensive. It is the cheapest thing
-    # here, so the cost rule wants it registered rather than excused, and the
-    # only thing standing between it and a registration is the instruction.
-    #
-    # Exact next step, in `check` beside `suite-self-test` and `doc-refs`, which
-    # are the other two files that read the tree's own documents:
-    #
-    #   test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'],
-    #        extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-    #               'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
-    #               'formal/lean.py', 'formal/build.py',
-    #               'formal/arm64_proof_gen.py',
-    #               'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
-    #               'reflect.py'],
-    #        desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-    #             'agrees with the tree')
-    #
-    # `extra` names the runtime headers and `lib/` because two of its six groups
-    # read them, and `doc-refs`'s own key does not: a `formal/hostmods/` edit
-    # that moved a declared `mojo_*` signature would otherwise replay a recorded
-    # PASS.
-    'test_formal_doc_truth.py': (
-        'Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md -- counts, '
-        'function names, limits, refusal messages, ABI signatures, tool flags -- '
-        'out of the documents and compares them with the tree, both directions. '
-        '0.17 s and 81 MB measured, no build and no Lean; it found three wrong '
-        'numbers in FORMAL.md §2.2 (540/219/321 against a real 668/262/406) and '
-        'three `lib/` holes published as live in §7 that had been closed for a '
-        'week. Listed because this branch\'s task says not to register anything; '
-        'the cost argues for the registration above.'),
+    # `test_formal_doc_truth.py` was here (listed rather than registered, its
+    # branch's task said not to touch the registry) and is REGISTERED as
+    # `formal-doc-truth` in `check` as of 2026-10-07: the cost rule always
+    # wanted it (0.17 s, no build, no Lean) and the one file whose job is "does
+    # the document still say what the code says" was a test nobody ran, with
+    # four of its rows drifted.
 
     # ── the formal backend's per-construct suites, run by hand ──
     #
