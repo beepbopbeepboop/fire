@@ -453,15 +453,15 @@ def gen_flagged_alu(rng, free):
     to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
     it).
 
-    **`TST` is here, and it is the logical half of the same flags question.**
-    `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`; `arm64_step`
-    has had `work_step_tst` for weeks; what was missing until now was the FUZZ
-    column, because nothing in this file spelled it — so
-    `tools/formal_isa_census.py`'s `test_every_emitted_form_has_a_model_a_fuzz_
-    case_and_an_as_check` was red on that row. Its answer is
-    `arm64_logic_flags (Xn &&& Xm)` with C and V clear, so a draw here is the
-    one case that exercises the logical flag test against the CPU rather than
-    the arithmetic one `adds`/`smulh` cover.
+    **`TST` is here now**, and it is this pool's version of the "a lowering no
+    fuzz case draws is not a lowering" question: `encode_tst_xn_xm` is emitted
+    by `_emit_branch_unless_and_test` (since 2026-10-05) and `arm64_step` has
+    had `work_step_tst` for weeks, but the census's FUZZ column read `NO`
+    because nothing in this file spelled it — so
+    `tools/formal_isa_census.py`'s
+    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` was red on
+    that row. `k == 6` is the arm. `CMN` needs no arm here: `gen_flags` already
+    draws it (`k == 3`), which is why its row has read `yes yes yes` all along.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
@@ -483,10 +483,7 @@ def gen_flagged_alu(rng, free):
     if k == 5:
         return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
-    # `tst` writes no destination: it is `ands xzr, xn, xm`, so the pair of
-    # sources is the whole of its operands. Drawn last so the six arm indices
-    # above keep their meaning.
-    return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
+    return ("tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m))
 
 
 def gen_select(rng, free):
