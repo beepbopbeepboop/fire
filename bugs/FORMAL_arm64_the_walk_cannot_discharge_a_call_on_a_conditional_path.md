@@ -6,10 +6,10 @@ unchanged.** `_reached_without_a_condition` returned `False` the moment ANY
 reachable source conditional was found, rather than only when one lies on
 the path TO the halt address — which is what its own docstring says ("a
 block on the path blocks only when it is `cbz`-kinded AND its branch pc is
-in `cond_branches`"). Every image's prologue now carries the stack-floor
-guard's `getrlimit` extern call
-(`formal/arm64_codegen.py::_emit_stack_floor_guard`; see
-`bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`), so the halt
+in `cond_branches`"). Every image's prologue carries the stack-floor guard's
+`getrlimit` extern call (`formal/arm64_codegen.py::_emit_stack_floor_guard`;
+the startup-stub fix later moved it below `func_offset` through
+`_emit_stack_floor_init`, its doc deleted with the fix), so the halt
 address of any conditional program is that prologue call, which sits AHEAD
 of the source test. The old code read the merely-reachable test as "the call
 is behind a CONDITIONAL" and refused `ifonly`, `deepif`, `cmp_le_ge`, and

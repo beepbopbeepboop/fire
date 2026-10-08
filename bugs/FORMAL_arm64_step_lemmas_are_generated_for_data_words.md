@@ -2,8 +2,9 @@
 
 **Area:** FORMAL, `formal/arm64_proof_gen.py::_step_result_plan` (and the
 `_gen_step_result_lemmas` / `_gen_step_lemmas` pair that read it). **Status:
-OPEN, pre-existing, found 2026-10-07 while landing the startup-stub fix
-(`bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`, now deleted).**
+OPEN, pre-existing, found 2026-10-07 while landing the startup-stub fix in
+`formal/arm64_codegen.py` that moved `getrlimit` below `func_offset` (that
+fix's own doc is deleted with it).**
 It is NOT that fix's doing: the identical failure is in a pre-fix run of
 `test_formal_call_proof_gen.py` (see "Measured on the pre-fix tree" below).
 
