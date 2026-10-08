@@ -139,7 +139,14 @@ _SIGN_FLIP = "0x8000000000000000"
 # UInt64 arithmetic as Lean spells it.  `UInt64.div` / `UInt64.mod` rather than
 # a bare `/` or `%`, which on `UInt64` is not the truncating operation -- the
 # same table `_dylib_spec_lean` uses, reached through it.
+#
+# `//` is the AST's spelling of integer division (`fire_compiler`'s `BinaryOp`
+# carries `//`, not `/`) and it is the SAME truncating operation: both forms
+# read as the IR's `/`, which `_lean_of` renders `UInt64.div` and `_eval_of`
+# evaluates `(a // b) & _MASK`.  Accepting only `/` here refused every clause
+# that writes the operator the source actually contains.
 _ARITH_OPS = {"+", "-", "*", "/", "%"}
+_AST_ARITH_OPS = _ARITH_OPS | {"//"}
 
 # The verdict set.  Named constants rather than bare strings because
 # `classify` and every consumer have to agree on the SPELLING, and a typo in a
@@ -408,7 +415,7 @@ class _Op:
     NEG = "neg"        # word negation: (NEG, e)
     POS = "pos"        # unary `+`, which is the identity: (POS, e)
     INVERT = "inv"     # `~`: (INVERT, e)
-    ARITH = "arith"    # (ARITH, op, a, b) for + - * / %
+    ARITH = "arith"    # (ARITH, op, a, b) for + - * / % (source `//` reads `/`)
     CMP = "cmp"        # (CMP, op, a, b) for the six comparisons
     AND = "and"        # (AND, a, b)
     OR = "or"          # (OR, a, b)
@@ -517,12 +524,14 @@ class _Reader:
                 if a is None or b is None:
                     return None
                 return (_Op.CMP, "=" if op == "==" else op, a, b)
-            if op in _ARITH_OPS:
+            if op in _AST_ARITH_OPS:
                 a = self.value(getattr(node, "left", None))
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                return (_Op.ARITH, op, a, b)
+                # The source spells integer division `//`; the IR (and Lean's
+                # `UInt64.div`) spells the same operation `/`.
+                return (_Op.ARITH, "/" if op == "//" else op, a, b)
             return None
         if kind == "TernaryExpr":
             test = self.truth(getattr(node, "condition", None))
@@ -1185,7 +1194,7 @@ def unlowered_reason(contract, params, model_name=None) -> str:
         (f"`{c.text}`" if c.is_pragma else f"`@{c.name}(...)`") for c in bad)
     return (f"{len(bad)} of {len(contract.clauses)} clause(s) has no Lean "
             f"rendering ({spelled}); the expression subset a contract may use "
-            f"is literals, the parameters, `result`, `+ - * / %`, the six "
+            f"is literals, the parameters, `result`, `+ - * / // %`, the six "
             f"comparisons, `and`/`or`/`not`, a conditional expression, and "
             f"`abs`/`min`/`max`/`clamp`")
 
@@ -1332,7 +1341,7 @@ class SourceRunner:
             return (a - b) & _MASK
         if op == "*":
             return (a * b) & _MASK
-        if op == "/":
+        if op in ("/", "//"):
             if b == 0:
                 raise Unsupported("a division by zero (the machine traps here)")
             return (a // b) & _MASK
