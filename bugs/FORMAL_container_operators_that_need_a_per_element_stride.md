@@ -1,5 +1,36 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
+**Status 2026-10-07 (`work/formal127-docs`): item 3 (SET ALGEBRA) HAS LANDED on
+arm64; items 1 (`==`/`!=`), 2 (ordering) and 4 (length-changing slice store)
+are unchanged and still refused.** The four lowerings and the one shared
+obstacle below are as written; what changed is that `&`, `-` and `^` between
+two SETS now answer correctly on arm64, through a per-element membership scan,
+and are refused BY NAME on x86-64 (which has no set emitter either — not even
+for `|`). `test_formal_container_methods.py`'s `set` group moved 12 → 17
+answer(s); `s_intersection`, `s_difference`, `s_symdiff`, `s_sub_r` and
+`s_andassign_r` are answers observed through a SUM (not only a length) and the
+`operator` group's `o_and`/`o_xor` moved with them, against CPython on both
+architectures.
+
+**The gate change is a DEFERRAL, not a removal, and that is deliberate.**
+`model.CONTAINER_GATED_OPS` still lists `&`, `-` and `^`; the shared
+`container_operator_refusal` now returns `None` for `SET_ALGEBRA_OPS` only when
+BOTH operands are blobs, and each backend decides: arm64 reaches
+`_emit_set_algebra`, x86-64 reaches `model.set_algebra_refusal`. The
+one-blob shapes (`[1] & 0`, `[1] - 2`) keep the gate's own sentence, which is
+the right one for a CPython `TypeError`, and `[1] & [2]` is refused by
+`set_algebra_refusal` on both. So no row was "fixed by deleting the case": the
+`set` and `operator` cases were MOVED from `probe=None` to a probe, and a new
+x86-only row (`s_intersection_x86_refused`) pins the sentence the backend with
+no emitter now owes.
+
+**What is left, in the doc's own order:** item 1 (`==`/`!=` between two
+containers — a recursive/content compare, and a data-dependent loop), item 2
+(ordering, which reuses item 1's compare), and item 4 (a length-changing slice
+store, arm64 first). Nothing in this landing touches those; their rows in
+`test_formal_container_methods.py` (`o_eq`, `o_ne`, `o_lt`, `o_le`,
+`t_eq_r`, `l_slice_store_*`) are still refusals.
+
 **Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
 that stand in for them are landed.** `test_formal_container_methods.py` measures
 the whole surface against CPython on both architectures and is green; this doc

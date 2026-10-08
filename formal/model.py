@@ -13772,6 +13772,19 @@ CONTAINER_OP_MEANING = {
 #: same defect wearing different operators, so they belong in one gate.
 CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
 
+#: The three operators that are SET ALGEBRA, and the ones a backend may lower
+#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
+#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
+#: operand shape EXCEPT two blobs the gate's message is the right answer — but
+#: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
+#: backend decides, because whether the pair is a set algebra this path lowers
+#: is a fact about the backend and not about the operator.  arm64 lowers the
+#: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
+#: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
+#: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
+#: gate's "is refused when ... is a list" is exactly the right sentence for it.
+SET_ALGEBRA_OPS = ("-", "&", "^")
+
 
 def container_operator_refusal(op: str, left_kind, right_kind,
                                spelled_op: str | None = None) -> str | None:
@@ -13823,6 +13836,17 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     if not (container_operand_is_blob(left_kind)
             or container_operand_is_blob(right_kind)):
         return None
+    if (bare in SET_ALGEBRA_OPS
+            and container_operand_is_blob(left_kind)
+            and container_operand_is_blob(right_kind)):
+        # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
+        # question for the backend (see `SET_ALGEBRA_OPS`), and
+        # `set_algebra_refusal` is where the two answers are worded.  Defer
+        # rather than refuse, so arm64 can reach `_emit_set_algebra` and x86-64
+        # can reach its own named refusal.  `aug_assign_operands_are_blobs`
+        # then routes the augmented spelling through `_emit_binop`, which is
+        # the second emitter the desugaring exists for.
+        return None
     if bare in ("==", "!="):
         # `==`/`!=` against a NON-blob is a program CPython answers: a blob is
         # never equal to a number or a string, so `[] == 0` is False and
@@ -13870,6 +13894,48 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 container_relational_refusal = container_operator_refusal
 
 
+def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
+                        right_is_set: bool, backend_has_emitter: bool) -> str:
+    """Why `left {op} right` is not lowered by the backend that asks.
+
+    The SECOND question for `&`/`-`/`^` on two blobs, asked only once
+    `container_operator_refusal` has been reached and DEFERRED (it returns
+    None for `SET_ALGEBRA_OPS` on two blobs), the same way `set_union_refusal`
+    is the second question for `|`.  There are two answers and the caller's
+    `backend_has_emitter` decides which one is true:
+
+    * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
+      sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
+      refusal names that rather than pretending a lowering was missing.  This
+      is the arm64 answer when it cannot establish both operands are sets, and
+      the x86-64 answer for every two-blob shape.
+    * **two sets, no emitter** — the operator really is the set operation the
+      source writes, and the machine simply does not lower it.  The message
+      says which machine does, so the reader is not sent looking for a spec.
+
+    The wording lives here, beside the other refusal texts and beside
+    `set_union_refusal`, so the two backends cannot word the same state
+    differently.
+    """
+    if left_is_set and right_is_set and not backend_has_emitter:
+        return (
+            f"{left} {op} {right} is a SET operation and this backend has no "
+            f"emitter for it: both operands are sets, so Python's `{op}` is "
+            f"{CONTAINER_OP_MEANING[_bare_operator(op)]}, and that needs a "
+            f"per-element scan this machine does not lower yet. arm64 lowers "
+            f"`&`, `-` and `^` for two sets; on this backend write the "
+            f"operation as a loop over `in` tests instead")
+    which = ("the left operand" if not left_is_set else
+             "the right operand" if not right_is_set else "an operand")
+    return (
+        f"{left} {op} {right} is refused because {which} is not established to "
+        f"be a SET. Python defines `{op}` as SET ALGEBRA — "
+        f"{CONTAINER_OP_MEANING[_bare_operator(op)]} — for two sets and for "
+        f"nothing else, so this is a `TypeError` in CPython and there is no "
+        f"correct program on the far side of this gate. Compare the elements "
+        f"you mean, or build the result with an explicit membership test")
+
+
 def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     """True when `x OP= y` has a CONTAINER on either side, so it is `x = x OP y`.
 
@@ -13898,11 +13964,15 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     this predicate asks about KINDS and lets both backends do the same routing
     rather than each growing its own copy of `_emit_list_concat`.
 
-    The operators with no container lowering are already refused by the time a
-    caller gets here, because `string_binary_refusal` asks
-    `container_operator_refusal` with the AUGMENTED SPELLING and this module's
-    `_bare_operator` strips the `=` — so `s -= {2}` and `s &= {2}` stop at that
-    gate rather than arriving here as a subtraction of two addresses.
+    The operators with no container lowering are refused by the time a caller
+    gets here, because `string_binary_refusal` asks
+    `container_operator_refusal` (with the AUGMENTED SPELLING, which this
+    module's `_bare_operator` strips) and that gate still refuses every
+    container operator except `+`, `|` and — on two blobs — the set-algebra
+    three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
+    `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
+    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
+    `set_algebra_refusal` on x86-64 rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
             or container_operand_is_blob(value_kind))

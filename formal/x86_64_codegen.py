@@ -7308,6 +7308,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
+        # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
+        # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
+        # `_emit_set_algebra`, so every two-blob shape is refused by name —
+        # both the two-set case (which arm64 lowers) and the not-two-sets case
+        # (a CPython `TypeError`).  Without this the deferral would let the
+        # operands reach the integer ALU as two blob ADDRESSES, which is the
+        # measured bug the gate exists for (`s & {2}` answered 2 on arm64 and
+        # 163061056 here; `s - {2}` SIGSEGVed on both).
+        if op in M.SET_ALGEBRA_OPS and (
+                M.container_operand_is_blob(self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
+                backend_has_emitter=False))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -8335,6 +8350,18 @@ preference.
             # on this one.
             raise CodegenError(reason)
         target = stmt.target
+        # `&`/`-`/`^` between two BLOBS are set algebra and the shared gate now
+        # DEFERS them, but a subscript TARGET is an element, not a whole set
+        # variable, and this backend has no fresh-blob lowering to store back
+        # here either: without this the deferral would let `a[0] &= b` reach the
+        # ALU as two blob addresses.
+        if op in M.SET_ALGEBRA_OPS and (
+                M.container_operand_is_blob(self._expr_str_kind(target))
+                or M.container_operand_is_blob(self._expr_str_kind(stmt.value))):
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(target), M.spelled(stmt.value),
+                self._expr_is_set_like(target),
+                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
         self._emit_subscript_addr(target)             # RAX = address
         self._push_slot(Reg.RAX)                      # [rsp] = address
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # old element
@@ -9965,6 +9992,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
+        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
+            # Set algebra is defined for two sets and nothing else, so a result
+            # is a set exactly when BOTH sides are.
+            return (self._expr_is_set_like(e.left)
+                    and self._expr_is_set_like(e.right))
         return False
 
 
