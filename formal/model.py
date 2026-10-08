@@ -10576,9 +10576,11 @@ def return_annotation_kind_refusal(func_name: str, declared_return, value,
 
     **This is the consumer that makes the pointer row load-bearing rather than
     cosmetic.** `Int(p.value())` and `return p.value()` under `-> Int` are the
-    two shapes `POINTEES_REFUSED`'s `Float64` row is written for, and a kind hook
-    that let the load through would have turned both into this same silent
-    answer, one call boundary away.
+    two shapes a `Pointer[Float64]` dereference reaches, and the kind hook that
+    lets the LOAD through (`pointer_deref_kind`) is exactly what makes this
+    refusal necessary: the dereference carries `FLOAT_KIND` now, so both shapes
+    reach here and are refused by name instead of printing a bit pattern as a
+    decimal, one call boundary away.
 
     **The annotation is the only evidence, and `None` never refuses** — the same
     asymmetry as `call_argument_kind_refusal` and for the same reason: an
@@ -16166,7 +16168,7 @@ WIDTH_POINTEES = {1: "Int8", 2: "Int16", 4: "Int32", 8: "Int64"}
 # Pointee base names that are refused BY NAME, with the reason, rather than
 # merely absent from POINTEE_WIDTHS.  A refusal that says "the pointee is not a
 # width I know" is true but unhelpful when the answer is a specific fact, and
-# these are the two that are specific facts: a float and a SIMD.
+# these are the two that are specific facts: a narrow float and a SIMD.
 POINTEES_REFUSED = {
     "Float16": "a Float16 is two bytes of IEEE binary16 and this path has no "
                "float kind to hold them",
@@ -16174,27 +16176,6 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
-    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
-    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
-    # is bit-exact — one word holding the bit pattern, loaded with the same
-    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
-    # for a reason that is about the CALL SITE rather than about the value: what
-    # a pointer dereference yields here is a word, and whether that word is an
-    # integer or a double is decided by the CONTEXT it lands in, and a context
-    # that has established neither answers `int` — so `Int(p.value())` on a
-    # double would read the exponent field.  Answering it means making the
-    # pointee's kind flow into the dereference and every context around it,
-    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
-    # work and this row is its starting state.  A row whose stated reason is
-    # FALSE is worse than an absent one, because the reader who finds it cannot
-    # tell which half of it still holds.
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
-               "bit-exact — one word holding the bit pattern — but this "
-               "dereference path yields a word whose KIND is decided by the "
-               "context it lands in, and a context that has established none "
-               "answers `int`, so `Int(p.value())` would read the exponent "
-               "field; see bugs/FORMAL_float_pointer_pointee.md",
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -16211,6 +16192,18 @@ POINTEES_REFUSED = {
     "StringSlice": "a StringSlice is a two-word {ptr, len} pair, so there is no "
                    "single load at its address that is the pointee",
 }
+
+# Pointee base names that are a FLOAT the dereference CAN carry, and the table
+# that lets the load through.  A `Pointer[Float64]` load is bit-exact — one
+# `LDR` of eight bytes holding the bit pattern, the same instruction an integer
+# pointee uses — so the load was never the problem; what was missing was the
+# WORD'S KIND.  `FLOAT_KIND` landed with the binary64 arithmetic, and
+# `pointer_deref_kind` carries the pointee's kind into every context that reads
+# the dereference, so `Int(p.value())` is the `FCVTZS` the source means rather
+# than a read of the exponent field.  A name here is therefore a LOAD this path
+# answers and a STORE it still refuses (`pointer_store_lowering`), because a
+# store needs the RHS's kind and this path checks none there.
+POINTEE_FLOAT_NAMES = frozenset(FLOAT_TYPE_NAMES)
 
 
 def pointee_args(text: str) -> list:
@@ -17266,24 +17259,32 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
     string is `None`, and the `why` is the refusal to emit.
 
-    Three answers, and the third is what makes this a value model rather than a
+    Four answers, and the third is what makes this a value model rather than a
     load:
 
       * `("load", width, signed)` — a scalar pointee whose width the table
         established.  `width` is 1, 2, 4 or 8 and is never anything else: a
-        pointee that is not in `POINTEE_WIDTHS` and not in `POINTEES_REFUSED`
-        has NO established width, and the refusal says so.  That is the whole
-        point of the exercise, and it is what removes D1's SIGBUS: the old
-        reasoning had only the 8-byte load available, which over-reads a
-        `UInt8` pointee by seven bytes; with the pointee known the load is one
-        byte, and one byte is the correct answer rather than an approximation.
+        pointee that is not in `POINTEE_WIDTHS`, not in `POINTEE_FLOAT_NAMES`
+        and not in `POINTEES_REFUSED` has NO established width, and the refusal
+        says so.  That is the whole point of the exercise, and it is what
+        removes D1's SIGBUS: the old reasoning had only the 8-byte load
+        available, which over-reads a `UInt8` pointee by seven bytes; with the
+        pointee known the load is one byte, and one byte is the correct answer
+        rather than an approximation.
+      * `("float", 8, False)` — a `Float64` pointee.  The load is bit-exact
+        (one `LDR` of eight bytes) and what makes it a DOUBLE rather than an
+        integer is `pointer_deref_kind`, which every context around the
+        dereference asks.  The shape is `"float"` and not `"load"` so
+        `subscript_base_lowering` can refuse `p[i]`, whose element kind is the
+        pointer's own (an integer) and whose eight right bytes would then be
+        read as the wrong number.
       * `("identity", 8, False)` — the receiver is a NULLABLE POINTER and the
         `.value()` is the UNWRAP of it, not a load.  `nullable_pointer_unwrap`
         is asked first, before any pointee question, because a nullable pointer
         has a pointee AND an unwrap and the two answers are different numbers;
         see that function for the whole of why the load was the wrong one.
-      * `None` — no pointee, a pointee with no width, a FLOAT or a wide `SIMD`
-        or a blob, or a STRUCT.  The struct case is the interesting one and its
+      * `None` — no pointee, a pointee with no width, a wide `SIMD` or a blob,
+        or a STRUCT.  The struct case is the interesting one and its
         derivation is CORRECT (a struct's value is a frame address, so the
         receiver already is the pointee — the same identity `Pointer()` gives,
         and the same shape as the string decision's "the length is a
@@ -17293,7 +17294,7 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         BOTH architectures.  The `why` spells that out, and the `why` is the
         same text on both architectures because it comes from here.
 
-    The three-tuple shape is kept for all three answers on purpose: every
+    The three-tuple shape is kept for every answer on purpose: every
     existing reader unpacks `shape, width, signed`, and the two that ignore the
     shape (`subscript_base_lowering` and both `_emit_dereference`) have to be
     taught to look at it.  A second arity for the new answer would make every
@@ -17319,6 +17320,21 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         return (None, why)
     if inner in POINTEES_REFUSED:
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
+    if inner in POINTEE_FLOAT_NAMES:
+        # A FLOAT pointee the load can carry: eight bytes, bit-exact, and the
+        # answer's KIND is the pointee's.  The shape is `"float"` rather than
+        # `"load"` so the two readers that unpack it can tell the one fact that
+        # matters apart — a `p[i]` SUBSCRIPT must not lower through this, because
+        # its element kind comes from the pointer's own kind (an integer) and the
+        # eight right bytes would be read as the wrong number.  Both emitters'
+        # `_emit_dereference` emit the width-8 `LDR` for it, which is the whole
+        # instruction the load needs; what makes it a double is
+        # `pointer_deref_kind`, which every context around it asks.
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, expr, 8)
+            if not scaled:
+                return (None, scale_why)
+        return (("float", 8, False), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         if not index_scaled:
@@ -17417,6 +17433,37 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                   f"must not emit, because an 8-byte load of a 1-byte pointee "
                   f"returns a plausible number assembled from adjacent bytes and "
                   f"faults at a page edge. {_declared_note(why)}")
+
+
+def pointer_deref_kind(fn, expr, decls: dict, functions: dict = None):
+    """`FLOAT_KIND` when `expr` is a pointer dereference whose pointee is a
+    float, else `None`.
+
+    The reader that makes a `Pointer[Float64]` LOAD answerable rather than
+    merely emittable: `dereference_lowering` decides the eight bytes and this
+    decides what they MEAN, and the two are separate because they are asked at
+    different times.  The lowering is asked when the dereference is emitted and
+    has the receiver in hand; the kind is asked by every CONTEXT the
+    dereference lands in — `Int(p.value())`, `p.value() + 1.0`, a `%d` format,
+    a parameter the callee declared an `Int` — and those contexts ask through
+    `ValueKinds.kind_of` before (and instead of) emitting the dereference at all.
+
+    The receiver is read with the SAME `pointer_pointee` the lowering uses, so
+    the two cannot disagree about what a pointer points at: two readers of that
+    question is two widths, and here it would be two KINDS.  `None` is every
+    other shape — a non-dereference, a non-pointer receiver, a pointee that is
+    not a float — and it leaves every existing decision exactly where it was,
+    which is why this is a hook consulted from `kind_of` and not a rewrite of
+    the default.
+    """
+    if not isinstance(expr, F.CallExpr) or expr.args or expr.kwargs:
+        return None
+    func = getattr(expr, "func", None)
+    if not (isinstance(func, F.MemberExpr)
+            and func.member in DEREFERENCE_TRY_NAMES):
+        return None
+    inner, _why = pointer_pointee(fn, func.obj, decls, functions)
+    return FLOAT_KIND if inner in POINTEE_FLOAT_NAMES else None
 
 
 def _declared_note(why) -> str:
@@ -18297,6 +18344,16 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                     f"`if not p:` is what establishes which. {_sentence(why)} "
                     f"Read through `p.value()[i]` once the unwrap is written "
                     f"out, which is the same program with the check spelled out")
+        if _shape == "float":
+            return (None, None, None,
+                    f"`{spelled(obj)}[i]` reads an element of a FLOAT pointee, "
+                    f"and this path carries a dereference's kind but not a "
+                    f"SUBSCRIPT's: the eight bytes would be loaded right and the "
+                    f"element would then be read as an integer, so `Int(...)` of "
+                    f"it would answer the bit pattern rather than the value. "
+                    f"Read the element through `{spelled(obj)}.value()` and index "
+                    f"the result, which is the same address with the kind the "
+                    f"pointee declared")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "
@@ -18640,6 +18697,22 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # paraphrasing it: a paraphrase would be a second answer to "why is a
         # float pointee refused", and the two would drift.
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
+    if inner in POINTEE_FLOAT_NAMES:
+        # A float pointee's LOAD lowers (`dereference_lowering`'s `"float"`
+        # answer); its STORE does not, and the asymmetry is the kind check that
+        # the load has and the store does not.  What a store needs is the RHS's
+        # kind — `p.value() = 3.9` writes a double's bits, `p.value() = 5` writes
+        # an integer where the source means `5.0` — and no rule here reads it,
+        # so a store through a float pointer is refused rather than written at
+        # the load's width on the strength of the pointer's declaration alone.
+        return (None, f"the pointee is {inner}, and the LOAD of one lowers (the "
+                      f"word's kind is carried by `pointer_deref_kind`), but a "
+                      f"STORE through it is refused: a store needs the kind of "
+                      f"the value on the right, so `p.value() = 5` would write "
+                      f"an integer's word where the source means `5.0`, and "
+                      f"nothing on this path reads that kind yet. Store the "
+                      f"element through an integer-typed view, or build the "
+                      f"value where it lives")
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         scaled, scale_why = _offset_scale(fn, obj, width)
@@ -23161,7 +23234,7 @@ class ValueKinds:
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=()):
+                 callee_returns_value=None, float_names=(), deref_kind=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -23250,6 +23323,15 @@ class ValueKinds:
         # keeps the answer it had.
         self._callee_returns_value = callee_returns_value or (
             lambda name: True)
+        # The EIGHTH hook, and the one that lets a POINTER DEREFERENCE carry a
+        # kind: `pointer_deref_kind` answers `FLOAT_KIND` for a `p.value()`
+        # whose pointee is a float, and `None` for everything else.  A
+        # dereference is an EXPRESSION the whole-function scan never binds — it
+        # is not a name, a field, a constructor or a subscript — so no existing
+        # hook can reach it, and without one `Int(p.value())` over a
+        # `Pointer[Float64]` read the exponent field.  Asked from `kind_of`'s
+        # CallExpr arm, where the dereference arrives.
+        self._deref_kind = deref_kind or (lambda expr: None)
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -24432,6 +24514,16 @@ class ValueKinds:
                 return list_kind(self.kind_of(e.element, scopes))
             return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
+            # A POINTER DEREFERENCE, asked FIRST: `p.value()` is a call whose
+            # callee is a member and whose receiver is a pointer, so the arms
+            # below (which read a callee NAME) cannot classify it and would
+            # answer `None` — the unclassified word that made
+            # `Int(p.value())` over a `Pointer[Float64]` read the exponent
+            # field.  `None` for every other call leaves each arm below exactly
+            # where it was.
+            deref = self._deref_kind(e)
+            if deref is not None:
+                return deref
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
             # `List[Int]()` are the same construction and must be the same
@@ -26707,8 +26799,8 @@ BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 #: the admitted ones are.
 #:
 #: **This list is also where the CONSTRUCTOR half of `POINTEES_REFUSED` comes
-#: from.**  `POINTEES_REFUSED` refuses `Float16`, `Float32` and `Float64` BY
-#: NAME at a dereference, and the constructor `Float32(1.0)` had no name to be
+#: from.**  `POINTEES_REFUSED` refuses `Float16` and `Float32` BY NAME at a
+#: dereference, and the constructor `Float32(1.0)` had no name to be
 #: refused by — it took `type_constructor_kind`'s documented `None` ("not a type
 #: constructor at all"), emitted a `BL Float32`, and failed at the LINK AUDIT
 #: with a message about a SYMBOL about a fact that is a TYPE's.
@@ -27266,6 +27358,7 @@ def subscript_callee_names(call) -> list:
 TYPE_VALUE_NAMES = frozenset(
     POINTEE_WIDTHS                                   # a width, for a pointee
 ) | frozenset(POINTEES_REFUSED) | frozenset(
+    POINTEE_FLOAT_NAMES) | frozenset(
     INT_TYPE_CTORS) | frozenset(
     IDENTITY_TYPE_CTORS) | frozenset(
     UNREPRESENTABLE_TYPE_CTORS) | frozenset(
