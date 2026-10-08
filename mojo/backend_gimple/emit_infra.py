@@ -4685,9 +4685,10 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
     # trailing comma is a spelling rather than a second slot. Declaring the raw
     # string emitted `int64_t (x,);`, which is not a C declaration, so the
-    # comprehension did not compile. A multi-slot target over a generator whose
-    # yield arity was never recorded is the other mismatch and is filed
-    # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
+    # comprehension did not compile. A real MULTI-slot target over a generator
+    # whose yield arity is not a recorded tuple is the other mismatch and is
+    # refused by name in the non-tuple arm below, exactly as
+    # `_gen_for_generator_iter` refuses it.
     #
     # Read once, above the branch, because BOTH arms need it: the non-tuple arm
     # declares and binds it, and the `_compr_restore_target` call after the loop
@@ -4701,6 +4702,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
+        if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
+            raise RuntimeError(
+                "cannot compile a multi-slot comprehension target over a "
+                f"generator whose yield arity is not a tuple (`{gen0.target} "
+                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
+                "yields one value per resume, and unpacking that value needs a "
+                "runtime iterator protocol this scalar generator model does "
+                "not have")
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -5425,6 +5434,16 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     propagation each already does. A value with no callable return type is a
     no-op, so the common non-callable store costs two dict misses."""
     _rt = gen._callable_ret_types.get(value_text)
+    if _rt is None:
+        # A bound METHOD stored into a module global: its return type lives in
+        # `_bound_method_ret_types` (the per-function table), not
+        # `_callable_ret_types`. Both must survive the store into a global,
+        # because the call site is often a DIFFERENT function than the one
+        # that stored it (`f = None` ... `global f; f = m.truthy` ... `f()`),
+        # where the per-function table has already been reset and the
+        # whole-program one is the only source. Without this the call fell to
+        # the `int64_t` box and a `-> bool` method printed `1` for `True`.
+        _rt = gen._bound_method_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
     _drt = gen._container_callable_ret.get(value_text)

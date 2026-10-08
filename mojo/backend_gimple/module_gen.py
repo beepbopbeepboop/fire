@@ -10628,6 +10628,16 @@ def gen_module_impl(self, stmts):
         return _out
 
     _pre_declared_globals = set()
+    # Names whose module-level initialiser is the literal `None`. `None` is a
+    # valid value of every pointer kind (it is the NULL pointer), so it carries
+    # no KIND of its own and must not fix the global's type the way a real
+    # scalar initialiser does. Without this, the standard lazy-initialised
+    # singleton (`x = None` at module scope, then `global x; x = "abc"` in a
+    # function) froze the field `int64_t` from the `None` (an integer-typed
+    # slot) and the later `char *` store was read back as the pointer's own
+    # decimal. The cross-function join below is where the recorded pointer kind
+    # then wins.
+    _none_init_globals = set()
     _phase17_mod = self.module_name if len(self.module_name) > 0 else "root"  # module name for _global_to_module mapping
     _phase17_own_stmts = _flatten_resolved_conditionals(stmts)
     _phase17_stmts = (_phase17_own_stmts
@@ -10810,6 +10820,8 @@ def gen_module_impl(self, stmts):
         CODEGEN_multi_assign_local_var_type_not_inferred
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
+        if _own and self._is_none_literal(_value):
+            _none_init_globals.add(_as_str(_gname))
         _phase17_set_gtype(_gname, _phase17_value_type(_value), _own)
         if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
             _elt = self._quick_type(_value.elements[0])
@@ -11287,6 +11299,30 @@ def gen_module_impl(self, stmts):
     for _rgname, _rgkinds in _phase17_scan_global_reassignments().items():
         _rgbase = self._global_var_types.get(_rgname, '')
         _rgall = set(_rgkinds)
+        if _rgname in _none_init_globals:
+            # The module-level initialiser is `None`, which is the NULL value
+            # of every pointer kind and therefore contributes no kind to the
+            # join. Use the function-store kind(s) as the whole answer — and
+            # declare the FIELD as that pointer type directly, not the
+            # `int64_t` box the multi-kind arm below uses: a boxed `char *`
+            # has no read-back path (`char *` is not in
+            # `_BOXED_CONTAINER_CTYPES`), so the box would make the read
+            # `char * t = <int64_t field>;` a `-Wint-conversion` error. A
+            # real pointer field takes the NULL initialiser fine (see
+            # `_safe_coerce_emit`'s `int -> <pointer>` arm for the runtime
+            # store, and the struct initialiser's `(<c_type>)0` for the
+            # static one).
+            if len(_rgall) == 1:
+                _rgsem = _rgkinds.pop()
+            elif len(_rgall) > 1:
+                _rgsem = 'int64_t'
+            else:
+                continue
+            self._global_var_types[_rgname] = _rgsem
+            self._own_global_var_types[_rgname] = _rgsem
+            self._global_c_decl_types[_rgname] = _rgsem
+            _mgk.add(_rgname)
+            continue
         if _rgbase.endswith('*'):
             _rgall.add(_rgbase)
         elif _rgbase:

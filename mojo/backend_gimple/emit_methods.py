@@ -542,7 +542,17 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
         ip = gen._ensure_local(stored_ctype, bm_raw)
         vp = gen._new_val('void *', f'(void *){ip}')
         bm = gen._new_val('MojoBoundMethod *', f'(MojoBoundMethod *){vp}')
-    ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
+    ret_type = gen._bound_method_ret_types.get(fname_raw)
+    if ret_type is None:
+        # The whole-program half: a bound method stored into a module global
+        # and called from a DIFFERENT function than the one that stored it.
+        # `_bound_method_ret_types` is reset per function, so by the time the
+        # call is emitted the store's entry is gone; `_note_global_callable_
+        # store` carries it to `_global_callable_ret_types` (keyed by name),
+        # which is what survives the box. Without this `f = None; global f;
+        # f = m.truthy` in one function and `f()` in another printed `1` for
+        # a `-> bool` method.
+        ret_type = gen._global_callable_ret_types.get(fname_raw, 'int64_t')
     return gen._lower_bound_method_call_value(bm, node, ret_type)
 
 
@@ -581,7 +591,9 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
     else:
         helper = f'mojo_maybe_bound_call_{min(n, 8)}'
         lead = [('void *', fp_void)]
-    ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
+    ret_type = gen._bound_method_ret_types.get(fname_raw)
+    if ret_type is None:
+        ret_type = gen._global_callable_ret_types.get(fname_raw, 'int64_t')
     raw_t = gen._call_expr('int64_t', helper, lead +
                              [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
