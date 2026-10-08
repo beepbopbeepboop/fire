@@ -453,15 +453,19 @@ def gen_flagged_alu(rng, free):
     to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
     it).
 
-    **`TST` is here, and it is the logical half of the same flags question.**
-    `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`; `arm64_step`
-    has had `work_step_tst` for weeks; what was missing until now was the FUZZ
-    column, because nothing in this file spelled it — so
-    `tools/formal_isa_census.py`'s `test_every_emitted_form_has_a_model_a_fuzz_
-    case_and_an_as_check` was red on that row. Its answer is
-    `arm64_logic_flags (Xn &&& Xm)` with C and V clear, so a draw here is the
-    one case that exercises the logical flag test against the CPU rather than
-    the arithmetic one `adds`/`smulh` cover.
+    `TST` is HERE, and its arrival is the pool's answer to "a lowering no fuzz
+    case draws is not a lowering": `encode_tst_xn_xm` is emitted by
+    `_emit_branch_unless_and_test` (twice: `if x & y:` and `not (x & y)`), and
+    `arm64_step` has had `work_step_tst` (branch 67, `arm64_logic_flags` with C
+    and V clear) for weeks — but nothing in this file spelled it, so the census's
+    FUZZ column read `NO` and
+    `tools/formal_isa_census.py`'s
+    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` was red on
+    that row. The case is here now, next to the other flag-setting forms the mix
+    exists for. `CMN` is the same instruction with the result discarded and is
+    already drawn by `gen_flags` (its `cmn x%d, x%d` arm), so it is not repeated
+    here. Filed as `bugs/FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md`;
+    fixed in the commit that added this arm, and the doc is deleted with it.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
@@ -481,12 +485,9 @@ def gen_flagged_alu(rng, free):
         return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
     if k == 5:
-        return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
-                A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
-    # `tst` writes no destination: it is `ands xzr, xn, xm`, so the pair of
-    # sources is the whole of its operands. Drawn last so the six arm indices
-    # above keep their meaning.
-    return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
+        return ("tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m))
+    return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
+            A.encode_sub_xd_xn_imm_sh(d, n, imm, 1))
 
 
 def gen_select(rng, free):
