@@ -3716,6 +3716,60 @@ def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared
     check("widen[<a type>]" in text,
           f"the refusal does not give the spelling that would bind: "
           f"{text.strip()[-300:]}")
+    # …and it names the ONE rule that applied rather than enumerating all four.
+    # `model.export_rule_for` reads the defining module's own source through
+    # `reflect.export_exclusions`; the old sentence offered a reader four
+    # candidates for a file that applies exactly one of them.
+    check("applied to the DECLARATION" in text
+          and "generic template is not one symbol" in text,
+          f"the refusal does not name the rule that applied: "
+          f"{text.strip()[-400:]}")
+    check("an overload has no single symbol" not in text,
+          f"the refusal still enumerates the four candidates: "
+          f"{text.strip()[-400:]}")
+
+
+def test_the_refusal_says_a_module_declares_no_such_name(tmpdir, _shared):
+    """The case that is NOT an export-rule exclusion: the defining module's own
+    source declares no such name.
+
+    `runtime/stdlib_wrapper.mojo` does `from time import now, sleep` and calls
+    `now()`; `formal/hostmods/time.mojo` declares no `now` at all. The old
+    sentence enumerated the four rules — a leading `_`, a generic, an overload,
+    a C name — and sent the reader to look for one of them in a module that has
+    none, which is the one file of the export-gate row none of the four explains.
+
+    `model.export_rule_for` reads the source and answers `(None, False)` there,
+    and the refusal then says the truthful thing. Checked directly rather than
+    through a build, because the whole subject is the sentence `export_rule_for`
+    feeds — a build of `stdlib_wrapper.mojo` would pin the same two facts through
+    a compiler run this file does not need.
+    """
+    import formal.model as M
+    source = os.path.join(HERE, "formal", "hostmods", "time.mojo")
+    rule, declared = M.export_rule_for("now", "time", source=source)
+    check(rule is None and declared is False,
+          f"export_rule_for says ({rule!r}, {declared!r}) about `now` in the "
+          f"time host module, which declares no such name")
+
+    class _Sym:
+        module = "time"
+
+    text = M.imported_callee_refusal("now", _Sym(), "main",
+                                     rule=rule, declared=declared)
+    check("declares no function or struct named `now`" in text,
+          f"the refusal does not say the module declares no such name: "
+          f"{text.strip()[-400:]}")
+    check("an overload has no single symbol" not in text
+          and "leading `_` is private" not in text,
+          f"the refusal still enumerates the four export-rule candidates for a "
+          f"name no rule applies to: {text.strip()[-400:]}")
+    # …and a source that cannot be read claims nothing, so the caller falls back
+    # to the enumeration rather than asserting "declares no such name" about a
+    # module it never saw.
+    check(M.export_rule_for("now", "time", source=os.path.join(HERE, "nope.mojo"))
+          == (None, None),
+          "an unreadable source must answer (None, None), not (None, False)")
 
 
 METHOD_CALL_MODULE = (
@@ -5156,6 +5210,8 @@ TESTS = [
      test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
     ("a bare call to a template is refused by the export rule",
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
+    ("the refusal says a module declares no such name",
+     test_the_refusal_says_a_module_declares_no_such_name),
     ("the bare-call refusal names the method the call is in",
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",

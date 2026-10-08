@@ -103,17 +103,19 @@ reader's time:
   R12 = `0xfedcba0987654321` leaves RDX = `0x012345f6789abcdf`, which is
   `R12 * -1`.  `x86_step_imul_r64` (the two-operand `0F AF` form) IS the one that
   reads its destination.
-* **The BACKLOG note for `encode_imul_r64_r64_imm` is false in its first
-  clause and false in its fix.**  It says "`69 /r id`: no decoder arm (only
+* **The BACKLOG note for `encode_imul_r64_r64_imm` was false in its first
+  clause and false in its fix.**  It said "`69 /r id`: no decoder arm (only
   `0F AF` is decoded)"; the encoder emits `6B /r ib`, and the four-bytes-later
   difference between the two spellings is the whole reason it does — the doc's
-  own §"What is NOT a gap here" half says so.  The note also claims the fix's
-  motivation ("8 examples are blocked from being walked") is not what is
-  happening, which the doc's Status already measured.  The note lives in
-  `tools/formal_isa_census.py`, which is another claim's write set
-  (`bug:FORMAL_arm64_instruction_coverage`), so it is **reported and not
-  edited**: the row is now over-covered, and the only thing left about it is a
-  sentence that says why it no longer needs to be in `BACKLOG`.
+  own §"What is NOT a gap here" half says so.  The note also claimed the fix's
+  motivation ("8 examples are blocked from being walked") was not what was
+  happening, which the doc's Status already measured.  The row is now
+  over-covered (`yes / yes / yes`), so the entry exempted nothing and the
+  census's anti-rot check reported it as a fixed gap that kept its exemption.
+  **The entry was removed from `tools/formal_isa_census.py`'s `BACKLOG` on
+  2026-10-05**, in the commit that added the arm64 fuzz case for `TST` — the
+  census's own self-test was red on the stale entry and on that missing row,
+  and both are now green.
 
 ### The byte-wise ALU class, and how it turned out
 
