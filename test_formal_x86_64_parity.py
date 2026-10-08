@@ -2122,6 +2122,24 @@ FAILING_CASES = [
      "    b = 0\n"
      "    a, b = t\n"
      "    return 0\n"),
+    # A `raise`, which is the case the doc that filed this measured and the one
+    # the two trap rows above cannot stand in for: a trap is a bounded stop the
+    # emitter writes inline, while a `raise` leaves through `_emit_diverge` and
+    # the SAME `_emit_exit`, so before `_emit_exit` flushed this printed
+    # `before` on x86-64 (whose `exit` is a call to the C library) and nothing
+    # on arm64 (a raw `svc` that does not touch stdio). The status is 1 on both
+    # (CPython's `raise 7` is a `TypeError`), and the whole assertion is that
+    # stdout is still CPython's line — the run reaches the raise, so this is
+    # not a question about whether the construct is lowered.
+    ("printed_output_survives_a_raise",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    raise 7\n"
+     "    return 0\n",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    raise 7\n"
+     "    return 0\n"),
 ]
 
 # A NEEDLE SHARED by every row that pins the same sentence, declared once here

@@ -68,10 +68,10 @@ $ echo $?
 ```
 
 No output at all, and exit 1. `before` was printed (see the control below), so
-the `except` arm did not run and `after` did not either. **The lost `before` is
-a separate defect with its own document** —
-`bugs/FORMAL_raise_skips_the_stdio_flush.md` — and it is why this program's
-output is empty rather than `before`.
+the `except` arm did not run and `after` did not either. **The lost `before` was
+a separate arm64-only defect** — a `raise` left through a raw `svc` that never
+touches stdio — now fixed by `_emit_exit`'s `fflush(NULL)` and pinned by
+`printed_output_survives_a_raise` in `test_formal_x86_64_parity.py`.
 
 **(b) the control — the same program with `return 1`, no raise:**
 
@@ -181,9 +181,10 @@ Ordered by what unblocks the most:
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.
 3. **Pin the behaviour so a backend change cannot quietly alter it.** There is
-   no test in the tree that raises on this path, which is why the arm64 flush
-   divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` sat unnoticed
-   through both backends and both host-module waves. A three-case group —
+   now a test that raises on this path — `test_formal_exceptions.py`'s
+   `systemexit_*` rows, and `test_formal_x86_64_parity.py`'s
+   `printed_output_survives_a_raise`, which pins the arm64 flush fix the old
+   `FORMAL_raise_skips_the_stdio_flush` document measured. A three-case group —
    raise under a handler, `try` with nothing raised, and `return 1` — is enough,
    and it belongs beside `test_formal_link_accounting.py`, which is the
    gate-resident file that already owns "does the thing this claim names exist".

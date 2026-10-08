@@ -70,7 +70,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal107-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | `formal108-docs` | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 | `FORMAL_no_exceptions.md` | `formal112-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
-| `FORMAL_raise_skips_the_stdio_flush.md` | `formal113-docs` | on arm64 a `raise` throws away everything the program had already printed |
 | `FORMAL_stack_floor_guard_still_segfaults_at_the_budget_frame_count.md` | `formal114-docs` | the stack-floor guard still dies of SIGSEGV at exactly the budget's frame count under a reduced `ulimit -s` |
 | `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | `formal116-docs` | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
