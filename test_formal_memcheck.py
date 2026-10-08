@@ -507,10 +507,24 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
+    # The ledger is keyed `basename|backend` (that is what `--write-ledger`
+    # writes, via `Corpus.add_file`), so the corpus has to be projected into
+    # the SAME namespace before it can be compared. A length comparison against
+    # `memcheck_sources() + example_sources()` -- full paths -- never matched a
+    # key and could not say WHICH program was missing; the set difference can,
+    # and "which programs have no row" is the question a baseline exists to
+    # answer.
+    expected = {"%s|%s" % (os.path.basename(p), b)
+                for p in M.memcheck_sources() + M.example_sources()
+                for b in BACKENDS}
+    missing = sorted(expected - set(rows))
+    stale = sorted(set(rows) - expected)
     check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+          not missing,
+          "no ledger row for: %s" % ", ".join(missing[:8]))
+    check("the ledger has no row for a program outside the corpus",
+          not stale,
+          "ledger rows with no corpus program: %s" % ", ".join(stale[:8]))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
