@@ -113,7 +113,6 @@ documented tradeoffs):
 
 import dataclasses
 import fire_compiler as N
-from fire_compiler import is_fstring_literal
 from ownership_check import _terminates, _block_terminates
 
 
@@ -214,12 +213,12 @@ def _is_fresh_string_expr(node) -> bool:
     `receiver_results_consumed` decide those, per call site, and the receiver
     may not even be a string), and any other call (whether it is fresh is
     exactly the question being asked)."""
-    # `is_fstring_literal(node)` as well as the (never-constructed, see its
+    # `N.is_fstring_literal(node)` as well as the (never-constructed, see its
     # own definition) `TstringLiteral`: an f-string is a plain `StringLiteral`
     # whose value keeps its `f` prefix and quotes, so without this an
     # interpolated string read as a CONSTANT here and the name that holds it
     # was never credited with owning anything.
-    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or is_fstring_literal(node):
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or N.is_fstring_literal(node):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
@@ -237,7 +236,7 @@ def _is_maybe_fresh_expr(node) -> bool:
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
     if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension,
-                         N.TstringLiteral)) or is_fstring_literal(node):
+                         N.TstringLiteral)) or N.is_fstring_literal(node):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
@@ -1799,52 +1798,7 @@ def nested_def_env_owned(fn_body, name: str) -> bool:
     refuses to look at" — this one asks nothing about a callable VALUE,
     because there is none.
     """
-    # The `def` must be a DIRECT statement of the owning function's body, not
-    # nested in an `if`/loop/`try`/`with`. The env's cleanup thunk is pushed
-    # at the `def` statement and `emit_return_frees` frees-and-cancels it at
-    # EVERY later `return` in the function -- which is only sound when the `def`
-    # has run on every path to that return. A `def` inside one arm of an `if`
-    # (or a loop that may not iterate, or a `try` whose handler returns after
-    # the unwind already freed it) breaks that: the other arms' returns freed an
-    # env that was never allocated and cancelled a thunk nobody pushed, driving
-    # the cleanup-stack top below -1 so the next push wrote BEFORE the array --
-    # onto an unrelated static table. Real: `lower_binary`'s nested
-    # `class_member_and_name` (the self-hosted compiler's own `a == b` lowering)
-    # and `ModuleLoader.load_module_from_path`'s `_scan_source`, whose whole
-    # body is a `try`. A top-level `def` is executed before anything after it,
-    # which is the dominance the free needs.
-    if not _def_is_toplevel_statement(fn_body, name):
-        return False
     return _lambda_uses_ok(fn_body, name)
-
-
-def _def_is_toplevel_statement(fn_body, name: str) -> bool:
-    """True iff `fn_body` (the owner's statement list) has exactly one `def
-    name` and it is one of that list's own statements."""
-    top = 0
-    for st in fn_body:
-        if isinstance(st, N.FunctionDef) and _as_str(st.name) == name:
-            top += 1
-    if top != 1:
-        return False
-    return _count_defs_named(fn_body, name) == 1
-
-
-def _count_defs_named(node, name: str) -> int:
-    """How many `def name` statements `node` contains at any depth."""
-    if isinstance(node, (list, tuple)):
-        n = 0
-        for item in node:
-            n += _count_defs_named(item, name)
-        return n
-    if not _is_node(node):
-        return 0
-    n = 0
-    if isinstance(node, N.FunctionDef) and _as_str(node.name) == name:
-        n = 1
-    for f in dataclasses.fields(node):
-        n += _count_defs_named(getattr(node, f.name), name)
-    return n
 
 
 def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
