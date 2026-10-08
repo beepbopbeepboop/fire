@@ -930,8 +930,8 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
               f'class_shortfalls on a synthetic 9.9 GB modcache: '
               f'{suite.class_shortfalls({"modcache": 9.9})}')
         check('peak log: a peak the class covers produces no shortfall',
-              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 5.5}),
-              f'{suite.class_shortfalls({"modcache": 0.3, "selfhost": 5.5})}')
+              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 7.9}),
+              f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
     else:
         print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
               'skipped (every class is the override)')
@@ -980,8 +980,8 @@ def test_over_provisioned_classes_are_reported_not_silently_kept():
           f'and the same numbers DO trip it with a lower floor')
     check('over-provisioned: the registry itself has no over-provisioned job',
           not suite.over_provisioned(),
-          '; '.join(f'{n} {f:.0f}x in {c} ({p:g} GB peak)'
-                    for n, p, c, f in suite.over_provisioned()))
+          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
+                    for n, _p, c, g in suite.over_provisioned()))
     check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
           len(suite.at_floor()) >= 3,
           f'{len(suite.at_floor())} at the floor class: a list that can only be '
@@ -1201,7 +1201,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'coro-detached-async': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1231,12 +1231,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
-                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
-                     # parity differential was registered in a bucket and given
-                     # a count-checked `expect=`; a census that did not state
-                     # the new marker would fail on the registry's own state,
-                     # which is this check working.
-                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
@@ -2060,7 +2054,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
+    'test_formal_link_accounting.py': 2,
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,
@@ -3878,26 +3872,26 @@ UNREGISTERED = {
     #    reading of a bug doc.
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
-    # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
-    # needs a check even though the sweep it feeds does not, so this file checks
-    # it. It is unregistered for the reason its own docstring gives: the text
-    # cases are Lean-free and cheap, but one compiles the harness
-    # `clang -arch x86_64` and runs it `arch -x86_64`, and it SKIPS where that is
-    # unavailable — so on a host that cannot run x86-64 code the row that matters
-    # most reports nothing, which is the shape `formal-receiver-position` was
-    # moved out of `proofs` for.
+    # `formal/x86_64_model_fuzz.py` is a TOOL and its two `HARNESS` verdict rows
+    # are the ones a reader must not go looking for in `lib/X86.lean`, so the
+    # harness's own entry path needs a check even though the sweep it feeds does
+    # not. This file is that check, and it is unregistered for the reason its own
+    # docstring gives: three of its four cases are Lean-free and cheap, but the
+    # fourth compiles the harness `clang -arch x86_64` and runs it `arch -x86_64`,
+    # and it SKIPS where that is unavailable — so on a host that cannot run
+    # x86-64 code the row that matters most reports nothing, which is the shape
+    # `formal-receiver-position` was moved out of `proofs` for.
     'test_x86_64_model_fuzz.py':
         'The model-fuzz harness\'s two unread steps: its ENTRY register file, '
         'read back through `--entry-probe` (if the stub\'s real `mov` loads did '
         'not land, every field of every program the harness compares is a false '
         'disagreement), and its VERDICT rules, which decide `WRONG` (a model '
-        'bug) from the program\'s bytes and the differing fields alone — with a '
-        'value the architecture leaves UNDEFINED (a flag after a multiply, and '
-        'everything a `setcc` computes from one) skipped rather than compared. '
-        'The text cases are Lean-free; one builds and runs the harness under '
-        '`arch -x86_64` and SKIPS where that is not available, which is why this '
-        'is listed rather than registered — a registered job that skips its only '
-        'substantive case is a green line that says nothing.',
+        'bug) against `HARNESS` (a disagreement no x86-64 CPU can produce) from '
+        'the program\'s bytes and the differing fields alone. The text cases are '
+        'Lean-free; one builds and runs the harness under `arch -x86_64` and '
+        'SKIPS where that is not available, which is why this is listed rather '
+        'than registered — a registered job that skips its only substantive '
+        'case is a green line that says nothing.',
 
     # A DOCUMENT check, and the cheapest file in this list by a wide margin:
     # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
