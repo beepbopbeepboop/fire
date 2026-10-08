@@ -8375,8 +8375,25 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # register holds a compile-time non-zero constant at the CBZ, the
             # taken (div0/error) arm is statically dead — close it by
             # contradiction instead of exploring the dead path.
+            #
+            # **Only a `CBZ` (`_bidx == 16`) tests a register against zero, and
+            # this reasoning is only about that register.** `r = w & 0x1f` is
+            # the register field of a CBZ/CBNZ, but for a `B.cond` (51) those
+            # same bits are the CONDITION CODE and for a `TBZ`/`TBNZ` (52/53)
+            # the test is one BIT of the register, not the whole word. Feeding
+            # `r` to `_cbz_reg_const` for those forms tracked whatever constant
+            # happened to be in that register and closed the taken arm with
+            # `absurd hc_{bi} hne_{bi}` — where `hc_{bi}` is about the flags and
+            # `hne_{bi}` is about a register — which is a type error, not a
+            # proof. Measured: `def main() -> Int: n = 3; if 0 == n: …` (the
+            # immediate on the LEFT, so the emitter materialises it into a
+            # register and emits `cmp x0, x1`) had the register that holds the
+            # literal tracked to a non-zero constant and failed elaboration with
+            # `Application type mismatch`, while `if n == 0:` proved.
+            # `TestTheConditionOperandOrderDoesNotReachTheProof` pins both.
             _reg_const = None
-            if _src is None and not is_contract and cbz_force is None:
+            if (_src is None and not is_contract and cbz_force is None
+                    and _bidx == 16):
                 _reg_const = _cbz_reg_const(block, words, r)
             _taken_dead = (_reg_const is not None and _reg_const != 0)
             if cbz_force == "taken":

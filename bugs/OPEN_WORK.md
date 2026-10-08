@@ -60,12 +60,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | `formal112-docs` | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal115-docs` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 10 documents, 8 claimed
+### `formal/arm64_codegen` — 9 documents, 7 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | `formal107-docs` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
-| `FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md` | `formal107-docs` | An arm64 conditional whose immediate is on the LEFT never elaborates |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | `formal107-docs` | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` | `formal108-docs` | The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` |
 | `FORMAL_no_exceptions.md` | `formal112-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |

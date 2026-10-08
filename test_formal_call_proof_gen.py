@@ -3526,6 +3526,67 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
                          "the example's ordinary run test is gone")
 
 
+class TestTheConditionOperandOrderDoesNotReachTheProof(unittest.TestCase):
+    """A compare's immediate may be on either side, and the proof must not care.
+
+    `if n == 0:` and `if 0 == n:` are the same test, and `_cmp_spec` decides
+    which operand becomes the immediate: the first is `cmp x0, #0` and the
+    second materialises the literal and emits `cmp x0, x1`.  The proof
+    generator's codegen-internal dead-arm reasoning (`_cbz_reg_const`) tracked
+    the register that happened to hold the materialised literal and, because a
+    `B.cond`'s low bits are the CONDITION CODE rather than a register, read that
+    condition field as a register number.  It then closed the taken arm with
+    `absurd hc_{bi} hne_{bi}` — `hc` about the flags and `hne` about a register
+    — which is a type error, so the immediate-on-the-left spelling never
+    elaborated (`Application type mismatch`) while the immediate-on-the-right
+    one proved.  The dead-arm reasoning is now restricted to a real `CBZ`
+    (`_bidx == 16`), the only branch form that tests a register against zero.
+    """
+
+    RIGHT = ("def main() -> Int:\n"
+             "    n = 3\n"
+             "    if n == 0:\n"
+             "        return 10\n"
+             "    else:\n"
+             "        return 20\n")
+    LEFT = ("def main() -> Int:\n"
+            "    n = 3\n"
+            "    if 0 == n:\n"
+            "        return 10\n"
+            "    else:\n"
+            "        return 20\n")
+
+    def _proof(self, source, name):
+        tmp = tempfile.mkdtemp(prefix="a2-oporder-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path, err = _generate(tmp, source, name)
+        self.assertIsNone(err, f"{name} refused: {err}")
+        with open(path, encoding="utf-8") as fh:
+            return path, fh.read()
+
+    def test_the_immediate_on_the_left_does_not_get_a_dead_arm(self):
+        _path, text = self._proof(self.LEFT, "immleft")
+        self.assertNotIn(
+            "absurd hc_", text,
+            "the immediate-on-the-left spelling closed a B.cond arm by "
+            "contradiction against a register — the dead-arm reasoning fired on "
+            "a branch that tests the flags, which is a type error")
+        self.assertIn(
+            "if_pos hc_", text,
+            "the taken arm is no longer walked as an ordinary machine path")
+
+    def test_both_spellings_elaborate(self):
+        for name, source in (("immright", self.RIGHT), ("immleft", self.LEFT)):
+            with self.subTest(spelling=name):
+                path, _text = self._proof(source, name)
+                got = _check_proof(path)
+                if got is None:
+                    self.skipTest("no Lean / no lib/ProofLib.olean: every "
+                                  "assertion about elaboration needs it")
+                ok, detail, _n = got
+                self.assertTrue(ok, f"{name}: {detail}")
+
+
 class TestLoopContractBlocks(unittest.TestCase):
     """Which block is a loop's TEST, asked once and asked right.
 
