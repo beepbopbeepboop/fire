@@ -14090,7 +14090,18 @@ CONTAINER_OP_MEANING = {
 #: literals are two distinct blocks and so two distinct addresses, which is
 #: what identity is.  `==`/`!=` on a blob and the ordering operators are the
 #: same defect wearing different operators, so they belong in one gate.
-CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
+#:
+#: `-`, `&` and `^` are absent too, and for a reason of their own: they are the
+#: three operators whose CPython answer IS a lowering on this path when BOTH
+#: operands are SETS.  Set-ness is a flow-sensitive question each backend
+#: answers with its own `_set_vars`/`is_set_expr`, so this table — which sees
+#: only KINDS — cannot ask it; `container_set_algebra_refusal` below is the gate
+#: that does, asked beside this one exactly as `container_union_refusal` is
+#: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
+#: message quotes the same table.
+SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 #: The three operators that are SET ALGEBRA, and the ones a backend may lower
 #: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
@@ -14149,6 +14160,13 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
+
+    `-`, `&` and `^` are NOT in this gate.  Their CPython answer is a real
+    lowering when BOTH operands are sets, and set-ness is flow-sensitive, so
+    they have their own gate — `container_set_algebra_refusal` below — asked at
+    the same site, exactly as `container_union_refusal` is asked for `|`.  The
+    numbers quoted above for `s - {2}`, `s ^ {2}` and `s & {2}` are that gate's
+    measurements.
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
