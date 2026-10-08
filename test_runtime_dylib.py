@@ -253,6 +253,73 @@ def test_cache_hit_is_the_same_file_and_reverified():
               'an unusable flag fails loudly rather than being dropped', str(e))
 
 
+def test_runtime_dylib_removes_its_staging_directory():
+    """A cold build stages the runtime objects and the generated reflection
+    table in a `mojo_rt_*` temp directory, moves only the finished dylib out,
+    and must remove the directory on the way out — on success AND when the
+    build raises. Without that `finally` the directory and its ~520 kB stay in
+    `$TMPDIR` for the life of the machine, and the per-test CAS homes this tree
+    is full of make that routine rather than rare.
+
+    `mkdtemp` is wrapped so the test names the exact directory the build made
+    rather than globbing `$TMPDIR` and hoping nothing else is in flight, and
+    `cas.CAS_DIR` is pointed at a private directory so the build is COLD (it
+    reaches `mkdtemp` instead of returning at the cache-hit guard) without
+    leaving an entry in the shared cache on every run.
+    """
+    real_mkdtemp = tempfile.mkdtemp
+    real_cas_dir = cas.CAS_DIR
+    made = []
+
+    def recording_mkdtemp(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        made.append(d)
+        return d
+
+    arch = bsd.normalize_arch()
+    cas_dir = real_mkdtemp(prefix='test_rt_stage_cas_')
+    try:
+        # 1. the success path.
+        cas.CAS_DIR = cas_dir
+        bsd.tempfile.mkdtemp = recording_mkdtemp
+        try:
+            bsd.runtime_dylib(arch=arch)
+        finally:
+            bsd.tempfile.mkdtemp = real_mkdtemp
+        staged = [d for d in made if os.path.basename(d).startswith('mojo_rt_')]
+        check(bool(staged), 'a cold runtime_dylib build creates a staging directory')
+        check(all(not os.path.exists(d) for d in staged),
+              'runtime_dylib removes its staging directory after a successful '
+              'build', str([d for d in staged if os.path.exists(d)]))
+
+        # 2. the failure path, which is the one a `finally` (rather than a
+        # trailing line) is for: a compile error must not leave the debris
+        # behind either.
+        made.clear()
+        bsd.tempfile.mkdtemp = recording_mkdtemp
+        try:
+            try:
+                bsd.runtime_dylib(arch=arch,
+                                  flags=('--mojo-not-a-real-compiler-flag',))
+            except Exception:
+                raised = True
+            else:
+                raised = False
+        finally:
+            bsd.tempfile.mkdtemp = real_mkdtemp
+        check(raised, 'an unusable compile flag makes the build fail rather than '
+                      'silently succeeding')
+        staged = [d for d in made if os.path.basename(d).startswith('mojo_rt_')]
+        check(bool(staged), 'the failing build also created a staging directory')
+        check(all(not os.path.exists(d) for d in staged),
+              'runtime_dylib removes its staging directory when the build fails',
+              str([d for d in staged if os.path.exists(d)]))
+    finally:
+        bsd.tempfile.mkdtemp = real_mkdtemp
+        cas.CAS_DIR = real_cas_dir
+        shutil.rmtree(cas_dir, ignore_errors=True)
+
+
 def test_wrong_arch_object_is_rejected():
     """The check that makes the flag trustworthy. An object built for the OTHER
     architecture must be refused by name, with both architectures in the
@@ -955,6 +1022,7 @@ def main():
     test_unreachable_arch_fails_with_a_reason()
     test_both_arch_dylibs_build_and_are_distinct()
     test_cache_hit_is_the_same_file_and_reverified()
+    test_runtime_dylib_removes_its_staging_directory()
     test_wrong_arch_object_is_rejected()
     test_export_table_entries_are_all_real_definitions()
     test_every_defined_entry_point_is_advertised()
