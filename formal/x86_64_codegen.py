@@ -6698,6 +6698,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+            # The TARGET AS A TREE, not the flattened name list: a nested group
+            # `a, (b, c)` must stay a nested group so the arity check counts 2
+            # against the element's blob and recurses, exactly as arm64's
+            # `_emit_for_unpack` does.  Flattening it (the old
+            # `_emit_for_unpack(tnames, …)` here) compared the blob's count of
+            # 2 against a target count of 3 and exited 1 with nothing printed,
+            # where arm64 and CPython both answer.  `M.for_target_tree` is the
+            # one parser both backends now use, so the two cannot disagree
+            # about what a target's shape is.
+            ttree = M.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
 
             self._while_counter += 1
             wid = self._while_counter
