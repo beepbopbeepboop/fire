@@ -6116,7 +6116,9 @@ def _dedup_variadic_externs(parts: list) -> str:
         head_toks = stmt[:paren].strip().split()
         if not head_toks:
             return ['', '']
-        name = head_toks[-1].lstrip('*')
+        # `[len(...) - 1]`, not `[-1]`: a negative index on the erased result of
+        # `.split()` read the slot before the list (0xffffffff) self-hosted.
+        name = _as_str(head_toks[len(head_toks) - 1]).lstrip('*')
         if params == '...':
             return ['', name]
         if params != '':
@@ -6143,17 +6145,21 @@ def _dedup_variadic_externs(parts: list) -> str:
         """
         if 'extern' not in part:
             return ([], [])
-        concrete = []
-        variadic = []
+        # `_pp_*`, not `concrete`/`variadic`: the ENCLOSING function binds
+        # `concrete = set()` below, and first-declaration-wins gave this closure's
+        # list that SET's type (self-hosted), so the 'list' it returned was a
+        # MojoSet whose slot words (0xffffffff) were then hashed as strings.
+        _pp_concrete = []
+        _pp_variadic = []
         for stmt in part.split(';'):
             _fnm = _fragment_names(stmt)
             c_name = _as_str(_fnm[0])
             v_name = _as_str(_fnm[1])
             if c_name != '':
-                concrete.append(c_name)
+                _pp_concrete.append(c_name)
             if v_name != '':
-                variadic.append(v_name)
-        return concrete, variadic
+                _pp_variadic.append(v_name)
+        return _pp_concrete, _pp_variadic
 
     def _boundaries_preserve_parse(joined: list) -> bool:
         """Does `'\\n'.join(joined)` parse as the concatenation of the parts'
@@ -6291,13 +6297,20 @@ def _dedup_variadic_externs(parts: list) -> str:
             exact_concrete = set()
             for p in out_parts:
                 entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-                for name in entry[0]:
-                    exact_concrete.add(name)
+                for name in _as_list(entry[0]):
+                    exact_concrete.add(_as_str(name))
         out_variadic = []
         for vl in variadic_by_out_part:
             for name in vl:
                 out_variadic.append(name)
-        _DEDUP_EXTERN_PARTS_CACHE[out] = (exact_concrete, out_variadic)
+        # The cached name collection is a LIST here, as `_parse_part`'s entries
+        # are: the reader iterates `entry[0]` and the self-hosted path cannot
+        # iterate a value that is sometimes a list and sometimes a set -- it read
+        # a published SET's slot words (0xffffffff) as string pointers.
+        _out_concrete = []
+        for _cn in _as_set(exact_concrete):
+            _out_concrete.append(_as_str(_cn))
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (_out_concrete, out_variadic)
 
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
