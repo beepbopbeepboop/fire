@@ -44868,7 +44868,38 @@ class GlobalDataImage:
 # main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
 # program dies as it does today — no worse than the defect being fixed — while a
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
+#
+# **The depth this affords is PER-ARCHITECTURE, and that is the budget's shape
+# rather than a defect of the guard.** The budget is in BYTES because the thing
+# it bounds — the stack a runaway recursion may spend before it is refused — is
+# in bytes, and it is the SAME stack on both machines. But the frames are not
+# the same size: arm64's is `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is
+# `X86_64_CONTAINER_BUDGET` (16 KiB), so the one budget is 60 frames of arm64
+# and 480 of x86-64 — 8x, the frame ratio spelled out. A DEPTH budget instead
+# would either refuse x86-64 8x earlier than it needs to, or (if sized for
+# x86-64's depth) let arm64 spend 60 MiB of a 7.5 MiB stack and crash exactly as
+# it did before the guard existed. `stack_floor_depth(arch)` is the one place
+# the per-architecture figure is computed; a harness that compares the two
+# machines' recursion depth is measuring this budget, not the compiler.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
+
+
+def stack_floor_depth(arch: str) -> int:
+    """The recursion depth `STACK_FLOOR_BUDGET_BYTES` affords on `arch`.
+
+    One budget in BYTES, two frame sizes, so the depth is per-architecture and
+    this is the single place it is derived: arm64's frame is
+    `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is `X86_64_CONTAINER_BUDGET`
+    (16 KiB), giving 60 and 480 — the 8x that is exactly the frame ratio, and a
+    property of the byte policy rather than of the guard. The MEASURED edge is
+    one or two frames below the quotient (the real frame is at least the budget,
+    and the 256 KiB margin is a level), which is why `tools/formal_fuzz.py`
+    counts a one-machine `trapped` pair apart from a parity finding.
+    """
+    arch = str(arch).replace("-", "_")
+    frame = (ARM64_CONTAINER_BUDGET if arch in ("arm64", "aarch64")
+             else X86_64_CONTAINER_BUDGET)
+    return STACK_FLOOR_BUDGET_BYTES // frame
 
 
 # THE PART OF THE PROCESS'S STACK THIS COMPILER LEAVES ALONE, and the reason
@@ -45234,9 +45265,14 @@ def call_graph_depth(edges: dict) -> int:
     The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
-    sixty levels deep spends the same stack as a recursion sixty deep. Every
-    formal frame is at least 128 KiB, so the depth that matters is
-    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+    sixty levels deep spends the same stack as a recursion sixty deep. The
+    depth that matters is `STACK_FLOOR_BUDGET_BYTES // frame` and it is
+    PER-ARCHITECTURE because the frames differ: 60 on arm64 (128 KiB frames)
+    and 480 on x86-64 (16 KiB frames), `model.stack_floor_depth`, with the
+    measured edges one or two below. So a corpus measuring recursion depth on
+    both machines is measuring this budget rather than the compiler — an arm64
+    program that answers at 60 and a x86-64 one that answers at 470 are both
+    inside their own budget.
 
     **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
     The exact figure is the longest SIMPLE path, which is NP-hard in general, so

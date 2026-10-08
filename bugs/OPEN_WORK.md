@@ -202,7 +202,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
 | `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` | **unclaimed** | `interpolated_literal_segments` assumes a ONE-character prefix, so every `rf"…"` f-string is refused with a sentence that is false about the source |
-| `FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md` | **unclaimed** | FORMAL_the_stack_floor_budget_is_in_BYTES_so_x86_64_allows_8x_the_recursion_depth_arm64_does |
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |
 | `FORMAL_type_name_as_a_value.md` | **unclaimed** | a bare TYPE name in a value position is refused as a name with no register |
 

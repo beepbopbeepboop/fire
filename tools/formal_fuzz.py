@@ -5452,6 +5452,14 @@ def classify(results, want_exit, want_out, args):
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
+        # Counted apart from the mismatches on purpose: `trapped` is the
+        # stack-floor guard refusing, and the guard bounds a BYTE budget
+        # (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`) against frames that are
+        # 128 KiB on arm64 and 16 KiB on x86-64 — so the same program runs 8x
+        # deeper on x86-64 (`model.stack_floor_depth`: 60 vs 480), and a pair
+        # where one machine answers and the other traps is that budget, not two
+        # backends disagreeing about the language. Reporting it as an ordinary
+        # parity finding would file the frame size on every sweep.
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend

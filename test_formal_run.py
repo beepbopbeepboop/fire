@@ -23878,6 +23878,25 @@ def check_stack_floor_decision(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: depth/{name}")
+    # The budget is BYTES and the frames are not the same size, so the depth it
+    # affords is PER-ARCHITECTURE. Pinned against the model's own constants and
+    # against the frame ratio, so a change to either frame or the budget cannot
+    # leave the two machines claiming one depth — the asymmetry is a fact of the
+    # byte policy, not a divergence between the backends, and this is the one
+    # place a harness can read it.
+    arm_d = M.stack_floor_depth("arm64")
+    x86_d = M.stack_floor_depth("x86_64")
+    frame_ratio = M.ARM64_CONTAINER_BUDGET // M.X86_64_CONTAINER_BUDGET
+    if arm_d <= 0 or x86_d != arm_d * frame_ratio:
+        failures.append(
+            f"depth/per-architecture: arm64 {arm_d}, x86-64 {x86_d}, frame "
+            f"ratio {frame_ratio}; one byte budget over two frame sizes must "
+            f"afford the frame ratio more levels where the frame is smaller")
+    else:
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: the depth is "
+                  f"per-architecture ({arm_d} arm64, {x86_d} x86-64)")
     return passed, failures
 
 
