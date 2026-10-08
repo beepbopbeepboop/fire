@@ -1966,12 +1966,19 @@ dylib_exports: list = None, globals_base: int = None,
         # unprivileged process raise, and which says nothing about what it
         # enforces — is not read.
         #
-        # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
-        # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
-        # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
+        # **It is LOADED from the scratch struct, and it used to be read out of
+        # X0 — which is getrlimit's RETURN VALUE (0 on success), not the limit.**
+        # That made the limit word 0 for every process, so the budget was always
+        # the `STACK_FLOOR_BUDGET_BYTES` clamp and the guard never adapted to a
+        # reduced `ulimit -s`: measured, arm64, `deep(n)` under `ulimit -s 2048`
+        # SIGSEGVs at every depth from 14 up instead of refusing, because the
+        # 7.5 MiB budget is larger than the process's real 2 MiB stack — which is
+        # exactly the defect `bugs/FORMAL_stack_floor_guard_still_segfaults_at_
+        # the_budget_frame_count.md` records. X16 is caller-saved and the call
+        # clobbers it, so the scratch address is materialized again rather than
+        # reused.
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(13, 16, 0))
         # …and argument 0 goes back, from X14.
         self.asm.emit(encode_mov_zr_xn(0, 14))
         # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value

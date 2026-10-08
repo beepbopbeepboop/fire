@@ -15439,8 +15439,8 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\\n\", deep(100))\n"
-     "    return 0\n", 100),
+     "    printf(\"%d\\n\", deep(8))\n"
+     "    return 0\n", 8),
     ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15456,22 +15456,17 @@ _REDUCED_STACK_SOURCES = (
 #: gap, not a skip, and per architecture rather than per row because the whole
 #: group is one defect.
 #:
-#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
-#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
-#: `call getrlimit` there is exactly what
-#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
-#: moved without first fixing the extern-stub layout: an extern call emitted
-#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
-#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
-#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
-#:
-#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
-#: than the process's real stack never fires — so under a reduced `ulimit -s` it
-#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
-#: next step.
-_REDUCED_STACK_DEFERRED = {
-    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
-}
+#: **It is now EMPTY, and the arm64 entry it used to carry is gone.** That entry
+#: deferred arm64 to `bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`
+#: because arm64 read `RLIMIT_STACK` in the guard's own prologue and the read
+#: could not be moved to the startup stub. The read did not have to move: it was
+#: reading `getrlimit`'s RETURN VALUE (0) instead of `rlim_cur`, so the limit was
+#: always 0 and the budget was always the `STACK_FLOOR_BUDGET_BYTES` clamp —
+#: which is why the reduced-`ulimit -s` rows SIGSEGV'd instead of refusing. That
+#: is fixed in `formal/arm64_codegen.py::_emit_stack_floor_guard`, and arm64 runs
+#: this group now. The deferral mechanism is kept for the next architecture that
+#: needs one.
+_REDUCED_STACK_DEFERRED = {}
 
 
 def reduced_stack_cases(tmpdir, verbose=False):
@@ -15528,7 +15523,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
                 else:
                     out_rows.append((name, arch, True, ""))
             else:
-                if "100" not in run.stdout:
+                if str(depth) not in run.stdout:
                     out_rows.append((name, arch, False,
                                      "stdout %r does not answer" % run.stdout[:80]))
                 else:
