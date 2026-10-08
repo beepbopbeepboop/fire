@@ -80,19 +80,20 @@ rather than of this module, and every function below is shaped by them.
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
-  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT. A call into another image USED not
-    to materialize the callee's defaults — the caller had no signature to read
+  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT, and here that is CPython's
+    signature rather than a choice: the five clocks take no argument,
+    `clock_gettime_ns`/`sleep_ns`/`sleep_seconds` take the one each requires,
+    and CPython gives none of them a default. A call into another image USED not
+    to materialize a callee's defaults — the caller had no signature to read
     them from, so the argument register was whatever the caller last left in it,
     measured as `need_two(1)` returning 511 in one image and 1867609072 across a
-    dylib. `formal/imports.py`'s `external_declarations` now hands the emitter
-    the callee's own declaration, so that measurement no longer reproduces
-    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is). The parameters CPython gives defaults are
-    still REQUIRED here — a choice rather than a limit, and the step that
-    restores them is written down in
-    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
-    because it wants a sweep behind it. The one place a default is genuinely
-    wanted is a SECOND function of its own.
+    dylib — and that is fixed (`formal/imports.py`'s `external_declarations`
+    hands the emitter the callee's own declaration). The `strftime`/`strptime`
+    family, whose CPython forms DO have a default, is absent for a different
+    reason (the `struct tm` in their signature; see
+    `bugs/FORMAL_time_struct_shaped_answers.md`), so there is no default to
+    restore here. The one place a default is genuinely wanted is a SECOND
+    function of its own.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------

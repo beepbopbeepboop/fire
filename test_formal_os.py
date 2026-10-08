@@ -287,6 +287,14 @@ def main(n):
     printf("makedirs-deep=%d@@", makedirs(join(root, "a/b/c/d/e"), 511))
     printf("makedirs-kept=%d@@", makedirs(join(root, "p/q/r"), 511))
     show("made-deep", join(root, "p/q/r"))
+    # ── the OMITTED `mode`, which is CPython's default 0o777 (spelled 511) ──
+    # `mkdir`/`makedirs` are in a module dylib, so the default has to be
+    # materialized at the call site from the callee's declaration; a default
+    # that is not arrives as whatever the caller left in the register, which for
+    # `mode` is a real directory with unusable permissions.
+    printf("mkdir-default=%d@@", mkdir(join(root, "one-dflt")))
+    printf("makedirs-default=%d@@", makedirs(join(root, "dd/ee")))
+    show("made-default", join(root, "dd/ee"))
     printf("rmdir=%d@@", rmdir(join(root, "a/b/c/d/e")))
     show("removed", join(root, "a/b/c/d/e"))
     printf("rmdir-missing=%d@@", rmdir(join(root, "a/b/c/d/e")))
@@ -325,6 +333,10 @@ def main(n):
     printf("chmod-missing=%d@@", chmod(join(root, "no-such"), 384))
     # ── the working directory, and coming back from it ──
     printf("cwd-rel=[%s]@@", relpath(join(root, "a"), getcwd()))
+    # ── the OMITTED `start`, which is CPython's `os.curdir` (".") ──
+    # Measured while the working directory is still `root`, so `relpath` of
+    # `root/a` against the default `"."` is exactly CPython's `"a"`.
+    printf("cwd-rel-default=[%s]@@", relpath(join(root, "a")))
     printf("chdir=%d@@", chdir(join(root, "a")))
     printf("cwd-in=%s@@", getcwd())
     printf("chdir-back=%d@@", chdir(root))
@@ -592,9 +604,12 @@ def group_fs(tmpdir, verbose):
         "replace": "0",
         "unlink": "0",
         "makedirs-kept": "0",
+        "mkdir-default": "0",
+        "makedirs-default": "0",
         "chmod": "0",
         "chmod-missing": "-1",
         "cwd-rel": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
+        "cwd-rel-default": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
         "chdir": "0",
         "cwd-in": p("a"),
         "chdir-back": "0",
@@ -622,6 +637,7 @@ def group_fs(tmpdir, verbose):
     })
     for tag, path in (("made", p("a", "b", "c")),
                       ("made-deep", p("p", "q", "r")),
+                      ("made-default", p("dd", "ee")),
                       ("removed", p("a", "b", "c", "d", "e")),
                       ("removed-file", p("f.txt")),
                       ("gone", p("x1")), ("renamed", p("z2")),
@@ -644,6 +660,23 @@ def group_fs(tmpdir, verbose):
     else:
         if mode != 0o600:
             bad.append(f"chmod(…, 384) left mode {mode:o}, expected 600")
+    # The omitted `mode`, checked from OUTSIDE and against the umask, which is
+    # the only way to tell CPython's 0o777 from the stale register a
+    # non-materialized default would have left behind. `os.umask` is read and
+    # restored; this process is single-threaded and the directory was already
+    # created by the child, so the window changes no other creation.
+    old_umask = os.umask(0)
+    os.umask(old_umask)
+    try:
+        default_mode = stat.S_IMODE(os.stat(p("one-dflt")).st_mode)
+    except OSError as e:
+        bad.append(f"mkdir with the omitted mode produced no directory: {e}")
+    else:
+        want_mode = 0o777 & ~old_umask
+        if default_mode != want_mode:
+            bad.append(f"mkdir(…) with the omitted mode left mode "
+                       f"{default_mode:o}, expected {want_mode:o} "
+                       f"(0o777 & ~umask)")
     if bad:
         return False, ("%d disagreements with the filesystem:\n      %s"
                        % (len(bad), "\n      ".join(bad[:20])))
