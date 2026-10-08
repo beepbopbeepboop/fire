@@ -788,6 +788,33 @@ def ledger_key(row: dict) -> str:
     return "%s|%s" % (row["name"], row["backend"])
 
 
+def corpus_ledger_keys() -> set:
+    """The `basename|backend` keys the ledger must carry for the shipped corpus.
+
+    The EXPECTED side of the coverage question, derived from the corpus rather
+    than from a ledger: the writer names a row with `ledger_key`, and this
+    names the rows the ledger is required to have, both as
+    `basename(p) + "|" + backend` over `memcheck_sources() +
+    example_sources()`. `test_formal_memcheck.py`'s coverage check compares
+    the committed ledger against THIS set, so the writer and the reader cannot
+    drift about what "the ledger covers the corpus" means.
+    """
+    return {"%s|%s" % (os.path.basename(p), b)
+            for p in memcheck_sources() + example_sources()
+            for b in BACKENDS}
+
+
+def ledger_coverage_missing(rows: dict) -> list:
+    """The corpus rows a ledger is missing, as sorted `basename|backend` keys.
+
+    A real coverage question rather than a length comparison: two counts can
+    agree while a program is absent from the ledger and a stale or foreign row
+    stands in its place, which is exactly the drift a count cannot see. The
+    answer is a list of names so a failure can say WHICH program went missing.
+    """
+    return sorted(corpus_ledger_keys() - set(rows))
+
+
 def load_ledger(path: str) -> dict:
     try:
         with open(path) as f:

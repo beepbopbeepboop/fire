@@ -507,10 +507,30 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
+    # A SET comparison, not a length: the ledger is keyed `basename|backend`
+    # while the corpus is a list of absolute paths, so comparing the two
+    # counts (which is what this check used to do) agrees whenever the
+    # arithmetic happens to line up and says nothing about WHICH programs are
+    # covered. `M.ledger_coverage_missing` is the one definition of the
+    # expected key set, shared with `--write-ledger`'s own `ledger_key`.
+    missing = M.ledger_coverage_missing(rows)
     check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+          not missing,
+          "%d corpus row(s) have no ledger entry: %s"
+          % (len(missing), ", ".join(missing[:6])))
+    # …and the check is non-vacuous: a ledger that drops one program and gains
+    # one foreign row keeps its LENGTH and must still name the absent one.
+    # This is the pin for the fix that replaced the count (the count would
+    # pass this probe; the set comparison must not).
+    probe = dict(rows)
+    dropped = sorted(probe)[0]
+    probe.pop(dropped)
+    probe["not_a_corpus_program.mojo|arm64"] = {"verdict": "MATCH"}
+    check("the coverage check names a program the ledger is missing",
+          M.ledger_coverage_missing(probe) == [dropped],
+          "a swap that keeps the ledger's length must still name the absent "
+          "program; got %s, expected [%s]"
+          % (M.ledger_coverage_missing(probe), dropped))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
