@@ -799,7 +799,7 @@ def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
 # A module that hands back a VALUE and publishes the operations on it as
 # functions of its own — which is the only way it can, since a dylib publishes
 # functions and not the objects they are called on. `os.environ` and
-# `environ_get`/`environ_len`/… is the measured instance; these two are the rule
+# `environ_get`/`environ_isnone`/… is the measured instance; these two are the rule
 # on a module of this test's own, because the rule is what is being pinned and
 # not one host module's spelling of it.
 THING = """\

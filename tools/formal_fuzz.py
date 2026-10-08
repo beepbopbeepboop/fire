@@ -1289,6 +1289,13 @@ STRINGS = ["ab", "cd", "ef", "gh", "", "a", "xyz", "pqrs"]
 #: fixed dict for a second reason: an x86-64 image run through Rosetta is
 #: launched with that variable whether the parent put it there or not, so
 #: declaring it is what makes the two architectures compare the SAME block.
+#:
+#: **What the mix draws is `os.getenv(k)` under three spellings** — `print`,
+#: `!= ""` and `is None` (`environ_stmt`) — and every key it can name is one of
+#: the four below. It does NOT draw `len(os.getenv(k))` (refused: `len` of an
+#: `Optional` has no representation) nor `os.environ` (a module view whose
+#: `len`/subscript are refused; its coverage is the sweep row in
+#: `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`).
 FIXED_ENV = {
     "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
     "FORMAL_FUZZ_PLAIN": "one",
@@ -1379,8 +1386,13 @@ MIXES = {
     # the argument's type entirely.
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
-    # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+    # The process environment, against a FIXED one (`FIXED_ENV`). Every shape
+    # here lowers: `get` prints the value, `cmp` is `!= ""` and `isnone` is
+    # `is None`, and all three are the comparisons an `Optional[String]` can
+    # carry. `len(os.getenv(k))` used to be the third and it is REFUSED (`len`
+    # of an `Optional` has no representation yet), so every program the mix
+    # drew was refused and the family measured nothing — see `environ_stmt`.
+    "environ": (("environ_get", 4), ("environ_isnone", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2009,7 +2021,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_len", "environ_cmp",
+"environ_get", "environ_isnone", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2116,7 +2128,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+        elif kind in ("environ_get", "environ_isnone", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3050,10 +3062,23 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
+    #
+    # **Every shape here must be one the path LOWERS.** The third used to be
+    # `len(os.getenv(k))`, which is `len` of an `Optional[String]` — refused on
+    # both backends — and because a program carries several draws, essentially
+    # every program the mix emitted was refused, so the family reported
+    # `refusals=N` and no answers at all. `test_formal_fuzz.py`'s
+    # `environ_produced_no_answer` is the anti-vacuity row that saw it; the
+    # replacement is the `is None` test, which is a comparison the optional
+    # carries and lowers on both backends (measured). `os.environ` itself is a
+    # module attribute the mix does NOT draw: `len(os.environ)` and
+    # `os.environ[k]` are both refused, and the `os.environ` model's coverage is
+    # the sweep row in
+    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_len":
-            self.emit(indent, f"print(len(os.getenv({key!r})))")
+        if kind == "environ_isnone":
+            self.emit(indent, f"print(1 if os.getenv({key!r}) is None else 0)")
             return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")

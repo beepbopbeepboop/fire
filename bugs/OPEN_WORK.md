@@ -49,7 +49,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_the_environ_fuzz_mix_is_refused_on_every_program_it_draws.md` | `formal116-docs` | FORMAL_the_environ_fuzz_mix_is_refused_on_every_program_it_draws |
+
 
 ### `formal/arm64` — 4 documents, 4 claimed
 
