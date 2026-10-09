@@ -7,6 +7,25 @@ rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
 this file is about is NOT built and §5 says what building it takes.**
 
+**Update 2026-10-08 (`work/formal224-docs`): the LOCAL half of §5 item 1 now
+lowers.** A local bound from a call whose declared `-> T` names a one-field
+struct of THIS IMAGE reads its sole field, where before only a construction
+did — `r = make(41); r.n` was refused ("'r.n' is a field access through 'r'")
+while `r = make(41); r.get()` lowered, because the method lift reads the
+declared return type and the field read had no reader for it.  The reader is
+`formal/build.py::_one_word_return_structs`, asked by `_one_word_field_map` and
+`_one_word_constructor_bindings`; a call-result one-field struct whose sole
+field is itself a FRAME stays excluded, because its block was reserved in the
+CALLEE's frame and the escape analysis does not track a one-word struct.
+Pinned by `test_formal_value_model.py`'s
+`a_call_result_bound_to_a_local_reads_its_sole_field`.
+
+**It does NOT touch the rows §5 is about, and cannot.** Those are HOST-MODULE
+returns whose model hands back one word (`os.stat`, `resource.getrusage`,
+`pwd.getpwnam`): the struct is not in the importing image at all, so there is no
+`-> T` for this reader to find, and §5's accessor-re-spelling direction stands
+unchanged for them.
+
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
 next 4-6 of them. The ranking is the deliverable and it is negative; §4 is the

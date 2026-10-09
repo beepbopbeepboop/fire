@@ -4217,9 +4217,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         holders = {_fn_key(fn): set() for fn in functions}
         hstruct = {_fn_key(fn): {} for fn in functions}
         one_word = {_fn_key(fn): {} for fn in functions}
+        _return_structs = _one_word_return_structs(functions, structs_by_name,
+                                                   one_field)
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
-                                    holders, hstruct, one_word, one_field)
+                                    holders, hstruct, one_word, one_field,
+                                    _return_structs)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -4398,6 +4401,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # function's docstring for the measured hang a name-keyed slot produced
     # when two definitions of one name disagreed.
     returns_frame: dict = {}
+    # Once per unit rather than once per function: `_seed_one_word_bindings`
+    # reads it for every binding in every body, and recomputing it there would
+    # make the walk quadratic in the module.  `_one_word_field_map`'s caller in
+    # `_prepare_functions` computes the same table and passes it for the same
+    # reason.
+    _return_structs = _one_word_return_structs(
+        functions, structs_by_name, one_field)
     for fn in functions:
         owner = method_owners.get(fn.name)
         # `and M.method_receiver_name(fn) is not None`, and the guard rather
@@ -4538,7 +4548,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
-                                hstruct, one_word, one_field)
+                                hstruct, one_word, one_field,
+                                _return_structs)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -9769,7 +9780,89 @@ def _nested_frame_bindings(fn, by_name, structs_by_name, params=()):
     return settled, reassigned
 
 
-def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
+def _one_word_return_structs(functions, structs_by_name, one_field=None) -> dict:
+    """`{callee name: the one-field struct its declared `-> T` names}`.
+
+    The evidence a CALL-RESULT binding needs and a construction does not:
+    `def make(x: Int) -> Box: return Box(x)` binds a name to the same word a
+    `Box(x)` binding produces, and the declaration says so.  Without this the
+    binding tables read only `structs_by_name.get(value.func.name)`, so a local
+    bound from such a call held no struct and its field read was refused by
+    name while the same program's `make(x).method()` lowered — the method lift
+    reads the declared return type, and the field read had no reader for it.
+    Measured both architectures (`.tmp` probe, 2026-10-08): `r = make(7);
+    printf("%d", r.field)` refuses, `r = make(7); printf("%d", r.rc())` builds
+    and answers 7.
+
+    Unanimity over every definition of a name, for the reason
+    `callees_returning_containers` gives: an overloaded name whose definitions
+    disagree answers no single question, and picking one would attribute a
+    layout to a body the call may not have selected.  A definition whose
+    annotation names nothing, a multi-field struct, or a type this module does
+    not declare takes the whole name out.
+    """
+    by_name = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    out = {}
+    for name, defs in by_name.items():
+        st = None
+        for d in defs:
+            base = M.annotation_base_name(getattr(d, "return_type", None))
+            cand = (structs_by_name or {}).get(base) if base else None
+            if cand is None or not M.one_field_answer(cand, one_field):
+                st = None
+                break
+            if st is not None and st.name != cand.name:
+                st = None
+                break
+            st = cand
+        if st is not None:
+            out[name] = st
+    return out
+
+
+def _call_result_one_field_struct(value, structs_by_name, return_structs,
+                                  one_field=None):
+    """The one-field struct a binding whose value is `value` is declared to
+    denote, or None.
+
+    `value`'s callee is either a struct of this module — a CONSTRUCTION, which
+    the existing arms already read — or a function whose declared `-> T` names
+    one, which is the case the binding tables used to miss.  A type CONVERSION
+    (`int(x)`) produces a word that is not any struct's field, so it is
+    excluded for the reason `_one_word_constructor_bindings` states.
+    """
+    if not isinstance(value, F.CallExpr) \
+            or not isinstance(value.func, F.IdentExpr):
+        return None
+    callee = value.func.name
+    st = (structs_by_name or {}).get(callee)
+    if st is not None:
+        return st if M.one_field_answer(st, one_field) else None
+    if M.type_constructor_kind(callee) is not None:
+        return None
+    st = (return_structs or {}).get(callee)
+    if st is None:
+        return None
+    # A call-result binding carries a WORD and nothing else.  A one-field struct
+    # whose sole field is itself a FRAME makes that word an ADDRESS, and the
+    # block was reserved at the CALLEE's construction site — so the word names a
+    # frame that belongs to the callee and is dead on return.  The escape
+    # analysis tracks that for a framed (multi-field) struct through the
+    # returned-frame convention, but a one-word struct is invisible to it, so
+    # binding one from a call would make a dangling address readable.  Refused
+    # by omission: the constructor spelling of such a value (a block in THIS
+    # frame) stays the only reachable one.
+    if M.one_word_sole_field_frame(st, structs_by_name, one_field) is not None:
+        return None
+    return st
+
+
+def _one_word_constructor_bindings(fn, structs_by_name, return_structs=None,
+                                   one_field=None) -> dict:
     """`{name: [struct, …]}` for locals bound from a ONE-FIELD struct's
     construction — the case whose value is a plain word that IS the field.
 
@@ -9815,10 +9908,9 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
         if not target or not isinstance(value, F.CallExpr) \
                 or not isinstance(value.func, F.IdentExpr):
             continue
-        st = (structs_by_name or {}).get(value.func.name)
-        if st is None or M.type_constructor_kind(value.func.name) is not None:
-            continue
-        if M.struct_is_framed(st) or M.struct_field_count(st) != 1:
+        st = _call_result_one_field_struct(value, structs_by_name,
+                                           return_structs, one_field)
+        if st is None:
             continue
         got = out.setdefault(target, [])
         if st not in got:
@@ -9827,7 +9919,8 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
 
 
 def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
-                            one_word, one_field=None) -> None:
+                            one_word, one_field=None,
+                            return_structs=None) -> None:
     """Seed `one_word[fn]` for `fn`, and the HOLDER half of the same fact.
 
     A LOCAL construction and a DECLARED parameter, the two ways a name becomes
@@ -9908,8 +10001,11 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
     empty, the early return in the `==`-dispatch analysis) cannot produce one.
     """
     key = _fn_key(fn)
-    bound = _one_word_constructor_bindings(fn, structs_by_name,
-                                           [f.name for f in functions])
+    if return_structs is None:
+        return_structs = _one_word_return_structs(functions, structs_by_name,
+                                                  one_field)
+    bound = _one_word_constructor_bindings(fn, structs_by_name, return_structs,
+                                           one_field)
     one_word[key].update(bound)
     # …and the same bindings read for the FRAME half, which is the case the
     # one-word VALUE table above cannot see and the frame pass had no case for.
@@ -11059,12 +11155,19 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
 
 
 def _one_word_field_map(fn, structs_by_name: dict, owner=None,
-                        one_field=None) -> dict:
+                        one_field=None, return_structs=None) -> dict:
     """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
     this path can produce such a value.
+
+    A local bound from a CALL whose declared `-> T` names a one-field struct
+    holds the same word, and `_call_result_one_field_struct` is the reader that
+    gives that case the answer the constructor case has always had.  Without
+    it, `r = make(7); r.field` was refused while `r = make(7); r.method()`
+    lowered — the method lift reads the declared return type and the field read
+    did not.
 
     A PARAMETER declared as a one-field struct joins them, from the
     declaration rather than from a binding, because the declaration is the same
@@ -11098,8 +11201,9 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
             continue
         if not isinstance(value.func, F.IdentExpr):
             continue
-        st = structs_by_name.get(value.func.name)
-        if st is not None and M.one_field_answer(st, one_field):
+        st = _call_result_one_field_struct(value, structs_by_name,
+                                           return_structs, one_field)
+        if st is not None:
             mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
@@ -18140,6 +18244,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             _functions_by_name[_f.name] = _f
     for _n in _overloaded_names:
         _functions_by_name.pop(_n, None)
+    # Once per unit: the `-> T` a CALL names, for the call-result field binding.
+    # Computed here rather than inside `_one_word_field_map` so the per-function
+    # loop does one table lookup instead of a walk of every function.
+    _return_structs = _one_word_return_structs(functions, structs_by_name,
+                                                 one_field)
     for fn in functions:
         # A `match` is lowered to compares and branches HERE, before anything
         # else in this loop reads the body, and for the same reason the `with`
@@ -18237,7 +18346,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # through one of those fields gets — and the chain is one line away
         # either way.  One recognition of "this name is a one-word word", read
         # once.
-        one_word = _one_word_field_map(fn, structs_by_name, st, one_field)
+        one_word = _one_word_field_map(fn, structs_by_name, st, one_field,
+                                       _return_structs)
         if st is not None and M.one_field_answer(st, one_field):
             one_word["self"] = st
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,

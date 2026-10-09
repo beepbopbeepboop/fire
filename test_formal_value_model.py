@@ -1113,6 +1113,37 @@ FIXED_CASES = [
      "    printf(\"z=%d\", s.size())\n"
      "    return 0\n",
      "z=0"),
+    # ── a one-word struct a CALL hands back ──
+    #
+    # A local bound from a call whose declared `-> T` names a one-field struct
+    # holds that struct's sole field, exactly as a construction does — and it
+    # did not: `r = Box(41)` lowered and `r = make(41)` was refused
+    # ("'r.n' is a field access through 'r', and this path has no way to say what
+    # 'r' holds"), while `make(41).get()` lowered because the method lift reads
+    # the declared return type and the field read had no reader for it. The same
+    # call result was classified by one lowering and not the other.
+    #
+    # Both spellings are in ONE image and every number is distinct, so a
+    # classification that answered one and not the other shows up as two numbers
+    # that must agree. `make(7).get()` is the method-lift control: it passed
+    # before this change, so it is the guard that the field-read fix did not
+    # disturb the path that already worked.
+    ("a_call_result_bound_to_a_local_reads_its_sole_field",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def main(n):\n"
+     "    var a = Box(41)\n"
+     "    var b = make(41)\n"
+     "    printf(\"ctor=%d call=%d m=%d\", a.n, b.n, make(7).get())\n"
+     "    return 0\n",
+     "ctor=41 call=41 m=7"),
     # ── walking a DICT, which is not walking a list ──
     #
     # A dict is a PAIR blob: `[count][k0][v0][k1][v1]…`, one COUNT per PAIR.
