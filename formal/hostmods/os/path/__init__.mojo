@@ -624,8 +624,20 @@ def stat_dev(p, follow) -> int:
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+
+    SIGN-EXTENDED, because `st_dev` is `dev_t` = `int32_t` and CPython reports
+    it widened to 64 bits rather than zero-extended: on this machine
+    `os.stat("/dev/null").st_dev` is `0xFFFFFFFFA8FB1A80`, the 32-bit
+    `0xA8FB1A80` with its sign bit copied up, while a zero-extending read gives
+    `0xA8FB1A80`. The two agree for every device whose number is below 2^31 —
+    which is every case that passed before a device with a negative
+    `st_dev` was in the corpus — and that is why this is a sign-extension and
+    not a wrong offset.
     """
-    return fs_stat_field32(p, follow, 0)
+    var v = fs_stat_field32(p, follow, 0)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
 
 
 def stat_nlink(p, follow) -> int:

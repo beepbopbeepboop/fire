@@ -784,7 +784,21 @@ def _stat_oracle(p):
         pass
 
     def field(st, name):
-        return -1 if st is None else getattr(st, name)
+        v = -1 if st is None else getattr(st, name)
+        # `st_dev` is `dev_t` = `int32_t`, and CPython exposes it widened to 64
+        # bits: `(unsigned long long)(int32_t)-1459938688` is
+        # `0xFFFFFFFFA8FB1A80`, which Python prints as the huge POSITIVE
+        # `18446744072249612928`.  The image's word is a SIGNED 64-bit int, so
+        # it prints the same bit pattern as `-1459938688`, and `%d` cannot
+        # print the unsigned form (it must stay signed for the `-1` a missing
+        # path answers).  So the oracle reinterprets the SAME 64-bit word as
+        # signed, which is what both engines actually hold; every device
+        # numbered below 2^31 is unaffected, which is why this was invisible
+        # until a machine whose `/dev/null` has a negative `st_dev` was in the
+        # corpus.
+        if name == "st_dev" and v >= 2 ** 63:
+            v -= 2 ** 64
+        return v
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
