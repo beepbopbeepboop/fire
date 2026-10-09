@@ -103,12 +103,11 @@ because it is not a matter of taste:
     `KeyError` and there is no unwinder to raise into, so `[]` is `get` and
     answers 0.
 
-  * **A DEFAULT ARGUMENT IS MATERIALIZED ACROSS A DYLIB NOW, so a parameter
-    CPython gives a default gets CPython's default.** `mkdir` and `makedirs`
-    default `mode` to `0o777`, which is CPython's own. A call to a function in
-    ANOTHER image USED not to materialize the callee's defaults: the caller had
-    no signature to read them from, so the argument register was whatever the
-    caller last left in it. Measured, same source either way:
+  * **A DEFAULT ARGUMENT CROSSES A DYLIB BOUNDARY NOW, and every parameter
+    CPython gives a default here says so in its own signature.** A call to a
+    function in ANOTHER image used not to materialize the callee's defaults:
+    the caller had no signature to read them from, so the argument register
+    was whatever the caller last left in it. Measured, same source either way:
 
         # dmod.mojo          def need_two(a, b=511): return b
         # in ONE file:       need_two(1)            ->  511
@@ -116,15 +115,16 @@ because it is not a matter of taste:
 
     A default that arrives as a stack address is worse than no default,
     because `mkdir(path, mode)` with a garbage mode SUCCEEDS and leaves a
-    directory nobody can enter — which is why the signature was written
-    without one. `formal/imports.py`'s `external_declarations` now hands the
-    emitter the callee's own declaration, so the register is filled from the
-    default and the measurement above no longer reproduces
+    directory nobody can enter. `formal/imports.py`'s `external_declarations`
+    now hands the emitter the callee's own declaration, so the register is
+    filled from the default and the measurement above no longer reproduces
     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is). The one place a default was always wanted —
-    `getenv`'s — is a SECOND function, `getenv_or(name, default)`, so the
-    two-argument form has a name of its own rather than a signature that
-    silently does nothing.
+    deleted, as a fixed bug's is). `mkdir`/`makedirs` carry CPython's `mode`
+    default again, and every future host-module signature may. The one place
+    where a default is deliberately NOT used is `getenv`'s: a default that
+    answers `None` cannot be told from an unset variable in a target that
+    returns one word, so that is a SECOND function, `getenv_or(name, default)`,
+    with a name of its own rather than a signature that silently does nothing.
 """
 
 from ._syscalls import str_alloc, str_len, str_at, str_prefix, str_starts
@@ -968,11 +968,12 @@ def rmdir(path) -> int:
 def mkdir(path, mode=0o777) -> int:
     """Create the directory `path` with permission bits `mode`. 0 or -1.
 
-    `mode` defaults to 0777, which is CPython's own default; the C library
-    masks it with the process umask either way. A default argument IS applied
-    to a call from another image now — `formal/imports.py`'s
-    `external_declarations` hands the emitter the callee's own declaration — so
-    this is CPython's signature rather than a workaround.
+    `mode` defaults to 0777, CPython's default. The default is applied at the
+    CALL SITE now — `formal/imports.py`'s `external_declarations` hands the
+    emitter the callee's own declaration — so the one-argument form is
+    `os.mkdir(path)` exactly as in CPython. The C library masks the bits with
+    the process umask either way, so 511 and the omitted argument are the same
+    call.
 
     -1 with EEXIST when the directory is already there, which is the same
     signal `makedirs` below uses to decide it has nothing to do.
@@ -983,8 +984,8 @@ def mkdir(path, mode=0o777) -> int:
 def makedirs(path, mode=0o777) -> int:
     """Create `path` and every directory above it that is missing.
 
-    `mode` defaults to 0777, for the reason `mkdir` gives. 0 when the whole path
-    exists afterwards, -1 otherwise. An intermediate
+    `mode` defaults to 0777, for the reason `mkdir` gives. 0 when the whole
+    path exists afterwards, -1 otherwise. An intermediate
     component that is already a directory is not an error, so this is
     CPython's `makedirs(path, exist_ok=True)` and there is no spelling of the
     other one: a target with no exceptions cannot report "FileExistsError" to

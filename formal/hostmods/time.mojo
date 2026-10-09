@@ -80,18 +80,16 @@ rather than of this module, and every function below is shaped by them.
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
-  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT, and that is now a fact about
-    CPython's `time` rather than a limit: NONE of the names here takes a
-    parameter CPython gives a default (`sleep(secs)`, `clock_gettime(clk_id)`
-    and the rest are all required). A call into another image USED not to
-    materialize the callee's defaults — the caller had no signature to read
-    them from, so the argument register was whatever the caller last left in it,
-    measured as `need_two(1)` returning 511 in one image and 1867609072 across a
-    dylib. `formal/imports.py`'s `external_declarations` now hands the emitter
-    the callee's own declaration, so a default DOES materialize
+  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT, because no CPython counterpart
+    does: `sleep(secs)`, `clock_gettime_ns(clk_id)` and `get_clock_info(name)`
+    all require their argument there, so a default here would be a spelling
+    CPython does not have. A default that crossed a dylib boundary used to fail
+    differently — a call into another image USED not to materialize the
+    callee's defaults, measured as `need_two(1)` returning 511 in one image and
+    1867609072 across a dylib — and that is fixed
     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is), and this module simply has none to give. The
-    one place a default is genuinely wanted is a SECOND function of its own.
+    deleted, as a fixed bug's is), so a default would be safe now; there is
+    simply none to give.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------

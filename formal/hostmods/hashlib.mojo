@@ -628,13 +628,11 @@ def b2_compress(h: Pointer[UInt8], block: Pointer[UInt8], t: int,
 def blake2b_hex(data, n: int, digest_size: int = 64) -> str:
     """`hashlib.blake2b(data, digest_size=digest_size).hexdigest()`.
 
-    `digest_size` defaults to 64, which is CPython's own default. A default
-    argument used not to survive a dylib boundary — the caller had no signature
-    to materialize it from, so the argument register was whatever the caller
-    last left in it — and that is fixed (`formal/imports.py`'s
-    `external_declarations`, which hands the emitter the callee's own
-    declaration), so this is CPython's signature rather than a workaround.
-    1 to 64, as in CPython.
+    `digest_size` is CPython's parameter and defaults to 64 here as it does
+    there; a default argument crosses a dylib boundary now
+    (`formal/imports.py`'s `external_declarations`, which hands the emitter the
+    callee's own declaration), so the one-argument form is CPython's
+    `blake2b_hex(data, n)`. 1 to 64, as in CPython.
 
     The truncated output is CPython's: BLAKE2b's `digest_length` is part of
     the initial state, so `digest_size=20` is a DIFFERENT HASH and not the

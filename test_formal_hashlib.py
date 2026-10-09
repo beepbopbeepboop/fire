@@ -290,29 +290,37 @@ def group_blake2b(tmpdir, verbose):
               f"CPython's digest_size={d} is a prefix of its 64-byte digest, "
               f"so this oracle cannot tell the two implementations apart")
 
-    # The OMITTED-argument spelling: `digest_size` defaults to 64, and that
-    # default has to materialize across the dylib boundary. Two lengths, so the
-    # case is not a single point, compared against CPython's own default.
-    om_want = {}
-    om_lines = ["import hashlib", "", "def main() -> int:"]
-    for n in (0, 137):
-        om_lines.append(f"  var q{n}: Pointer[UInt8] = malloc({max(n, 1)})")
-        om_lines.append(f"  memset(q{n}, 97, {n})")
-        om_lines.append(f'  printf("om{n}=%s@@", hashlib.blake2b_hex(q{n}, {n}))')
-        om_want[f"om{n}"] = hashlib.blake2b(b"a" * n,
-                                            digest_size=64).hexdigest()
-    om_lines.append("  return 0")
-    om_got = _records(run(build("\n".join(om_lines) + "\n", "b2om")),
-                      r"(om\d+)=([0-9a-f]*)")
-    bad_om = {k: (om_got.get(k, "<missing>")[:16], v[:16])
-              for k, v in om_want.items() if om_got.get(k) != v}
-    check(not bad_om,
-          "the OMITTED digest_size did not materialize CPython's default of "
-          f"64: {bad_om}")
+    # The OMITTED `digest_size` must be CPython's 64, materialized at the call
+    # site from the callee's declaration rather than left in whatever register
+    # the caller last touched. One build over the length boundaries that
+    # matter for the parameter block.
+    default_lens = [0, 1, 64, 127, 128, 129, 200]
+    default_expected = {n: hashlib.blake2b(b"a" * n).hexdigest()
+                        for n in default_lens}
+    lines = ["import hashlib", "", "def main() -> int:"]
+    for n in default_lens:
+        lines.append(f"  var m{n}: Pointer[UInt8] = malloc({max(n, 1)})")
+        lines.append(f"  memset(m{n}, 97, {n})")
+        lines.append(f'  printf("d{n}=%s@@", hashlib.blake2b_hex(m{n}, {n}))')
+    lines.append("  return 0")
+    got_default = _records(run(build("\n".join(lines) + "\n", "b2d")),
+                           r"(d\d+)=([0-9a-f]*)")
+    check(len(got_default) == len(default_expected),
+          f"the one-argument form printed {len(got_default)} of "
+          f"{len(default_expected)} records")
+    bad_default = [(n, got_default.get(f"d{n}"), default_expected[n])
+                   for n in default_lens
+                   if got_default.get(f"d{n}") != default_expected[n]]
+    check(not bad_default,
+          "blake2b_hex(data, n) is not CPython's default digest_size=64"
+          + (f"; first d{bad_default[0][0]} got "
+             f"{(bad_default[0][1] or '')[:24]!r} want "
+             f"{bad_default[0][2][:24]!r}" if bad_default else ""))
 
     if verbose:
         print(f"    {len(got)} BLAKE2b digests byte-exact over "
-              f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes")
+              f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes, "
+              f"plus {len(got_default)} with digest_size omitted")
     return True, f"{len(got)} digests byte-exact"
 
 
