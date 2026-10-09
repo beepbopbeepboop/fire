@@ -784,6 +784,19 @@ MEASURED_PEAK_GB = {
     # `class_for_peak` agrees with the class landed here, so unlike `formal` it
     # needs no `CLASS_ABOVE_PEAK` entry.
     'formal-x86':                             (24.8, 'measured'),  # 80 s, x86-64 corpus
+    # Red on 9 of 175 cases and still recorded, for the reason `formal`'s row
+    # gives: it ran every case in 77 s, so 2.5 GB is what it needs and not how
+    # far it got. The failures are a proof-generation fixture that no longer
+    # emits the goal its own harness looks for ("the fixture generates no
+    # `q_compiles_correctly_universal` carrying `all_goals (first | done |
+    # sorry)`") — a formal lane, not a measurement finding.
+    'formal-call-proofgen':                   (2.5, 'measured'),   # 175 cases, 9 red
+    # 6.5 s looked like a skip, so checked before recording: it is not one. The
+    # file reports 223 samples over 80 forms, 25 step-lemmas at 52 encodings and
+    # 523 hypotheses, the 128-bit divide against exact integer arithmetic, and
+    # the shift and multiply against their definitions — it is a MODEL check in
+    # pure python and does no Lean, so it is fast rather than empty.
+    'formal-x86-model':                       (1.3, 'measured'),   # 223 samples, 80 forms
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2812,7 +2825,7 @@ test('formal-globals', [PY, 'test_formal_globals.py'], deps=['preflight'],
 # but the recorded-PASS path does, and that is where a library change would
 # have been served stale.
 test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
-     deps=['preflight', 'prooflib'], timeout=1200,
+     deps=['preflight', 'prooflib'], timeout=1200, mem='tiny',
      extra=['test_formal_call_proof_gen.py', 'fire_compiler.py',
             'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
             'formal/arm64_codegen.py', 'formal/build.py', 'formal/lean.py',
@@ -2991,7 +3004,7 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='tiny',
      desc='every byte the x86-64 emitter can produce is a step the model can step')
 # The check that `lib/X86.lean` is a MODEL of the machine rather than a
 # well-typed program: it builds every `formal/examples/*.mojo` for x86-64, RUNS
