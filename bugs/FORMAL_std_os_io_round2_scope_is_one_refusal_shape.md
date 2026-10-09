@@ -6,22 +6,6 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
-**Status (2026-10-07, `work/formal135-docs`): the §0.4/§6.2 sentence was red on
-`master`, and the RED was a merge, not a missing fix. The `no_public_api_reason`
-constants-only text was reworded by the `work/formal27-5`/`work/merge-formal45`
-merge (`b9174ce1e`) and two phrases its own pin asserts went with it — "nothing
-an importer could bind" became "no address an importer could bind", and "a
-decision about the BACKEND" was dropped — so
-`test_formal_imports.py::test_a_constants_only_module_is_not_told_nothing_could_be_added`
-failed and `formal-imports` (a gate job) was red. The sentence is restored with
-both halves the doc itself states: the refusal is correct ("nothing an importer
-could bind") and what would remove it is "a decision about the BACKEND" beside
-the two things that would answer it. Measured: `test_formal_imports.py`
-PASS=90 FAIL=0 (was 89/1). The §0.4 pin the doc names
-(`test_formal_monomorph.py`'s constants-only test) has since become a
-build-and-RUN comparison, so this file's test is the live pin; the doc's §0.4
-sentence is otherwise unchanged.**
-
 **Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
 (§0.4) — the false clause "nothing this backend could add" is gone and the
 sentence now names the backend RULE that would remove it and the feature that
@@ -573,6 +557,21 @@ next to the file's three existing `no_public_api_reason` message-accuracy guards
 **What this does NOT do:** it lowers nothing and moves no file. The feature is
 still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
 `formal16-2`'s. This item asked for a sentence, and the sentence is now true.
+
+**Status (2026-10-08, `work/formal248-docs`): a later merge DROPPED two phrases
+this item's pin requires, and both are restored.** Two independent branches
+fixed this sentence (`c1f99d80`, which added the pin in `test_formal_imports.py`,
+and `00ac52bb`, which rewrote the wording and pinned only in
+`test_formal_monomorph.py`); the merge kept `00ac52bb`'s text and left
+`c1f99d80`'s pin RED, because the rewrite lost `BACKEND` and the exact phrase
+`nothing an importer could bind` the pin asserts. The sentence now says both
+again — "what would remove it is not a declaration this file is missing … and a
+decision about the BACKEND: a rule that a module nothing binds needs no library
+at all" — while keeping `00ac52bb`'s accuracy (it names BOTH missing things and
+both docs, rather than claiming the constants "are inlined at their use site",
+which §0.4 established is false of a refused module). Measured:
+`test_formal_imports.py` PASS=89 FAIL=0 (was 88/1), `test_formal_sweep.py`
+135/135, `test_formal_monomorph.py` 37/37.
 
 ## 6. What is left
 
