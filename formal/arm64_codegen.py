@@ -1012,6 +1012,16 @@ dylib_exports: list = None, globals_base: int = None,
         self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
+            # The stack floor is READ here, once, before any argument is
+            # materialised — the arm64 twin of x86-64's placement at the same
+            # call site. A `getrlimit` in a guarded prologue is a `BL` the proof
+            # layer cannot follow, so it ended every function's path tree; the
+            # stub is emitted above every body and is walked by nothing, and the
+            # floor it stores in `__DATA` is read by four instructions in each
+            # prologue. See `_emit_stack_floor_init`. It runs after the stub's
+            # own `stp` so SP is 16-byte aligned at the `call`, and before the
+            # argument materialisers below so it cannot overwrite X0.
+            self._emit_stack_floor_init()
             test_val = self.test_input
             # `_emit_mov_imm`, not a hand-rolled movz+movk pair: it is the one
             # materializer on this backend, it covers the whole 64-bit word
@@ -1603,18 +1613,24 @@ dylib_exports: list = None, globals_base: int = None,
         # `ulimit -s 2048` where the usable stack is exactly 14 frames: `n=13`
         # exits 0 and `n=14` dies of SIGSEGV with no output.
         #
-        # AFTER the argument moves because the guard's own `getrlimit` is a CALL
-        # and AAPCS gives a call every caller-saved register: X0..X17, which is
-        # where every incoming argument still is at the top of this prologue.
-        # The guard parks argument 0 in X14 and puts it back, because it is the
-        # one register whose value it needed for itself, and arguments 1..7 were
+        # AFTER the argument moves, and the reason is a LIBRARY's guard rather
+        # than a program's. A program image's guard is four instructions that
+        # touch only X16/X17 (the startup stub already read `getrlimit` — see
+        # `_emit_stack_floor_init`), but a LIBRARY has no stub, so its first
+        # guarded prologue still emits the `getrlimit` call, and AAPCS gives a
+        # call every caller-saved register: X0..X17, which is where every
+        # incoming argument still is at the top of this prologue. That guard
+        # parks argument 0 in X14 and puts it back, because it is the one
+        # register whose value it needed for itself, and arguments 1..7 would be
         # simply destroyed. Measured, and the shape of the failure is a contract
         # check reading a parameter that is no longer the caller's: on arm64,
         # `formal/examples/bounds_index.mojo`'s `at_offset(2, 5)` and
         # `at_offset(4, 5)` exited 1 through `debug_assert` where CPython answers
         # 2 and 4 — two parameters, and the guard ran before the second was
         # saved. One-argument functions were unaffected, which is why this sat
-        # behind every single-argument case in the corpus.
+        # behind every single-argument case in the corpus. Keeping the homes
+        # first for BOTH shapes is one ordering to reason about, and a program's
+        # guard is unharmed by registers it never writes.
         #
         # It cannot be fixed by pushing the arguments around the call instead:
         # a `sub sp, #16` across `getrlimit` was measured as a hang or a SIGSEGV
@@ -1790,6 +1806,99 @@ dylib_exports: list = None, globals_base: int = None,
             return
         raise CodegenError(self._no_home(name))
 
+    def _emit_stack_floor_init(self) -> None:
+        """Read `RLIMIT_STACK` once, in the startup stub, and store the floor.
+
+        Called from `compile`'s `emit_startup` branch and nowhere else — before
+        the entry function is called and OUTSIDE every function body — and that
+        placement is the whole reason this is its own method rather than the
+        first half of `_emit_stack_floor_guard`. A `getrlimit` inside a guarded
+        prologue is a `BL` the arm64 proof layer cannot follow: `arm64_step` has
+        no bytes for a target outside the image, so a call there ends the
+        function's path tree at the call and the whole corpus loses its value
+        theorem. That was measured and is the arm64 twin of x86-64's note at the
+        same call site (`formal/x86_64_codegen.py::_emit_stack_floor_init`).
+
+        The startup stub is emitted before any function body and is not part of
+        any walked range (`_unfollowable_calls` scans from `func_entry`, which is
+        the ENTRY FUNCTION's body, above the stub), so nothing walks this call.
+        The floor is a `__DATA` word that outlives the stub, so every guarded
+        prologue reads it with four already-proven instructions and no call of
+        its own.
+
+        The sequence and every decision in it are the same as the in-prologue
+        half this replaces; what moved is WHERE the `getrlimit` runs:
+
+            ADRP+ADD X16, &limit ; LDR X16, [X16]      the cached limit
+            CBNZ X16, done                             already read
+            X0 = RLIMIT_STACK ; X1 = &scratch
+            BL getrlimit
+            X16 = [&scratch]                           rlim_cur
+            STR X16, [&limit]
+            X16 = X16 - (MARGIN + frame)               budget
+            clamp X16 to [MIN, BUDGET]
+            X17 = SP ; X17 = X17 - X16
+            STR X17, [&floor]                          the floor, once
+        done:
+
+        X0/X1/X14/X15/X16/X17 are free here: this runs before the stub
+        materialises any entry argument, so there is nothing to park, and
+        `getrlimit` is a C call that preserves X29/X30 (the stub's own `stp`
+        already saved them). Nothing reads SP except the `ADD X17, SP, #0` that
+        is the floor's base, and that form reads SP in `Rn` unambiguously — the
+        same `Rn`-of-31 rule `_emit_stack_floor_guard`'s docstring records.
+        """
+        if self._globals_base is None:
+            return
+        self._if_counter += 1
+        sid = self._if_counter
+        done_label = f"sfinit{sid}_done"
+        clamp_lo = f"sfinit{sid}_cl"
+        clamp_hi = f"sfinit{sid}_ch"
+        scratch = M.stack_scratch_address(self._globals_base)
+        limit_word = M.stack_limit_address(self._globals_base)
+        floor = M.stack_floor_address(self._globals_base)
+        self._adrp_add_abs(16, limit_word)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self.asm.emit(encode_cbnz_xn(0, 16))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        # `getrlimit(RLIMIT_STACK, &scratch)`: X0 is the resource, X1 the
+        # address of the 16-byte `struct rlimit`. The destination is a `__DATA`
+        # word rather than 16 bytes of stack, for the measurements
+        # `model.GlobalDataImage.stack_scratch_offset` records — every stack
+        # answer corrupts the program.
+        self._emit_mov_imm("X0", M.RLIMIT_STACK)
+        self._adrp_add_abs(1, scratch)
+        self._emit_extern_call("getrlimit")
+        # `rlim_cur` is the FIRST word of the struct on both targets this path
+        # emits for (`unsigned long`); `rlim_max` is not read.
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+        self._adrp_add_abs(17, limit_word)
+        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        # budget = min(BUDGET, max(MIN, limit - (MARGIN + frame))), the same
+        # arithmetic `model.stack_floor_budget_for_limit` states and
+        # `_emit_stack_floor_guard` computed inline before this method existed.
+        # Branches rather than CSEL for the reason the guard's comment records
+        # (the model has no `csel` arm).
+        _emit_sub_imm(self.asm, 16, 16, M.STACK_FLOOR_MARGIN_BYTES + _SCRATCH)
+        self._emit_mov_imm("X14", M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_xn_xm(16, 14))
+        self._emit_b_cond_to("hs", clamp_lo)
+        self._emit_mov_imm("X16", M.STACK_FLOOR_MIN_BUDGET_BYTES)
+        self.asm.label(clamp_lo)
+        self._emit_mov_imm("X14", M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.emit(encode_cmp_xn_xm(16, 14))
+        self._emit_b_cond_to("lo", clamp_hi)
+        self._emit_mov_imm("X16", M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.label(clamp_hi)
+        # floor = SP - budget, stored once for every guarded prologue to read.
+        self.asm.emit(encode_add_xd_xn_imm(17, 31, 0))
+        self.asm.emit(encode_sub_xd_xn_xm(17, 17, 16))
+        self._adrp_add_abs(16, floor)
+        self.asm.emit(encode_str_xt_xn_imm(17, 16, 0))
+        self.asm.label(done_label)
+
     def _emit_stack_floor_guard(self) -> None:
         """Refuse instead of dying when the frame just taken crosses the floor.
 
@@ -1802,23 +1911,36 @@ dylib_exports: list = None, globals_base: int = None,
         can read.
 
         The sequence and every decision in it are `model.stack_floor_address`'s
-        and are written down there; what is here is its instruction selection:
+        and are written down there; what is here is its instruction selection,
+        and it has TWO shapes because the `getrlimit` read moved out of the
+        prologue:
 
-            ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
-            CBNZ X16, done                             already stored
-            ADD X16, SP, #0 ; SUB X16, X16, #BUDGET    the first caller sets it
-            STR X16, [X17]
-        done:
-            ADD X17, SP, #0 ; CMP X17, X16
-            B.HS ok                                    SP >= floor: carry set
-            movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
-        ok:
+          * **A program image** (`_entry_name` set) loads the floor the startup
+            stub already stored and compares. Four instructions, no call:
 
-**Every one of those forms is one `lib/ProofLib.lean` already reads.**
-        That is not luck and it is the reason the sequence is shaped this way
-        rather than as the shorter `CMP SP, X16`: the model reads an `Rn` of 31
-        as `s.sp` in exactly the forms A64 gives that encoding to — the
-        add/subtract IMMEDIATE forms and every memory form — and as the ZERO
+                ADRP+ADD X16, &floor ; LDR X16, [X16]
+                ADD X17, SP, #0 ; CMP X17, X16
+                B.HS ok                                    SP >= floor: carry set
+                movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
+            ok:
+
+          * **A library** (no stub) has no floor in `__DATA` yet, so the first
+            guarded prologue reads the limit itself and stores the floor — the
+            original shape, below.
+
+        The move is the arm64 twin of x86-64's `_emit_stack_floor_init` and it is
+        the WALKER, not taste, that decided it: a `BL getrlimit` in every
+        prologue is a call `arm64_step` cannot follow, so it ended every
+        function's path tree at the call and the whole corpus lost its value
+        theorem. The stub is above every body and is walked by nothing, so the
+        call is gone from the walked range and the guard is four already-proven
+        instructions.
+
+**Every one of the forms either shape uses is one `lib/ProofLib.lean` already
+        reads.** That is not luck and it is the reason the sequence is shaped
+        this way rather than as the shorter `CMP SP, X16`: the model reads an
+        `Rn` of 31 as `s.sp` in exactly the forms A64 gives that encoding to —
+        the add/subtract IMMEDIATE forms and every memory form — and as the ZERO
         register everywhere else, `SUB`/`SUBS`/`CMP` (register) included
         (measured: a `SUBS X0, X31, X1` computes `-1`, not `sp - 1`;
         `lib/ProofLib.lean`'s `arm64_step_cmp_reg_n31_reads_zero` is the pin and
@@ -1842,14 +1964,30 @@ dylib_exports: list = None, globals_base: int = None,
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        ok_label = f"{fn}_sf{sid}_ok"
+        floor = M.stack_floor_address(self._globals_base)
+        if self._entry_name is not None:
+            # A PROGRAM image (`emit_startup`): the startup stub already read
+            # RLIMIT_STACK and stored the floor (`_emit_stack_floor_init`), so
+            # this guard only LOADS the word and compares. A `getrlimit` here
+            # would be a `BL` the proof layer cannot follow in every prologue,
+            # which is what this split removes; see `_emit_stack_floor_init`.
+            # The four live instructions are all forms `arm64_step` already
+            # reads, and none is a call.
+            self._adrp_add_abs(16, floor)
+            self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
+            self._emit_stack_floor_trap(ok_label)
+            return
+        # A LIBRARY (`emit_startup` False) has no stub, so the first guarded
+        # prologue still reads the limit itself — the same asymmetry x86-64's
+        # `_emit_stack_floor_guard` states. Every instruction and comment below
+        # is the in-prologue sequence the startup case no longer needs.
         done_label = f"{fn}_sf{sid}_done"
         set_label = f"{fn}_sf{sid}_set"
         ret_label = f"{fn}_sf{sid}_ret"
         trap_label = f"{fn}_sf{sid}_trap"
-        ok_label = f"{fn}_sf{sid}_ok"
         clamp_lo_label = f"{fn}_sf{sid}_cl"
         clamp_hi_label = f"{fn}_sf{sid}_ch"
-        floor = M.stack_floor_address(self._globals_base)
         limit_word = M.stack_limit_address(self._globals_base)
         scratch = M.stack_scratch_address(self._globals_base)
         # X17 = the address of the floor word, X16 = the floor itself. The
@@ -2045,62 +2183,63 @@ dylib_exports: list = None, globals_base: int = None,
         self._adrp_add_abs(17, floor)
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
         self.asm.label(done_label)
-        # SP into X17, then `SP - floor`. The stack grows DOWN, so having spent
-        # the budget is `SP < floor`, which is the subtraction BORROWING and so
-        # carry CLEAR. `B.HS` is the complement of that — "carry set", i.e.
-        # `SP >= floor` — and it branches OVER the trap, so the trap is the
-        # fall-through and the body's first instruction is the branch target.
+        self._emit_stack_floor_trap(ok_label)
+
+    def _emit_stack_floor_trap(self, ok_label: str) -> None:
+        """Compare SP against the floor in X16 and exit(2) when it is below.
+
+        Shared by both guard shapes — the startup image that LOADS the floor
+        from `__DATA` and the library that computes it in the prologue — so the
+        trap is one sequence rather than two that can drift. On entry X16 holds
+        the floor and nothing else is live.
+
+        SP goes into X17, then `SP - floor`. The stack grows DOWN, so having
+        spent the budget is `SP < floor`, which is the subtraction BORROWING and
+        so carry CLEAR. `B.HS` is the complement of that — "carry set", i.e.
+        `SP >= floor` — and it branches OVER the trap, so the trap is the
+        fall-through and the body's first instruction is the branch target.
+
+        The trap is `movz x0, <status>; movz x16, 1; svc #0x80`, Darwin arm64
+        `exit(status)`, the same sequence with the same shape as the
+        divide-by-zero arm of `_emit_div_shift_pow`. **The one exit on this
+        backend that does NOT go through `_emit_exit`,** and it is the only
+        deliberate exception: this trap can fire before the program has produced
+        any output at all (it is the first thing a prologue does), so there is
+        nothing for a flush to push, and `fflush` is a call — which would move
+        the address this trap is decoded from. `lib/ProofLib.lean` reads that
+        address out of `info["compiler_traps"]`, so a flush here would silently
+        move the decoded trap under the proof layer.
+
+        The MESSAGE, before the exit — `model.stack_trap_message`, the fourth
+        member of the `*_message` family and the one that was missing, because
+        this trap used to be the only bounded stop on the path that said nothing
+        at all. A reader who hit it got a status and no sentence. **A raw `svc`,
+        not `_emit_overflow_diagnostic`'s `call write`:** the trap is decoded
+        from its own address, and Darwin arm64's `write` is syscall 4 in X16 —
+        the same `svc #0x80` the exit below uses for syscall 1 — so the message
+        costs no CALL and moves nothing the proof layer decodes. A `bl write`
+        here would put an unfollowable call in front of every guard's trap and
+        change what every arm64 theorem says about where the run stops.
+
+        `label`, not `emit_label_rel`, for `ok_label`: this DEFINES where the
+        branch above goes, and it lands on the first instruction of the BODY
+        because the trap is the fall-through. Branching OVER the trap rather
+        than TO it keeps the basic-block structure of a prologue the same as the
+        one the proof generator already walks; a `b` over the trap would add a
+        block that is nothing but an unconditional branch, and a block with no
+        instructions to run breaks `formal/arm64_proof_gen.py`'s syntactic fuel
+        chain (measured: `rw` fails on `fuel - 0`).
+        """
         self.asm.emit(encode_add_xd_xn_imm(17, 31, 0))
         self.asm.emit(encode_cmp_xn_xm(17, 16))
         self.asm.emit(encode_b_cond("hs", 12))
         self.asm.emit_label_rel(ok_label, here_offset=-4)
-        # The trap is three instructions: `movz x0, <status>; movz x16, 1; svc
-        # #0x80` is Darwin arm64 `exit(status)`, and it is the same sequence
-        # with the same shape as the divide-by-zero arm of `_emit_div_shift_pow`.
-        # **The one exit on this backend that does NOT go through
-        # `_emit_exit`,** and it is the only deliberate exception: this trap can
-        # fire before the program has produced any output at all (it is the
-        # first thing a prologue does), so there is nothing for a flush to
-        # push, and `fflush` is a call — which would move the address this trap
-        # is decoded from. `lib/ProofLib.lean` reads that address out of
-        # `info["compiler_traps"]`, so a flush here would silently move the
-        # decoded trap under the proof layer.
-        # The MESSAGE, before the exit — `model.stack_trap_message`, the fourth
-        # member of the `*_message` family and the one that was missing, because
-        # this trap used to be the only bounded stop on the path that said
-        # nothing at all. A reader who hit it got a status and no sentence.
-        #
-        # **A raw `svc`, not `_emit_overflow_diagnostic`'s `call write`, and the
-        # reason is the one the comment above gives for the exit:** the trap is
-        # decoded from its own address, which `info["compiler_traps"]` records on
-        # the x86-64 half and `lib/ProofLib.lean` reads as an in-image `svc` here.
-        # Darwin arm64's `write` is syscall 4 in X16, the same `svc #0x80` the
-        # exit below uses for syscall 1, so the message costs no CALL and moves
-        # nothing the proof layer decodes. A `bl write` here would put an
-        # unfollowable call in front of every guard's trap and change what every
-        # arm64 theorem says about where the run stops.
-        #
-        # The two registers are set with `movz_xd` rather than `movz_wd`, which
-        # is what the rest of this file uses for x0 and x16 and what
-        # `_emit_raw_write` above already does: the two spellings write the same
-        # value here, and one spelling per register is one thing to read.
         self._emit_stack_trap_message()
         self.asm.emit(encode_movz_xd_imm(0, M.STACK_TRAP_STATUS))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
-        # `label`, not `emit_label_rel`: this DEFINES where the branch above
-        # goes, and it lands on the first instruction of the BODY because the
-        # trap is the fall-through. Branching OVER the trap rather than TO it
-        # is the layout the divide-by-zero arm already uses
-        # (`_emit_div_shift_pow`), and keeping the two the same shape is what
-        # keeps the basic-block structure of a prologue the same as the one the
-        # proof generator already walks: a branch to a three-instruction trap
-        # block whose successor is the next thing to do. The alternative — a
-        # `b` over the trap — adds a basic block that is nothing but an
-        # unconditional branch, and a block with no instructions to run breaks
-        # `formal/arm64_proof_gen.py`'s syntactic fuel chain (measured: `rw`
-        # fails on `fuel - 0`).
         self.asm.label(ok_label)
+
 
     def _emit_stack_trap_message(self) -> None:
         """`write(2, model.stack_trap_message(), len)` as a raw Darwin syscall.
