@@ -150,7 +150,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 15 documents, 8 claimed
+### `formal/lean` — 14 documents, 7 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -159,7 +159,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_contract_ladder_reach.md` | `formal109-docs` | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | `formal109-docs` | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
 | `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `formal110-docs` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
-| `FORMAL_lean_verdict_cache_publishes_a_timeout.md` | `formal111-docs` | A Lean TIMEOUT is published to the proof-verdict cache as if it were a verdict |
 | `FORMAL_nested_short_circuit_chain_in_a_condition.md` | `formal112-docs` | `((a or b) or c)` is still unproved |
 | `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | `formal115-docs` | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
 | `FORMAL_a_conditional_value_in_a_dylib_export.md` | **unclaimed** | A conditional VALUE in a dylib export: the block layer already takes it, and the cost is the certificate |
