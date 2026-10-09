@@ -24042,6 +24042,15 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
+    # The set ALGEBRA site (`&`, `-`, `^`), the fourth blob-producing site and
+    # arm64-only like `|` above — x86-64 refuses all three by name.  ONE probe
+    # for the three operators because they are one emitter and one guard
+    # (`_emit_set_algebra`), so a probe per operator would exercise the same
+    # site three times and the row would not be stronger for it.
+    ("arm64", "setalg",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a & b\n    return len(u)\n",
+     {"a set operation"}),
 ]
 
 # The fewest instructions a guard can emit and still BE one. Both backends'

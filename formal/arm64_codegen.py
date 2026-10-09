@@ -2704,6 +2704,19 @@ dylib_exports: list = None, globals_base: int = None,
             # non-answer as `s = s + t`, which BOTH backends refused, from the
             # same line of source. `stmt.op` is the spelling to quote, so the
             # diagnostic names the `+=` the reader is looking at.
+            #
+            # A SET ALGEBRA on a SET target is `s = s <op> t`, and the binary
+            # emitter lowers it; the shared gate asked just below would refuse
+            # it first (it refuses every blob), so the two-set case is caught
+            # here and desugared onto `_emit_binop`, exactly as the other blob
+            # operators are at the bottom of this arm.
+            if (op in M.SET_ALGEBRA_OPS
+                    and self._expr_is_set_like(stmt.target)
+                    and self._expr_is_set_like(stmt.value)):
+                self._emit_binop(F.BinaryOp(op=op, left=stmt.target,
+                                            right=stmt.value))
+                self._store_var(name, 0)
+                return
             reason = M.string_binary_refusal(
                 op, self._expr_str_kind(stmt.target),
                 self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -5268,6 +5281,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
+            return (self._expr_is_set_like(e.left)
+                    and self._expr_is_set_like(e.right))
         return False
 
     def _is_dict_subscript(self, obj) -> bool:
@@ -8056,6 +8075,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        #
+        # A SET ALGEBRA between two SETS is a real lowering here, and the gate
+        # below would refuse it for every blob, so it is caught first.  The gate
+        # keeps the shapes that are NOT two sets — `[1] & [2]` is a CPython
+        # `TypeError` and `s & [1]` is a mixed pair — and its sentence stays
+        # true of them.  Asked at THIS site, before the gate, so that the
+        # augmented form (which desugars onto this emitter) gets the same
+        # answer.
+        if (op in M.SET_ALGEBRA_OPS and self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            self._emit_set_algebra(e.left, e.right, op)
+            return
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -13312,6 +13343,169 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(urd)
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_algebra(self, left, right, op: str) -> None:
+        """`a & b`, `a - b`, `a ^ b` as set INTERSECTION, DIFFERENCE and
+        SYMMETRIC DIFFERENCE over list blobs, result in X0.
+
+        `left` and `right` are known to be SETS — the caller asks
+        `_expr_is_set_like` on both, and `container_operator_refusal` keeps the
+        non-set shapes (`[1] & [2]`, `s & [1]`) in its own sentence — so each
+        blob's elements are unique and the result needs no dedup of its own: an
+        intersection and a difference keep elements of the left operand, whose
+        elements are already distinct, and a symmetric difference is the union
+        of two disjoint such results.
+
+        ONE method rather than three, because the three differ ONLY in the
+        predicate an element is kept by — `&` keeps a left element the right
+        also holds, `-` keeps one it does not, `^` keeps a left element it does
+        not AND a right element the left does not — and the two nested loops,
+        the growth guard and the append are otherwise identical.  The union
+        emitter above is the worked example of the blob layout (`X7` left base,
+        `X8` right base, `X9` result base) and of the append `result[count] =
+        elem; count++` this reuses.
+
+        Set-ness is also why the membership test compares element WORDS: a set
+        of ints holds words and a set of strings holds `char *`s, and two equal
+        literals are one merged constant here (which is what makes the union
+        emitter's word dedup correct for `{"a"} | {"a", "b"}`), so an address
+        compare is the set's own equality.
+        """
+        if op == "&":
+            keep_when_found = True
+        elif op in ("-", "^"):
+            keep_when_found = False
+        else:
+            raise CodegenError(
+                f"the set-algebra emitter got the operator {op!r}")
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # left
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # right, left
+        # Nested emits above may have advanced the cursor — re-clamp.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "a set operation exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(want, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        nbytes = 8 + 8 * cap
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
+        # The reservation is nL + nR — the widest any of the three results can
+        # be (the symmetric difference of two disjoint sets) — so the guard is
+        # the union's guard and no result can outrun the reservation.
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # nL + nR
+        self._emit_blob_growth_guard("a set operation", 4, cap, "setalg")
+        # The result starts EMPTY and grows by the elements the predicate keeps,
+        # so its count is written 0 here and bumped in the append below (the
+        # union can start from nL because it keeps every left element).
+        self.asm.emit(encode_movz_wd_imm(4, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
+        # Every left element the predicate keeps.
+        self._emit_set_algebra_side(
+            7, 2, 8, 3, keep_when_found, offset, "l")
+        # `^` is the union of the two one-sided differences, so it is the same
+        # pass once more over the RIGHT operand, keeping what the left lacks.
+        if op == "^":
+            self._emit_set_algebra_side(8, 3, 7, 2, False, offset, "r")
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_algebra_side(self, elem_base: int, elem_count: int,
+                               other_base: int, other_count: int,
+                               keep_when_found: bool, offset: int,
+                               tag: str) -> None:
+        """One operand's pass of `_emit_set_algebra`: for each element of the
+        blob based at `elem_base` (count in `elem_count`), append it to the
+        result when its membership in the blob based at `other_base` (count in
+        `other_count`) satisfies the predicate.
+
+        `keep_when_found` is the whole of the predicate: True keeps an element
+        the other side also holds (intersection), False keeps one it does not
+        (difference, and each half of the symmetric difference).  Shared by the
+        left pass and the right pass so the scan-and-append exists once.  The
+        result base is recomputed from `offset` at each append because
+        `_emit_list_base` is the only writer of X9 and this loop must not carry
+        it across the scan.
+        """
+        self._while_counter += 1
+        n = self._while_counter
+        outer = f"{self.func_name}_sa{n}{tag}o"
+        outer_done = f"{self.func_name}_sa{n}{tag}od"
+        scan = f"{self.func_name}_sa{n}{tag}s"
+        found = f"{self.func_name}_sa{n}{tag}f"
+        after = f"{self.func_name}_sa{n}{tag}a"
+        skip = f"{self.func_name}_sa{n}{tag}k"
+        self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
+        self.asm.label(outer)
+        self.asm.emit(encode_cmp_xn_xm(5, elem_count))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(outer_done, here_offset=-4)
+        # X6 = elem[i]
+        self.asm.emit(encode_add_xd_xn_imm(0, elem_base, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))
+        # Scan the other blob for X6; X1 = 1 when it is found.
+        self.asm.emit(encode_movz_wd_imm(1, 0))          # found = 0
+        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
+        self.asm.label(scan)
+        self.asm.emit(encode_cmp_xn_xm(0, other_count))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(after, here_offset=-4)   # k >= nOther -> done
+        self.asm.emit(encode_add_xd_xn_imm(4, other_base, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))
+        self.asm.emit(encode_cmp_xn_xm(4, 6))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(found, here_offset=-4)   # == -> found
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(scan)
+        self.asm.label(found)
+        self.asm.emit(encode_movz_wd_imm(1, 1))
+        self.asm.label(after)
+        # Keep when the predicate says so; X1 (found) is dead after this.
+        if keep_when_found:
+            self.asm.emit(encode_cbz_xn(0, 1))           # not found -> skip
+        else:
+            self.asm.emit(encode_cbnz_xn(0, 1))          # found -> skip
+        self.asm.emit_label_rel(skip, here_offset=-4)
+        # append: result[count] = elem; count++
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))     # count
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(skip)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(outer)
+        self.asm.label(outer_done)
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.

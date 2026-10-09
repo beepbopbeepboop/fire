@@ -1,10 +1,13 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
-that stand in for them are landed.** `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green; this doc
-is about the rows in it that are green *as refusals*, which is a different thing
-from green as answers.
+**Status: PARTIALLY FIXED 2026-10-08 — item 3 (set algebra `&`, `^`, `-`) is
+lowered on arm64 and x86-64 refuses the three by name; items 1 (`==`/`!=`), 2
+(ordering) and 4 (a length-changing slice store) still stand as refusals.**
+`test_formal_container_methods.py` measures the whole surface against CPython on
+both architectures and is green; this doc is about the rows in it that are
+green *as refusals*, which is a different thing from green as answers. §"What
+landed 2026-10-08" has the measurement and the ONE place this deviated from
+§"What to do, in order".
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
@@ -99,6 +102,53 @@ the second reason this is a project rather than a rewrite.
 4. **A length-changing slice store** (item 4). arm64 first (it is the backend
    that has the store), and only then x86-64, which needs a slice to stop being
    a materialized copy before the store can mean anything.
+
+## What landed 2026-10-08: item 3, set algebra, on arm64
+
+**Item 3 is lowered, and it is the only part of this document that is.**
+`formal/arm64_codegen.py::_emit_set_algebra` computes `&`, `-` and `^` over two
+set blobs with the two nested loops item 3 describes: for each element of one
+operand, a membership scan over the other, and an append of the elements the
+predicate keeps. It is ONE method parameterised by the predicate (and one helper
+for the pass), not three near-identical emitters, because the three differ only
+in whether a found element is kept — `&` keeps it, `-` and `^` drop it, and `^`
+runs the pass once more over the right operand. The result starts at count 0 and
+grows, and the site carries the union's run-time capacity guard (the reservation
+is `nL + nR`, the widest any of the three can be), pinned by a new
+`_BLOB_GROWTH_PROBES` row (`arm64/setalg`).
+
+**Measured, both architectures.** `test_formal_container_methods.py`'s `set`
+group moved five rows and added a sixth from *refusal* to *answer* on arm64:
+`s_intersection`, `s_difference`, `s_symdiff` (whose operands `{1,2} ^ {2,3}`
+exercise BOTH halves of the symmetric difference), the augmented `s_sub` and
+`s_andassign` (which desugar onto the binary emitter), and a new
+`s_intersection_str` over string elements. All agree with CPython on the
+elements' SUM and the result's length, not on a length alone — the same
+observation `s_union_elems` makes. x86-64 refuses all six by name
+(`model.set_algebra_refusal`, the sibling of `set_union_refusal`) and the rows
+are `BACKEND_ONLY` there, as `s_union` already is.
+
+**The ONE deviation from §"What to do, in order", and why.** Item 3 says to drop
+the operator from `model.CONTAINER_GATED_OPS`. That table is consulted for EVERY
+blob, so removing `&` from it would also stop refusing `[1] & [2]` — a CPython
+`TypeError` with no set answer — and let it reach the integer ALU on a list's
+address, which is the exact wrong answer the gate was built to refuse. So the
+table is unchanged and the two-SET case is caught at the codegen site instead
+(`op in M.SET_ALGEBRA_OPS and _expr_is_set_like(left) and
+_expr_is_set_like(right)`), before the shared gate; everything else falls through
+to `container_operator_refusal` and keeps its sentence. The two operator-group
+rows (`o_and`, `o_xor`) moved from set operands to LIST operands for the same
+reason — they exist to hold the gate's coverage of a non-set blob, and the
+two-set shape is now the `set` group's answer row.
+
+**`_expr_is_set_like` now knows a set algebra of two sets is a set**, so a
+later operator on its result is classified correctly; `&`/`^`/`-` require BOTH
+sides to be sets for that, unlike `+`/`|` which keep their existing one-side
+rule.
+
+**Still open, and unchanged by this**: items 1 (`==`/`!=` between two
+containers), 2 (ordering) and 4 (a length-changing slice store) — and the x86-64
+half of item 3, which the ordered list stages "after" arm64.
 
 ## The rows that must not be "fixed" by deleting the case
 

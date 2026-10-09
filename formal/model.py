@@ -12911,6 +12911,40 @@ def set_union_refusal(left: str, right: str) -> str:
         f"membership test. arm64 lowers this operator correctly, for two SETS")
 
 
+#: The operators that are a SET ALGEBRA when BOTH operands are sets: `&`
+#: intersection, `^` symmetric difference, `-` difference.  One tuple, read by
+#: the two backends' binary emitter and the augmented-assignment emitter's
+#: desugar, so the operator set is not re-spelled per site.  Their CPython
+#: meanings are `CONTAINER_OP_MEANING`'s.
+SET_ALGEBRA_OPS = ("&", "^", "-")
+
+
+def set_algebra_refusal(left: str, right: str, op: str) -> str:
+    """Why `left {op} right` is a SET operation a backend does not lower.
+
+    The sibling of `set_union_refusal`, for the three operators whose per-
+    element answer is set algebra only between two SETS.  It is asked where the
+    operands are known to be sets — `s & {2}`, not `[1] & [2]`: a non-set blob
+    is `container_operator_refusal`'s sentence, because `[1] & [2]` is a
+    CPython `TypeError` and there is no set answer to state for it.  So the
+    caller reaches here only once both sides ARE sets, and the answer is one
+    arm64 has and this backend does not.
+
+    The message names the CPython meaning (`CONTAINER_OP_MEANING[op]`) and
+    which machine does lower it, for the reason `set_union_refusal` gives:
+    "not supported" sends a reader looking for a spec when the answer is an
+    emitter, and a reader who is not told arm64 lowers it cannot tell a missing
+    emitter from an undecided semantics.
+    """
+    return (
+        f"{left} {op} {right} is a SET operation "
+        f"({CONTAINER_OP_MEANING[op]}), and this backend has no emitter for it: "
+        f"it needs a per-element membership scan, which is a loop over element "
+        f"WORDS at the element's own stride. Build the result with an explicit "
+        f"loop over `in` tests. arm64 lowers this operator correctly, for two "
+        f"SETS")
+
+
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 

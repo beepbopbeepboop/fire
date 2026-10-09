@@ -3071,6 +3071,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # BOTH backends refused, from the same line of source. `stmt.op` is
         # the spelling to quote, so the diagnostic names the `+=` the reader
         # is looking at rather than the `+` the table is keyed on.
+        #
+        # A SET ALGEBRA on a SET target is `s = s <op> t`, and this backend has
+        # no emitter for it: arm64 lowers it, so the honest answer is
+        # `set_algebra_refusal` rather than the generic gate's, which would
+        # describe the operands as a list.  A non-set shape falls through.
+        if (op in M.SET_ALGEBRA_OPS
+                and self._expr_is_set_like(stmt.target)
+                and self._expr_is_set_like(stmt.value)):
+            raise CodegenError(M.set_algebra_refusal(
+                M.spelled(stmt.target), M.spelled(stmt.value), op))
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -7439,6 +7449,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        #
+        # A SET ALGEBRA between two SETS is a real operation arm64 lowers and
+        # this backend does not, so it answers with `set_algebra_refusal`
+        # before the generic gate refuses it as if the operands were a list:
+        # the difference matters, because the generic sentence says the result
+        # is "an address" while this backend's real answer is "arm64 has the
+        # emitter and this one does not".  `[1] & [2]` and `s & [1]` are NOT
+        # this case; they fall through to the gate.
+        if (op in M.SET_ALGEBRA_OPS and self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            raise CodegenError(M.set_algebra_refusal(
+                M.spelled(e.left), M.spelled(e.right), op))
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -10118,6 +10140,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
+            return (self._expr_is_set_like(e.left)
+                    and self._expr_is_set_like(e.right))
         return False
 
 
