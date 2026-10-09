@@ -5186,9 +5186,8 @@ theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
     else moves -- in particular `sp` does not, which is the whole point.  The
     base is the instruction's `Rn`, not `SP`.
 
-    Named `_uoff` (unsigned offset) to match the A64 encoding.  The generator
-    still asks for this by its historical name `work_step_ldr_pre`, which is
-    the alias immediately below; see the note there. -/
+    Named `_uoff` (unsigned offset) to match the A64 encoding, which is the
+    name `formal/arm64_proof_gen.py`'s `_WORK_STEP` table dispatches on. -/
 theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000) :
@@ -5220,25 +5219,6 @@ theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   have hne_tbz : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
-
-/-- Per-instruction step: `work_step_ldr_pre` -- HISTORICAL NAME, see
-    `work_step_ldr_uoff` for the statement and the reasoning.
-
-    `formal/arm64_proof_gen.py`'s `_WORK_STEP` table dispatches on this name
-    (`(18, "work_step_ldr_pre", [(0xffe00000, 0xf9400000)])`), so the name is
-    load-bearing for the generator even though it is wrong: the opcode is a
-    plain unsigned-offset load, not a pre-index store.  Renaming the generator
-    entry to `work_step_ldr_uoff` and deleting this alias is a one-line change
-    in `_WORK_STEP` with no effect on any proof; it is left to a commit that
-    owns that file rather than done here, because four other agents are in
-    `formal/`. -/
-theorem work_step_ldr_pre : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe00000) = 0xf9400000),
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
-      ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
-        + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) :=
-  work_step_ldr_uoff
 
 /-- Per-instruction step: `work_step_str_uoff32`.
 
@@ -5764,21 +5744,7 @@ theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
 
-/-- Per-instruction step: `work_step_str_off` -- kept as the name the proof
-    generator dispatches on (`_WORK_STEP` entry 31).  The statement is
-    `work_step_str_uoff`'s; see that lemma for what changed and why the old
-    `s.sp` base was wrong. -/
-theorem work_step_str_off : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe00000) = 0xf9000000),
-    arm64_step s code = some { s with
-      mem := mem_write_u64 s.mem
-        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
-          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
-        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
-  work_step_str_uoff
-
-/-- Per-instruction step: `work_step_ldp_off`. -/
+/-- Per-instruction step: `work_step_ldp_off`.-/
 theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffc00000) = 0xa9400000) :
