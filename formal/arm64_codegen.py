@@ -1782,8 +1782,8 @@ dylib_exports: list = None, globals_base: int = None,
         is a call `formal/arm64_proof_gen.py`'s CFG walk cannot follow: every
         program with an entry guards every prologue, so before this move every
         such program had the guard's `getrlimit` AND its own calls as opaque
-        calls, and one halt address cannot discharge two
-        (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+        calls, and one halt address cannot discharge two, so the universal
+        theorem was refused for every program that called anything.
         The startup stub runs before `func_offset`, so the call is on no path a
         run test walks — the same placement, for the same reason, as
         `formal/x86_64_codegen.py::_emit_stack_floor_init`.
@@ -1824,8 +1824,7 @@ dylib_exports: list = None, globals_base: int = None,
         STUB, and not here.** This method used to `BL getrlimit` on the first
         guarded prologue of the process; a `BL` in a prologue is a call the
         arm64 CFG walk cannot follow, so it cost every calling program its
-        universal theorem
-        (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+        universal theorem.
         The move mirrors `formal/x86_64_codegen.py::_emit_stack_floor_init`, and
         the startup stub's `BL` is below `func_offset`, on no path any run test
         walks.
@@ -1896,8 +1895,7 @@ dylib_exports: list = None, globals_base: int = None,
         # emits no call.  `getrlimit` is a `BL`, and a `BL` in a prologue is a
         # call `formal/arm64_proof_gen.py`'s CFG walk cannot follow: it landed on
         # every guarded prologue, so every program that calls anything at all had
-        # two unfollowable calls and no universal theorem
-        # (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+        # two unfollowable calls and no universal theorem.
         # x86-64's guard made the same move for the same reason
         # (`x86_64_codegen.py::_emit_stack_floor_init`), so the two backends now
         # agree that the runtime limit is read once, outside every walked body.
