@@ -24042,6 +24042,24 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
+    # The three set-algebra emitters arm64 grew with `_emit_set_op`
+    # (`&`, `-`, `^` between two sets).  Each reserves `nL` (or `nL + nR`) and
+    # guards it exactly as the union does, and each gets its OWN row so a guard
+    # lost from one of them is as loud as a guard lost from `|` -- the same
+    # "no blob-producing site may appear on one backend alone" property this
+    # group exists for.
+    ("arm64", "its",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a & b\n    return len(u)\n",
+     {"a set intersection"}),
+    ("arm64", "dif",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a - b\n    return len(u)\n",
+     {"a set difference"}),
+    ("arm64", "sym",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a ^ b\n    return len(u)\n",
+     {"a set symmetric difference"}),
 ]
 
 # The fewest instructions a guard can emit and still BE one. Both backends'

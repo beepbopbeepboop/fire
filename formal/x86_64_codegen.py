@@ -3073,7 +3073,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # is looking at rather than the `+` the table is keyed on.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
-            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op,
+            left_is_set=self._expr_is_set_like(stmt.target),
+            right_is_set=self._expr_is_set_like(stmt.value))
         if reason is not None:
             raise CodegenError(reason)
         # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
@@ -7442,9 +7444,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
-            untyped_callee=self._untyped_callee)
+            untyped_callee=self._untyped_callee,
+            left_is_set=self._expr_is_set_like(e.left),
+            right_is_set=self._expr_is_set_like(e.right))
         if reason is not None:
             raise CodegenError(reason)
+        # `&`, `^` and `-` between two SETS are set algebra.  The shared gate
+        # above no longer refuses them — arm64 lowers them — so this backend,
+        # which has no set-algebra emitter, must refuse them BY NAME here
+        # instead of falling through to the integer ALU on two blob addresses.
+        if (op in M.SET_ALGEBRA_OPS
+                and M.container_operand_is_blob(self._expr_str_kind(e.left))
+                and M.container_operand_is_blob(self._expr_str_kind(e.right))
+                and self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right)))
         # `|` on a container is a SET UNION only between two SETS, and it has
         # to be asked HERE rather than at the concat branch below: that branch
         # recognises a container by `_is_container_expr`, which on this backend
