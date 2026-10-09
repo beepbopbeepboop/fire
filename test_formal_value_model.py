@@ -2191,6 +2191,34 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "print() is asked to render the value of g(…)"),
+    # ── the GUARD for the call-result one-field binding's exclusion ──
+    #
+    # A local bound from a call whose declared `-> T` names a one-field struct
+    # now reads its sole field (the case just above in FIXED_CASES), but ONLY
+    # when the word is a VALUE. A struct whose sole field is itself a FRAME is a
+    # word that is an ADDRESS, and the block was reserved at the CALLEE's
+    # construction site — dead on return — while the escape analysis tracks that
+    # only for a framed (multi-field) struct. Binding one from a call would make
+    # a dangling address readable, so it must stay refused; this row is what
+    # fails if the exclusion in `_call_result_one_field_struct` is removed.
+    ("a_call_result_one_field_struct_holding_a_frame_stays_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var n: Inner\n"
+     "\n"
+     "def make() -> Outer:\n"
+     "    var o = Outer()\n"
+     "    o.n.a = 7\n"
+     "    return o\n"
+     "\n"
+     "def main(n):\n"
+     "    var o = make()\n"
+     "    printf(\"v=%d\", o.n.a)\n"
+     "    return 0\n",
+     "reads a field of a field through the receiver"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──
