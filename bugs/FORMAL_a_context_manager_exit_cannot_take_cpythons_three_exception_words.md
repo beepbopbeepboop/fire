@@ -9,6 +9,23 @@ unwinder: a `__exit__` that READS any of the three words is still refused, by
 name, because there is no exception value to pass and a fabricated one would be
 a lie the method then acted on.**
 
+**2026-10-08 (`work/formal258-docs`): §4 item 3 — the alias-dispatched method
+whose NAME a second struct also declares — is FIXED for every manager that
+ANNOTATES `__enter__`, which is the cheap fix §4 said was available.**
+`model.with_alias_struct` is the one reader of "what does the alias hold", the
+`with` lowering publishes it (`formal/build.py::_one_with_item` →
+`_rewrite_with_statements`' `alias_structs`), and `_prepare_functions` merges it
+into the framed-receiver table `_rewrite_one_word_field_method_calls` reads, so
+`v.m()` lifts from the alias's DECLARED type instead of being declined by name.
+The unannotated spelling (`__enter__` returning a word, e.g. `return self` with
+no `-> T`) stays refused, correctly: nothing in the source types the alias, so
+the ambiguity is real. Pinned by `test_formal_with.py`'s new
+`an_annotated_enter_publishes_the_alias_struct` row (both backends, CPython
+oracle) plus its in-process predicate checks — 361 checks, PASS=361 FAIL=0 —
+and the existing REFUSED row
+`a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked` still
+passes, which is the boundary between the two.
+
 **What landed, and why it is not the signature change §3 warns against.** The
 three words still have nowhere to come from; the fix does not invent them. It
 distinguishes the shape that USES them from the shape that does not, and lowers
@@ -51,13 +68,11 @@ workaround §3 points the reader at, applied by the COMPILER instead of by the
 reader, and it is safe precisely because the arguments are provably unused.
 
 **Area:** FORMAL, context managers. Claim `project:with-statements`, measured
-2026-10-05 on `work/formal56-with-statements`. **PARTIAL: the §4 alias-dispatch
-limit is CLOSED (2026-10-07, `work/formal118-docs`); the three-exception-word
-signature below is still OPEN**, because it needs the unwinder. One of three
-limits this project measured and did not close; the other two are
+2026-10-05 on `work/formal56-with-statements`. One of three limits
+this project measured; the other two are
 `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` (the narrow half of
 the same missing unwinder, which IS now refused when the value is foldable) and
-the alias-dispatch note in §4, which is no longer one of them.
+the alias-dispatch note in §4.
 
 **Read this before planning the rest of the work.** What is left is the
 unwinder, and §3 is why the same missing unwinder is
@@ -197,32 +212,27 @@ second is the same missing unwinder seen through a narrower door:
     dropped on the floor). See
     `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` for the
     remaining half of that;
-  * ~~a method call through the alias whose NAME a second struct also declares.~~
-    **CLOSED 2026-10-07 (`work/formal118-docs`).** The alias's struct is now
-    published into `formal/build.py`'s frame-holder table — the alias is bound to
-    `S.__enter__(tmp)`, and when `__enter__` returns its receiver that call is a
-    frame-returning call, so the holder fixpoint already knows the alias is an
-    `S` (which is why `b.tag` lowered while `c.tag` for an `__enter__` that
-    returns a field still refuses). `_rewrite_holder_method_calls` runs beside
-    `_rewrite_nested_method_calls` against the same `by_name` table and lifts the
-    bare-name receiver the name-only dispatch declined, with
-    `_derived_overrides`'s guard copied so a child that overrides the member is
-    still refused. `test_formal_with.py`'s
-    `a_method_through_the_alias_with_a_rival_owner_is_answered` is the row (it
-    moved from the REFUSED table to the DECLARED one, against CPython on both
-    architectures), and `test_formal_run.py`'s
-    `ambiguous_name_a_derived_struct_also_declares_is_still_refused` still pins
-    the one clause that must not be waived. The context-manager-to-a-value
-    spelling and the `__enter__`-returns-a-word spelling both stay refused, which
-    is what keeps a wrong layout unreachable.
+  * a method call through the alias whose NAME a second struct also declares. The
+    alias holds one word with no declared type, so dispatch is by name, and
+    `_method_owners` pops a name two structs declare on purpose. It is REFUSED,
+    not picked — **for an alias whose type nothing declares**. For the manager
+    that ANNOTATES `__enter__` (`def __enter__(self) -> Res`) the alias's struct
+    IS written down, and the fix named here is now landed (2026-10-08,
+    `work/formal258-docs`): `model.with_alias_struct` publishes it, the `with`
+    lowering carries it out (`formal/build.py::_rewrite_with_statements`'
+    `alias_structs`), and `_prepare_functions` merges it into the
+    framed-receiver table the bare-receiver lift reads, so the ambiguity
+    disappears for every manager that annotates `__enter__`. The unannotated
+    spelling (`__enter__` returning a plain word) keeps the refusal, because
+    there the ambiguity is real; the two are one shape apart and the pair of rows
+    `an_annotated_enter_publishes_the_alias_struct` /
+    `a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked` in
+    `test_formal_with.py` pins the boundary.
 
 ## 5. The reproduce line for the whole table
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py
 
-338 checks, both architectures (measured 2026-10-07). §1's "ANSWERED" rows are
-its 28 ANSWERED + 7 DECLARED + 3 resource rows; §4's remaining shapes are among
-its 16 REFUSED rows. The former two-owner alias row is now the seventh DECLARED
-row (`a_method_through_the_alias_with_a_rival_owner_is_answered`), not a
-refusal: its alias's `Box` receiver is published by the holder analysis, so the
-ambiguity the name-only dispatch declines is settled by the binding.
+361 checks, both architectures. §1's "ANSWERED" rows are its 28 ANSWERED + 6
+DECLARED + 3 resource rows; §4's shapes are three of its 17 REFUSED rows, minus
+the alias-with-a-rival-owner row whose ANNOTATED sibling §4 item 3 answers.
