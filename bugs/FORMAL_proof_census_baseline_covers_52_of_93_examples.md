@@ -1,10 +1,34 @@
-# `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus
+# `tools/formal_proof_census_baseline.json` was 52 rows against a 93-file corpus; the 41 are now banked, and the ratchet's remaining red is a stale `fact.mojo` row
 
-**Claim** `project:loop-invariants` on `work/formal66-loop-invariants`.  **Not
-mine**: this is the census's file and its tool, and nothing on this branch
-touches either.  **Measured** on `master` @ `cd2a1678` on 2026-10-06, and it is
-the state of the tree, not of this branch — `git diff master -- tools/
-formal_proof_census_baseline.json formal/examples/` is empty.
+**Status 2026-10-08 (`work/formal237-docs`): the 41 missing rows are BANKED and
+the arm64 baseline now covers the corpus — `tools/formal_proof_census_baseline.json`
+holds 93 records and `test_every_example_has_a_row_and_every_row_a_status`
+passes. The bank landed in `07cc3260` ("the proof ratchet described 52 examples;
+the corpus is 93"), measured at 5219 s / 7.0 GB, 93 measured, "no example
+regressed".
+
+**The arm64 ratchet's remaining red is a different fact, and it is one row.**
+`fact.mojo` was edited by `ffe27e1a` ("the contract is no longer FALSE") after
+the bank, so its committed row carries the pre-edit source hash and
+`test_each_row_is_tied_to_the_example_it_measured` refuses to compare it. The
+fix is a re-seed of that single row:
+
+    python3 tools/memslot.py --gb 8 --label census-fact -- \
+      python3 tools/formal_proof_census.py --only fact --remeasure --write-baseline
+
+**The x86-64 half still has no baseline at all.** `tools/
+formal_proof_census_baseline_x86_64.json` does not exist, so that arm of the
+ratchet has never run — the second half of the "exact next step" below, unstarted.
+Both of these are census runs over `formal/examples` (one Lean elaboration per
+row), which is a light worker's do-not-run list; they are recorded here rather
+than taken.
+
+---
+
+**The original analysis (measured on `master` @ `cd2a1678`, 2026-10-06), kept
+because it is why the arm64 bank had to happen and what the x86-64 arm is
+missing:**
+
 
 ## What is broken
 

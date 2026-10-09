@@ -276,7 +276,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_proof_census_baseline_covers_52_of_93_examples.md` | `formal237-docs` | `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus |
+| `FORMAL_proof_census_baseline_covers_52_of_93_examples.md` | `formal237-docs` | `tools/formal_proof_census_baseline.json` was 52 rows against a 93-file corpus; the 41 are now banked, and the ratchet's remaining red is a stale `fact.mojo` row |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | **unclaimed** | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | **unclaimed** | `.returncode` is a field access on an integer |
 
