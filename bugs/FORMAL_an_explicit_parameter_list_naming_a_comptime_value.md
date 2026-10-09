@@ -28,6 +28,19 @@ diagnosis fix and not the wall**: `type_arg_text` still answers `""` for a
 top-level literal, so no demand is computed, nothing is instantiated, and the
 construct is still refused — it is now refused with the true sentence.
 
+**One shape is deliberately NOT covered, so nobody re-derives it.**
+`tagged.Tagged[Int, 0]()` — the DOTTED spelling of the same construct — still
+reaches the tuple-index sentence, and that is the classifier's stated boundary
+rather than an oversight: `formal/model.py::_base_name` answers `None` for a
+`MemberExpr`, and §`subscript_index_is_a_comptime_parameter_list`'s docstring
+says every dotted base keeps today's answer, because deciding one needs the
+IMPORTED module's declarations (`formal/imports.py`'s question) and guessing is
+the one direction that could turn a refusal into a wrong image. The type-only
+dotted shape (`mylib.Box[Int]()`) has its own answer
+(`dotted_specialization_refusal`, §3 row 5); the comptime-value dotted shape is
+a gap left for whoever makes a dotted base classifiable, and the fix above does
+not reach it.
+
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
 
