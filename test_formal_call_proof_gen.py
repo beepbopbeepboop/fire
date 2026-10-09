@@ -4396,23 +4396,39 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         """The other backend, and the reason the asymmetry was the bug.
 
         arm64's STACK-FLOOR guard trap is a raw `svc`, which `lib/ProofLib.lean`
-        decodes, so a program that emits no bounded stop has an empty
-        `extern_calls` and needs nothing subtracted. Nothing here may change
-        that, and the assertion that it has not is what makes the x86-64 fix a
-        fix rather than a lowering of the bar on both sides.
+        decodes, so a program that emits no bounded stop publishes an empty
+        `compiler_traps` and needs nothing subtracted from THAT list. What is in
+        the raw `extern_calls` is the startup stub's `getrlimit` — the runtime
+        stack limit is read once there, below `func_offset`, for the same reason
+        x86-64 reads it there — and it is none of the program's calls; see
+        `test_the_arm64_subtraction_of_the_startup_limit_pins_it_back` for the
+        assertion that keeps a getrlimit out of a PROLOGUE, which is where it
+        used to be and what cost every calling program its universal theorem.
 
         The name says "no trap list" and the assertion is `assertFalse`, so it
         is worth being exact about what it does and does not claim: it claims
-        THIS program's list is empty, and arm64 DOES publish one for a program
-        with a bounded stop — see the two rows below, which are the other half
-        and which this row used to contradict.
+        THIS program's trap list is empty, and arm64 DOES publish one for a
+        program with a bounded stop — see the two rows below, which are the
+        other half and which this row used to contradict.
         """
         info = self._info("arm64", "plain")
-        self.assertEqual([e["sym"] for e in (info.get("extern_calls") or [])],
-                         [], "arm64's guard trap is an `svc`, not a call")
         self.assertFalse(info.get("compiler_traps"),
                          "a program with no bounded trap published one, so "
                          "something other than a stop is being recorded")
+        entry = info.get("func_offset")
+        for call in (info.get("extern_calls") or []):
+            with self.subTest(sym=call["sym"], addr=hex(call["addr"])):
+                self.assertLess(
+                    call["addr"], entry,
+                    "an unbound call at or above the entry function is on a "
+                    "walked path: the stack limit's `getrlimit` belongs in the "
+                    "startup stub, below `func_offset`, and a `BL` in a "
+                    "prologue is what cost every calling program its universal "
+                    "theorem")
+        from formal.arm64_proof_gen import _program_extern_calls
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the startup limit read is not being subtracted, so "
+                         "every run test on this backend stays suppressed")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
@@ -4540,6 +4556,34 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
             {"extern_calls": info["extern_calls"]})), 2,
             "with no traps published both calls are the program's")
         self.assertEqual(_program_extern_calls({}), [])
+
+    def test_the_arm64_subtraction_drops_a_call_below_the_entry(self):
+        """The startup stub's `getrlimit` is not the program's call.
+
+        The runtime stack limit is read once, in the startup stub, which is
+        BELOW `func_offset`; the run tests start at the entry function, so that
+        call is on no path they walk. Counting it suppressed every run test on
+        this backend — the same failure x86-64's `_program_externs` already
+        subtracts against `func_offset`.  This is that rule, unit-pinned, so a
+        regression names the rule rather than a whole generated file.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        below, at, above = 0x1000, 0x2000, 0x3000
+        info = {
+            "func_offset": at,
+            "extern_calls": [{"sym": "getrlimit", "addr": below},
+                             {"sym": "printf", "addr": above},
+                             {"sym": "puts", "addr": at}],
+        }
+        self.assertEqual(
+            _program_extern_calls(info),
+            [{"sym": "printf", "addr": above}, {"sym": "puts", "addr": at}],
+            "a call below the entry is in the startup stub, not the program")
+        self.assertEqual(
+            _program_extern_calls({"extern_calls": info["extern_calls"]}),
+            info["extern_calls"],
+            "with no `func_offset` nothing below-entry can be named, so the "
+            "conservative answer is that every call is the program's")
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
@@ -6391,9 +6435,22 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
 
     # name, source, the extern symbol its image calls, whether the concrete run
     # gets to the call (MEASURED — see the class docstring).
+    #
+    # **`modvar` used to be the unreached probe and is not one any more.** Its
+    # `fflush` is the compiler's own bounded stop, and after the arm64 trap
+    # subtraction landed (`_emit_trap_flush`) its image has NO program call at
+    # all, so it takes the ordinary run-test path rather than this one — see
+    # `TestCompilerTrapIsNotAProgramCall::test_a_program_whose_only_unbound_call_
+    # is_a_trap_gets_its_run_test`, which is where that shape is pinned now. The
+    # unreached arm is exercised here by a PROGRAM call (`printf`) that the
+    # concrete run cannot reach — it is emitted after an unconditional `return`,
+    # so it is dead code rather than a call behind a condition.  A call behind a
+    # condition is REFUSED by the universal theorem (`a call on a path a
+    # condition selects`), so it cannot be a probe for this class at all.
     PROBES = (
-        ("modvar", "def modvar(n):\n    d = 4\n    return n % d\n",
-         "fflush", False),
+        ("unreached",
+         "def unreached(n):\n    return n\n    printf(\"hi\")\n",
+         "printf", False),
         ("print1", 'def print1(n):\n    printf("hi")\n    return n\n',
          "printf", True),
     )
@@ -6403,6 +6460,7 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-extcall-")
         cls.proofs = {}
         cls.calls = {}
+        from formal.arm64_proof_gen import _program_extern_calls
         for name, source, sym, _reached in cls.PROBES:
             src = os.path.join(cls.tmp, name + ".mojo")
             with open(src, "w", encoding="utf-8") as f:
@@ -6410,17 +6468,22 @@ class TestExternCallTheRunDoesNotReach(unittest.TestCase):
             r = _compile(src, os.path.join(cls.tmp, name + ".aout"), "arm64")
             with open(r["proof_path"], encoding="utf-8") as f:
                 cls.proofs[name] = f.read()
-            cls.calls[name] = r["info"]["extern_calls"]
+            # The PROGRAM's calls: the startup stub's `getrlimit` and any
+            # compiler trap are subtracted, so this is the list `_gen_extern_test`
+            # is driven from and the one this class is about.
+            cls.calls[name] = _program_extern_calls(r["info"])
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_each_probe_reaches_the_extern_test_at_all(self):
-        """The premise: both images carry exactly one extern call, and it is the
-        one this class is about.  Without this a change that stopped emitting
-        `fflush` for the div0 guard, or stopped emitting a `printf` call, would
-        make every assertion below pass by there being nothing to look at.
+        """The premise: both images carry exactly one PROGRAM extern call, and
+        it is the one this class is about.  Without this a change that stopped
+        emitting a `printf` call would make every assertion below pass by there
+        being nothing to look at.  (The list is `_program_extern_calls`, so the
+        startup stub's `getrlimit` is not counted — it is the compiler's, not the
+        program's, and every image has it now.)
         """
         for name, _source, sym, _reached in self.PROBES:
             with self.subTest(probe=name):

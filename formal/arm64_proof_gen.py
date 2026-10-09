@@ -9833,12 +9833,20 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
                    entry_values: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
-    Appends a RET sentinel after the code and executes the whole program
-    (starting from the entry stub) with the initial link register pointing
-    at that sentinel, using arm64_exec_go_exit (which only stops at the
-    designated exit address, so recursion is traced correctly). The result
-    in x0 is verified against the semantic model by native_decide.
-    Additional inputs are executed from the function entry directly.
+    Appends a RET sentinel after the code and executes the program with the
+    initial link register pointing at that sentinel, using arm64_exec_go_exit
+    (which only stops at the designated exit address, so recursion is traced
+    correctly).  The result in x0 is verified against the semantic model by
+    native_decide.
+
+    **Every instance starts at the FUNCTION ENTRY, not the startup stub.**  The
+    stub used to be walked (it only materialised the arguments and called the
+    entry), but it now also reads `RLIMIT_STACK` there
+    (`_emit_stack_floor_init`), and that is a `BL` the model cannot follow — so a
+    run test starting at the stub would halt at the `getrlimit` and compare its
+    placeholder answer against `mojo`.  Starting at the entry with the arguments
+    already in x0.. is exactly what the stub hands the entry, so nothing is lost:
+    `model.entry_arg_values` is the same list the stub materialises.
     """
     exit_addr = base + len(code)
     # The entry function's ARGUMENT words as the startup stub materialized
@@ -9850,7 +9858,7 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     # that says "input 10" about a two-parameter entry whose second argument is
     # 20 would be describing a different program.
     tinput = test_input if arity <= 1 else ", ".join(vals)
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    init = (f"{{ {_entry_run(vals, func_entry, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     _tac = _decide_or_admit(admitted_model)
     # The admission note goes on the FIRST block only, and every docstring here
@@ -9934,17 +9942,37 @@ def _program_extern_calls(info: dict) -> list:
     An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
     predates the key — is read as having none, which is the conservative
     direction: nothing is subtracted and the refusal stands.
+
+    **And a call BELOW the entry function is not the program's either.** The
+    startup stub runs before `main` is called and reads `RLIMIT_STACK` once
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`, moved there from the
+    guard for exactly this reason), so its `BL getrlimit` is in the image, in
+    `extern_calls`, and on no path the run tests walk: they start at
+    `info["func_offset"]`, by which time the stub has finished. Counting it as
+    a program call suppressed every run test on this backend for every program.
+    `getrlimit` is not a trap at all — it returns — so it is subtracted by
+    ADDRESS against `func_offset` rather than added to `compiler_traps`, which
+    is the same design x86-64's `_program_externs` uses.
     """
     traps = set(info.get("compiler_traps") or ())
-    return [c for c in (info.get("extern_calls") or ())
-            if c.get("addr") not in traps]
+    entry = info.get("func_offset")
+    out = []
+    for c in (info.get("extern_calls") or ()):
+        addr = c.get("addr")
+        if addr in traps:
+            continue
+        if entry is not None and addr is not None and addr < entry:
+            continue
+        out.append(c)
+    return out
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
-                     entry_values: list = None, scope=None) -> tuple:
+                     entry_values: list = None, scope=None,
+                     func_entry: int = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -10000,7 +10028,14 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     # two-parameter entry's run starts from the same x0/x1 the binary was
     # given rather than from an x1 the model invented.
     vals = [str(v) for v in (entry_values or [test_input])]
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    # The run starts at the FUNCTION ENTRY, not the startup stub: the stub reads
+    # `RLIMIT_STACK` with a `BL` the model cannot follow (`_emit_stack_floor_init`),
+    # so a run starting there would halt at the `getrlimit` before reaching the
+    # call this section is about.  Starting at the entry with the arguments
+    # already in x0.. is exactly what the stub hands the entry — see the same
+    # note in `_gen_runs_test`.
+    _start = func_entry if func_entry is not None else base
+    init = (f"{{ {_entry_run(vals, _start, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     ret_type_of = {e.name: e.return_type for e in externs}
     blocks = []
@@ -10997,7 +11032,8 @@ def generate_arm64_proof(prog, code, info) -> str:
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
-            admitted_names=_admitted_used_names, scope=_vscope)
+            admitted_names=_admitted_used_names, scope=_vscope,
+            func_entry=info["labels"].get(func_name, base_addr))
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),
@@ -11274,7 +11310,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"    the RET sentinel, and the machine halts once the program has returned to\n"
             f"    it. Proved by native_decide, which scales to any program size. -/\n"
             f"theorem {func_name}_compiles_correctly :\n"
-            f"  (match arm64_exec_go {{ {_entry_run(elist, base_addr, arity)}\n"
+            f"  (match arm64_exec_go {{ {_entry_run(elist, func_entry_addr, arity)}\n"
             f"      with x30 := UInt64.ofNat {sentinel_addr} }} {func_name}_code {concrete_fuel} with\n"
             f"   | some s => s.x0\n"
             f"   | none => 0) = {_apply_args('mojo', elist)} := by\n"
