@@ -81,7 +81,7 @@ about** — it was 11 before rows #4–#6 closed.
 
 | # | example | status | the site it stops at | declared? | whose |
 |---:|---|---|---|---|---|
-| 1 | `fact` | `lean-rejected` | `fact_proof.lean:2880:16: Tactic 'rfl' failed` — the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
+| 1 | `fact` | `too-large` | **re-measured 2026-10-08** after `ffe27e1a` changed the contract: the proof now exceeds `formal/lean.py`'s `LEAN_MEMORY_MB = 6144` (249.4 s CPU / 6.90 GB peak), so it is "the checker ran out" and not a verdict — see the Status below. Its old site was `fact_proof.lean:2880:16: Tactic 'rfl' failed`, the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
 | 2 | `sqsum` | `lean-rejected` | `sqsum_proof.lean:3250:16`, the same goal | **no** | as #1 |
 | 3 | `sum` | `lean-rejected` | `sum_proof.lean:2880:16`, the same goal | **no** | as #1 |
 | 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on `sgt8_proof.lean:2332:41: unsolved goals n : UInt64 …` — a narrow typed parameter's truncation with no range hypothesis on the theorem, so Lean refused the file with no `sorry` in it. The universal theorem now carries `nw : n < 128` and the truncation discharges against it; 0 admitted `sorry`. Pinned by `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. Note the obligation is now spelled `t32s (t32u (t8s n))` — the extra `t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW` — so the `t32s (t8s n)` this row used to quote no longer matches the generator's text | **n/a — fixed** | — |
