@@ -328,14 +328,26 @@ GIMPLE_SOURCES = (
 #            `tools/ab_run_one.py` caps each per-file A/B compile at this same
 #            number for the same reason.
 #   program  55 GB. The measured peak of `native-dumpfull` (31.3 GB) with
-#            headroom — the largest job in the registry that still completes.
+#            headroom, and `ab-aside`/`ab-bside`/`ab-native` with it.
 #   stage    96 GB. Kept as the ceiling for a genuine whole-transitive-closure
 #            self-compile plus a `gcc -fgimple` over the resulting 40 MB
-#            translation unit. NO JOB IS IN THIS CLASS ANY MORE: the workloads
-#            it was written for measure 1.4-4.9 GB (below), which is 20-70x
-#            under it. It stays because the number is the documented ceiling
-#            for that shape and MEMLIMIT_GB=96 has to mean something; it is a
-#            debt, and bugs/PERF_memory_over_4gb_is_a_bug.md says so.
+#            translation unit — the shape it was written for, which no job in
+#            this registry has any more (those workloads measure 1.4-4.9 GB,
+#            below, which is 20-70x under it).
+#
+#            It is EMPTY again, and that is a fact about the tree rather than a
+#            goal: the workloads it was written for measure 1.4-4.9 GB (below),
+#            20-70x under it. The one job that measured above `program` is
+#            `formal` — 46.2 GB over 32 concurrent Lean processes on the
+#            93-proof formal/examples corpus, registered at `small` (8 GB) and so
+#            RESOURCE-killed on every run — and it is deliberately NOT here:
+#            46.2 is summed tree RSS and reads high, `program` (55 GB) covers
+#            the measurement at 1.19x, and `stage` would reserve the entire
+#            ledger for one job and make it unadmittable on a 64 GB budget.
+#            That exception is `CLASS_ABOVE_PEAK`, with its reason, and the
+#            measurement that would settle it is
+#            bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. The
+#            rung stays because MEMLIMIT_GB=96 has to mean something.
 #
 # `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
 # runaway" and "the largest footprint ever observed completing a self-compile
@@ -711,6 +723,15 @@ MEASURED_PEAK_GB = {
     'formal-run':                             (0.2, 'measured'),
     'formal-runtime-link':                    (0.2, 'measured'),
     'formal-sweep':                           (0.1, 'measured'),
+    # The corpus-wide arm64 formal sweep, which was registered at `small` (8 GB)
+    # and could therefore never pass: it is RESOURCE-killed at the ceiling
+    # before it finishes. Measured once at MEMLIMIT_GB=96 to find the real
+    # number -- 46.2 GB over 1129 s, up to 32 processes -- which is 5.8x its
+    # whole class. Trusted despite the run being RED: it ran 1129 s and did all
+    # 93 proofs (PASS=34 KNOWN-GAP=31 FAIL=28), and the exit 1 is a stale
+    # expected-failure row in the sweep's own report, not a job that died early,
+    # so the peak is what the job needs rather than how far it got.
+    'formal':                                (46.2, 'measured'),  # 93 proofs, 32 procs
     # The WARM peak, and deliberately not the one its class is sized from: this
     # job calls `ensure_library` itself, so on a cold store it is the 9.0 GB
     # build recorded under `prooflib` above, which is what `mem='module'`
@@ -754,6 +775,9 @@ MEASURED_PEAK_GB = {
     'doc-refs-stale-verdicts':                (0.07, 'measured'),  # 0.9 s
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'memslot':                                (0.5, 'measured'),
+    # Added by --apply-peaks (see MEASURED_RUN for the run).
+    'formal-imports':                         (0.2, 'measured'),
+    'formal-interop':                         (0.1, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1011,6 +1035,23 @@ CLASS_ABOVE_PEAK = {
     'formal-sweep-truth': 'the cold-store lib/*.olean build it can start: 9.0 '
                           'GB (see MEASURED_PEAK_GB["prooflib"]), not the '
                           '1.5 GB warm peak recorded here',
+    # The other direction, and the reason this is a dict and not a set: a class
+    # SMALLER than class_for_peak asks for, justified by a peak that is an UPPER
+    # BOUND. `formal`'s 46.2 GB is memcap's SUMMED tree RSS over up to 32
+    # concurrent Lean processes, and `procrun.tree_usage` documents that summing
+    # double-counts the pages those processes share, so the instrument errs high
+    # — the safe direction for a CEILING. Reserving `stage` (96 GB) would be
+    # treating an over-counted maximum as a floor, and it costs something the
+    # peak does not show: 96 GB is the whole machine-wide ledger, so the job can
+    # only ever run alone, and on a 64 GB budget (MEMSLOT_BUDGET_GB=64) it could
+    # never be admitted AT ALL — which is what test_suite.py's own admission
+    # check exists to catch. `program` (55 GB) still covers the measurement at
+    # 1.19x. Settling it properly means measuring unique pages instead of the
+    # sum; that is bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md.
+    'formal': '46.2 GB is summed tree RSS over 32 Lean processes and reads '
+              'HIGH (see procrun.tree_usage); `program` (55 GB) covers the '
+              'measurement at 1.19x, where `stage` (96 GB) would reserve the '
+              'whole ledger and make the job unadmittable on a 64 GB budget',
 }
 
 
@@ -2687,7 +2728,21 @@ test('prooflib', [PY, '-c',
 # never disabled, which is the argument for expecting them green; it is not the
 # same as having seen them green.
 test('formal', [PY, 'test_formal.py'], j=True,
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='program',
+     memwhy='measured 46.2 GB over 1129 s — the whole formal/examples corpus '
+            'through Lean, 93 proofs, up to 32 processes at once — against a '
+            '`small` (8 GB) class it used to carry, so every run of it was a '
+            'guaranteed RESOURCE verdict. `class_for_peak` asks for `stage` '
+            '(96 GB) and this is `program` (55 GB) ON PURPOSE, which is what '
+            'CLASS_ABOVE_PEAK exists to record: the 46.2 is summed tree RSS '
+            'over 32 Lean processes and summing double-counts the pages they '
+            'share, so it reads HIGH; `program` covers the measurement at '
+            '1.19x, and `stage` would reserve the entire machine-wide ledger '
+            'for one job — which also makes it unadmittable outright on a '
+            '64 GB budget. The unique-pages measurement that would settle it '
+            'is the open question in '
+            'bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. Over '
+            'the 4 GB line and therefore a debt, not a fact. See ' + MEM_DEBT_DOC,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'], mem='tiny',
      desc='formal arm64 executables that actually build AND run (no lean)')
@@ -2772,7 +2827,7 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
      mem='tiny',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='tiny',
      desc='formal import surface')
 # The formal dylib boundary seen by a CONSUMER, which is the half
 # `formal-dylib` above cannot see from the inside: that one checks the emitted
