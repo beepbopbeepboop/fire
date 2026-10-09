@@ -89,27 +89,31 @@ without every one of those, signed or not.
 ## Latent real bugs found while bisecting (NOT the cause above)
 
 These are spec violations that do **not** change the crash's outcome, but match
-`ld`'s output and are worth fixing independently:
+`ld`'s output and are worth fixing independently. **Items 1 and 2 are FIXED**
+(2026-10-08, `formal/macho_linker.py` + `formal/macho.py`); item 3 is still
+open. None of them changes the crash, which is why this doc stays open.
 
-1. **`__stubs` reserved fields are swapped.** `<mach-o/loader.h>`: for
-   `S_SYMBOL_STUBS`, `reserved1` is the indirect-symbol-table index and
-   `reserved2` is **the size of one stub**. `formal/macho_linker.py`'s
+1. **`__stubs` reserved fields are swapped.** ~~`formal/macho_linker.py`'s
    `_write_text_segment` puts the stub size (`ssize`) in `reserved1` and leaves
-   `reserved2 == 0`; `ld` emits `reserved1 0 / reserved2 6` (x86-64). The three
-   call sites pass the size as the 6th tuple element. (Verified: patching the
-   emitted `reserved2` to 6 makes `otool -l` read like `ld`'s; it does not fix
-   the crash.)
-2. **dylib mach_header flags are wrong.** `build_macho_dylib` hardcodes
+   `reserved2 == 0`.~~ **FIXED**: the 6th tuple element is now the one-stub
+   size and is written to `reserved2`, with `reserved1` 0 (these images carry no
+   indirect symbol table), which is what `ld` emits. `<mach-o/loader.h>`: for
+   `S_SYMBOL_STUBS`, `reserved1` is the indirect-symbol-table index and
+   `reserved2` is the size of one stub.
+2. **dylib mach_header flags are wrong.** ~~`build_macho_dylib` hardcodes
    `0x800005` = `MH_NOUNDEFS|MH_DYLDLINK|MH_HAS_TLV_DESCRIPTORS` — it is
    **missing `MH_TWOLEVEL` (0x80)** and sets a TLV-descriptor bit the library
    does not have. `formal/macho.py` carries the root cause:
    `MH_TWOLEVEL = 0x00800000` (should be `0x00000080`); its `MH_BIND_AT_LOAD`
-   and `MH_DEAD_STRIPPABLE_DYLIB` are likewise aliased onto other flags. `ld`
-   emits `0x100085` for the same dylib. (Changing the header flags to `0x100085`
-   does not fix the crash.)
+   and `MH_DEAD_STRIPPABLE_DYLIB` are likewise aliased onto other flags.~~
+   **FIXED**: `MH_TWOLEVEL = 0x80`, `MH_BIND_AT_LOAD = 0x8` and
+   `MH_DEAD_STRIPPABLE_DYLIB = 0x400000` are the header's values, and
+   `build_macho_dylib` uses `MH_DYLIB_FLAGS = 0x1|0x4|0x80|0x100000`, the
+   `0x100085` `ld` emits for the same dylib. (Changing the flags does not fix
+   the crash — measured, and the reason this doc stays open.)
 3. **`__DATA_CONST` is not marked `SG_READ_ONLY` (0x10).** `ld` sets it on the
    GOT-carrying segment for executables and libraries alike; this tree leaves it
-   `0x0`. Hardening only.
+   `0x0`. Hardening only. **Still open.**
 
 ## Next step
 
