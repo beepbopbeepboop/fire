@@ -108,13 +108,12 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures were behind the tree** — it published
-206 exported / 166 reachable where the same census measured 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` were both red on
-exactly that. **Swept 2026-10-05**: `FORMAL.md` now publishes the measured
-triple — 272 word-shaped, 216 exported, 176 reachable — and both jobs are green,
-so the eight stale figures `1dd68a48`/`ca50560f` had published are current
-again.
+**`FORMAL.md` §2.2/§6's published figures were behind the tree** — 206 exported /
+166 reachable where the same census measures 216 / 176. **Fixed**: `9e79c79e`
+rewrote §6 phase 2 to the measured triple and added the missing row-1 check to
+`test_formal_runtime_link.py`, and the remaining §1/§12/restatement figures were
+corrected with their check in `test_formal_doc_truth.py`. Both jobs are green on
+the current tree, so the paragraph is history rather than an open gap.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
