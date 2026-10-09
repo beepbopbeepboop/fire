@@ -5,21 +5,24 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
-element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
+**Status: the FLAT-container half of the relocation LANDED 2026-10-06, the
+NESTED-COMPREHENSION half LANDED 2026-10-08, and the runtime-blob-base half has
+not.** A comprehension whose element is a list / tuple / set / dict LITERAL with
+no nested container-building sub-expression is materialised per iteration: the
+element's blob is copied into a slot of a `cap`-sized array indexed by the result
+count, so the aliasing is gone AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
-the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
-is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+the refusal had replaced `31 31 31`. The SAME snapshot copy now also takes a
+NESTED COMPREHENSION element whose yielded values build no container, which is
+this document's own reproducer: `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`
+summed at `v[0]` prints `63` where it was refused (and `93`/exit 1 before the
+refusal). `model.comprehension_element_is_flat_container` is the shared predicate
+and each emitter's `_materialize_compr_element` is the copy (see "What landed
+2026-10-06" and "What landed 2026-10-08" below). What is STILL refused is every
+element whose per-iteration materialisation needs a RUNTIME blob base — a list of
+lists, a slice, a constructor call, and a comprehension whose yielded value BUILDS
+a container — which is the relocation the rest of this document describes, and it
+is unchanged. Read "What landed" first; the paragraphs under it price the refusal.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
@@ -63,6 +66,59 @@ comprehension's element site reserves through the ONE sequential frame ledger
 (`_reserve_blob` against `_list_cursor`), and it runs once at COMPILE time while
 running N times at RUN time — so any reservation it makes is one allocation for
 N iterations. Measured on both architectures.
+
+## What landed 2026-10-08: a nested comprehension that yields no container is per-iteration
+
+**The reproducer this document was written around now answers CPython's number,
+on both backends, with no runtime blob base and no allocator change.**
+`[[x + y for x in [1, 2]] for y in [10, 20, 30]]` summed at `v[0]` was `93` with
+exit 1 (then refused) and now prints `63`. The mechanism is the SAME snapshot
+copy the flat-container half already uses, asked one level in: the inner
+comprehension's result is a fresh blob at a fixed scratch offset, so
+`_materialize_compr_element` copies that blob into slot `i` of the outer element
+array exactly as it copies a list literal's. The two architectures share the
+predicate, so they cannot disagree about which nested comprehensions are
+representable.
+
+`model.comprehension_element_is_flat_container` gained the arm: a
+COMPREHENSION element is copyable iff what it YIELDS builds no container —
+neither its `.element` nor, for a dict, its `.value` passes
+`_expr_builds_a_container`. `[x + y for x in [1, 2]]` yields scalars and is
+copied; `[[x] for x in …]` yields a container build and is not; a comprehension
+yielding a COMPREHENSION is not either, because the inner result's own address is
+at a fixed offset reused per outer iteration — that last one is why the predicate
+does not recurse. The soundness argument in one line: the copied words are
+exactly the nested comprehension's yielded values, so they are scalars or STABLE
+addresses (an outer name/subscript CPython shares too), and anything that would
+put a reused scratch address in the result either trips the predicate or is
+refused at the nested emission before a result exists.
+
+Measured against CPython 3.14, both backends, before and after:
+
+| program (read) | CPython | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum of `v[0]` | `63` | refused (was `93`, exit 1) | **`63`** |
+| `[[a for x in [1, 2]] for y in [10, 20, 30]]`, `a=[100, 200]`, `r[i][0][0]` | `100 100 100` | refused | **`100 100 100`** |
+| `[[x * y for x in [1, 2]] for y in [3, 4, 5]]`, mutate `r[1][0]`, read the held `r[0]` | `3 99` | refused | **`3 99`** (independent inner lists) |
+| `[[[x for x in [1, 2]] for y in [10, 20]] for z in [1, 2]]` | builds | refused | refused (yields a comprehension) |
+| `[[[y]] for y in [10, 20, 30]]` (list of lists) | — | refused | refused (unchanged) |
+
+**Pinned in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**, whose nested
+row moved from a refusal to a build-and-run over `r[i][j]` (CONTENT, not count),
+plus a stable-name row (the shared outer object must stay shared) and a
+triply-nested refusal row that bounds the fix.
+
+**What this does NOT do, and it is the whole of "The exact next step" below.**
+The list-of-lists, the slice, the constructor call, a dict comprehension whose
+VALUE opens a container (still refused by `_refuse_an_element_blob`, which the
+dict leaf calls instead of materialising), and a nested comprehension whose
+yielded value builds a container all still need the runtime blob base. **The
+cost of the nested half is honest and named:** the copied region is the nested
+comprehension's whole ledger footprint (`_list_cursor - before`), not only its
+result blob, so a nested comprehension over a large iterable reserves
+`cap × (result + scratch)` and can meet the frame refusal where a tighter stride
+would fit. That is a strictly smaller reservation than "refused", so it is a
+forward step, but a result-only stride is part of the runtime-base work below.
 
 ## What landed (2026-10-05): the refusal, and the ledger measurement that asks it
 

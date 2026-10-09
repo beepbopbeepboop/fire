@@ -571,24 +571,6 @@ FILE_CASES = [
 # evidence the source can carry — through the one reader a field access already
 # uses.
 DECLARED = [
-    # A METHOD through a `with` ALIAS whose NAME a second struct also declares.
-    # The alias holds `Box.__enter__`'s result — the receiver — so the holder
-    # analysis knows the frame is a `Box`, and that binding is what resolves the
-    # ambiguity the name-only dispatch declines on purpose.  This row used to be
-    # a REFUSAL ("would be a guess about what it means on"); the alias's struct
-    # is now published (`_rewrite_holder_method_calls`), so it is answered and
-    # compared against CPython, which resolves it through the object's own type.
-    # See `bugs/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
-    # exception_words.md` §4.
-    ("a_method_through_the_alias_with_a_rival_owner_is_answered",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     CTX_PY + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n", 3),
     # `make()` returns a manager: the callee's own `-> T` says which struct, and
     # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
     # of every factory a reader writes for a resource.
@@ -698,48 +680,6 @@ DECLARED = [
      "    print('after')\n"
      "    return 0\n",
      SUPPRESSING_EXIT_PY.replace("return True", "return False") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the FALSY end of the string case, which is the boundary the fix to
-    # `context_exit_returns_truthy` had to keep: CPython reads a return by its
-    # TRUTHINESS, so an EMPTY string is falsy and the exception still propagates,
-    # exactly as `return False` does.  This row and the refusal below are one
-    # pair, and without it a gate that refused every string return would pass the
-    # refusal row while breaking a program CPython runs.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the same boundary one type further out, where `fold_literal_expr`
-    # does not reach at all: a float literal. CPython reads `0.0`/`-0.0` as
-    # falsy, so a `return 0.0` does NOT suppress and the exception still
-    # propagates. `0.0` is the falsy end of the pair whose truthy end (`0.5`) is
-    # a refusal below, and the two exist together because a gate that refused
-    # every float return would pass the refusal while breaking this program.
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
@@ -937,11 +877,24 @@ REFUSALS = [
      "    return 0\n",
      "names somewhere this path cannot put the word",
      "this build cannot answer what type it is"),
-    # The METHOD-through-the-alias-with-a-rival-owner row used to live HERE, as a
-    # refusal, and it moved to the DECLARED table: the alias's struct is now
-    # published from the frame holder the `with` established, so the ambiguity
-    # `_method_owners` declines is resolved by the BINDING and the program is
-    # answered against CPython.  `RIVAL` is still declared for that row.
+    # A METHOD through the alias whose NAME a second struct also declares.  The
+    # alias carries no declared type — `Box___enter__(tmp)` returns one word and
+    # nothing says which struct it is a frame of — so dispatch is by NAME, and
+    # `use` has two owners.  CPython resolves it through the object's own type.
+    # Here `_method_owners` pops an ambiguous name on purpose (a name TWO structs
+    # declare is absent, and that absence is what makes the lift decline), so
+    # the call lands in the receiverless arm and is refused rather than picked —
+    # with the "would be a guess about what it means" sentence, which IS the
+    # property: a build that picked silently would print this same program's
+    # answer against the OTHER struct's field layout, and a wrong layout is the
+    # failure nothing else on this path can see.  This row's whole claim is the
+    # refusal, so it passes "" for the forbidden clause.
+    ("a_method_through_the_alias_with_a_rival_owner_is_refused_not_picked",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     "would be a guess about what it means on", ""),
     # A SUBSCRIPT alias, `as holder[0]`, is the third shape one word does not go
     # and the one a reader is most likely to try after the other two are
     # refused.
@@ -1018,39 +971,6 @@ REFUSALS = [
     # on the token would let `return 1` through.
     ("an_exit_returning_one_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT_ONE + "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-empty STRING, which is the same suppression one type over and
-    # the case the gate used to miss: `context_exit_returns_truthy` checked
-    # `isinstance(value, int)` while its docstring claimed the test was the
-    # folded VALUE's truthiness, so `return "yes"` built, printed the cleanup
-    # every other line CPython printed, and exited 1 where CPython exits 0 — the
-    # identical wrong answer as `return True`, reached through a value the gate
-    # had folded and then discarded for being the wrong shape.  Measured, both
-    # architectures; the FALSY sibling (`return ""`) is an ANSWERED row above.
-    ("an_exit_returning_a_truthy_string_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", 'return "yes"') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and a non-zero FLOAT, the literal kind `fold_literal_expr` has no arm
-    # for at all — so this case is not the string one one type over but the
-    # other reader (`_literal_return_truthiness`) doing its own job. CPython
-    # reads `0.5` as true and suppresses; this path built, printed
-    # `enter / body 7 / exit` and exited 1. `int(0.5)` is 0, which is why the
-    # word reader `fold_module_value` must not be reused here. `-0.5` is the
-    # same value behind a `UnaryOp` and is covered by the same reader.
-    ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 0.5") +
-     "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
      "        raise ValueError('m')\n"
