@@ -427,6 +427,33 @@ def test_a_program_the_search_cannot_run_is_recorded_as_skipped(tmpdir=None):
 
 
 
+def test_a_body_with_the_sources_floordiv_is_run_not_skipped(tmpdir=None):
+    """`collatz.mojo` halves with `v = v // 2`.  Before the reader knew `//`,
+    every input of that body raised `Unsupported`, so the search skipped all of
+    them and said nothing -- which a reader of the verdict sees as "no
+    counterexample".  The layer papered over it by rewriting the node to `/`
+    before handing it to the reader; that rewrite is gone and
+    `formal/contracts.py::_Reader` is the one rule now.
+
+    This pins that the body RUNS: `collatz`'s variant is measured and found to
+    go below zero, rather than every candidate being skipped.  It is the
+    complement of `..._cannot_run_is_recorded_as_skipped`, which keeps
+    `array_fill` (a subscript) as the still-skipped shape.
+    """
+    from formal import loop_invariants as LI
+    v = verdicts_of("collatz")[0]
+    check(bool(v.candidates),
+          "collatz: the search ran and reported per candidate", repr(v))
+    skipped = [c for c in v.candidates if c["skipped"]]
+    check(not skipped,
+          "collatz: no candidate is skipped now that the reader takes `//`",
+          str([(c["role"], c["skipped"]) for c in v.candidates]))
+    witness, _ = LI.refute(v.shape, v.rel, v.variants[0])
+    check(witness is not None,
+          "collatz: and the run names the state where the variant drops below "
+          "zero", repr(witness))
+
+
 # ── 4. the ladder, and the shape of the emitted file ──────────────────────────
 
 def test_the_ladder_is_the_shared_one(tmpdir=None):
@@ -669,28 +696,6 @@ def test_the_ladder_discharges_what_the_baseline_records(lean_bin, tmpdir):
             print(f"{severity:<11} {stem}: {text}")
 
 
-def test_a_body_with_floor_division_is_run_and_not_skipped(tmpdir=None):
-    """`collatz` halves a variable with `v // 2`, and the reader used to refuse
-    `//` — it was keyed on `/` alone.
-
-    Before `formal/contracts.py`'s IR learned the spelling, EVERY input to this
-    loop was a skip, and a skip reads as "no counterexample": the loop's variant
-    row said nothing while looking like agreement.  Now the search runs it, so
-    the candidate is not skipped and names a witness — which is the difference
-    between "the loop is clean" and "the search could not read it".
-    """
-    v = verdicts_of("collatz")[0]
-    check(bool(v.candidates),
-          "collatz: the search ran and reported a candidate")
-    skipped = [c for c in v.candidates if c["skipped"]]
-    check(not skipped,
-          "collatz: NO candidate is a skip (the body's `//` has a reading)",
-          str([(c["role"], c["skipped"]) for c in v.candidates]))
-    check(any(c["witness"] for c in v.candidates),
-          "collatz: and the variant names a witness, so it was really run",
-          str([(c["role"], c["witness"]) for c in v.candidates]))
-
-
 ALL = [
     test_every_loop_answers_even_when_nothing_was_derived,
     test_a_refusal_row_can_never_be_proved,
@@ -698,7 +703,7 @@ ALL = [
     test_a_wrong_claim_is_refuted_and_the_right_one_is_not,
     test_a_variant_that_goes_negative_is_refuted,
     test_a_program_the_search_cannot_run_is_recorded_as_skipped,
-    test_a_body_with_floor_division_is_run_and_not_skipped,
+    test_a_body_with_the_sources_floordiv_is_run_not_skipped,
     test_the_ladder_is_the_shared_one,
     test_the_emitted_file_imports_nothing,
     test_the_proof_states_the_loop_it_is_about,
