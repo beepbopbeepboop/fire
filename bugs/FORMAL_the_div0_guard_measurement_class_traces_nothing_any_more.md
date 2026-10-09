@@ -10,6 +10,24 @@ reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
 class: 3 failures before, 3 failures after, identical messages.**
 
+**Status 2026-10-08 (`work/formal217-docs`): step 1 of §"The exact next step" —
+the MECHANISM CHECK — is LANDED, and it fires.** `setUpClass` now records
+whether the tail it dissects carries `_ADMIT` (and, when the fixture does not
+even generate, why), and every row calls `_require_mechanism` before it asserts
+on a goal, so the class can no longer report its own blindness as a diagnosis
+about `fdiv64`. On this tree it fires for a NEW reason: `a // b` no longer
+generates a proof file at all — the stack-floor guard's `getrlimit` (`bfeec991`)
+is a call the arm64 CFG walk cannot step, so the universal theorem has TWO
+unfollowable calls and is refused
+(`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`,
+`formal213-docs`'s claim). **Step 2 therefore cannot be chosen here**: neither
+half the doc offers — subtracting `info["compiler_traps"]` in
+`_unfollowable_calls`, or a literal-divisor fixture — restores a value theorem
+while `getrlimit` is in every arm64 prologue, and the guard change that would is
+another claim's to land. What is fixed on this branch is the class's honesty;
+the residual it exists to measure is still unreachable, now for a named cause.**
+
+
 ## What I ran
 
     $ python3 tools/memslot.py --gb 8 --label t -- \

@@ -4548,20 +4548,23 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
     recorded twelve red examples on 2026-10-03 and measured them one family at a
     time, which is the right discipline and produced a list that has since gone
-    stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
-    `sorry`, and `sum_range` was the last one refusing at generation — its
-    back edge is a conditional branch, and a `for`-range loop lowers with the
-    test at the BOTTOM of the body, so the walk's "is the taken target the loop
-    top?" question had to be asked on the conditional arm too.
+    stale in BOTH directions: most now generate, `sum_range` was the last one
+    refusing at generation, and `wdiff` — which passed when this census was
+    written — refuses again.
 
-    **All twelve now generate**, and the reason the count is stated here rather
-    than left to the reader is that it was WRONG in this file for a while: the
-    census pinned `sum_range` as the one refusal, its owner doc recorded the
-    generation refusal as fixed, and the two had been merged onto this tree
-    without either noticing the other. That is what `REFUSED` below is for — an
-    empty dict here is not a table nobody filled in, it is the assertion that
-    every one of the twelve reaches a proof file, and the moment one stops, the
-    case below says which and why.
+    **Ten of the twelve generate and two refuse, and both refusals are pinned
+    with their owner.** `sum_range` refuses by DESIGN (its loop test is a signed
+    `CSET lt` and its contract is stated in the unsigned order, so the obligation
+    would be false); `wdiff` refuses in the loop contract because the stack-floor
+    guard's `getrlimit` (`bfeec991`, emitted in every arm64 prologue) is counted
+    as a program call and becomes the theorem's halt boundary — the regression
+    `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`
+    records, and not this class's to fix. The reason the counts are stated here
+    rather than left to the reader is that they were WRONG in this file for a
+    while: the census pinned `sum_range` as the one refusal, its owner doc
+    recorded the generation refusal as fixed, and the two had been merged onto
+    this tree without either noticing the other. That is what `REFUSED` below is
+    for — the moment a row's verdict changes, the cases below say which and why.
 
     A census that has gone stale is worth exactly as much as the measurement
     that refreshed it, and the refresh is cheap: **emission needs no Lean**, so
@@ -4576,12 +4579,11 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The eleven that still generate, grouped as the doc grouped them, so a
+    #: The ten that still generate, grouped as the doc grouped them, so a
     #: reader can see which family each is in.
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
-                "both", "either",                               # family 3
-                "wdiff")                                        # family 4
+                "both", "either")                               # family 3
 
     #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
     #: is HERE rather than deleted because the refusal is the FIX and not a
@@ -4593,6 +4595,14 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
     #: generating proof that says something false.
     #:
+    #: `wdiff` was family 4 and PASSED when this census was written; it refuses
+    #: again on this tree because `bfeec991`'s stack-floor guard put a
+    #: `getrlimit` call in every arm64 prologue, and the guard's low address is
+    #: the run terminal, so the loop contract has no block to match. That is
+    #: `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`'s
+    #: regression, and the row is recorded rather than fixed here because the
+    #: repair is a `formal/arm64_codegen.py` change owned by that doc.
+    #:
     #: The needles are the three facts a reader needs to act, and the first two
     #: are what tell this refusal apart from "the loop shape is unrecognised"
     #: (an emitter change) and from "the contract is wrong for this shape" (a
@@ -4603,26 +4613,34 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                        "while_lt_exit_contract_bottom"],
                       "its loop test is signed and the contract is stated in "
                       "the unsigned order, so the obligation would be false"),
+        "wdiff": (["unsupported edge to", "loop back-edge / continuation; no "
+                   "loop contract matches"],
+                  "the stack-floor guard's `getrlimit` is the run terminal, so "
+                  "the loop contract has no block to match"),
     }
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
-    #: doc is named for the DEFECT rather than for the example. `sum_range` is
-    #: the only row, and its doc is
+    #: doc is named for the DEFECT rather than for the example. BOTH rows are
+    #: here, and neither doc contains its stem: `sum_range`'s is
     #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` — a name that says what is wrong and deliberately does not
-    #: contain the stem, which is why `test_the_owner_of_the_one_refusal_still_
-    #: exists` cannot find it by prefix.
+    #: flag.md` and `wdiff`'s is
+    #: `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` — each
+    #: a name that says what is wrong, which is why
+    #: `test_the_owners_of_the_refusals_still_exist` cannot find either by
+    #: prefix and has to be told.
     #:
-    #: The point of naming it is the same as the check's own: this refusal is a
+    #: The point of naming them is the same as the check's own: a refusal is a
     #: STOP, not a fix, and the doc is what a reader has to find to learn that.
     #: A row that pinned the refusal without naming the doc would let the doc be
     #: deleted on the grounds that the refusal it describes is now recorded
-    #: here — which is the opposite of true, because the doc records the part
+    #: here — which is the opposite of true, because each doc records the part
     #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
     #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
     REFUSED_OWNER = {
         "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
                      "against_a_signed_flag.md",
+        "wdiff": "FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_"
+                 "call.md",
     }
 
     @classmethod
@@ -4685,7 +4703,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                                   f"say {needle!r}, which is what makes the "
                                   f"refusal actionable: {err} ({why})")
 
-    def test_the_owner_of_the_one_refusal_still_exists(self):
+    def test_the_owners_of_the_refusals_still_exist(self):
         """A refusal whose owning doc is gone is a doc to delete, not to keep.
 
         The rule the whole `bugs/` queue rests on: a doc for a bug that is fixed
@@ -4693,21 +4711,19 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **`REFUSED` is NOT empty** — `sum_range` joined it on 2026-10-05, when
+        **`REFUSED` has TWO rows** — `sum_range` joined it on 2026-10-05, when
         its loop contract was declined for stating an unsigned order against a
-        signed flag — so this check does real work from the first row. It was
-        vacuous while the table was empty, and an empty table and a table whose
-        rows all point at deleted docs look identical from the outside: that is
-        the difference between "nobody refuses" and "the records of the
-        refusals were thrown away". The census is asserted explicitly for the
-        same reason.
+        signed flag, and `wdiff` joined it when the stack-floor guard put a
+        `getrlimit` in every arm64 prologue — so this check does real work for
+        both. It was vacuous while the table was empty, and an empty table and a
+        table whose rows all point at deleted docs look identical from the
+        outside: that is the difference between "nobody refuses" and "the records
+        of the refusals were thrown away". The census is asserted explicitly for
+        the same reason.
         """
-        # Not vacuous any more: `sum_range` moved from GENERATE to REFUSED on
-        # 2026-10-05, so the total is asserted rather than derived from a
-        # table that used to be empty. The number is the census this class
-        # claims; a silent change to either list is how a refusal goes
-        # unrecorded, and the OWNER check below is what makes the row survive
-        # its own fix.
+        # The number is the census this class claims; a silent change to either
+        # list is how a refusal goes unrecorded, and the OWNER check below is
+        # what makes a row survive its own fix.
         self.assertEqual(
             len(self.GENERATE) + len(self.REFUSED), 12,
             "the census of the twelve red examples changed shape: "
@@ -5481,7 +5497,18 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
 
 
 class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
-    """The measurement itself: the residual is `1 = 0`, and it is FALSE."""
+    """The measurement itself: the residual is `1 = 0`, and it is FALSE.
+
+    The class dissects the generated `a // b` proof at
+    `theorem q_compiles_correctly_universal` and reads the residual by replacing
+    the walk terminal's `all_goals (first | done | sorry)` with a
+    `trace_state`-carrying spelling. **That replacement is a no-op unless the
+    tail still carries `_ADMIT`, and a class that does not check is a class that
+    reports its own blindness as a diagnosis about `fdiv64`** — which is exactly
+    what `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+    found, and why `setUpClass` records whether the mechanism fired and every row
+    calls `_require_mechanism` before it asserts on a goal.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -5495,8 +5522,22 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-div0-lean-")
         from formal import lean as FLEAN
         cls.out = {}
+        #: label -> whether the tail we dissect actually carried the admission
+        #: the trace replaces, i.e. whether the measurement could happen at all.
+        cls.traced = {}
+        #: label -> why the fixture could not even be generated, when that is the
+        #: reason the mechanism did not fire.
+        cls.generate_error = {}
         for label, patch in (("as_emitted", False), ("doc_next_step", True)):
-            head, tail = _symbolic_divisor_proof(cls.tmp)
+            try:
+                head, tail = _symbolic_divisor_proof(cls.tmp)
+            except Exception as e:                    # noqa: BLE001
+                cls.traced[label] = False
+                cls.generate_error[label] = f"{type(e).__name__}: {e}"
+                cls.out[label] = ""
+                continue
+            cls.generate_error[label] = None
+            cls.traced[label] = _ADMIT in tail
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -5512,6 +5553,34 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         if hasattr(cls, "tmp"):
             shutil.rmtree(cls.tmp, ignore_errors=True)
 
+    def _require_mechanism(self, label):
+        """Fail with the TRUTH when the class could not trace a residual.
+
+        Without this the class reports "the residual is no longer the `1 = …`
+        goal — fdiv64's div0 arm may have been corrected" whenever the
+        end-to-end theorem stops being emitted, which is a diagnosis about the
+        wrong thing. The mechanism check is what turns that into "the thing I
+        measure is gone", with the reason.
+        """
+        if self.traced.get(label):
+            return
+        why = self.generate_error.get(label)
+        if why:
+            self.fail(
+                f"{label}: the fixture no longer generates, so the tail this "
+                f"class dissects is empty and no goal can be traced: {why}. "
+                f"The arm64 universal theorem is refused while the stack-floor "
+                f"guard's `getrlimit` (bfeec991) is a call the CFG walk cannot "
+                f"step — see bugs/FORMAL_the_stack_guards_getrlimit_is_counted_"
+                f"as_a_program_call.md and bugs/FORMAL_the_div0_guard_"
+                f"measurement_class_traces_nothing_any_more.md.")
+        self.fail(
+            f"{label}: the measurement this class exists for did not happen — "
+            f"the dissected tail carries no `_ADMIT` for `_TRACE` to replace, so "
+            f"no residual goal can be traced. That is the class going blind, not "
+            f"a statement about `fdiv64`: see bugs/FORMAL_the_div0_guard_"
+            f"measurement_class_traces_nothing_any_more.md.")
+
     def test_the_false_goal_survives_the_documented_next_step(self):
         """Both spellings leave `⊢ 1 =`, and adding `hc_N` changes nothing.
 
@@ -5521,6 +5590,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """
         for label in ("as_emitted", "doc_next_step"):
             with self.subTest(spelling=label):
+                self._require_mechanism(label)
                 self.assertIn("⊢ 1 =", self.out[label],
                               f"{label}: the div0 path's residual is no longer "
                               f"the `1 = …` goal — fdiv64's div0 arm or the "
@@ -5531,6 +5601,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
         for label in ("as_emitted", "doc_next_step"):
+            self._require_mechanism(label)
             got, keep = [], False
             for line in self.out[label].splitlines():
                 if line.strip().startswith("⊢"):
