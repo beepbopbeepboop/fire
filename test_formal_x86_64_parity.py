@@ -2122,6 +2122,21 @@ FAILING_CASES = [
      "    b = 0\n"
      "    a, b = t\n"
      "    return 0\n"),
+    # The RAISE shape, which is the exit the arm64 raise-skips-the-flush bug
+    # measured and the reason it was filed: a `raise` leaves through
+    # `_emit_diverge` -> `_emit_exit`, the same flushed exit as the two traps
+    # above, so it is the same assertion reached by a different lowering.
+    # `raise 7` is this path's terminate-with-status-1 and CPython's `raise 7` is
+    # a TypeError, so both machines exit 1 and the line must survive on both.
+    ("printed_output_survives_a_raise",
+     "def main() -> Int:\n"
+     "    printf(\"before@@\")\n"
+     "    raise 7\n",
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    sys.stdout.write(\"before@@\")\n"
+     "    raise 7\n"),
 ]
 
 # A NEEDLE SHARED by every row that pins the same sentence, declared once here
