@@ -5126,8 +5126,15 @@ def _range_is_nonempty(args, consts=None) -> bool:
     Folding here rather than in a new reader is deliberate: this is the ONE
     question in the file about "what integers does this `range` have", and
     `_cfg_int_literal` stays what its own docstring says it is.
+
+    **An ARGUMENT COUNT outside 1-3 is `None`, not a crash.**  `range()` with no
+    arguments is CPython's own `TypeError` and `_cfg_int_value` has no value to
+    read, so the guard is `not in (1, 2, 3)` rather than `> 3`; the old `> 3`
+    guard fell through to the three-way unpack and a `for i in range():` raised
+    `ValueError: not enough values to unpack` OUT of the model and into the
+    build, which reports as a backend crash rather than as a refusal.
     """
-    if len(args) > 3:
+    if len(args) not in (1, 2, 3):
         return None
     vals = []
     for a in args:

@@ -87,6 +87,15 @@ CPython oracle in both directions — `preheader_zero_range_target_is_not_a_defi
 `preheader_range_bound_from_a_parameter_keeps_the_target`, which pins the
 residual as a case so it cannot rot.
 
+**A `range` with an argument count outside 1-3 is `'maybe'`, not a crash
+(2026-10-08).** `_range_is_nonempty`'s guard was `len(args) > 3`, so a call with
+NO arguments fell through to the three-way unpack and `for i in range():` raised
+`ValueError: not enough values to unpack` OUT of the model and into the build —
+a backend crash rather than a refusal. The guard is `not in (1, 2, 3)` now, and
+the row `zero_arg_range_does_not_crash_the_reader` in
+`test_formal_read_before_store.py` pins it; the build now refuses the program
+with `range() takes 1-3 arguments, got 0`.
+
 ## What is wrong
 
 THE RESIDUAL, in its own words, and it is the shape §0 did not reach:
