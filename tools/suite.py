@@ -778,6 +778,12 @@ MEASURED_PEAK_GB = {
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'formal-imports':                         (0.2, 'measured'),
     'formal-interop':                         (0.1, 'measured'),
+    # The x86-64 half of the same corpus sweep as `formal`, and it was
+    # registered at `small` (8 GB) too, so it was RESOURCE-capped in 2 s at
+    # 20.5 GB before it could do anything. It PASSES at the raised ceiling, and
+    # `class_for_peak` agrees with the class landed here, so unlike `formal` it
+    # needs no `CLASS_ABOVE_PEAK` entry.
+    'formal-x86':                             (24.8, 'measured'),  # 80 s, x86-64 corpus
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2931,7 +2937,14 @@ test('formal-runtime-link', [PY, 'test_formal_runtime_link.py'],
 # output/x86_64/ keeps these from colliding with the arm64 verdicts above, so
 # they can share the machine with them.
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='program',
+     memwhy='measured 24.8 GB (80 s, the same corpus as `formal` on the x86-64 '
+            'backend) against a `small` (8 GB) class it used to carry, which '
+            'RESOURCE-capped it in 2 s at 20.5 GB before it could do anything. '
+            '`program` is exactly what class_for_peak assigns here (1.5x of '
+            '24.8 = 37.2), so unlike `formal` this one needs no exception. '
+            'Over the 4 GB line and therefore a debt, not a fact; same subject '
+            'as `formal` and the same open measurement. See ' + MEM_DEBT_DOC,
      desc='the x86-64 examples, built and proof-checked')
 # **This job was RED and NOTHING RAN IT**, and both halves were true for the
 # same reason: it is registered, it is in two buckets, and neither of them is in
