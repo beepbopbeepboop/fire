@@ -1276,14 +1276,12 @@ _FLOOR_COMMON = [
     ("eor x4, x3, x1",
      "some (arm64_set_reg 4 s (arm64_reg 3 s ^^^ arm64_reg 1 s))"),
     ("cmp x3, #0",
-     "some { s with nzcv := arm64_subs_flags (arm64_reg 3 s) "
-     "(UInt64.ofNat (arm64_ext_imm12 (4043309183 : UInt32))) }"),
+     "some { s with nzcv := arm64_subs_flags (arm64_reg 3 s) (UInt64.ofNat 0) }"),
     ("cset x5, ne",
      "some (arm64_set_reg 5 s "
      "(if arm64_matches_condition 1 s.nzcv then 1 else 0))"),
     ("cmp x4, #0",
-     "some { s with nzcv := arm64_subs_flags (arm64_reg 4 s) "
-     "(UInt64.ofNat (arm64_ext_imm12 (4043309215 : UInt32))) }"),
+     "some { s with nzcv := arm64_subs_flags (arm64_reg 4 s) (UInt64.ofNat 0) }"),
     ("cset x6, lt",
      "some (arm64_set_reg 6 s "
      "(if arm64_matches_condition 11 s.nzcv then 1 else 0))"),
