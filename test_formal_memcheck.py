@@ -507,10 +507,20 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
-    check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+    # A COUNT against a namespace it does not share is not a coverage check.
+    # The ledger is keyed `basename|backend` (that is what `--write-ledger`
+    # writes, and what the two checks below split on), while the corpus is a
+    # list of full paths, so `len(rows) == len(sources) * 2` agreed only while
+    # the two counts happened to coincide -- the ledger sat at 120 rows for 101
+    # programs and this check reported nothing. Compare the SETS instead, and
+    # name the program/backend rows that are absent so a reader can act on it.
+    expected = {os.path.basename(p) + "|" + b
+                for p in M.memcheck_sources() + M.example_sources()
+                for b in M.BACKENDS}
+    have = set(rows)
+    missing = sorted(expected - have)
+    check("the ledger covers every corpus row on both backends", not missing,
+          "%d absent: %s" % (len(missing), ", ".join(missing[:6])))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
