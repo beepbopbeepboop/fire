@@ -12,10 +12,12 @@ answers the other four, for every instruction form the code generators CAN emit:
 
 The unit is the EMITTED FORM, and "emitted" means a call site: an `encode_*`
 that some emitter (a backend's `codegen.py`, or the Mach-O linker's stub)
-references. That is the same distinction the survey's 2026-10-03 method change
-made and it is the reason this tool exists at all — an encoder nothing calls is
-byte-exact, has a Lean arm, and cannot occur in an image, so counting it in any
-of the four columns would over-report all of them at once.
+references, read by an AST walk of the emitter so a DOCSTRING that names an
+encoder is not one (see `_emitter_refs`). That is the same distinction the
+survey's 2026-10-03 method change made and it is the reason this tool exists at
+all — an encoder nothing calls is byte-exact, has a Lean arm, and cannot occur
+in an image, so counting it in any of the four columns would over-report all of
+them at once.
 
 **Each column names the thing it reads, because a column that cannot say where
 its answer came from is not a measurement.**
@@ -245,20 +247,40 @@ def encoder_names(arch):
     return re.findall(r"^def (encode_[A-Za-z0-9_]+)", src, re.M)
 
 
-def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only."""
-    for rel in LEVER_ROOTS[arch]:
-        blob = _read(os.path.join(ROOT, rel))
+def _emitter_refs(path):
+    """`{encoder: count}` referenced in one emitter file, BY AST.
+
+    The EMITTED column is "an encoder a lowering CALLS", so the read has to be
+    of code and not of text. A regex over the file counts a DOCSTRING mention as
+    a call site, and that is not hypothetical: `formal/x86_64_codegen.py`'s
+    prose explains why the clamp uses two branches instead of a `cmov`, and the
+    bare word `encode_cmov_r64_r64` put the row in the census as an emitted form
+    with no model, no fuzz case and no `as` check — an instrument defect that
+    made the census's own `test_every_emitted_form_has_...` red on a form no
+    image can contain. AST drops strings and docstrings, so the row falls out
+    and nothing else moves (measured: the AST and regex reads agree on every
+    other emitted form on both backends).
+    """
     out = {}
-    for name in encoder_names(arch):
-        hits = []
-        for rel in LEVER_ROOTS[arch]:
-            n = len(re.findall(r"\b%s\b" % re.escape(name),
-                               _read(os.path.join(ROOT, rel))))
-            if n:
-                hits.append((os.path.basename(rel), n))
-        out[name] = hits
+    for node in ast.walk(ast.parse(_read(path))):
+        name = None
+        if isinstance(node, ast.Name) and node.id.startswith("encode_"):
+            name = node.id
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("encode_"):
+            name = node.attr
+        if name is not None:
+            out[name] = out.get(name, 0) + 1
     return out
+
+
+def call_sites(arch):
+    """{encoder: [(file, count)]} over the emitter files only, by AST."""
+    sites = {}
+    for rel in LEVER_ROOTS[arch]:
+        blob = _emitter_refs(os.path.join(ROOT, rel))
+        for name, n in blob.items():
+            sites.setdefault(name, []).append((os.path.basename(rel), n))
+    return {name: sites.get(name, []) for name in encoder_names(arch)}
 
 
 #: The names whose VALUES are the encoder test's byte-differential table.
@@ -589,13 +611,14 @@ BACKLOG = {
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`FF /2` with mod=11, the call through a function VALUE; the decoder "
         "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
+    # `encode_and_r8_r8` and `encode_or_r8_r8` WERE here until this census ran
+    # against the current tree: `formal/x86_64_model_fuzz.py` draws both now
+    # (`and`/`or` over the RBP-operand class `_byte_rex_required` fixed), so
+    # their FUZZ column reads `yes` and the anti-rot half of
+    # `test_formal_isa_census.py` fired on the stale entries until they came
+    # out. The byte-wise ALU class is documented in
+    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md` §"The byte-wise ALU
+    # class"; the row there that is still a real gap is `encode_call_r64`.
     # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,

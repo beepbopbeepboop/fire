@@ -54,7 +54,7 @@ all steppable**, all five checks green; `test_x86_64_decode.py` green;
 `test_x86_64_encoders.py` 152/152; `test_x86_64_model_fuzz.py` 12/12;
 `--census --per-form 4 --seed 11` **287 AGREE, 0 WRONG**.
 
-**What is left in this file, and it is now only shape 2's FUZZ column:**
+**What is left in this file, and it is now only `encode_call_r64`:**
 
 * `encode_call_r64` — the target is a register's contents, outside the harness's
   one `MAP_FIXED` region; a permanent `HARNESS_LIMITS` reason, not work.
@@ -62,7 +62,9 @@ all steppable**, all five checks green; `test_x86_64_decode.py` green;
   out to be this tree's own encoder omitting the REX prefix for SPL/BPL/SIL/DIL
   rather than a hardware one, and which `x86-hw-fuzz` fixed with
   `_byte_rex_required` (see "The byte-wise ALU class" below). Their LEAN and AS
-  columns are `yes`.
+  columns are `yes`, and **their FUZZ column is `yes` now too** — the pool draws
+  both — so their `BACKLOG` entries were removed and the census's anti-rot half
+  is green on them. The docstring there records the same.
 * Two CENSUS-INSTRUMENT defects, reported rather than edited (the tool is
   another claim's write set): the EX column matches a form by DISASSEMBLY
   MNEMONIC, so two encodings of one instruction are indistinguishable; and the

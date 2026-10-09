@@ -189,8 +189,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    # `wasSuccessful() and 0 or 1` is always 1: `and`/`or` do not associate the
+    # way the sentence reads, so the file exited non-zero even on OK and its
+    # PASS/FAIL was unreadable by exit code. `test_formal_field_walk.py` has the
+    # conditional spelling this now uses.
+    result = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                           exit=False).result
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":

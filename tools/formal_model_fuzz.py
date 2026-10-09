@@ -453,31 +453,35 @@ def gen_flagged_alu(rng, free):
     to catch and did (`tools/formal_isa_census.py`'s `BACKLOG` no longer names
     it).
 
-    **`TST` is NOT here and its absence is a gap of its own**, which is this
-    pool's version of the "a lowering no fuzz case draws is not a lowering"
-    question: `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test`
-    since 2026-10-05, `arm64_step` has had `work_step_tst` for weeks, and the
-    census's FUZZ column still reads `NO` because nothing in this file spells
-    it — so `tools/formal_isa_census.py`'s
-    `test_every_emitted_form_has_a_model_a_fuzz_case_and_an_as_check` is red on
-    that row today. Filed as `bugs/FORMAL_the_flagged_fuzz_pool_does_not_draw_
-    tst.md`; not fixed here because the pool is another claim's area.
+    **`TST` is here because its absence was a gap of its own** — this pool's
+    version of the "a lowering no fuzz case draws is not a lowering" question.
+    `encode_tst_xn_xm` is emitted by `_emit_branch_unless_and_test` since
+    2026-10-05 and `arm64_step` has had `work_step_tst` for weeks, but the
+    census's FUZZ column read `NO` because nothing in this file spelled it, so
+    `tools/formal_isa_census.py`'s `test_every_emitted_form_has_a_model_a_fuzz_
+    case_and_an_as_check` was red on that row. `TST`'s answer is
+    `arm64_logic_flags` with C and V CLEAR, which is exactly the semantics a
+    pool arm has to agree with: the flags half of the generator is where that
+    gets compared against the CPU. (`CMN`, the `ADDS`/`Rd = 31` twin, is drawn
+    by `gen_flags`, so the census reads `yes` for it already.)
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
-    k = rng.randrange(6)
+    k = rng.randrange(7)
     if k == 0:
         return "adds x%d, x%d, x%d" % (d, n, m), A.encode_adds_xd_xn_xm(d, n, m)
     if k == 1:
         return ("smulh x%d, x%d, x%d" % (d, n, m),
                 A.encode_smulh_xd_xn_xm(d, n, m))
     if k == 2:
+        return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
+    if k == 3:
         return ("add x%d, x%d, x%d, lsl #3" % (d, n, m),
                 A.encode_add_xd_xn_xm_lsl3(d, n, m))
-    if k == 3:
+    if k == 4:
         return ("add x%d, x%d, x%d, lsl #4" % (d, n, m),
                 A.encode_add_xd_xn_xm_lsl4(d, n, m))
-    if k == 4:
+    if k == 5:
         return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
     return ("sub x%d, x%d, #%d, lsl #12" % (d, n, imm),
