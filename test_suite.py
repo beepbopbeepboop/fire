@@ -1201,7 +1201,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
+                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -2060,7 +2060,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 2,
+    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,

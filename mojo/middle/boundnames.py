@@ -341,3 +341,19 @@ def bound_names_in_order(body, params=None) -> list:
     for stmt in body or []:
         _lbn_compr_targets(bound, stmt)
     return list(bound)
+
+
+def bound_name_set(body) -> set:
+    """The names `body` binds, as a plain `set` -- for COMPILED callers.
+    `bound_names_in_order` threads an `_OrderedNames` (a duck-typed Python
+    class) through `_lbn_walk`, whose parameter is annotated `set`; compiled, the
+    walk then treated that object's header as a hash table and its first `add`
+    ran away (a set growing without bound, 40 GB, SIGKILL) inside the first
+    `--dump-full` of any function with an assignment. The order is not needed
+    by the one compiled caller (`infra_infer._returned_param_containers`
+    asks membership), so it gets a real set."""
+    bound: set = set()
+    _lbn_walk(bound, set(), body)
+    for stmt in body or []:
+        _lbn_compr_targets(bound, stmt)
+    return bound
