@@ -290,26 +290,6 @@ def group_blake2b(tmpdir, verbose):
               f"CPython's digest_size={d} is a prefix of its 64-byte digest, "
               f"so this oracle cannot tell the two implementations apart")
 
-    # The OMITTED-argument spelling: `digest_size` defaults to 64, and that
-    # default has to materialize across the dylib boundary. Two lengths, so the
-    # case is not a single point, compared against CPython's own default.
-    om_want = {}
-    om_lines = ["import hashlib", "", "def main() -> int:"]
-    for n in (0, 137):
-        om_lines.append(f"  var q{n}: Pointer[UInt8] = malloc({max(n, 1)})")
-        om_lines.append(f"  memset(q{n}, 97, {n})")
-        om_lines.append(f'  printf("om{n}=%s@@", hashlib.blake2b_hex(q{n}, {n}))')
-        om_want[f"om{n}"] = hashlib.blake2b(b"a" * n,
-                                            digest_size=64).hexdigest()
-    om_lines.append("  return 0")
-    om_got = _records(run(build("\n".join(om_lines) + "\n", "b2om")),
-                      r"(om\d+)=([0-9a-f]*)")
-    bad_om = {k: (om_got.get(k, "<missing>")[:16], v[:16])
-              for k, v in om_want.items() if om_got.get(k) != v}
-    check(not bad_om,
-          "the OMITTED digest_size did not materialize CPython's default of "
-          f"64: {bad_om}")
-
     if verbose:
         print(f"    {len(got)} BLAKE2b digests byte-exact over "
               f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes")

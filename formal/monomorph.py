@@ -247,9 +247,83 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
             if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
     if not drop:
         return stmts
+    # …and a template whose type parameters are all UNUSED in its body is not
+    # parametric: every instantiation produces the identical declaration text,
+    # so it is extensionally a concrete struct and a BARE construction of it
+    # (`Marker(v)`, no bracket) names a declaration this image can compile. It
+    # is KEPT, not dropped, exactly when `stmts` itself constructs it that way,
+    # so a template nobody writes without a bracket is still dropped and the
+    # analysis of its body (which may read a bracket parameter) is still
+    # skipped. `bugs/FORMAL_generic_local_binding_has_no_home.md` is the
+    # measurement: `struct Marker[T: AnyType]: var v: Int` with
+    # `var m = Marker(b.a)` was refused as "nothing this image can see about
+    # 'm's binding", while `Marker[Int](b.a)` built — the base name had no
+    # declaration because the body was dropped and no bracket asked for an
+    # instantiation.
+    from formal import model as M                    # lazy — cycle
+    bare = set()
+    for st in stmts:
+        for node in M.iter_nodes(st):
+            if (isinstance(node, F.CallExpr)
+                    and isinstance(node.func, F.IdentExpr)
+                    and node.func.name in drop):
+                bare.add(node.func.name)
+    for name in list(drop):
+        if name in bare and _struct_template_params_are_unused(src, name):
+            drop.discard(name)
+    if not drop:
+        return stmts
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
+
+
+def _struct_template_params_are_unused(src: str, name: str) -> bool:
+    """True when none of struct template `name`'s type parameters occurs in its
+    BODY.
+
+    The parameter list is read out of the same declaration `_template_source`
+    extracts and `elaborate.type_param_names` names; the HEADER's bracket is
+    removed before the search, because a parameter's own declaration
+    (`[T: AnyType]`) must not count as a use. Everything after the matching
+    bracket is body — comments included — so a comment that mentions the
+    parameter is read as a use, the direction that keeps this from reducing a
+    template whose body a reader might still need to see substituted.
+
+    A template with no type parameters at all answers False: `template_kind`
+    filed it as a template, but a declaration with an empty bracket is not one
+    this rule has anything to say about, and the drop stands.
+    """
+    import elaborate                                # lazy — module docstring
+    template_src = _template_source(src, name, KIND_STRUCT)
+    params = elaborate.type_param_names(template_src)
+    if not params:
+        return False
+    body = _template_body_text(template_src)
+    return not any(re.search(rf"\b{re.escape(p)}\b", body) for p in params)
+
+
+def _template_body_text(template_src: str) -> str:
+    """`template_src` with the bracket parameter list removed from its header.
+
+    Found by DEPTH and not by a line: a parameter list may wrap
+    (`struct Pair[T: AnyType,\n U: AnyType]:`), and a line-based split would
+    leave the second parameter's declaration in the text and read it as a use.
+    A declaration with no bracket is returned unchanged.
+    """
+    open_i = template_src.find("[")
+    if open_i < 0:
+        return template_src
+    depth = 0
+    for i in range(open_i, len(template_src)):
+        ch = template_src[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return template_src[:open_i] + template_src[i + 1:]
+    return template_src
 
 
 def template_kind(src: str, name: str) -> str:
