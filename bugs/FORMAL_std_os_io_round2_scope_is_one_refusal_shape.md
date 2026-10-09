@@ -12,10 +12,13 @@ was the resolver bug the probe's own fix surfaced — a dotted import could bind
 nearer root's leaf instead of the module it spells — and it was fixed by
 `a4cdab9a` (measured: 31 such bindings over the stdlib). The item had cited a doc
 that was deleted with that fix, so the citation now names the bug and the commit
-instead. §0.4's message pin was also red on arrival (`work/formal248-docs`) and
-is green again: a later merge dropped two substrings the pin asserts, both
-restored. The per-file table's two features are still `formal19-1`'s and
+instead. The per-file table's two features are still `formal19-1`'s and
 `formal16-2`'s, and §2's table remains the map of what is outside this scope.
+
+(§0.4's message pin is red on this worktree's base — a later merge dropped two
+substrings the pin asserts — and the fix is `work/formal114-docs`'s
+`bfdd6258`, which the integrator's branch already carries; it is deliberately
+NOT repeated on this branch.)
 
 **Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
 (§0.4) — the false clause "nothing this backend could add" is gone and the
