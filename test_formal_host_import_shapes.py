@@ -325,13 +325,24 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         register, frame slot or `__DATA` word for it".
 
         `importlib.util` is the same capability reached one step in:
-        `importlib.util.spec_from_file_location(path)` and
-        `module_from_spec(spec)` load a module BY PATH, so the row is a
-        `FIELD` read of a module-level name rather than a `DEAD` one. An
-        earlier version of this test asserted `DEAD` for both and was wrong,
-        because the reader it was checking had `import a.b` binding `a.b` — a
-        false `DEAD` about a live file, which is the one answer this tool must
-        never give.
+        `importlib.util.find_spec(name)` locates a module,
+        `spec_from_file_location(path)` names one BY PATH and
+        `module_from_spec(spec)` builds it, so the row is a `FIELD` read of a
+        module-level name rather than a `DEAD` one. An earlier version of this
+        test asserted `DEAD` for all of them and was wrong, because the reader
+        it was checking had `import a.b` binding `a.b` — a false `DEAD` about a
+        live file, which is the one answer this tool must never give.
+
+        **The third name is `find_spec`, and it arrived with
+        `test_formal_imports.py`'s tier precondition check** (`f4aca5cd`, "a
+        name with nothing to IMPLEMENT gets its own tier"), which measures
+        CPython's own `importlib.util.find_spec` to decide whether a stdlib
+        name has source on this host. That use is an ORACLE rather than a
+        capability the file wants modelled (see
+        `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+        §4.1), but this tool has no oracle column and counts it as the same
+        `FIELD`/`WORD` read the other two are — which is why the row's name set
+        is the three, not the two.
         """
         builtins = next((r for r in self.rows if r["name"] == "builtins"), None)
         if builtins is None:
@@ -347,12 +358,15 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         self.assertTrue(loader["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(loader["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is blocked on two names, and "
-                         "they are the two that load a module by PATH — an "
-                         "embedded CPython, which is why the row is tiered "
-                         "`unreachable` and not `modelled`")
+                         "the importlib.util row is blocked on the module "
+                         "machinery of an embedded CPython — `find_spec` "
+                         "locates a module, `spec_from_file_location` names "
+                         "one by PATH and `module_from_spec` builds it — which "
+                         "is why the row is tiered `unreachable` and not "
+                         "`modelled`")
 
     def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
         """`--dead` is the set the ranking CANNOT see, so its ratchet is the
