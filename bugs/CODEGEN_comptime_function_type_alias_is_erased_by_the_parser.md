@@ -10,11 +10,11 @@ value.
 
 ## Part 1 — a function-type alias is ERASED, so its callee has no signature
 
-This is the finding that closes the open question in
-`bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`.
-That doc names two options and says "which one is a decision rather than an
-implementation". The first option is **not implementable**, and not for want of
-effort: **the signature is not in the tree.**
+This is the finding that closes the open question the
+`work/formal18-tile-specialization` lowering raised. Its two options were called
+"a decision rather than an implementation". The first option is **not
+implementable**, and not for want of effort: **the signature is not in the
+tree.**
 
 `tile.mojo:20` declares
 
@@ -227,9 +227,8 @@ files depend on it, not 10 — see the census table below.
 ### Part 3, measured again 2026-10-03 (`work/formal18-tile-specialization`): the ERASURE is what the INTERPRETER trips over too, and it is a diagnostic with no position
 
 Re-measured while landing the specialization-through-a-function-value lowering
-(`FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
-§"What landed"), because the differential test for that construct wanted the
-stdlib's own spelling and could not have it.
+(`work/formal18-tile-specialization`), because the differential test for that
+construct wanted the stdlib's own spelling and could not have it.
 
 `fire.py run` on the smallest possible file that uses it:
 
