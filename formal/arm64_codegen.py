@@ -1948,19 +1948,26 @@ dylib_exports: list = None, globals_base: int = None,
         # enforces — is not read.
         #
         # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
+        # saves it, so it is parked in X14 and restored before anything else
+        # reads X0. X13 is free for the read below: locals are X19..X28
         # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
         # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
         # …and argument 0 goes back, from X14.
         self.asm.emit(encode_mov_zr_xn(0, 14))
-        # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value
-        # has to be moved into it before the cache store. Storing X16 directly
-        # wrote the scratch's own address into the limit word, and the next
-        # guarded prologue then read an address in `__DATA` as a byte count —
-        # `address - 262144` is still enormous, so neither clamp caught it.
-        self.asm.emit(encode_mov_zr_xn(16, 13))
+        # **`rlim_cur` is READ OUT OF THE STRUCT, not taken from X0.** X0 holds
+        # `getrlimit`'s RETURN VALUE (0 on success), and the first version of
+        # this parked THAT and stored it into the limit word — so the cached
+        # limit was ALWAYS ZERO, the budget subtraction underflowed to a huge
+        # unsigned value and the MIN/BUDGET clamps pinned it to
+        # `STACK_FLOOR_BUDGET_BYTES`. The guard therefore never read the
+        # process's limit at all: it refused at 59 on the default 8176 KiB stack
+        # (where 7.5 MiB happens to fit) and died of SIGSEGV at every depth
+        # under `ulimit -s 2048`, which is the crash this whole mechanism exists
+        # to replace. X16's scratch address is caller-saved across the call, so
+        # it is re-derived here rather than trusted; the first word at that
+        # address is `rlim_cur`.
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
         self._adrp_add_abs(17, limit_word)
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
         if False:

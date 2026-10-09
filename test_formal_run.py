@@ -15461,8 +15461,14 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
 #: reduced limit gave SIGSEGV (exit 139) at every depth from 100 upwards: a guard
 #: whose budget exceeds the process's real stack never fires, and the process
 #: runs off the end of it.
+#:
+#: `{depth}` is filled per architecture, because the SHALLOW row's depth is a
+#: property of the FRAME: under 2 MiB an arm64 frame (128 KiB) affords about 14
+#: levels and an x86-64 frame (16 KiB) about 111, so a single depth that answers
+#: on one backend refuses on the other. `depth` is the depth baked into the
+#: source and the value the shallow row must print.
 _REDUCED_STACK_SOURCES = (
-    # name, program, the depth that must still ANSWER, the depth that must refuse
+    # name, program template, per-arch depth, must_refuse
     ("reduced_stack_a_shallow_recursion_still_answers",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15470,8 +15476,9 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\\n\", deep(100))\n"
-     "    return 0\n", 100),
+     "    printf(\"%d\\n\", deep({depth}))\n"
+     "    return 0\n",
+     {"x86_64": 100, "arm64": 5}, False),
     ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15479,7 +15486,25 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    return deep(5000)\n", 5000),
+     "    return deep({depth})\n",
+     {"x86_64": 5000, "arm64": 5000}, True),
+    # The depth the doc named: `budget // frame_bytes` under 2 MiB, where the
+    # usable stack is an EXACT whole number of arm64 frames (14) and so a budget
+    # that is not derived from the real limit has no slack to hide in — the
+    # crossing frame lands on the guard page and the process dies of SIGSEGV
+    # rather than refusing. The budget is `limit - MARGIN - frame`, so this is
+    # `(2048 - 256 - 128) KiB // 128 KiB = 13` on arm64 and
+    # `(2048 - 256 - 16) KiB // 16 KiB = 110` on x86-64; one frame past each is
+    # stated so the row is past the boundary rather than exactly on it.
+    ("reduced_stack_at_the_budget_frame_count_is_refused",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return deep({depth})\n",
+     {"x86_64": 111, "arm64": 14}, True),
 )
 
 
@@ -15487,22 +15512,18 @@ _REDUCED_STACK_SOURCES = (
 #: gap, not a skip, and per architecture rather than per row because the whole
 #: group is one defect.
 #:
-#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
-#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
-#: `call getrlimit` there is exactly what
-#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
-#: moved without first fixing the extern-stub layout: an extern call emitted
-#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
-#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
-#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
-#:
-#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
-#: than the process's real stack never fires — so under a reduced `ulimit -s` it
-#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
-#: next step.
-_REDUCED_STACK_DEFERRED = {
-    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
-}
+#: **arm64 is no longer here.** The guard reads `RLIMIT_STACK` in its own
+#: prologue, and it now reads `rlim_cur` out of the `struct rlimit` the call
+#: filled (`arm64_codegen._emit_stack_floor_guard`) rather than `getrlimit`'s
+#: return value in X0 — the first version parked X0, so the cached limit was
+#: always zero, the budget underflowed and the clamps pinned it to
+#: `STACK_FLOOR_BUDGET_BYTES`. That made arm64 refuse at 59 on the default 8176
+#: KiB stack and SIGSEGV at every depth under a reduced one, which is why this
+#: row was deferred. With the load fixed the two rows below run on arm64 as well
+#: as x86-64. The startup-stub alternative the deferral named is still what
+#: `bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` records; it is
+#: not needed, because the read stays in the guard.
+_REDUCED_STACK_DEFERRED = {}
 
 
 def reduced_stack_cases(tmpdir, verbose=False):
@@ -15514,10 +15535,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
     written that way.
     """
     out_rows = []
-    for name, src, depth in _REDUCED_STACK_SOURCES:
-        path = os.path.join(tmpdir, name + ".mojo")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(src + "\n")
+    for name, template, depths, must_refuse in _REDUCED_STACK_SOURCES:
         for arch in ("x86_64", "arm64"):
             if arch in _REDUCED_STACK_DEFERRED:
                 out_rows.append((
@@ -15525,20 +15543,24 @@ def reduced_stack_cases(tmpdir, verbose=False):
                     "DEFERRED on %s — see %s"
                     % (arch, _REDUCED_STACK_DEFERRED[arch])))
                 continue
+            depth = depths[arch]
+            src = template.format(depth=depth)
+            path = os.path.join(tmpdir, "%s_%s.mojo" % (name, arch))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src + "\n")
             out = os.path.join(tmpdir, "%s_%s" % (name, arch))
             rc, text = build_formal(path, out, backend=arch)
             if rc != 0 or not os.path.isfile(out):
                 out_rows.append((name, arch, False,
                                  "build failed: " + text.strip()[-200:]))
                 continue
-            # 2 MiB: below this backend's 7.5 MiB budget on x86-64 and its
-            # 128 KiB frame on arm64 leaves room for the shallow case and not for
-            # the deep one, so a threshold that reads the limit and one that does
-            # not are told apart by these two rows together.
+            # 2 MiB: below this backend's 7.5 MiB budget, so only a threshold
+            # that reads the limit refuses — and the per-arch depth above is what
+            # leaves room for the shallow case and not for the deep one.
             run = subprocess.run(
                 ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
                 capture_output=True, text=True, timeout=RUN_TIMEOUT)
-            want = 2 if depth >= 5000 else 0
+            want = 2 if must_refuse else 0
             if run.returncode != want:
                 out_rows.append((
                     name, arch, False,
@@ -15559,9 +15581,10 @@ def reduced_stack_cases(tmpdir, verbose=False):
                 else:
                     out_rows.append((name, arch, True, ""))
             else:
-                if "100" not in run.stdout:
+                if str(depth) not in run.stdout:
                     out_rows.append((name, arch, False,
-                                     "stdout %r does not answer" % run.stdout[:80]))
+                                     "stdout %r does not answer %d"
+                                     % (run.stdout[:80], depth)))
                 else:
                     out_rows.append((name, arch, True, ""))
     return out_rows
