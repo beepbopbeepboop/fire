@@ -10,6 +10,25 @@ question in somebody else's area (a one-word struct whose only field is a nested
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
 
+**Status (2026-10-08, `work/formal248-docs`): the first arrow is now the
+bare-call row and NOT the frame-identity question the section below names.**
+Measured on this tree, one `fire.py build --formal --no-prove` per module:
+`std/builtin/builtin_slice.mojo` refuses at `Slice.write_to: 'FormatStruct' is
+called, and it is imported from 'std.format._utils'`, and
+`std/utils/variant.mojo` — the file whose `get_discriminant` is this doc's
+second arrow — now refuses one module earlier, at `Allocation.write_to`'s same
+`FormatStruct` call. So the FIRST wall between the 13-file row and this
+document's subject is
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+(a bare call to a generic template), which is `formal19-1`'s and is a demand
+walk rather than a value model. **Nothing in this document's subject changed**
+— `Optional`'s representation is still the frame-away tag problem the sections
+below describe — and the finding is that a session picking this up must
+measure the first refusal before building anything, which the two "Re-measured"
+sections already say and this one re-confirms at a third position in the
+chain. `std/collections/binary_heap.mojo` now BUILDS on arm64, which is how far
+the queue in front of this row has moved.
+
 This doc exists to say what the frame-holder document — deleted 2026-10-05,
 consolidated, because every arm of it was closed and the row it measured had
 moved three refusals deeper — left open, with the measurement that settles the
