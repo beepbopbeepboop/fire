@@ -10,6 +10,23 @@ question in somebody else's area (a one-word struct whose only field is a nested
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
 
+**Status 2026-10-08 (`work/formal217-docs`): the SUBJECT is answered, and the
+headline above is stale.** `Optional[T]` has a NICHE representation now — an
+`Optional[T]` value is the payload word and `None` is a word `T` cannot produce
+(`formal/model.py::optional_none_word`, `formal/build.py::apply_optional_none_
+representation`, both backends and the Lean mirror) — and it landed under this
+doc's successor, `bugs/FORMAL_optional_needs_a_niche.md`, whose Status says of
+this file exactly that: *"its 'NOT FIXED' headline is wrong as of this commit."*
+What is still open here is only the payloads with **no** niche —
+`Optional[Int]` and the rest of the full-word family — which need the tagged
+TWO-WORD value; that is `FORMAL_optional_needs_a_niche.md` §2's row, and it is
+not the `builtin_slice` row's terminal cause any more (that moved to
+`FormatStruct`, a bare call to a generic template —
+`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`). The
+three chain revisions below are kept as history; a reader picking this up should
+read the successor's Status first and measure the arrow §"Re-measured
+2026-10-03" names, not the `__mlir_op` one this doc's first revision put first.
+
 This doc exists to say what the frame-holder document — deleted 2026-10-05,
 consolidated, because every arm of it was closed and the row it measured had
 moved three refusals deeper — left open, with the measurement that settles the
