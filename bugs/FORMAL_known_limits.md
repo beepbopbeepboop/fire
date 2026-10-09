@@ -756,8 +756,8 @@ template; it stopped being true when `__mlir_op` was recognised as spelling a
 specific dialect operation and one sentence was kept for all of them.
 
 `formal/model.py`'s `mlir_dialect_op_refusal` now classifies the operation, and
-the measurement behind it is in
-`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §Correction.
+the measurement behind it is a census of the stdlib's dialect sites, read off
+each operand's DECLARED type rather than off the operation's name.
 In short, over the 259 sites / 104 operations in the stdlib: 14 operations / 76
 sites denote **no value at all** (an effect — a store, a trap, an ownership
 marker — where "no representation" remains a true statement), 12 operations /
@@ -861,9 +861,8 @@ the census doc:
     for a receiver whose DECLARED type says `Bool`
     (`build._lower_dialect_select`), and `std/utils/_select.mojo` swept
     `codegen -> pass` on 2026-10-03. It needed the DECLARATION rather than a
-    fifth kind, and
-    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`
-    records why the kind would have been the wrong tool. It is also the natural
+    fifth kind, and the corpus census records why the kind would have been the
+    wrong tool. It is also the natural
     first target for the operand-type work, being reachable and mostly word-typed
     where `std/simd.mojo` is 22 sites of pure vector.
 
