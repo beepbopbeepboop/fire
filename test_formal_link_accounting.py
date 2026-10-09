@@ -647,19 +647,6 @@ HOST_SET_ADDED_TIERS = {
     "genericpath": "modelled",
     "ntpath": "modelled",
     "nturl2path": "modelled",
-    # ── and the five CPython `find_spec` decides of the unclassified set, added
-    # 2026-10-07 by the worker holding `FORMAL_stdlib_module_names_are_not_
-    # classified.md`.  Same measurement, same rule and the same direction as the
-    # four above: `find_spec` returns NO SPEC for each on this host, so the
-    # object (the gdbm library, Tcl/Tk, and the Windows overlapped-I/O, Win32 API
-    # and WMI objects) is missing from the target rather than the module being
-    # unwritten.  §0.5 named these as the entries with a measurement behind them;
-    # all five are private, so the public count is unchanged.
-    "_gdbm": "unreachable",
-    "_overlapped": "unreachable",
-    "_tkinter": "unreachable",
-    "_winapi": "unreachable",
-    "_wmi": "unreachable",
 }
 
 
@@ -1110,56 +1097,100 @@ def test_audit_fires_on_a_real_build():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_raise_flushes_stdout():
-    """A `raise` must not throw away what the program already printed.
+def test_a_raise_terminates_and_flushes_on_both_backends():
+    """The uncaught-`raise` contract, pinned where the gate will run it.
 
-    This is the gate-resident half of the class `test_formal_x86_64_parity.py`'s
-    `FAILING_CASES` also carries (that file is in no bucket, so its rows run in
-    no gate): the arm64 backend used to lower a `raise` to the raw Darwin `exit`
-    SYSCALL emitted inline, which enters the kernel directly and runs none of
-    libc's user-space `exit` — so a block-buffered stdout (every pipe and every
-    `subprocess.run(capture_output=True)`) lost every byte the program had
-    written. x86-64 was already right, because its `_emit_call_exit` is a CALL
-    to libc's `exit(3)`, so the same source printed `before` on one machine and
-    NOTHING on the other. `formal/arm64_codegen.py::_emit_exit` now emits
-    `fflush(NULL)` before the trap and all of its call sites share it.
+    `bugs/FORMAL_no_exceptions.md` records that on this path a `raise` is a
+    TERMINATION rather than a value a caller can catch, and its third next step
+    asks for a three-case group pinned beside THIS file — because no
+    gate-resident test raised on the path, and the arm64 stdout flush
+    divergence (`bugs/FORMAL_raise_skips_the_stdio_flush.md`) sat unnoticed
+    through two host-module waves as a result.  The group is here, and the
+    measured facts are:
 
-    Both backends, because the defect WAS the divergence between them: a
-    one-sided assertion stays green through the whole class. The control is the
-    same source with `return 1`, which reaches the same exit through libc's
-    `__main` and always flushed.
+      * `print` then `raise 7`: the line printed before the raise must survive
+        and the status must be nonzero, on BOTH backends — the flush was
+        arm64-only, so a one-sided assertion would have been green throughout
+        the bug;
+      * `print` then `return 1`: the CONTROL, same output and same status, so a
+        failure here is about the raise and not about stdout;
+      * `try:` whose `except` arm has a body: REFUSED by name on both backends,
+        because `formal` has no unwinder and the arm's effects would be
+        silently absent from the image that runs.  The refusal IS the assertion
+        — a build that succeeds is the failure.
+
+    CPython is the oracle for the first two: it prints the line and exits 1.
     """
-    import subprocess
     import shutil
-    d = tempfile.mkdtemp(prefix='raiseflush_')
-    try:
-        src = os.path.join(d, 'raise.mojo')
-        open(src, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    raise 7\n')
-        ctl = os.path.join(d, 'return.mojo')
-        open(ctl, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    return 1\n')
-        for backend in ('arm64', 'x86_64'):
-            for path, what in ((src, 'a raise'), (ctl, 'a return')):
-                out = os.path.join(d, f'{what.split()[-1]}.{backend}')
-                r = subprocess.run(
-                    [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
-                     '--formal', '--no-prove', f'--backend={backend}', '-o', out,
-                     path],
-                    capture_output=True, text=True, timeout=600, cwd=REPO)
-                if not check(r.returncode == 0,
-                             f'{what} builds on {backend}',
-                             (r.stdout + r.stderr)[-300:]):
-                    continue
-                run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=120)
-                check('before@@' in run.stdout,
-                      f'stdout survives {what} on {backend} (the exit flushes)',
-                      f'stdout={run.stdout[:80]!r} exit={run.returncode}')
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    import subprocess
+    RAISES = ("def main(n):\n"
+              "    print('before')\n"
+              "    raise 7\n")
+    CONTROL = ("def main(n):\n"
+               "    print('before')\n"
+               "    return 1\n")
+    HANDLER = ("def main(n):\n"
+               "    print('before')\n"
+               "    try:\n"
+               "        print('body')\n"
+               "    except:\n"
+               "        print('caught')\n"
+               "    print('after')\n"
+               "    return 0\n")
+
+    def build_run(backend, src, tag):
+        """Build `src` for `backend` and return `(CompletedProcess|None, err)`.
+
+        A build failure is `(None, output)`; a build success is
+        `(run result, None)`.  The `arch -x86_64` wrapper is the same one
+        `test_formal_x86_64_parity.py` uses: this process is arm64, so a built
+        x86-64 image has to be run under Rosetta.
+        """
+        d = tempfile.mkdtemp(prefix='exc-contract-')
+        try:
+            path = os.path.join(d, tag + '.mojo')
+            with open(path, 'w') as f:
+                f.write(src)
+            out = os.path.join(d, tag + '.' + backend)
+            r = subprocess.run(
+                [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
+                 '--formal', '--no-prove', '--backend=' + backend, '-o', out,
+                 path],
+                capture_output=True, text=True, timeout=600, cwd=REPO)
+            if r.returncode != 0:
+                return None, (r.stdout + r.stderr)
+            argv = ([out] if backend == 'arm64' or sys.platform != 'darwin'
+                    else ['arch', '-x86_64', out])
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            return p, None
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    for backend in ('arm64', 'x86_64'):
+        for tag, src in (('raise', RAISES), ('control', CONTROL)):
+            p, err = build_run(backend, src, tag)
+            check(p is not None,
+                  f'{backend}: the {tag} program builds (--no-prove)', err)
+            if p is None:
+                continue
+            check(p.stdout == 'before\n',
+                  f'{backend}: the {tag} program flushed what it printed '
+                  f'before it stopped — this is the arm64-only divergence '
+                  f'`bugs/FORMAL_raise_skips_the_stdio_flush.md` measured',
+                  repr(p.stdout))
+            check(p.returncode == 1,
+                  f'{backend}: the {tag} program leaves status 1, CPython\'s '
+                  f'answer for an uncaught raise / an explicit return 1',
+                  f'status {p.returncode}')
+        p, err = build_run(backend, HANDLER, 'handler')
+        check(p is None,
+              f'{backend}: a try/except arm with a BODY is refused, not '
+              f'lowered to something that silently drops it — a build that '
+              f'succeeds here is the regression this row exists for', err)
+        check(p is None and 'handler arm with a body' in (err or ''),
+              f'{backend}: the refusal NAMES the construct (a bare message '
+              f'about the try would send a reader to the wrong place)',
+              err)
 
 
 def test_sorry_note():
@@ -1427,7 +1458,7 @@ def main():
     test_libsystem_provider()
     test_bind_audit()
     test_audit_fires_on_a_real_build()
-    test_raise_flushes_stdout()
+    test_a_raise_terminates_and_flushes_on_both_backends()
     test_sorry_note()
     test_hostmods_are_invisible_to_every_other_resolver()
     test_hostmod_cross_references()
