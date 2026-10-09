@@ -649,6 +649,13 @@ SET_CASES = [
      "set difference over STRING elements, where the membership scan compares "
      "`char *` ADDRESSES -- the same limit as the union's dedup and as "
      "`bugs/FORMAL_set_value_model.md`"),
+    ("s_set_result_is_a_set", ["a = {1, 2, 3}", "b = {3, 4}", "c = a & b",
+                               "d = (a | b) - c", "u = 0",
+                               "for x in d:", "    u = u + x"], "u",
+     "a set that is the RESULT of one set operation used as an operand of the "
+     "next: `c = a & b` (a NAME this function bound) and `(a | b)` (a nesting "
+     "expression). `_expr_is_set_like` must recognise both as sets or the "
+     "second operator is refused as having a non-set operand"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
@@ -880,6 +887,7 @@ BACKEND_ONLY = {
     "s_sub": "x86_64",
     "s_andassign": "x86_64",
     "s_difference_str": "x86_64",
+    "s_set_result_is_a_set": "x86_64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

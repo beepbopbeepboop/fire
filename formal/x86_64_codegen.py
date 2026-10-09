@@ -10126,11 +10126,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         if isinstance(e, F.IdentExpr):
             return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "&", "^", "-"):
+            # `+` is a concatenation, `|` a union and `&`/`^`/`-` set algebra;
+            # all leave a SET a set where a side is one, and a set combined
+            # with a non-set is a CPython `TypeError` this path refuses
+            # downstream (so the predicate is only ever consulted on programs
+            # that build).  The three set-algebra operators are here because
+            # `c = a & b` must make `c` a set for `c - d` to be recognised —
+            # this backend then refuses that pair by name.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
         return False
