@@ -2,9 +2,50 @@
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
-MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
-wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
-`7ac78995`, with every claim below measured on that tree.
+MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`), and §4.1's
+DEMAND-WALK HALF FOR A BARE LITERAL IS DONE (2026-10-08, `work/formal236-docs`);
+the comptime-value wall is OPEN only for the shapes named in the next paragraph.
+Filed 2026-10-05 on `work/formal27-5` at `7ac78995`, with every claim below
+measured on that tree.
+
+**What landed 2026-10-08 (`work/formal236-docs`), and why it was small.** §4.1
+says the wall is "a value substitution, not a text substitution", and the
+substitution half was in fact already there: `monomorphize_source` is a
+whole-word textual substitution that does not read a parameter's KIND, and
+`MM.instantiate("struct Tagged[T, origin: Int]: …", "Tagged", ("Int", "0"))`
+already produced `struct Tagged_…_0: var v: Int` before this branch. **The only
+missing piece was the demand walk's READER**: `formal/monomorph.py::type_arg_text`
+refuses a bare literal at the top level by design — an all-values bracket is the
+comptime-specialization shape `tile[2, 3]` the local machinery owns — so
+`Tagged[Int, 0]` was dropped at the bracket, no demand was created, and the call
+fell through to `formal/model.py`'s "compile-time explicit-parameter list"
+refusal, which is §1's message.
+
+`_bracket_type_args` now reads a bare literal (`7`, `0`, `-3`, `"x"`, `True`,
+`None`) as a VALUE argument **when at least one other element of the same bracket
+spelled a type**, through the new `_value_literal_arg_text`. A bracket that is
+ENTIRELY values still returns `[]` exactly as before, so `Pair[2]` and
+`tile[2, 3]` stay the local machinery's and `test_formal_monomorph.py`'s
+`a_literal_display_…` row is unchanged. Measured end to end on both
+architectures: `plus[Int, 7](10)`, `plus[Int, 0](10)` and `plus[Int, -3](10)`
+print `17 / 10 / 7`, the same numbers CPython prints, and
+`struct Tagged[T, origin: Int]` with `def at(self) -> Int: return origin` prints
+`7 / 0` for `Tagged[Int, 7]` and `Tagged[Int, 0]` — two boundary symbols whose
+bodies carry the two different values. Pinned by
+`test_formal_monomorph.py::test_a_bare_literal_beside_a_type_is_a_value_argument`.
+
+**What is still open, stated so nobody re-derives it.** (a) an ALL-VALUES bracket
+on an imported template, and (b) a bare NAME the reading scope binds as a value
+(`comptime n = 5 ; plus[Int, n](10)`), both stay non-demands — the first is the
+local machinery's by design, and the second has no compile-time fold on this
+path. **§1's standing instance is neither**: `ImmStaticOrigin` is a bare, unbound
+name and `all_instantiation_calls` already collects it, so
+`Span[StaticString, ImmStaticOrigin]` is blocked further down — the alias does
+not fold because `std/origin/__init__.mojo`'s initializer is
+`Origin[_mlir_attr[…]]()` and that module does not build here (see
+`_UNRESOLVABLE_NAME_SHAPES` in `formal/model.py`), which is another module's fact
+rather than this backend's reader. So this is real partial progress and not the
+whole of §4.1.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
@@ -105,52 +146,45 @@ written, whose second element is not a type. Neither existing doc lists it;
 §8 of the monomorph doc's "what is not here, deliberately" does not mention it,
 which is where `FORMAL_std_os_io_round2_…` §3 looked for it.
 
-## 3. Two messages in this neighbourhood are wrong about the source — BOTH FIXED
+## 3. Two messages in this neighbourhood are wrong about the source
 
-Both are the defect this repository calls `refuse_without:` — a next step that is
-wrong about the code being compiled. **Both are now fixed**, and the paragraphs
-below are kept as the record of the shapes: row 5's message was already true of
-the program when `94b29b12` (2026-10-04) gave the dotted case its own sentence
-(`formal/model.py::dotted_specialization_refusal`), and row 3's advice was fixed
-2026-10-07 in `specialization_call_refusal` (below). Neither was the wall. What
-remains is §4 step 1.
+Both are in the family `formal/model.py::imported_callee_refusal` writes, both
+are reachable from a program whose source is correct Mojo, and both are the
+defect this repository calls `refuse_without:` — a next step that is wrong about
+the code being compiled. **They are recorded here rather than fixed, because the
+monomorphisation area is another claim's.**
 
 **Row 3's message recommends the spelling the program already uses.** For
-`unbox[Int](b)`, where `unbox` is `def unbox(t: Box[T]) -> T` — a generic
-parameter written in the SIGNATURE, with no bracket to bind:
+`unbox[Int](b)`:
 
 > `unbox[…](…)` calls a name this unit does not compile, so the brackets cannot
 > be bound. … so a call arriving here asked for none: its brackets named no type
-> argument or named a value rather than a type. **Write it as
-> `unbox[<a type>](…)`** and the library will carry the instantiation
+> argument, named a value rather than a type, or spelled the template as
+> `module.unbox`. **Write it as `unbox[<a type>](…)`** and the library will carry
+> the instantiation
 
-The program is written `unbox[Int](b)`. So the alternatives are exhausted and
-the advice is the source, which means the sentence is a dead end twice over: it
-cannot be true that "its brackets named no type argument" of a call whose
-bracket is `[Int]`. The real answer is measurable from rows 1 and 2 — **a type
-argument is a demand when the callee is a CONSTRUCTOR and is inferred rather
-than read when the callee is a plain function** — and that is what the sentence
-now says (`specialization_call_refusal`'s implicit-generic clause): write
-`unbox(…)`, the bare call, which is the same program. The advice
-"`name[<a type>](…)`" is gone, because for this shape it is the line already in
-the editor. A function whose parameters ARE spelled in brackets (`def
-twice[T](…)`) is the other half and still instantiates — the two are told apart
-by the declaration, and `test_formal_monomorph.py` now has a row for each.
+The program is written `unbox[Int](b)`. So the three alternatives are all
+exhausted and the advice is the source, which means the sentence is a dead end
+twice over: it cannot be true that "its brackets named no type argument" of a
+call whose bracket is `[Int]`. The real answer is measurable from rows 1 and 2 —
+**a type argument is a demand when the callee is a CONSTRUCTOR and is inferred
+rather than read when the callee is a plain function** — and it is one clause,
+not three alternatives.
 
-**Row 5's message blamed the module's export table for a call the program does
+**Row 5's message blames the module's export table for a call the program does
 not contain.** For `import mylib; mylib.Box[Int]()`:
 
 > `mylib` is called, and it is imported from `mylib`, so the call has to bind a
 > symbol `mylib` exports. That module does not export it …
 
 `mylib` is a MODULE, it is not called, and the program never mentions it as a
-callee. `94b29b12` fixed exactly this: `_bracketed_export_gap` now answers
-`None` for a dotted base and `dotted_specialization_refusal` names the module,
-the template, the recogniser (`comptime.specialization_name`), and the one
-spelling measured to work. So the dotted application is a **parser/lowering**
-difference rather than a demand difference, and `FORMAL_generic_monomorph_scope.md`
-§2 ("A DOTTED application — `mod.Pair[Int]()`") is still where the mechanism is
-written down.
+callee. The same shape spelled with a from-import (row 1) builds, so the dotted
+application is a **parser/lowering** difference rather than a demand difference,
+and the message should say the brackets could not be attached to the member
+rather than that the module was called. This is also the shape
+`FORMAL_generic_monomorph_scope.md` §2 is titled after ("A DOTTED application —
+`mod.Pair[Int]()`"), which is worth re-checking against row 5 before §2 is
+relied on for a dotted call.
 
 ## 4. The next step, and what it costs
 
@@ -160,14 +194,16 @@ written down.
    `origin`-typed positions. That is a value substitution, not a text
    substitution, and the mangler needs the argument's **text** — which is why
    `type_arg_text` returning `""` for a non-type is right and insufficient
-   rather than a bug to widen.
-2. ~~**The two messages**, which are independent of (1) and can be landed
-   first.~~ **DONE.** Row 5's dotted sentence landed on `94b29b12`
-   (`dotted_specialization_refusal`); row 3's advice landed 2026-10-07 in
-   `specialization_call_refusal`, pinned by
-   `test_formal_monomorph.py::test_a_bracket_on_an_implicitly_generic_function_
-   recommends_the_bare_call` on both architectures. Neither needed the value
-   model.
+   rather than a bug to widen. **HALF-DONE 2026-10-08 (`work/formal236-docs`):**
+   the substitution half already existed, and the demand walk now reads a bare
+   LITERAL when the bracket mixes it with a type (`_bracket_type_args` +
+   `_value_literal_arg_text`), so §2 row 4's `Tagged[Int, 0]()` builds and runs.
+   The all-values bracket and the bound-NAME argument are the remaining shapes;
+   see the Status at the top.
+2. **The two messages**, which are independent of (1) and can be landed first:
+   row 3's advice is a clause that can be written from the measurement in §2,
+   and row 5 needs the dotted application to say what it is. Both are the
+   `refuse_without:` class and neither needs the value model.
 3. **What NOT to do:** bind the comptime value to a plausible constant, or read
    a two-element bracket as a flat index. The first is a wrong answer, the
    second is the refusal the existing message already declines to make, and

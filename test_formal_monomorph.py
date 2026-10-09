@@ -369,80 +369,6 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
-def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
-        tmpdir):
-    """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
-
-    `formal/model.py::specialization_call_refusal` is the bracket case, and the
-    two rows above it both name a concrete type argument as a DEMAND — a struct
-    template's instantiation and a function template's. This case is the third
-    shape and the one the message used to get wrong: a function of another
-    module whose generic parameter is IMPLICIT, written in the SIGNATURE
-    (`def unbox(t: Box[T])`) with no bracket to bind. There the type is inferred
-    from the call, so `unbox(b)` is the SAME PROGRAM and builds (run below,
-    against CPython on both architectures), while the source's `unbox[Int](b)`
-    has no declaration to bind its bracket against.
-
-    The old sentence answered it with "Write it as `unbox[<a type>](…)`", which
-    is the spelling already on the line — the `refuse_without:` class of defect,
-    a repair that is wrong about correct code. The refusal now names the bare
-    call instead, and this row is what keeps the two apart: a reword that put
-    the old advice back for this shape would pass every adjoining case, because
-    neither of them writes a bracket on an implicitly generic function at all.
-    """
-    lib = ("struct Box[T]:\n"
-           "    var v: T\n"
-           "\n"
-           "def unbox(t: Box[T]) -> T:\n"
-           "    return t.v\n")
-    bracketed = ("from implib import Box\n"
-                 "from implib import unbox\n"
-                 "\n"
-                 "def main():\n"
-                 "    var b = Box[Int]()\n"
-                 "    b.v = 10\n"
-                 "    print(unbox[Int](b))\n")
-    bare = ("from implib import Box\n"
-            "from implib import unbox\n"
-            "\n"
-            "def main():\n"
-            "    var b = Box[Int]()\n"
-            "    b.v = 10\n"
-            "    print(unbox(b))\n")
-    cpython = ("class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def unbox(t):\n"
-               "    return t.v\n"
-               "\n"
-               "def main():\n"
-               "    b = Box()\n"
-               "    b.v = 10\n"
-               "    print(unbox(b))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_implicit_bracket", lib,
-                             bracketed, cpython, expect_ok=False,
-                             libname="implib.mojo")
-        check("brackets cannot be bound" in text,
-              f"[{arch}] `unbox[Int](b)` is not refused by the bracket "
-              f"sentence: {text.strip()[-300:]}")
-        check("Write it as `unbox[<a type>]" not in text,
-              f"[{arch}] the refusal still recommends `unbox[<a type>](…)`, "
-              f"which is the spelling already on the line: "
-              f"{text.strip()[-300:]}")
-        check("write `unbox(…)`" in text,
-              f"[{arch}] the refusal does not name the bare call, which is the "
-              f"same program for an implicitly generic function: "
-              f"{text.strip()[-300:]}")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_implicit_bare", lib, bare,
-                            cpython, libname="implib.mojo")
-        check(got == "10\n", f"[{arch}] printed {got!r}, expected 10")
-
-
 def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
     """`struct Box[T]` and `Box[Int]()` in ONE file — the shape that was
     refused by name, on both architectures, for every struct template.
@@ -1744,6 +1670,36 @@ def main():
     print(total(10, (4, 5)))
 """
 
+# The bare-literal half of the same construct — §2 row 4 of
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
+# the literal is what proves the value was substituted (a collapsed mangling, or
+# a body that read the parameter as a type, would print a different number). The
+# reference passes the value as an ordinary argument, exactly as
+# `VALUE_BRACKET_CPYTHON` does — the two programs are the same computation.
+VALUE_LITERAL_LIB = """\
+def plus[T: AnyType, n: Int](x: Int) -> Int:
+    return x + n
+"""
+
+VALUE_LITERAL_PROG = """\
+from vlib import plus
+
+def main():
+    print(plus[Int, 7](10))
+    print(plus[Int, 0](10))
+    print(plus[Int, -3](10))
+"""
+
+VALUE_LITERAL_CPYTHON = """\
+def plus(x, n):
+    return x + n
+def main():
+    print(plus(10, 7))
+    print(plus(10, 0))
+    print(plus(10, -3))
+"""
+
 
 # The STRUCT half of the same construct, read through `Self`. `Self.values` is
 # the parameter, and the only reason it works is that the template's OWN body is
@@ -2234,6 +2190,55 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
         check(got == "11\n17\n14\n",
               f"[{arch}] printed {got!r} for three instantiations whose first "
               f"elements are 1, 7 and 4 over a base of 10")
+
+
+def test_a_bare_literal_beside_a_type_is_a_value_argument(tmpdir):
+    """`plus[Int, 7](10)` is a demand whose second argument is a VALUE.
+
+    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
+    is `Tagged[Int, 0]()` on `struct Tagged[T, origin: Int]`: the bracket names a
+    type and a comptime value, and every parameter in it is real. Before this
+    case the reader dropped the literal at the bracket, so no instantiation was
+    demanded and the call was refused downstream as a "compile-time
+    explicit-parameter list on a generic" the model cannot bind.
+
+    Two things are pinned, and the second is the one that is easy to get wrong:
+
+    * **a bare literal beside a type IS a demand** and mangles to its own
+      symbol — `7`, `0` and `-3` are three instantiations, and a mangling that
+      collapsed them onto the parameter name would build, run, and print one
+      program's answer for all three;
+    * **an all-values bracket is STILL NOT a demand.**  `Pair[2]` and
+      `tile[2, 3]` are the comptime-specialization shape the local machinery
+      already answers, and demanding `Pair_2` / `tile_2_3` for them would publish
+      a second symbol for a body the build already emits.  The rule is the MIX,
+      not the literal: a literal is read as a value only when at least one other
+      element spelled a type.
+
+    The end-to-end half runs the value out of the emitted code on both
+    architectures, so a substitution that put the wrong literal (or a mangled
+    fragment) in the body is a number the reference does not print.
+    """
+    from formal import monomorph as MM
+    found = MM.all_instantiation_calls(
+        "def main():\n"
+        "    var a = plus[Int, 7](10)\n"
+        "    var b = plus[Int, 0](10)\n"
+        "    var c = plus[Int, -3](10)\n"
+        "    var d = Pair[2]()\n"
+        "    var e = tile[2, 3](7)\n")
+    check(found.get("plus") == [("Int", "-3"), ("Int", "0"), ("Int", "7")],
+          f"the three literals beside `Int` are three value arguments: {found}")
+    check("Pair" not in found and "tile" not in found,
+          f"an all-values bracket is the comptime-specialization shape and "
+          f"belongs to the local machinery, not to a boundary symbol: {found}")
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_vallit", VALUE_LITERAL_LIB,
+                            VALUE_LITERAL_PROG, VALUE_LITERAL_CPYTHON,
+                            libname="vlib.mojo")
+        check(got == "17\n10\n7\n",
+              f"[{arch}] printed {got!r} for `n` of 7, 0 and -3 over a base of "
+              f"10")
 
 
 # ── the artifact's identity ─────────────────────────────────────────────────
@@ -2990,8 +2995,6 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
-    ("a bracket on an implicitly generic function recommends the bare call",
-     test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
     ("a dotted application says which word is the module",
@@ -3034,6 +3037,8 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a bare literal beside a type is a value bracket argument",
+     test_a_bare_literal_beside_a_type_is_a_value_argument),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",
