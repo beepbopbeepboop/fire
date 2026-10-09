@@ -103,17 +103,19 @@ reader's time:
   R12 = `0xfedcba0987654321` leaves RDX = `0x012345f6789abcdf`, which is
   `R12 * -1`.  `x86_step_imul_r64` (the two-operand `0F AF` form) IS the one that
   reads its destination.
-* **The BACKLOG note for `encode_imul_r64_r64_imm` is false in its first
-  clause and false in its fix.**  It says "`69 /r id`: no decoder arm (only
+* **The BACKLOG note for `encode_imul_r64_r64_imm` was false in its first
+  clause and false in its fix.**  It said "`69 /r id`: no decoder arm (only
   `0F AF` is decoded)"; the encoder emits `6B /r ib`, and the four-bytes-later
   difference between the two spellings is the whole reason it does — the doc's
-  own §"What is NOT a gap here" half says so.  The note also claims the fix's
-  motivation ("8 examples are blocked from being walked") is not what is
-  happening, which the doc's Status already measured.  The note lives in
-  `tools/formal_isa_census.py`, which is another claim's write set
-  (`bug:FORMAL_arm64_instruction_coverage`), so it is **reported and not
-  edited**: the row is now over-covered, and the only thing left about it is a
-  sentence that says why it no longer needs to be in `BACKLOG`.
+  own §"What is NOT a gap here" half says so.  The note also claimed the fix's
+  motivation ("8 examples are blocked from being walked") was not what was
+  happening, which the doc's Status already measured.  The row is now
+  over-covered (`yes / yes / yes`), so the entry exempted nothing and the
+  census's anti-rot check reported it as a fixed gap that kept its exemption.
+  **The entry was removed from `tools/formal_isa_census.py`'s `BACKLOG` on
+  2026-10-05**, in the commit that added the arm64 fuzz case for `TST` — the
+  census's own self-test was red on the stale entry and on that missing row,
+  and both are now green.
 
 ### The byte-wise ALU class, and how it turned out
 
@@ -144,12 +146,12 @@ right one.  Shape 2's fourth row, `encode_movq_xmm_rm64`, was closed with
 `work/formal40-7` as a `samples()` row.
 
 **Measured, this pass.**  `formal/x86_64_model_coverage_test.py`: 193 samples
-over 71 forms, **all steppable** (was 185/67).  Its successor comparison is
-**RED on three rows** — `shift_imm8:shl` / `:shr` / `:sar`, whose successors
-set only ZF and SF where `x86_shift_post` sets four — and that is a real
-finding with its own doc,
-`bugs/FORMAL_shift_successor_leaves_cf_and_of_alone.md`, which the rows added
-here found.  The other four checks are green.
+over 71 forms, **all steppable** (was 185/67).  Its successor comparison is now
+**green on all 12 forms**: the three `shift_imm8:shl` / `:shr` / `:sar` rows
+that set only ZF and SF where `x86_shift_post` sets four were corrected to
+quote `x86_shift_post` itself, and the rows added here are what found the drift
+(its own doc was deleted with the fix, and `SUCCESSOR_FORMS` is the pin).  The
+other four checks are green.
 `formal/x86_64_model_fuzz.py --census --per-form 3 --seed 11`: 206 AGREE,
 11 HARNESS, 1 FAULT, 1 NORUN, **0 WRONG**.  `-n 16 --ninstr 6 --seed 5`:
 11 AGREE, 5 HARNESS, 0 WRONG.  `test_x86_64_decode.py`,

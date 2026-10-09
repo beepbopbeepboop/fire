@@ -951,16 +951,17 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
           f"something other than the export rule, which is the fact that "
           f"decides it: {text.strip()[-300:]}")
     check("a name with a leading `_` is private" in text,
-          f"the refusal does not say WHICH of the four exclusions keeps this "
-          f"name off the boundary, and it is the private one: "
-          f"{text.strip()[-300:]}")
+          f"the refusal does not say WHICH exclusion keeps this name off the "
+          f"boundary, and it is the private one: {text.strip()[-300:]}")
     check("doc/ABI.md" in text or "export rule" in text,
           f"the refusal does not name the rule that keeps the name off the "
           f"boundary: {text.strip()[-300:]}")
-    check("one per instantiation" in text or "monomorph" in text
-          or "instantiation is the boundary symbol" in text,
-          f"the refusal does not say WHY a name is not one boundary symbol: "
-          f"{text.strip()[-300:]}")
+    # …and it names the ONE rule that applied. `model.export_rule_for` reads
+    # `lib.mojo`'s own source through `reflect.export_exclusions`, so a private
+    # name no longer drags the generic-template clause along with it.
+    check("one per instantiation" not in text and "libSystem" not in text,
+          f"the refusal enumerates the rules that did NOT apply instead of the "
+          f"one that did: {text.strip()[-300:]}")
 
 
 def test_a_cross_module_specialization_of_a_published_name_says_brackets(tmpdir):

@@ -436,6 +436,34 @@ def _excluded_name_sets(src: str, parsed) -> tuple:
     return generic, overloaded
 
 
+def declared_names(src: str, parsed=None) -> set:
+    """The top-level names a module DECLARES: functions, structs and aliases.
+
+    `export_exclusions` answers "which rule kept this name off the boundary";
+    this answers the question underneath it, "does the file name this at all",
+    which is what separates a name the module HAS but does not publish from a
+    name it does not have. A caller that asks only the first would report a
+    module as not declaring a name that is a private function, a template or an
+    alias of one, because none of those reaches the export table.
+
+    The kinds are `_excluded_name_sets`/`export_exclusions`' own
+    `FunctionDef`/`StructDef` walk plus an alias, which the parser leaves as a
+    top-level assignment to a bare name (`alias _isnan = isnan` declares
+    `_isnan` although no `FunctionDef` carries it). A module-level `var` parses
+    to the same node shape and is included with it; that ambiguity only decides
+    between "declares it but does not publish it" and "declares no such name",
+    and the first is the safe direction to be wrong in.
+    """
+    if parsed is None:
+        parsed = Parser(py_tokenize(src)).parse_module()
+    names = {s.name for s in parsed if isinstance(s, (FunctionDef, StructDef))}
+    for s in parsed:
+        target = getattr(s, 'target', None)
+        if isinstance(target, IdentExpr):
+            names.add(target.name)
+    return names
+
+
 def export_exclusions(src: str, parsed=None) -> dict:
     """{declared name: which rule of doc/ABI.md's export rule excluded it}.
 

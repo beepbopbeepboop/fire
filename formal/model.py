@@ -6962,19 +6962,28 @@ def specialization_call_refusal(name: str) -> str:
     LEADING arguments (see the calling convention above): the call site
     evaluates the brackets and passes them first. That is a decision about a
     signature, so it can only be made against a declaration — and when the
-    name is not a function this unit compiles, there is none. The two
-    spellings that reach here are both unanswerable, and they are unanswerable
-    for the same reason:
+    name is not a function this unit compiles, there is none. Three spellings
+    reach here, and the third is the one the first wording of this sentence
+    got wrong:
 
       * the name is a generic of ANOTHER module. Its instantiation is the
         boundary symbol (doc/ABI.md §Generics), one per set of type arguments,
         and `formal/monomorph.py` compiles the ones an importer asks for into
         that module's own library and REWRITES the call site to the mangled
         name — so a call that arrives here is one whose brackets named no
-        instantiation: a bare call with no arguments, an argument that is a
-        value rather than a type, a dotted `module.name[…]`, or a template in
-        a type ANNOTATION rather than a callee position.
+        instantiation: an argument that is a value rather than a type, a
+        dotted `module.name[…]`, or a template in a type ANNOTATION rather
+        than a callee position.
         `bugs/FORMAL_generic_monomorph_scope.md` lists each with its next step.
+      * the name is a function of another module whose generic parameter is
+        IMPLICIT — `def name(x: Box[T])`, with the parameter written in the
+        SIGNATURE and no bracket to bind. There the type is INFERRED from the
+        call, so a bracket the source wrote is not read at all; the repair is
+        the bare call, and it is the same program (measured: the identical
+        module with `def unbox(t: Box[T])` builds as `unbox(b)` and is refused
+        as `unbox[Int](b)`, both architectures). This is why the sentence must
+        not tell the reader to write `name[<a type>](…)` — for this shape that
+        is the spelling already on the line.
       * the name is an ordinary VALUE and the brackets are a subscript. A
         subscript of a value is not a call this path can name at all.
 
@@ -6994,7 +7003,8 @@ def specialization_call_refusal(name: str) -> str:
     return (
         f"{name}[…](…) calls a name this unit does not compile, so the "
         f"brackets cannot be bound. If `{name}` is a generic of another module "
-        f"then its instantiation is the boundary symbol, one per set of type "
+        f"whose parameters are spelled in brackets (`def {name}[T](…)`) then "
+        f"its instantiation is the boundary symbol, one per set of type "
         f"arguments (doc/ABI.md §Generics), and this path DOES instantiate the "
         f"ones an importer asks for — `formal/monomorph.py` compiles each into "
         f"that module's own library and rewrites the call to the mangled name — "
@@ -7006,17 +7016,18 @@ def specialization_call_refusal(name: str) -> str:
         f"which this path reads off the ARGUMENTS rather than off a bracketed "
         f"declaration, so no boundary symbol is emitted for it. That last shape "
         f"is CORRECT SOURCE and this path is short: Mojo infers a template "
-        f"call's type arguments, so call it WITHOUT the bracket — `{name}(b)` "
-        f"with `b: Box[Int]` — which is the same program and is lowered (for "
-        f"that shape the bracketed call is refused and the inferred one builds "
-        f"and answers CPython on both architectures). **Do not add `[<a type>]` "
-        f"— that is the spelling that arrived here.** The ways this can still "
-        f"be reached, with the spelling that works for each, are in "
-        f"bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
-        f"an ordinary value then the brackets are a subscript, which is not a "
-        f"call this path can name at all. Refused rather than emitted with the "
-        f"brackets dropped: that builds, runs, and returns a number the "
-        f"source never wrote, with nothing on the link line to catch it"
+        f"call's type arguments, so call it WITHOUT the bracket — write "
+        f"`{name}(…)`, which is the same program (`{name}(b)` with "
+        f"`b: Box[Int]`) and is lowered (for that shape the bracketed call is "
+        f"refused and the inferred one builds and answers CPython on both "
+        f"architectures). **Do not add `[<a type>]` — that is the spelling that "
+        f"arrived here.** The ways this can still be reached, with the spelling "
+        f"that works for each, are in bugs/FORMAL_generic_monomorph_scope.md. "
+        f"If `{name}` is instead an ordinary value then the brackets are a "
+        f"subscript, which is not a call this path can name at all. Refused "
+        f"rather than emitted with the brackets dropped: that builds, runs, and "
+        f"returns a number the source never wrote, with nothing on the link "
+        f"line to catch it"
     )
 
 
@@ -9569,6 +9580,19 @@ SSE_CLASS = "sse"
 # and `a`. `%n` is not in it (it writes through a pointer) and `%p` is not
 # (Darwin's `%p` renders the ADDRESS, which is an integer word).
 PRINTF_FLOAT_CONVERSIONS = frozenset("aAeEfFgG")
+#: The conversions whose C reading is NOT a number, and it is an exclusion
+#: rather than an inclusion because a NUMBER conversion is every one that
+#: renders the word it is handed. `%s` reads it as TEXT, `%p` renders the
+#: ADDRESS (which is exactly what a container IS, so a container is the RIGHT
+#: operand for it), and `%n` writes the count THROUGH the vararg rather than
+#: rendering anything. Every other conversion — the integer family, `%c`, the
+#: floating family, and a `*` width, which reads an `int` — is a number.
+#:
+#: Spelled once and read by `printf_container_conversion_refusal`, because the
+#: question it answers ("does this conversion render a number") is the same one
+#: that decides whether a container operand is being read as an address by
+#: mistake or on purpose.
+PRINTF_NON_NUMBER_CONVERSIONS = frozenset("spn")
 # Eight XMM registers, and the boundary is the ABI's rather than this path's.
 PRINTF_SSE_REGISTERS = 8
 PRINTF_INTEGER_REGISTERS = 6
@@ -10251,6 +10275,13 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
          decision cover both spellings. (`identity_conversion_operand`, looped
          so a conversion of a conversion is one question too.)
       2. **A STRING LITERAL, or anything `is_text` calls text.** Unchanged.
+      2b. **A CONTAINER, from its KIND.** `is_list_kind(vk.kind_of(arg))` is
+         positive evidence that the operand is NOT text: a container's one word
+         is its blob's address, whose first word is its count, so `%s` walked the
+         count header as a C string. Asked here rather than after step 3 because
+         a name bound to a list has no integer `own_shape` and would otherwise
+         reach `one_word_text`'s permissive None. `is_list_kind` covers a list, a
+         tuple, a set, a `bytearray` and a dict, so the answer is one answer.
       3. **A NAME, from the two positive-evidence sources**: a statement of this
          function bound it to an integer on that statement's own shape, or a
          one-field struct's declaration says what its only field holds. Both
@@ -10279,6 +10310,24 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
         return True
     if is_text is not None and is_text(arg):
         return True
+    # **A CONTAINER is positive evidence that the operand is NOT text, and it is
+    # the same defect as an integer at `%s` one step further out.** `%s` walks
+    # bytes at the address it is handed looking for a NUL; a container's one word
+    # is the address of its blob, whose FIRST word is its count, so `printf("%s",
+    # xs)` walked the count header as a C string. The evidence is the KIND and
+    # not a name's `own_shape`, because a literal, a construction and a name
+    # bound to either are one answer — and `is_list_kind` also covers a dict and
+    # a `bytearray`, which classify as `list:*` blobs on this path
+    # (`ValueKinds.is_dict_value`'s docstring is the measurement). It is asked
+    # before the name arm because a name bound to a list has no `own_shape` on
+    # the integer axis and would otherwise fall through to `one_word_text`'s
+    # permissive None. An unannotated parameter still answers `INT_KIND` (not a
+    # container), so a program whose container-ness this build cannot see keeps
+    # building.
+    if vk is not None and is_list_kind(vk.kind_of(arg)):
+        return ("a CONTAINER — its one word is the address of its blob, and the "
+                "blob's first word is its count, so it is not a `char *` for "
+                "`%s` to walk")
     if isinstance(arg, F.IdentExpr):
         if vk is not None and vk.own_shape_kind(arg.name) == INT_KIND:
             return ("a value this function bound to an integer on that "
@@ -10421,6 +10470,44 @@ def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
     return "int" if vk.kind_of(expr) == INT_KIND else None
 
 
+def printf_arg_container_evidence(expr, vk) -> str | None:
+    """The CONTAINER kind of a `printf` vararg, or None when it is not one.
+
+    The evidence axis the NUMBER conversions were missing. `printf_arg_text_evidence`
+    asks whether an operand is TEXT and `printf_arg_float_evidence` whether it is
+    a FLOAT or an INTEGER, and neither asks whether it is a CONTAINER — so
+    `printf("%d", xs)` placed the vararg from the format, read eight bytes of a
+    blob as a decimal and printed the blob's heap ADDRESS on both architectures,
+    from a green build, exit 0, where CPython raises
+
+        TypeError: %d format: a list is required, not int
+
+    It is the exact mirror of the refusal that already exists for the other
+    direction (`printf("%s", 42)`, whose operand is a number where text is
+    required), and it is the same table read from the other side.
+
+    The evidence is `ValueKinds.kind_of` and nothing else, because a container
+    is a KIND a word has and not a `None` a word is defaulted to: `is_list_kind`
+    is the one predicate that recognises it — `List`, `Tuple`, `Set`, `Dict`,
+    `bytearray` and `bytes` all classify as `list:…`, one spelling per element
+    kind, so asking it of the KIND rather than of a constructor's name is what
+    keeps `printf("%d", xs)`, `printf("%d", d)` and `printf("%d", b)` one answer
+    instead of three.
+
+    **A NAME's `own_shape` is deliberately not consulted**, and that is the one
+    place this hook differs from the text hook: there the question is "did this
+    function BIND the name to an integer on that statement's own shape", which
+    is evidence a word cannot otherwise carry, while a container is derived from
+    the construction or the declaration by `kind_of` itself. `None` is the
+    permissive direction, as it is for both sibling hooks: an unclassifiable
+    operand keeps whatever behaviour it had.
+    """
+    if vk is None:
+        return None
+    kind = vk.kind_of(expr)
+    return kind if is_list_kind(kind) else None
+
+
 def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
                                    class_of=None) -> str | None:
     """Why a conversion whose CLASS disagrees with its operand's kind is refused.
@@ -10491,6 +10578,75 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
             f"the conversion is the source's decision and this path already "
             f"has both of them: `Int(x)` truncates toward zero and `float(x)` "
             f"rounds to the nearest double"
+        )
+    return None
+
+
+def printf_container_conversion_refusal(callee: str, fmt_text, args: list,
+                                        kind_of=None) -> str | None:
+    """Why a NUMBER conversion of a CONTAINER operand is refused.
+
+    The mirror of `printf_text_conversion_refusal` on the axis the two other
+    format checks do not cover. `printf_text_conversion_refusal` owns the `%s`
+    that DEREFERENCES its operand; `printf_kind_conversion_refusal` owns the
+    float/integer class disagreement. A container is neither a double nor an
+    integer: its one word is the address of its blob, so a conversion that reads
+    the word as a number renders the heap ADDRESS as a decimal. Measured on BOTH
+    architectures, from a green build and exit 0:
+
+        var xs = [1, 2, 3]
+        printf("v=%d\\n", xs)
+
+    prints `v=1809329920` on arm64 and `v=1870638832` on x86-64 — the address is
+    a property of the run, the defect is not — where CPython raises `TypeError:
+    %d format: a number is required, not list`. The two machines agreeing about
+    nothing but disagreeing with the program is the shape this table exists for.
+
+    `kind_of(arg)` is the emitter's own `ValueKinds.kind_of` over one argument,
+    and the evidence is the operand's own KIND rather than a name's
+    `own_shape`: a `[1, 2, 3]` literal, a `List[Int]()` construction and a name
+    bound to either are one answer. `is_list_kind` covers a list, a tuple, a set,
+    a `bytearray` AND a dict, because all of them classify as `list:*` blobs on
+    this path (`ValueKinds.is_dict_value`'s docstring is the measurement: a dict
+    and a list are the same word here), so `printf("%d", b)` for a `bytearray`
+    and `printf("%d", d)` for a `Dict` are the same shape and get the same
+    answer rather than three that disagree.
+
+    A `%s` operand is NOT this function's: `printf_text_conversion_refusal` owns
+    the conversion that dereferences, and a container reaching it has that
+    function's own answer. This one is every conversion that READS THE WORD AS A
+    NUMBER — the floating conversions plus every other non-`s` conversion — so
+    the two refusals cannot both fire on one conversion.
+
+    `None` never refuses, the same permissive direction the two siblings take:
+    `kind_of` answers `INT_KIND` (not a container) for an unannotated parameter
+    and for anything else this build cannot classify, so a program whose
+    container-ness is not visible keeps whatever behaviour it had rather than
+    being refused for a word.
+    """
+    if kind_of is None:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if j >= len(args) or conv == "s":
+            continue
+        kind = kind_of(args[j])
+        if kind is None or not is_list_kind(kind):
+            continue
+        return (
+            f"the `%{conv}` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as a number, and `{spelled(args[j])}` is a "
+            f"CONTAINER — its one word is the address of its blob, so the C "
+            f"library renders the heap address rather than a value. Measured on "
+            f"BOTH architectures, `printf(\"%d\", xs)` for `xs = [1, 2, 3]` "
+            f"printed the blob's address (1809329920 on arm64, 1870638832 on "
+            f"x86-64) from a green build and exit 0, where CPython raises "
+            f"`TypeError: %d format: a number is required, not list`. Refused "
+            f"rather than emitted, because an address is not the number the "
+            f"source asked for: pass the count (`len(xs)`), an element "
+            f"(`xs[0]`), or render the container to text and use `%s`"
         )
     return None
 
@@ -10619,9 +10775,11 @@ def return_annotation_kind_refusal(func_name: str, declared_return, value,
 
     **This is the consumer that makes the pointer row load-bearing rather than
     cosmetic.** `Int(p.value())` and `return p.value()` under `-> Int` are the
-    two shapes `POINTEES_REFUSED`'s `Float64` row is written for, and a kind hook
-    that let the load through would have turned both into this same silent
-    answer, one call boundary away.
+    two shapes a `Pointer[Float64]` dereference reaches, and the kind hook that
+    lets the LOAD through (`pointer_deref_kind`) is exactly what makes this
+    refusal necessary: the dereference carries `FLOAT_KIND` now, so both shapes
+    reach here and are refused by name instead of printing a bit pattern as a
+    decimal, one call boundary away.
 
     **The annotation is the only evidence, and `None` never refuses** — the same
     asymmetry as `call_argument_kind_refusal` and for the same reason: an
@@ -10828,27 +10986,30 @@ def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
 
 
 def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
-                         text_of_arg=None, class_of=None):
+                         text_of_arg=None, class_of=None, container_of=None):
     """Any reason `callee`'s FORMAT cannot be used, or None if it can.
 
     **The one entry point both backends ask**, and the reason it exists rather
-    than two: there are now four ways a format string fails here — a `%s`
+    than two: there are now five ways a format string fails here — a `%s`
     handed something that is not text (`printf_text_conversion_refusal`), a
     conversion with no argument behind it
     (`printf_missing_operand_refusal`), a WIDTH on a `%s` whose argument is
-    text that is not ASCII (`printf_text_width_refusal`), and a conversion whose
+    text that is not ASCII (`printf_text_width_refusal`), a conversion whose
     CLASS disagrees with the kind of the argument behind it
-    (`printf_kind_conversion_refusal`) — and two emitters that each had to
+    (`printf_kind_conversion_refusal`), and a NUMBER conversion of a CONTAINER
+    (`printf_container_conversion_refusal`) — and two emitters that each had to
     remember them is exactly how arm64 and x86-64 come to disagree about what a
     `printf` means. One function, one order, one message table.
 
     The order is the one that matters if two could fire: a missing operand and
     a `%s` of a non-text argument are both more basic facts about the CALL than
     the width is, and naming them first is the more useful refusal, since the
-    fix is in the format rather than in the argument's text. The class check
-    comes last because it is the only one that needs the argument's VALUE rather
-    than its text, and a format already known to be unusable is not worth a
-    second, deeper question about the same call.
+    fix is in the format rather than in the argument's text. The last two come
+    last because they need the argument's VALUE rather than its text, and a
+    format already known to be unusable is not worth a second, deeper question
+    about the same call. They cannot both fire: the class check refuses only a
+    disagreement with `%f`/`%g`/`%e`, and a container is refused only by the
+    non-`s`, non-float conversions, whose class evidence is never `"float"`.
 
     `text_of_arg` is the fourth hook and it is the only one of the first two
     that is optional: it answers "what TEXT does this argument carry" (None for
@@ -10858,13 +11019,17 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     passes None — which is the permissive direction, exactly as `text_of`'s own
     None row is. **`class_of` is optional for the same reason**: it is
     `printf_arg_float_evidence`'s three-way answer, and a caller that has no
-    `ValueKinds` to hand passes None, which never refuses.
+    `ValueKinds` to hand passes None, which never refuses. **`container_of` is
+    the same**: it answers the OPERAND'S KIND (`ValueKinds.kind_of`) and a
+    caller with no `ValueKinds` passes None.
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
                                              text_of_arg)
             or printf_kind_conversion_refusal(callee, fmt_text, args,
-                                              class_of))
+                                              class_of)
+            or printf_container_conversion_refusal(callee, fmt_text, args,
+                                                   container_of))
 
 
 
@@ -13862,7 +14027,31 @@ CONTAINER_OP_MEANING = {
 #: literals are two distinct blocks and so two distinct addresses, which is
 #: what identity is.  `==`/`!=` on a blob and the ordering operators are the
 #: same defect wearing different operators, so they belong in one gate.
-CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
+#:
+#: `-`, `&` and `^` are absent too, and for a reason of their own: they are the
+#: three operators whose CPython answer IS a lowering on this path when BOTH
+#: operands are SETS.  Set-ness is a flow-sensitive question each backend
+#: answers with its own `_set_vars`/`is_set_expr`, so this table — which sees
+#: only KINDS — cannot ask it; `container_set_algebra_refusal` below is the gate
+#: that does, asked beside this one exactly as `container_union_refusal` is
+#: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
+#: message quotes the same table.
+SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
+
+#: The three operators that are SET ALGEBRA, and the ones a backend may lower
+#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
+#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
+#: operand shape EXCEPT two blobs the gate's message is the right answer — but
+#: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
+#: backend decides, because whether the pair is a set algebra this path lowers
+#: is a fact about the backend and not about the operator.  arm64 lowers the
+#: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
+#: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
+#: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
+#: gate's "is refused when ... is a list" is exactly the right sentence for it.
+SET_ALGEBRA_OPS = ("-", "&", "^")
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
@@ -13908,12 +14097,30 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
+
+    `-`, `&` and `^` are NOT in this gate.  Their CPython answer is a real
+    lowering when BOTH operands are sets, and set-ness is flow-sensitive, so
+    they have their own gate — `container_set_algebra_refusal` below — asked at
+    the same site, exactly as `container_union_refusal` is asked for `|`.  The
+    numbers quoted above for `s - {2}`, `s ^ {2}` and `s & {2}` are that gate's
+    measurements.
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
         return None
     if not (container_operand_is_blob(left_kind)
             or container_operand_is_blob(right_kind)):
+        return None
+    if (bare in SET_ALGEBRA_OPS
+            and container_operand_is_blob(left_kind)
+            and container_operand_is_blob(right_kind)):
+        # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
+        # question for the backend (see `SET_ALGEBRA_OPS`), and
+        # `set_algebra_refusal` is where the two answers are worded.  Defer
+        # rather than refuse, so arm64 can reach `_emit_set_algebra` and x86-64
+        # can reach its own named refusal.  `aug_assign_operands_are_blobs`
+        # then routes the augmented spelling through `_emit_binop`, which is
+        # the second emitter the desugaring exists for.
         return None
     if bare in ("==", "!="):
         # `==`/`!=` against a NON-blob is a program CPython answers: a blob is
@@ -13962,6 +14169,48 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 container_relational_refusal = container_operator_refusal
 
 
+def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
+                        right_is_set: bool, backend_has_emitter: bool) -> str:
+    """Why `left {op} right` is not lowered by the backend that asks.
+
+    The SECOND question for `&`/`-`/`^` on two blobs, asked only once
+    `container_operator_refusal` has been reached and DEFERRED (it returns
+    None for `SET_ALGEBRA_OPS` on two blobs), the same way `set_union_refusal`
+    is the second question for `|`.  There are two answers and the caller's
+    `backend_has_emitter` decides which one is true:
+
+    * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
+      sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
+      refusal names that rather than pretending a lowering was missing.  This
+      is the arm64 answer when it cannot establish both operands are sets, and
+      the x86-64 answer for every two-blob shape.
+    * **two sets, no emitter** — the operator really is the set operation the
+      source writes, and the machine simply does not lower it.  The message
+      says which machine does, so the reader is not sent looking for a spec.
+
+    The wording lives here, beside the other refusal texts and beside
+    `set_union_refusal`, so the two backends cannot word the same state
+    differently.
+    """
+    if left_is_set and right_is_set and not backend_has_emitter:
+        return (
+            f"{left} {op} {right} is a SET operation and this backend has no "
+            f"emitter for it: both operands are sets, so Python's `{op}` is "
+            f"{CONTAINER_OP_MEANING[_bare_operator(op)]}, and that needs a "
+            f"per-element scan this machine does not lower yet. arm64 lowers "
+            f"`&`, `-` and `^` for two sets; on this backend write the "
+            f"operation as a loop over `in` tests instead")
+    which = ("the left operand" if not left_is_set else
+             "the right operand" if not right_is_set else "an operand")
+    return (
+        f"{left} {op} {right} is refused because {which} is not established to "
+        f"be a SET. Python defines `{op}` as SET ALGEBRA — "
+        f"{CONTAINER_OP_MEANING[_bare_operator(op)]} — for two sets and for "
+        f"nothing else, so this is a `TypeError` in CPython and there is no "
+        f"correct program on the far side of this gate. Compare the elements "
+        f"you mean, or build the result with an explicit membership test")
+
+
 def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     """True when `x OP= y` has a CONTAINER on either side, so it is `x = x OP y`.
 
@@ -13990,11 +14239,15 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     this predicate asks about KINDS and lets both backends do the same routing
     rather than each growing its own copy of `_emit_list_concat`.
 
-    The operators with no container lowering are already refused by the time a
-    caller gets here, because `string_binary_refusal` asks
-    `container_operator_refusal` with the AUGMENTED SPELLING and this module's
-    `_bare_operator` strips the `=` — so `s -= {2}` and `s &= {2}` stop at that
-    gate rather than arriving here as a subtraction of two addresses.
+    The operators with no container lowering are refused by the time a caller
+    gets here, because `string_binary_refusal` asks
+    `container_operator_refusal` (with the AUGMENTED SPELLING, which this
+    module's `_bare_operator` strips) and that gate still refuses every
+    container operator except `+`, `|` and — on two blobs — the set-algebra
+    three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
+    `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
+    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
+    `set_algebra_refusal` on x86-64 rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
             or container_operand_is_blob(value_kind))
@@ -16258,7 +16511,7 @@ WIDTH_POINTEES = {1: "Int8", 2: "Int16", 4: "Int32", 8: "Int64"}
 # Pointee base names that are refused BY NAME, with the reason, rather than
 # merely absent from POINTEE_WIDTHS.  A refusal that says "the pointee is not a
 # width I know" is true but unhelpful when the answer is a specific fact, and
-# these are the two that are specific facts: a float and a SIMD.
+# these are the two that are specific facts: a narrow float and a SIMD.
 POINTEES_REFUSED = {
     "Float16": "a Float16 is two bytes of IEEE binary16 and this path has no "
                "float kind to hold them",
@@ -16266,27 +16519,6 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
-    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
-    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
-    # is bit-exact — one word holding the bit pattern, loaded with the same
-    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
-    # for a reason that is about the CALL SITE rather than about the value: what
-    # a pointer dereference yields here is a word, and whether that word is an
-    # integer or a double is decided by the CONTEXT it lands in, and a context
-    # that has established neither answers `int` — so `Int(p.value())` on a
-    # double would read the exponent field.  Answering it means making the
-    # pointee's kind flow into the dereference and every context around it,
-    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
-    # work and this row is its starting state.  A row whose stated reason is
-    # FALSE is worse than an absent one, because the reader who finds it cannot
-    # tell which half of it still holds.
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
-               "bit-exact — one word holding the bit pattern — but this "
-               "dereference path yields a word whose KIND is decided by the "
-               "context it lands in, and a context that has established none "
-               "answers `int`, so `Int(p.value())` would read the exponent "
-               "field; see bugs/FORMAL_float_pointer_pointee.md",
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -16303,6 +16535,18 @@ POINTEES_REFUSED = {
     "StringSlice": "a StringSlice is a two-word {ptr, len} pair, so there is no "
                    "single load at its address that is the pointee",
 }
+
+# Pointee base names that are a FLOAT the dereference CAN carry, and the table
+# that lets the load through.  A `Pointer[Float64]` load is bit-exact — one
+# `LDR` of eight bytes holding the bit pattern, the same instruction an integer
+# pointee uses — so the load was never the problem; what was missing was the
+# WORD'S KIND.  `FLOAT_KIND` landed with the binary64 arithmetic, and
+# `pointer_deref_kind` carries the pointee's kind into every context that reads
+# the dereference, so `Int(p.value())` is the `FCVTZS` the source means rather
+# than a read of the exponent field.  A name here is therefore a LOAD this path
+# answers and a STORE it still refuses (`pointer_store_lowering`), because a
+# store needs the RHS's kind and this path checks none there.
+POINTEE_FLOAT_NAMES = frozenset(FLOAT_TYPE_NAMES)
 
 
 def pointee_args(text: str) -> list:
@@ -17358,24 +17602,32 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
     string is `None`, and the `why` is the refusal to emit.
 
-    Three answers, and the third is what makes this a value model rather than a
+    Four answers, and the third is what makes this a value model rather than a
     load:
 
       * `("load", width, signed)` — a scalar pointee whose width the table
         established.  `width` is 1, 2, 4 or 8 and is never anything else: a
-        pointee that is not in `POINTEE_WIDTHS` and not in `POINTEES_REFUSED`
-        has NO established width, and the refusal says so.  That is the whole
-        point of the exercise, and it is what removes D1's SIGBUS: the old
-        reasoning had only the 8-byte load available, which over-reads a
-        `UInt8` pointee by seven bytes; with the pointee known the load is one
-        byte, and one byte is the correct answer rather than an approximation.
+        pointee that is not in `POINTEE_WIDTHS`, not in `POINTEE_FLOAT_NAMES`
+        and not in `POINTEES_REFUSED` has NO established width, and the refusal
+        says so.  That is the whole point of the exercise, and it is what
+        removes D1's SIGBUS: the old reasoning had only the 8-byte load
+        available, which over-reads a `UInt8` pointee by seven bytes; with the
+        pointee known the load is one byte, and one byte is the correct answer
+        rather than an approximation.
+      * `("float", 8, False)` — a `Float64` pointee.  The load is bit-exact
+        (one `LDR` of eight bytes) and what makes it a DOUBLE rather than an
+        integer is `pointer_deref_kind`, which every context around the
+        dereference asks.  The shape is `"float"` and not `"load"` so
+        `subscript_base_lowering` can refuse `p[i]`, whose element kind is the
+        pointer's own (an integer) and whose eight right bytes would then be
+        read as the wrong number.
       * `("identity", 8, False)` — the receiver is a NULLABLE POINTER and the
         `.value()` is the UNWRAP of it, not a load.  `nullable_pointer_unwrap`
         is asked first, before any pointee question, because a nullable pointer
         has a pointee AND an unwrap and the two answers are different numbers;
         see that function for the whole of why the load was the wrong one.
-      * `None` — no pointee, a pointee with no width, a FLOAT or a wide `SIMD`
-        or a blob, or a STRUCT.  The struct case is the interesting one and its
+      * `None` — no pointee, a pointee with no width, a wide `SIMD` or a blob,
+        or a STRUCT.  The struct case is the interesting one and its
         derivation is CORRECT (a struct's value is a frame address, so the
         receiver already is the pointee — the same identity `Pointer()` gives,
         and the same shape as the string decision's "the length is a
@@ -17385,7 +17637,7 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         BOTH architectures.  The `why` spells that out, and the `why` is the
         same text on both architectures because it comes from here.
 
-    The three-tuple shape is kept for all three answers on purpose: every
+    The three-tuple shape is kept for every answer on purpose: every
     existing reader unpacks `shape, width, signed`, and the two that ignore the
     shape (`subscript_base_lowering` and both `_emit_dereference`) have to be
     taught to look at it.  A second arity for the new answer would make every
@@ -17411,6 +17663,21 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         return (None, why)
     if inner in POINTEES_REFUSED:
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
+    if inner in POINTEE_FLOAT_NAMES:
+        # A FLOAT pointee the load can carry: eight bytes, bit-exact, and the
+        # answer's KIND is the pointee's.  The shape is `"float"` rather than
+        # `"load"` so the two readers that unpack it can tell the one fact that
+        # matters apart — a `p[i]` SUBSCRIPT must not lower through this, because
+        # its element kind comes from the pointer's own kind (an integer) and the
+        # eight right bytes would be read as the wrong number.  Both emitters'
+        # `_emit_dereference` emit the width-8 `LDR` for it, which is the whole
+        # instruction the load needs; what makes it a double is
+        # `pointer_deref_kind`, which every context around it asks.
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, expr, 8)
+            if not scaled:
+                return (None, scale_why)
+        return (("float", 8, False), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         if not index_scaled:
@@ -17509,6 +17776,37 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                   f"must not emit, because an 8-byte load of a 1-byte pointee "
                   f"returns a plausible number assembled from adjacent bytes and "
                   f"faults at a page edge. {_declared_note(why)}")
+
+
+def pointer_deref_kind(fn, expr, decls: dict, functions: dict = None):
+    """`FLOAT_KIND` when `expr` is a pointer dereference whose pointee is a
+    float, else `None`.
+
+    The reader that makes a `Pointer[Float64]` LOAD answerable rather than
+    merely emittable: `dereference_lowering` decides the eight bytes and this
+    decides what they MEAN, and the two are separate because they are asked at
+    different times.  The lowering is asked when the dereference is emitted and
+    has the receiver in hand; the kind is asked by every CONTEXT the
+    dereference lands in — `Int(p.value())`, `p.value() + 1.0`, a `%d` format,
+    a parameter the callee declared an `Int` — and those contexts ask through
+    `ValueKinds.kind_of` before (and instead of) emitting the dereference at all.
+
+    The receiver is read with the SAME `pointer_pointee` the lowering uses, so
+    the two cannot disagree about what a pointer points at: two readers of that
+    question is two widths, and here it would be two KINDS.  `None` is every
+    other shape — a non-dereference, a non-pointer receiver, a pointee that is
+    not a float — and it leaves every existing decision exactly where it was,
+    which is why this is a hook consulted from `kind_of` and not a rewrite of
+    the default.
+    """
+    if not isinstance(expr, F.CallExpr) or expr.args or expr.kwargs:
+        return None
+    func = getattr(expr, "func", None)
+    if not (isinstance(func, F.MemberExpr)
+            and func.member in DEREFERENCE_TRY_NAMES):
+        return None
+    inner, _why = pointer_pointee(fn, func.obj, decls, functions)
+    return FLOAT_KIND if inner in POINTEE_FLOAT_NAMES else None
 
 
 def _declared_note(why) -> str:
@@ -18389,6 +18687,16 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                     f"`if not p:` is what establishes which. {_sentence(why)} "
                     f"Read through `p.value()[i]` once the unwrap is written "
                     f"out, which is the same program with the check spelled out")
+        if _shape == "float":
+            return (None, None, None,
+                    f"`{spelled(obj)}[i]` reads an element of a FLOAT pointee, "
+                    f"and this path carries a dereference's kind but not a "
+                    f"SUBSCRIPT's: the eight bytes would be loaded right and the "
+                    f"element would then be read as an integer, so `Int(...)` of "
+                    f"it would answer the bit pattern rather than the value. "
+                    f"Read the element through `{spelled(obj)}.value()` and index "
+                    f"the result, which is the same address with the kind the "
+                    f"pointee declared")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "
@@ -18732,6 +19040,22 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # paraphrasing it: a paraphrase would be a second answer to "why is a
         # float pointee refused", and the two would drift.
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
+    if inner in POINTEE_FLOAT_NAMES:
+        # A float pointee's LOAD lowers (`dereference_lowering`'s `"float"`
+        # answer); its STORE does not, and the asymmetry is the kind check that
+        # the load has and the store does not.  What a store needs is the RHS's
+        # kind — `p.value() = 3.9` writes a double's bits, `p.value() = 5` writes
+        # an integer where the source means `5.0` — and no rule here reads it,
+        # so a store through a float pointer is refused rather than written at
+        # the load's width on the strength of the pointer's declaration alone.
+        return (None, f"the pointee is {inner}, and the LOAD of one lowers (the "
+                      f"word's kind is carried by `pointer_deref_kind`), but a "
+                      f"STORE through it is refused: a store needs the kind of "
+                      f"the value on the right, so `p.value() = 5` would write "
+                      f"an integer's word where the source means `5.0`, and "
+                      f"nothing on this path reads that kind yet. Store the "
+                      f"element through an integer-typed view, or build the "
+                      f"value where it lives")
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         scaled, scale_why = _offset_scale(fn, obj, width)
@@ -23140,7 +23464,7 @@ def function_returns_a_value(fn) -> bool:
     return fn_returns_a_value(fn) or fn_declares_a_return(fn)
 
 
-def returnless_value_refusal(callee: str) -> str:
+def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:
     """Why rendering the result of `callee(…)`, which returns nothing, is wrong.
 
     One message for both backends, and it is asked from `_print_call` in each of
@@ -23148,6 +23472,9 @@ def returnless_value_refusal(callee: str) -> str:
     value this path cannot carry becomes TEXT: the arithmetic case computes with
     the word and the `x = f()` case is silent until somebody prints `x`, but a
     printed `None` is the shape CPython answers and the one a reader recognises.
+    `printf` is the second such position and asks the same question through
+    `returnless_printf_argument_refusal`, so `rendering` names which call is
+    doing the rendering.
 
     The wording discipline is `string_concat_refusal`'s: name the callee, say
     what CPython answers, say what this path has instead, and say what to do. A
@@ -23156,7 +23483,7 @@ def returnless_value_refusal(callee: str) -> str:
     a number the source wrote.
     """
     return (
-        f"print() is asked to render the value of {callee}(…), and {callee} "
+        f"{rendering} is asked to render the value of {callee}(…), and {callee} "
         f"returns nothing: CPython evaluates that call to `None` and prints "
         f"`None`, and a value on this path is one 64-bit word with no way to "
         f"say `no value` — the epilogue writes no return register, so the word "
@@ -23167,6 +23494,36 @@ def returnless_value_refusal(callee: str) -> str:
         f"plausible number is worse than a refusal. Give {callee} a `return`, "
         f"or do not use its value"
     )
+
+
+def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
+    """The refusal for a printf vararg that renders a return-less call, or None.
+
+    **`printf` is the other position where a value this path cannot carry
+    becomes TEXT, and it was unguarded.** `print` builds its format from its own
+    operands and refuses each of them in `_print_call`; a `printf` the SOURCE
+    wrote was only checked for a usable FORMAT, so `printf("%d", g(…))` for a `g`
+    with no `return` built and printed the leftover word — the same divergence
+    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
+    None.md` refuses for `print(g(…))`, at the same position (the value's word
+    becoming text) and one call spelling away.
+
+    `no_value_callee_of` is the caller's `ValueKinds` hook, the one reader of
+    "this expression's value is the result of a function that returns nothing";
+    it is passed in rather than re-derived so `print` and `printf` cannot answer
+    that question differently. The format's index comes from
+    `printf_format_arg_index`, so `sprintf`'s buffer argument is not mistaken for
+    an operand. Both emitters ask this at the same line they ask the format
+    check, so the two architectures cannot disagree about one call.
+    """
+    idx = printf_format_arg_index(name)
+    if idx is None:
+        return None
+    for a in list(args)[idx + 1:]:
+        callee = no_value_callee_of(a)
+        if callee is not None:
+            return returnless_value_refusal(callee, "printf()")
+    return None
 
 
 class ValueKinds:
@@ -23253,7 +23610,7 @@ class ValueKinds:
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=()):
+                 callee_returns_value=None, float_names=(), deref_kind=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -23342,6 +23699,15 @@ class ValueKinds:
         # keeps the answer it had.
         self._callee_returns_value = callee_returns_value or (
             lambda name: True)
+        # The EIGHTH hook, and the one that lets a POINTER DEREFERENCE carry a
+        # kind: `pointer_deref_kind` answers `FLOAT_KIND` for a `p.value()`
+        # whose pointee is a float, and `None` for everything else.  A
+        # dereference is an EXPRESSION the whole-function scan never binds — it
+        # is not a name, a field, a constructor or a subscript — so no existing
+        # hook can reach it, and without one `Int(p.value())` over a
+        # `Pointer[Float64]` read the exponent field.  Asked from `kind_of`'s
+        # CallExpr arm, where the dereference arrives.
+        self._deref_kind = deref_kind or (lambda expr: None)
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -24524,6 +24890,16 @@ class ValueKinds:
                 return list_kind(self.kind_of(e.element, scopes))
             return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
+            # A POINTER DEREFERENCE, asked FIRST: `p.value()` is a call whose
+            # callee is a member and whose receiver is a pointer, so the arms
+            # below (which read a callee NAME) cannot classify it and would
+            # answer `None` — the unclassified word that made
+            # `Int(p.value())` over a `Pointer[Float64]` read the exponent
+            # field.  `None` for every other call leaves each arm below exactly
+            # where it was.
+            deref = self._deref_kind(e)
+            if deref is not None:
+                return deref
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
             # `List[Int]()` are the same construction and must be the same
@@ -26844,8 +27220,8 @@ BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 #: the admitted ones are.
 #:
 #: **This list is also where the CONSTRUCTOR half of `POINTEES_REFUSED` comes
-#: from.**  `POINTEES_REFUSED` refuses `Float16`, `Float32` and `Float64` BY
-#: NAME at a dereference, and the constructor `Float32(1.0)` had no name to be
+#: from.**  `POINTEES_REFUSED` refuses `Float16` and `Float32` BY NAME at a
+#: dereference, and the constructor `Float32(1.0)` had no name to be
 #: refused by — it took `type_constructor_kind`'s documented `None` ("not a type
 #: constructor at all"), emitted a `BL Float32`, and failed at the LINK AUDIT
 #: with a message about a SYMBOL about a fact that is a TYPE's.
@@ -27403,6 +27779,7 @@ def subscript_callee_names(call) -> list:
 TYPE_VALUE_NAMES = frozenset(
     POINTEE_WIDTHS                                   # a width, for a pointee
 ) | frozenset(POINTEES_REFUSED) | frozenset(
+    POINTEE_FLOAT_NAMES) | frozenset(
     INT_TYPE_CTORS) | frozenset(
     IDENTITY_TYPE_CTORS) | frozenset(
     UNREPRESENTABLE_TYPE_CTORS) | frozenset(
@@ -44321,7 +44698,93 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+def export_rule_for(name: str, module: str, link_line=None,
+                    source: str = None) -> tuple:
+    """`(rule, declared)` for `name` as `module`'s SOURCE states it.
+
+    The one reader of `reflect.export_exclusions` for a REFUSAL, so that a
+    message about "the export rule" can name the rule that actually applied
+    instead of enumerating the four candidates — and can say, for the case that
+    is not an exclusion at all, that the module declares no such name.
+
+    The source comes from either
+      * `source`, a path (the `check_library_free_calls` site has it as the key
+        of the `library_free` table it is walking); or
+      * `link_line`, the raw manifest list a build carries, whose entries record
+        the defining module's own `source` (`write_dylib_manifest`). `module` is
+        matched against each entry's `module`, which is the spelled module name
+        the diagnostic itself uses.
+
+    Returns `(rule, declared)`:
+      * `(EXCL_*, True)`  — the module declares `name` and the rule excluded it;
+      * `(None, False)`   — the module declares no function or struct by that
+        name at all (the `now` in `runtime/stdlib_wrapper.mojo`, and an alias
+        spelled as its target's name);
+      * `(None, True)`    — declared and NOT excluded, which cannot be why a call
+        reached a refusal (see `(None, None)` in the caller);
+      * `(None, None)`    — no source could be read, so nothing is claimed.
+    """
+    text = None
+    if source:
+        try:
+            with open(source, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = None
+    if text is None and link_line:
+        for d in link_line:
+            if (d.get("module") or "") != (module or ""):
+                continue
+            path = d.get("source")
+            if not path:
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                text = None
+            break
+    if text is None:
+        return None, None
+    import reflect                                   # lazy — pulls the backend
+    try:
+        parsed = reflect.Parser(reflect.py_tokenize(text)).parse_module()
+        excluded = reflect.export_exclusions(text, parsed)
+    except Exception:                                # noqa: BLE001
+        return None, None
+    if name in excluded:
+        return excluded[name], True
+    declared = any(
+        isinstance(s, (reflect.FunctionDef, reflect.StructDef))
+        and getattr(s, "name", None) == name for s in parsed)
+    return None, declared
+
+
+#: The one-line gloss of each export rule the refusal names, keyed by
+#: `reflect`'s own constant (read lazily, because `reflect` pulls the backend).
+def _export_rule_why() -> dict:
+    import reflect
+    return {
+        reflect.EXCL_PRIVATE:
+            "a name with a leading `_` is private — the source saying it is not "
+            "for another module",
+        reflect.EXCL_GENERIC:
+            "a generic template is not one symbol but one per instantiation, "
+            "and each instantiation is the boundary symbol — "
+            "`formal/monomorph.py` compiles one into the defining module's "
+            "library when an importer asks for it, and a bare call asks for "
+            "none",
+        reflect.EXCL_OVERLOADED:
+            "an overload has no single symbol, and one trie entry cannot be two "
+            "instantiations",
+        reflect.EXCL_CLIB:
+            "a C library name like `exit` or `write` is provided by libSystem "
+            "(right for a call, wrongly named as this module's own definition)",
+    }
+
+
+def imported_callee_refusal(name: str, sym, fn_name: str,
+                            rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     Distinct from `module_global_refusal` because the two are different facts,
@@ -44341,6 +44804,15 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     symbol denotes it) or a C library name. `_get_kgen_string` in
     `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
     construct for nineteen swept files.
+
+    **It names the ONE rule that applied when `rule`/`declared` are passed in**,
+    and it is `export_rule_for` above that computes them from the defining
+    module's own source. The fallback below (no source readable) still
+    enumerates the four, but every caller that has the source passes the answer,
+    so a reader of the export-gate row gets "it is a generic template" rather
+    than four candidates — and the file whose name the module does not declare
+    at all (`runtime/stdlib_wrapper.mojo`'s `from time import now`) gets
+    `declared=False` and the sentence that says so.
 
     **The generic clause is no longer a claim that this path cannot do the
     thing** — it can, and it did so the moment it was asked, so saying so here
@@ -44369,6 +44841,66 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
+    # The rule that ACTUALLY applied, when the defining module's source was read
+    # (`export_rule_for`) — one sentence instead of four candidates, so a reader
+    # is not sent to look for an underscore, a bracket, a second definition and
+    # a C name in a file that has none of them.
+    if rule is not None:
+        why = _export_rule_why().get(rule) or f"it is excluded as `{rule}`"
+        import reflect
+        if rule == reflect.EXCL_GENERIC:
+            # The generic rule carries the whole explanation the fallback used to
+            # carry, because it is the ONE rule whose "why" a reader acts on:
+            # the bare spelling is CORRECT source and the missing piece is the
+            # inference. `test_formal_monomorph.py` pins every clause of it.
+            return (f"{who}`{name}` is called, and it is imported from `{mod}`, "
+                    f"so the call has to bind a symbol `{mod}` exports. That "
+                    f"module does not export it, and the reason is `doc/ABI.md`'s "
+                    f"export rule applied to the DECLARATION: {why}. A generic "
+                    f"template's instantiations ARE compiled into that module's "
+                    f"library when an importer asks for them "
+                    f"(`formal/monomorph.py`), so this call is one that asked "
+                    f"for none — it names no type argument, or names one that is "
+                    f"a value rather than a type, or spells the template as "
+                    f"`module.{name}`. **If the call names no type argument at "
+                    f"all, the SOURCE is right and this path is short**: Mojo "
+                    f"infers a template call's type arguments, so `{name}(…)` "
+                    f"with no bracket is correct code — the stdlib's own "
+                    f"`FormatStruct(writer, \"Allocation\")` is spelled that way "
+                    f"— and this path does not infer them yet. Its demand "
+                    f"pipeline reads type arguments off an explicit bracket, so "
+                    f"a bare call arrives here with no instantiation to bind; "
+                    f"the inference, the 123 measured files it is worth, and the "
+                    f"shape of the missing piece are in "
+                    f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"
+                    f"arguments_are_inferrable.md. So write the operation in this "
+                    f"module, or call a public function that does it — which is "
+                    f"the same program with a definition this image can bind. "
+                    f"Spelling it `{name}[<a type>](…)` will carry the "
+                    f"instantiation, and is a workaround for this gap rather "
+                    f"than a correction to your code")
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. That module "
+                f"does not export it, and the reason is `doc/ABI.md`'s export "
+                f"rule applied to the DECLARATION: {why}. The exclusion is "
+                f"measured and settled in bugs/FORMAL_known_limits.md §1.1, and "
+                f"the generic case in §1.2.")
+    # …and the case that is NOT an exclusion at all: the module's own source
+    # declares no such name. `runtime/stdlib_wrapper.mojo`'s `from time import
+    # now` is this, and the old four-candidate sentence sent the reader to look
+    # for an underscore, a bracket, a second definition and a libSystem name in
+    # `formal/hostmods/time.mojo`, which has none of them.
+    if declared is False:
+        return (f"{who}`{name}` is called, and it is imported from `{mod}`, so "
+                f"the call has to bind a symbol `{mod}` exports. **`{mod}` "
+                f"declares no function or struct named `{name}` at all**, so "
+                f"`doc/ABI.md`'s export rule (a leading `_`, a generic template, "
+                f"an overload, a C library name) is not the reason and none of "
+                f"its four clauses applies. The name is coming from somewhere "
+                f"other than `{mod}`'s own source — an alias or a re-export "
+                f"spelled in the importer, or a misspelling — so check the "
+                f"spelling and what `{mod}` actually declares before changing "
+                f"the call.")
     return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
             f"call has to bind a symbol `{mod}` exports. That module does not "
             f"export it, and the reason is `doc/ABI.md`'s export rule rather "
@@ -44379,26 +44911,22 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
             f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
-            f"A generic template's instantiations ARE compiled into that "
-            f"module's library when an importer asks for them "
-            f"(`formal/monomorph.py`), so this call is one that asked for "
-            f"none — it names no type argument, or names one that is a value "
-            f"rather than a type, or spells the template as `module.{name}`. "
-            f"**If the call names no type argument at all, the SOURCE is right "
-            f"and this path is short**: Mojo infers a template call's type "
-            f"arguments, so `{name}(…)` with no bracket is correct code — the "
-            f"stdlib's own `FormatStruct(writer, \"Allocation\")` is spelled that "
-            f"way — and this path does not infer them yet. Its demand pipeline "
-            f"reads type arguments off an explicit bracket, so a bare call "
-            f"arrives here with no instantiation to bind; the inference, the 123 "
-            f"measured files it is worth, and the shape of the missing piece are "
-            f"in "
-            f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
-            f"So write the operation in this module, or call a public function "
-            f"that does it — which is the same program with a definition this "
-            f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
-            f"instantiation, and is a workaround for this gap rather than a "
-            f"correction to your code")
+            + _generic_inference_tail(name))
+    if clause is not None:
+        return head + (
+            f"That module does not export it, and the reason is `doc/ABI.md`'s "
+            f"export rule rather than anything about this call: {clause}. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1.")
+    return head + (
+        f"That module does not export it, and the reason is `doc/ABI.md`'s "
+        f"export rule rather than anything about this call: a name with a "
+        f"leading `_` is private, a generic template is not one symbol but one "
+        f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
+        f"both at once), an overload has no single symbol, and a C library "
+        f"name like `exit` or `write` is provided by libSystem. The exclusion "
+        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
+        f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
@@ -45030,7 +45558,38 @@ class GlobalDataImage:
 # main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
 # program dies as it does today — no worse than the defect being fixed — while a
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
+#
+# **The depth this affords is PER-ARCHITECTURE, and that is the budget's shape
+# rather than a defect of the guard.** The budget is in BYTES because the thing
+# it bounds — the stack a runaway recursion may spend before it is refused — is
+# in bytes, and it is the SAME stack on both machines. But the frames are not
+# the same size: arm64's is `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is
+# `X86_64_CONTAINER_BUDGET` (16 KiB), so the one budget is 60 frames of arm64
+# and 480 of x86-64 — 8x, the frame ratio spelled out. A DEPTH budget instead
+# would either refuse x86-64 8x earlier than it needs to, or (if sized for
+# x86-64's depth) let arm64 spend 60 MiB of a 7.5 MiB stack and crash exactly as
+# it did before the guard existed. `stack_floor_depth(arch)` is the one place
+# the per-architecture figure is computed; a harness that compares the two
+# machines' recursion depth is measuring this budget, not the compiler.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
+
+
+def stack_floor_depth(arch: str) -> int:
+    """The recursion depth `STACK_FLOOR_BUDGET_BYTES` affords on `arch`.
+
+    One budget in BYTES, two frame sizes, so the depth is per-architecture and
+    this is the single place it is derived: arm64's frame is
+    `ARM64_CONTAINER_BUDGET` (128 KiB) and x86-64's is `X86_64_CONTAINER_BUDGET`
+    (16 KiB), giving 60 and 480 — the 8x that is exactly the frame ratio, and a
+    property of the byte policy rather than of the guard. The MEASURED edge is
+    one or two frames below the quotient (the real frame is at least the budget,
+    and the 256 KiB margin is a level), which is why `tools/formal_fuzz.py`
+    counts a one-machine `trapped` pair apart from a parity finding.
+    """
+    arch = str(arch).replace("-", "_")
+    frame = (ARM64_CONTAINER_BUDGET if arch in ("arm64", "aarch64")
+             else X86_64_CONTAINER_BUDGET)
+    return STACK_FLOOR_BUDGET_BYTES // frame
 
 
 # THE PART OF THE PROCESS'S STACK THIS COMPILER LEAVES ALONE, and the reason
@@ -48522,6 +49081,38 @@ def struct_is_context_manager(struct_def) -> bool:
     return not context_exit_returns_truthy(exit_)
 
 
+def _literal_return_truthiness(node):
+    """CPython's truthiness of a `return`'s value when it is a literal, else None.
+
+    The one reader `context_exit_returns_truthy` asks, and it exists because
+    "which literals can this build decide" is not the same question for a
+    TRUTHINESS as it is for a WORD.  `fold_literal_expr` is the word reader: it
+    folds the integers, the `bool`s (to 0/1) and the strings, and it has no
+    float arm on purpose — that folder is also the struct-field, class-constant
+    and default-parameter reader, where a float is not an integer word.
+    `fold_module_value` is the one that turns a float literal into a word, by
+    `int(...)`, and that truncation is exactly what must NOT be used here:
+    `int(0.5)` is 0 while CPython reads the returned 0.5 as TRUE, so a gate
+    built on it would answer the wrong way for every fraction.  So a float
+    literal is decided from its own value here, a unary `+`/`-` over one
+    following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), and
+    everything else is None — which every caller reads as "not decided" and
+    leaves the return where it was, the one-sided direction this gate is
+    deliberately in.
+    """
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return float(node.value) != 0.0
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, F.UnaryOp) and node.op in ("+", "-"):
+        return _literal_return_truthiness(node.operand)
+    value = fold_literal_expr(node)
+    if value is None:
+        return None
+    return bool(value)
+
+
 def context_exit_returns_truthy(method) -> bool:
     """True when some `return` in `__exit__` folds to a value CPython reads as TRUE.
 
@@ -48548,10 +49139,24 @@ def context_exit_returns_truthy(method) -> bool:
     wrong answer takes on this path: the visible half is right.
 
     **The test is FOLDABILITY, deliberately, and the direction is one-sided.**
-    `fold_literal_expr` answers a `return` whose value the build can decide —
-    `return True`, `return 1`, `return 2` are all suppressions; a bare `return`,
-    `return False`, `return None` and `return 0` are all not — and answers None
-    for anything computed.  So a COMPUTED return is not counted here and stays
+    `_literal_return_truthiness` answers a `return` whose value the build can
+    decide — `return True`, `return 1`, `return 2` are all suppressions; a bare
+    `return`, `return False`, `return None` and `return 0` are all not — and
+    answers None for anything computed.  **The test is the returned value's
+    TRUTHINESS and neither its type nor its word**: CPython reads any true return
+    as a suppression, so a non-empty string literal (`return "yes"`) and a
+    non-zero float literal (`return 0.5`) both suppress exactly as `return 1`
+    does and are both refused here, where earlier wordings of this function
+    checked `isinstance(value, int)` and let the first through.  Both are
+    measured on both architectures — the image built, printed
+    `enter / body 7 / exit` and exited 1 where CPython exits 0, the same wrong
+    answer as the `return True` case above.  `return ""`, `return 0.0`, `return
+    0`, `return False` and `return None` are all falsy in CPython and all still
+    lower.  **The word reader is deliberately not reused for the float**:
+    `fold_literal_expr` has no float arm, and `fold_module_value`'s truncation
+    (`int(0.5)` is 0) would answer the truthiness the wrong way, which is why
+    `_literal_return_truthiness` reads a float's own value.  So a
+    COMPUTED return is not counted here and stays
     as it was: that is the remaining limit, it is cross-FIELD flow (`nullcontext`
     returns `self.exit_result`, and whether that is true depends on a constructor
     argument this function cannot see), and it is the same limit
@@ -48565,8 +49170,15 @@ def context_exit_returns_truthy(method) -> bool:
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if not isinstance(node, F.ReturnStmt):
             continue
-        value = fold_literal_expr(getattr(node, "value", None))
-        if isinstance(value, int) and not isinstance(value, bool) and value:
+        # `_literal_return_truthiness` is the ONE reader of "what would CPython
+        # read this return as", so the test is the value's TRUTHINESS rather
+        # than its type or its word: `fold_literal_expr` answers an int for a
+        # number or a `bool` and a STRING for a string literal, `0.5` is a float
+        # literal it does not fold, and every one of those is decided there.
+        # Python `None` means "not decided" — a bare `return` and a computed
+        # expression both — and is falsy here, the refusal-to-decide direction
+        # this gate is deliberately one-sided in.
+        if _literal_return_truthiness(getattr(node, "value", None)):
             return True
     return False
 

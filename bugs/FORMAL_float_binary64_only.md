@@ -41,9 +41,11 @@ VALUE is on this path, so a tag for a format this path cannot HOLD is not a lie.
 `POINTEES_REFUSED["Float32"]`'s text — *"a Float32 is four bytes of IEEE binary32
 and this path has no float kind distinct from an int"* — is TRUE and only true of
 binary32, and `test_formal_run.py`'s `deref_refuse_float_pointee` pins it as such.
-Its `Float64` sibling was CORRECTED in the same change, because that half of the
-sentence had become false: a `Float64` load IS bit-exact now. The corrected text
-and the reason are in `bugs/FORMAL_float_pointer_pointee.md`.
+Its `Float64` sibling is GONE rather than corrected: `POINTEE_FLOAT_NAMES` is the
+table of float pointees whose load lowers, and `model.pointer_deref_kind` carries
+the pointee's kind into every context, so `Pointer[Float64]` is no longer refused
+by name (`test_formal_run.py`'s
+`deref_a_binary64_pointee_is_a_double_and_int_of_it_converts`).
 
 ## What the next slice would be
 
@@ -132,11 +134,10 @@ still pass the three refusals). `FLOAT_CASES` is 21/21 and the new group 5/5.
 **What this does NOT close.** It is a hole in the boundary of the scope, not a
 change to it: the scope is still binary64, `Float32` is still refused by name for
 the reason §"What is NOT" gives, and the SECOND slice is still a second kind. It
-also removes one hazard from
-`bugs/FORMAL_float_pointer_pointee.md`'s remaining work rather than doing any of
-it: letting a `Pointer[Float64]` load through without a kind would have made
-`printf("%d", p.value())` print a bit pattern, so the rule above is a
-PREREQUISITE for that change and not an alternative to it.
+also removed the hazard that stood in front of letting a `Pointer[Float64]` load
+through: without a kind, `printf("%d", p.value())` would print a bit pattern, so
+the rule above was a PREREQUISITE for that change and not an alternative to it —
+and the change has since landed (`model.pointer_deref_kind`, above).
 
 ## Status, 2026-10-05 (`formal28-3`): §"What is NOT"'s second sentence was
 ## FALSE about the CONSTRUCTOR, and that is now the refusal the doc always said

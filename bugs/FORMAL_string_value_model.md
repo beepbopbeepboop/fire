@@ -677,12 +677,24 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   answers None there, so the overlay claims nothing and the name falls through
   to the function's own map, which is exactly what happened before.
 
-  **One thing found while looking, filed not fixed:**
-  `FORMAL_nested_comprehension_generator_temps_are_not_collected` — a
-  comprehension inside a comprehension's ITERABLE has no `_ci1`/`_cb1`, because
-  the collector and the emitter disagree by one about the nesting counter, and
-  every nested comprehension is refused on both machines today. Re-measured with
-  the patch above reverted, so it is not a regression from it.
+  **One thing found while looking: the `_ci1`/`_cb1` counter bug that was filed
+  here is FIXED, its doc is gone, and nested comprehensions are still refused
+  for a DIFFERENT reason.** This bullet used to cite
+  `FORMAL_nested_comprehension_generator_temps_are_not_collected` (a
+  comprehension inside a comprehension's ITERABLE had no `_ci1`/`_cb1` because
+  the collector and the emitter disagreed by one about the nesting counter).
+  That file is not in `bugs/` any more — this project deletes a doc when its bug
+  is fixed — and the old message does not reproduce. What reproduces, on both
+  machines, is the element-CONTAINER refusal, and it is not a counter off-by-one:
+
+      build: a comprehension in main: the element `[…] for …` opens a container,
+      and this path has one frame blob for it — 48 bytes reserved once, at the
+      element's own site — while the comprehension body runs up to 3 times. …
+
+  i.e. a list-comprehension whose element is itself a container can only be
+  represented as one frame blob shared by every iteration. That is the same
+  frame-lifetime subject as the rest of this document, and it belongs to whoever
+  takes the run-time sequence, not to a generator-temp counter.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String

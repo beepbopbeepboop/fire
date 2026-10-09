@@ -2189,6 +2189,47 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
           "unclassified names only if there are many of them")
 
 
+def test_the_find_spec_decided_names_are_unreachable(tmpdir, _shared):
+    """The five names `find_spec` decides of the unclassified set are claimed.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measured the
+    oracle and found it splits the unclassified set 5 and 200: `find_spec`
+    returns NO SPEC for `_gdbm`, `_overlapped`, `_tkinter`, `_winapi` and
+    `_wmi` on this host, which is the rule at the top of `formal/imports.py`
+    applied — the object is missing from the target, so they are
+    `unreachable` rather than a per-name judgement with no measurement behind
+    it. This pins the direction that §0.5 named as the next step: the oracle
+    decides a name's TIER, and the five it decides are claimed and not left in
+    no tier.
+
+    **The measurement is CPython's own and is host-specific, and that is the
+    point rather than a fragility** — a host that carries Tcl/Tk or gdbm would
+    answer a spec for `_tkinter`/`_gdbm`, and then the classification would be
+    wrong and this row is the right place to say so. All five are private, so
+    this moves the PUBLIC unclassified count by zero.
+    """
+    import importlib.util
+    five = ("_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi")
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    for name in five:
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the five `find_spec` "
+              "decides are not claimed")
+        check(I.host_module_tier(name) == "unreachable",
+              f"host_module_tier({name!r}) answered "
+              f"{I.host_module_tier(name)!r}, want 'unreachable'")
+        answer, _detail = I.host_module_verdict(name, relative_to=probe,
+                                                project_root=probe)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}")
+        check(name.startswith("_"),
+              f"{name} is not private, so this row moves the public count")
+        check(importlib.util.find_spec(name) is None,
+              f"find_spec found a spec for {name} on this host, which is the "
+              "measurement the tier rests on — the object is NOT missing from "
+              "the target and the entry is wrong")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -3716,10 +3757,123 @@ def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared
     check("widen[<a type>]" in text,
           f"the refusal does not give the spelling that would bind: "
           f"{text.strip()[-300:]}")
+    # …and it names the ONE rule that applied rather than enumerating all four.
+    # `model.export_rule_for` reads the defining module's own source through
+    # `reflect.export_exclusions`; the old sentence offered a reader four
+    # candidates for a file that applies exactly one of them.
+    check("applied to the DECLARATION" in text
+          and "generic template is not one symbol" in text,
+          f"the refusal does not name the rule that applied: "
+          f"{text.strip()[-400:]}")
+    check("an overload has no single symbol" not in text,
+          f"the refusal still enumerates the four candidates: "
+          f"{text.strip()[-400:]}")
+
+
+def test_the_refusal_says_a_module_declares_no_such_name(tmpdir, _shared):
+    """The case that is NOT an export-rule exclusion: the defining module's own
+    source declares no such name.
+
+    `runtime/stdlib_wrapper.mojo` does `from time import now, sleep` and calls
+    `now()`; `formal/hostmods/time.mojo` declares no `now` at all. The old
+    sentence enumerated the four rules — a leading `_`, a generic, an overload,
+    a C name — and sent the reader to look for one of them in a module that has
+    none, which is the one file of the export-gate row none of the four explains.
+
+    `model.export_rule_for` reads the source and answers `(None, False)` there,
+    and the refusal then says the truthful thing. Checked directly rather than
+    through a build, because the whole subject is the sentence `export_rule_for`
+    feeds — a build of `stdlib_wrapper.mojo` would pin the same two facts through
+    a compiler run this file does not need.
+    """
+    import formal.model as M
+    source = os.path.join(HERE, "formal", "hostmods", "time.mojo")
+    rule, declared = M.export_rule_for("now", "time", source=source)
+    check(rule is None and declared is False,
+          f"export_rule_for says ({rule!r}, {declared!r}) about `now` in the "
+          f"time host module, which declares no such name")
+
+    class _Sym:
+        module = "time"
+
+    text = M.imported_callee_refusal("now", _Sym(), "main",
+                                     rule=rule, declared=declared)
+    check("declares no function or struct named `now`" in text,
+          f"the refusal does not say the module declares no such name: "
+          f"{text.strip()[-400:]}")
+    check("an overload has no single symbol" not in text
+          and "leading `_` is private" not in text,
+          f"the refusal still enumerates the four export-rule candidates for a "
+          f"name no rule applies to: {text.strip()[-400:]}")
+    # …and a source that cannot be read claims nothing, so the caller falls back
+    # to the enumeration rather than asserting "declares no such name" about a
+    # module it never saw.
+    check(M.export_rule_for("now", "time", source=os.path.join(HERE, "nope.mojo"))
+          == (None, None),
+          "an unreadable source must answer (None, None), not (None, False)")
 
 
 METHOD_CALL_MODULE = (
     "def widen[T: Intable](v: T) -> T:\n  return v\n")
+
+
+def test_the_export_refusal_names_the_rule_that_actually_applied(
+        tmpdir, _shared):
+    """The refusal names the ONE rule, and says a name the module lacks is absent.
+
+    `model.imported_callee_refusal` used to list all four `doc/ABI.md` export
+    rules whatever the case, so a name a module does not declare at all was
+    answered by sending the reader to look for an underscore, a bracket, a
+    second definition or a libSystem name — none of which the module has. The
+    measured case is `runtime/stdlib_wrapper.mojo`'s `from time import now`:
+    `formal/hostmods/time.mojo` declares no `now`, and `build._export_rule_for`
+    now reads the defining module's own source (through the `source` its
+    manifest carries) to say which rule applied, or that none did.
+    """
+    # A name declared nowhere in the module: the message must say so, and must
+    # NOT hand the reader the other three rules.
+    root = os.path.join(tmpdir, "exportrule_absent")
+    os.makedirs(root)
+    write_tree(root, {
+        "lib.mojo": "def present(v: Int) -> Int:\n  return v\n",
+        "prog.mojo": "from lib import absent\n"
+                     "def main():\n  return absent(3)\n",
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0 and "absent" in text,
+          f"a bare call to a name the module does not declare was not refused "
+          f"by name: {text.strip()[-300:]}")
+    check("declares no `absent`" in text,
+          f"the refusal did not say the module declares no such name: "
+          f"{text.strip()[-300:]}")
+    check("a name with a leading `_` is private" not in text
+          and "one per instantiation" not in text,
+          f"the refusal still lists export rules that do not apply to a name "
+          f"the module does not declare: {text.strip()[-300:]}")
+
+    # A private name IS an export-rule exclusion, and the message must name
+    # that one and only that one (not the generic/overload/libSystem
+    # candidates).
+    root2 = os.path.join(tmpdir, "exportrule_private")
+    os.makedirs(root2)
+    write_tree(root2, {
+        "lib.mojo": "def anchor(v: Int) -> Int:\n  return v\n"
+                    "def _hidden(v: Int) -> Int:\n  return v\n",
+        "prog.mojo": "from lib import _hidden\n"
+                     "def main():\n  return _hidden(3)\n",
+    })
+    fresh_cas()
+    result2, _out2 = build(root2, "prog.aout", expect_ok=False)
+    text2 = result2.stderr or result2.stdout
+    check("a name with a leading `_` is private" in text2,
+          f"the private name's refusal did not name the private rule: "
+          f"{text2.strip()[-300:]}")
+    check("one per instantiation" not in text2
+          and "provided by libSystem" not in text2,
+          f"the private name's refusal listed rules that do not apply to it: "
+          f"{text2.strip()[-300:]}")
 
 
 def _bare_template_call_program(caller: str) -> str:
@@ -3928,7 +4082,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           f"on: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
-    check("nothing an importer could bind" in reason,
+    check("no address an importer could bind" in reason,
           f"the refusal stopped saying why the refusal is correct: {reason}")
     # The private sibling is a DIFFERENT branch and must not have been edited.
     priv = os.path.join(tmpdir, "private_only.mojo")
@@ -5156,6 +5310,8 @@ TESTS = [
      test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
     ("a bare call to a template is refused by the export rule",
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
+    ("the refusal says a module declares no such name",
+     test_the_refusal_says_a_module_declares_no_such_name),
     ("the bare-call refusal names the method the call is in",
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",
@@ -5194,6 +5350,8 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
+    ("the names find_spec decides are unreachable, not unclassified",
+     test_the_find_spec_decided_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

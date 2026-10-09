@@ -1,5 +1,29 @@
 # The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing`
 
+**RE-MEASURED 2026-10-07, and ONE class of the refusals below is FIXED —
+the per-block terminal this doc is about is NOT, and the `ProofLib` half is
+unchanged.** `_reached_without_a_condition` returned `False` the moment ANY
+reachable source conditional was found, rather than only when one lies on
+the path TO the halt address — which is what its own docstring says ("a
+block on the path blocks only when it is `cbz`-kinded AND its branch pc is
+in `cond_branches`"). Every image's prologue carries the stack-floor guard's
+`getrlimit` extern call (`formal/arm64_codegen.py::_emit_stack_floor_guard`;
+the startup-stub fix later moved it below `func_offset` through
+`_emit_stack_floor_init`, its doc deleted with the fix), so the halt
+address of any conditional program is that prologue call, which sits AHEAD
+of the source test. The old code read the merely-reachable test as "the call
+is behind a CONDITIONAL" and refused `ifonly`, `deepif`, `cmp_le_ge`, and
+the whole dec1 family (`count`, `fact`, `pow2`, `sqsum`, `sum`). A source
+conditional is now a BARRIER that is not traversed (`commit 14af4cbe`), so
+those programs generate again; a call GENUINELY behind a condition still
+answers `False` and is still refused. Pinned by
+`test_formal_call_proof_gen.py::TestAReachableSourceConditionIsABarrierNotAGlobalRefusal`,
+which asks the helper directly on a compiled image (no Lean). The unblocked
+examples' proofs still do not typecheck, for reasons that pre-date this
+change (`formal/examples/neg.mojo` fails the same way), so the gate's
+Lean-checking formal rows are unaffected. This is **partial progress**, not
+this doc's fix.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the blocker this doc names is
 MISNAMED, and the correction is worth more than the work it precedes — the Lean
 gate is NOT what stands in front of option 1. It is runnable, cheaply, by

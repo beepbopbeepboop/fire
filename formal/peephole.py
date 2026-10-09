@@ -101,10 +101,12 @@ def decode_arm64(word: int) -> ArmInsn | None:
     # ADD (immediate), 64-bit, flags NOT set — `encode_mov_zr_xn`'s word.
     #
     # `sh == 0` is required and is not decoration: `arm64_step`'s arm for this
-    # class reads the operand as `imm12` ALONE and does not look at bit 22,
-    # while the hardware scales the immediate by 4096 when `sh` is set. A rule
-    # over a word the model and the hardware already disagree about proves
-    # nothing about the binary, so this decoder refuses those words outright.
+    # class now reads `arm64_ext_imm12`, which scales the immediate by
+    # `1 << (12 * sh)`, while `peephole_arm64_mov_self` and the rules below
+    # reason about the immediate as written. A rule over a `sh = 1` word would
+    # need the scale carried through every proof, so this decoder refuses those
+    # words outright and every rule's Lean theorem carries the matching
+    # `sh = 0` hypothesis.
     if (word & 0xFF800000) == 0x91000000 and ((word >> 22) & 1) == 0:
         rd = word & 0x1F
         rn = (word >> 5) & 0x1F
@@ -647,16 +649,18 @@ def _a_add_imm_fuse(window, ctx):
 
 
 _COPY_CHAIN = Rule("arm64/copy_chain", "arm64", "peephole_arm64_copy_chain",
-                   ("rd < 31", "rn < 31", "the intermediate register is never "
-                    "read again"), _a_copy_chain,
+                   ("rd < 31", "rn < 31", "sh == 0",
+                    "the intermediate register is never read again"),
+                   _a_copy_chain,
                    "two copies in a row folded into the second")
 
 ARM64_RULES = [
     Rule("arm64/mov_self", "arm64", "peephole_arm64_mov_self",
-         ("rd < 31", "rn < 31"), _a_mov_self,
+         ("rd < 31", "rn < 31", "sh == 0"), _a_mov_self,
          "a copy of a register into itself"),
     Rule("arm64/add_imm_fuse", "arm64", "peephole_arm64_add_imm_fuse",
-         ("rd < 31", "rn < 31", "Rn2 == Rd1", "Rd2 == Rd1", "i + j < 4096"),
+         ("rd < 31", "rn < 31", "Rn2 == Rd1", "Rd2 == Rd1", "i + j < 4096",
+          "sh == 0"),
          _a_add_imm_fuse,
          "two additions to one register, fused"),
     _COPY_CHAIN,

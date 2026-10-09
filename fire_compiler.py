@@ -1148,6 +1148,60 @@ def for_target_names(target: object) -> list[str]:
     return [name] if isinstance(name, str) and name else []
 
 
+def for_target_tree(target: object):
+    """A for/comprehension target string parsed into its leaf/nesting tree.
+
+    `'i'` -> `'i'`; `'(a, b)'` -> `['a', 'b']`; `'a, b'` (the comprehension
+    `Generator.target` spelling, no surrounding parens) -> `['a', 'b']`;
+    `'(a, (b, c))'` -> `['a', ['b', 'c']]`; `'*rest'` -> `'*rest'` (a starred
+    leaf keeps its star, the same contract `for_target_names` gives). Returns
+    None when a leaf is not a plain identifier.
+
+    This is the NESTED companion to `for_target_names`, which flattens: the
+    consumers that only need the leaf NAMES want the flat list, but a codegen
+    that UNPACKS each group needs the shape, and recovering it from the flat
+    list is impossible. The top-level comma split is `target_slots`, so a
+    nested group's commas are not torn (`for a, (b, c)` is two slots, not
+    three). Both formal backends read this one function, so a `for` target
+    cannot be nested on one architecture and flat on the other.
+    """
+    if not isinstance(target, str):
+        return None
+    t = target.strip()
+    # Only PARENS are peeled here, matching the emitter this replaced: a
+    # comprehension's list-pattern target `for [a, b] in ...` is the parser's
+    # `[a, b]` spelling and is not unwrapped into a tuple target by this
+    # function (the record of that being a real distinction is
+    # `_lbn_split_commas`'s docstring, which has the bug it fixed).
+    if t.startswith("(") and t.endswith(")"):
+        parts = target_slots(t[1:-1])
+        tree = []
+        for p in parts:
+            child = for_target_tree(p)
+            if child is None:
+                return None
+            tree.append(child)
+        return tree if tree else None
+    if "," in t:
+        parts = target_slots(t)
+        if len(parts) > 1:
+            tree = []
+            for p in parts:
+                child = for_target_tree(p)
+                if child is None:
+                    return None
+                tree.append(child)
+            return tree if tree else None
+    if t.startswith("*"):
+        rest = t[1:].strip()
+        if rest.isidentifier():
+            return "*" + rest
+        return None
+    if t.isidentifier():
+        return t
+    return None
+
+
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 

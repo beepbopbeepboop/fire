@@ -3347,7 +3347,7 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
-        imm12 = (w >> 10) & 0xfff
+        imm12 = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         return (f"some {{ s with nzcv := arm64_subs_flags "
                 f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
     if idx == 14:  # B
@@ -3403,13 +3403,16 @@ def _step_rhs(w: int, idx: int):
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
-        imm = (w >> 10) & 0xfff
+        # `sh` (bits 23:22) is `LSL #0` at 0 and `LSL #12` at 1; the arm's mask
+        # keeps bit 23, so a word reaching here has `sh ∈ {0, 1}`. `& 0x1` makes
+        # the shift total without ever computing a reserved immediate.
+        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = (w >> 10) & 0xfff
+        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3536,9 +3539,14 @@ def _step_rhs(w: int, idx: int):
     # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
     # memory helper is the one at that width — the widths are the whole point of
     # these arms: `LDRB` reads ONE byte where `LDR` reads eight.
-    if idx == 66:  # CMN Xn, Xm: the flags of Xn + Xm, which is not CMP's
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg "
-                f"{(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 66:  # ADDS Xd, Xn, Xm / CMN Xn, Xm: write Rd and the flags of the
+        # sum. `arm64_set_reg 31` is the identity, so the `Rd = 31` (CMN) spelling
+        # writes no register and the `Rd ≠ 31` one (the signed `+` overflow
+        # check's `ADDS Xd, Xn, Xm`) does — one row for the whole class, exactly
+        # as index 6's CMP/SUBS row covers both spellings of the subtract.
+        return (f"some (arm64_set_reg {rd} {{ s with nzcv := arm64_adds_flags "
+                f"(arm64_reg {(w >> 5) & 0x1f} s) (arm64_reg {(w >> 16) & 0x1f} s) }} "
+                f"(arm64_reg {(w >> 5) & 0x1f} s + arm64_reg {(w >> 16) & 0x1f} s))")
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
@@ -3705,18 +3713,18 @@ def _step_rhs_generic(idx: int):
     if idx == 8:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ^^^ arm64_reg {_RM} s))"
     if idx == 9:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + UInt64.ofNat (arm64_ext_imm12 w)))"
     if idx == 10:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} + UInt64.ofNat (arm64_ext_imm12 w) }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} + UInt64.ofNat (arm64_ext_imm12 w)))")
     if idx == 11:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat {_I12}))"
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - UInt64.ofNat (arm64_ext_imm12 w)))"
     if idx == 12:
-        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat {_I12} }} "
-                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat {_I12}))")
+        return (f"some (if {_RD} = 31 then {{ s with sp := {_BASE} - UInt64.ofNat (arm64_ext_imm12 w) }} "
+                f"else arm64_set_reg {_RD} s ({_BASE} - UInt64.ofNat (arm64_ext_imm12 w)))")
     if idx == 13:
         return (f"some {{ s with nzcv := arm64_subs_flags (arm64_reg {_RN} s) "
-                f"(UInt64.ofNat {_I12}) }}")
+                f"(UInt64.ofNat (arm64_ext_imm12 w)) }}")
     if idx == 14:
         return f"some {{ s with pc := (UInt64.ofNat s.pc + {_OFF26} * 4).toNat }}"
     if idx == 15:
@@ -3797,8 +3805,9 @@ def _step_rhs_generic(idx: int):
     if idx == 35:
         return "some s"
     if idx == 66:
-        return (f"some {{ s with nzcv := arm64_adds_flags (arm64_reg {_RN} s) "
-                f"(arm64_reg {_RM} s) }}")
+        return (f"some (arm64_set_reg {_RD} {{ s with nzcv := arm64_adds_flags "
+                f"(arm64_reg {_RN} s) (arm64_reg {_RM} s) }} "
+                f"(arm64_reg {_RN} s + arm64_reg {_RM} s))")
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
@@ -4700,14 +4709,35 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51, 66, 67):
+    if idx in (0, 13, 14, 16, 17, 34, 35, 51, 67):
         return set()
+    # 6 is `SUBS Xd, Xn, Xm` / `CMP Xn, Xm` (one class, split by `Rd`) and 66 is
+    # `ADDS Xd, Xn, Xm` / `CMN Xn, Xm`: in both, `Rd = 31` is the zero register
+    # and writes nothing, every other `Rd` writes it. `arm64_step` and
+    # `_step_rhs` write it for the whole class, so this table has to as well, or
+    # a block's certificate under-approximates the registers it clobbered — and
+    # the backend emits `SUBS/ADDS Xd, ...` with `Rd != 31` for the signed `-`/`+`
+    # overflow checks (`_emit_int_alu_checked`'s `encode_subs_xd_xn_xm(0,0,1)` /
+    # `encode_adds_xd_xn_xm(0,0,1)`), not only the CMP/CMN spellings.
+    if idx in (6, 66):
+        return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
     # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
     # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
     # membership states, and a second row saying the same thing is how
     # `_regs_written` and the model's arm drift apart.
+    #
+    # 6 (CMP/SUBS register) and 66 (CMN/ADDS) are here for the same reason 2/3
+    # are: the classes also carry their register-writing spellings
+    # (`encode_subs_xd_xn_xm`, `encode_adds_xd_xn_xm`), and the model writes
+    # `Rd` for both.  When the compare spelling is the one encoded, `Rd = 31`
+    # and `arm64_set_reg 31` is the identity — so the write set is EMPTY there
+    # and `{rd}` otherwise.  `_written_expr` cannot read register 31 (there is
+    # no `arm64_reg 31`), which is why the conditional is needed rather than
+    # the plain `{rd}` the register-arithmetic rows use.
+    if idx in (6, 66):
+        return {rd} if rd != 31 else set()
     if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
         return {rd}
     if idx in (9, 10, 11, 12):
@@ -8375,8 +8405,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # register holds a compile-time non-zero constant at the CBZ, the
             # taken (div0/error) arm is statically dead — close it by
             # contradiction instead of exploring the dead path.
+            #
+            # **`_bidx == 16` (CBZ) ONLY, and that is not tidiness.** The
+            # contradiction is `absurd hc hne` with `hc : arm64_reg r s = 0` and
+            # `hne : arm64_reg r s ≠ 0`, which are complementary ONLY for a CBZ.
+            # A `B.cond` tests the FLAGS (`hc : arm64_matches_condition k s.nzcv
+            # = true`) and its `r = w & 0x1f` is the CONDITION FIELD, not a
+            # register, so `_cbz_reg_const` can return a non-zero constant for a
+            # register the branch never tests and `absurd` then fails to
+            # elaborate. Measured on `if 0 == n:` (which lowers to `cmp` +
+            # `B.cond`, unlike `if n == 0:`'s `CBZ`): `Application type
+            # mismatch` at every `absurd`, and the proof did not elaborate at
+            # all. A CBNZ is excluded for the same reason with the polarity
+            # flipped (`hc` and `hne` are then the SAME proposition).
             _reg_const = None
-            if _src is None and not is_contract and cbz_force is None:
+            if _src is None and not is_contract and cbz_force is None \
+                    and _bidx == 16:
                 _reg_const = _cbz_reg_const(block, words, r)
             _taken_dead = (_reg_const is not None and _reg_const != 0)
             if cbz_force == "taken":
@@ -9554,6 +9598,37 @@ def _step_result_plan(code: bytes) -> dict:
     return plan
 
 
+#: The immediate's own sign bit, in the immediate's domain, per step index —
+#: the literal the model spells (`lib/ProofLib.lean`'s `arm64_step`: `imm19
+#: &&& 0x40000`, `imm14 &&& 0x2000`) and the one `lhs` is phrased over.
+#: B.cond/CBZ/CBNZ read imm19 (`(w >>> 5) &&& 0x7ffff`); TBZ/TBNZ read imm14
+#: (`(w >>> 5) &&& 0x3fff`); B/BL's 26-bit offset has no shift (`0x02000000`).
+_SIGN_EXTEND_IMM_BIT = {14: 0x02000000, 16: 0x00040000, 17: 0x00040000,
+                        51: 0x00040000, 52: 0x00002000, 53: 0x00002000}
+
+
+def _sign_extend_mask(idx: int) -> int:
+    """The mask on the RAW WORD for the bit the sign-extend `if` splits on.
+
+    The step lemma's `lhs` is the model's term — `((w >>> 5) &&& <imm mask>
+    &&& <imm sign bit>)` — so the bit it tests is the immediate's sign bit
+    SHIFTED UP BY 5 (the immediate starts at bit 5), and the mask applied to
+    `w` to decide the `hb` polarity has to be that bit in `w`.  For imm19 that
+    is bit 23 (`0x800000`), for imm14 bit 18 (`0x40000`); B/BL's 26-bit offset
+    is read unshifted, so its sign bit is bit 25 (`0x02000000`) as-is.
+
+    **Writing the immediate-domain mask here instead is a real bug, not a
+    style choice**: it reads bit 18 for imm19 and bit 13 for imm14, decides
+    the WRONG branch whenever those disagree with the real sign bit, and the
+    `hb` it then emits is false about the word — which `native_decide` rejects
+    outright.  Measured on the `not n` → CMP+CSET dylib's own TBZ, word
+    `0x36312064`: bit 18 (the sign bit) is 0 but bit 13 is 1, so the old
+    `0x2000` mask emitted `¬(lhs = 0)` for a `lhs` that is 0.
+    """
+    bit = _SIGN_EXTEND_IMM_BIT[idx]
+    return bit if idx == 14 else bit << 5
+
+
 def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
@@ -9641,17 +9716,27 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             # everything downstream is a proof of something else. That is why
             # the numbers are spelled out here rather than derived from a
             # table the two families do not share.
+            #
+            # **`sign_mask` is the SAME BIT AS `lhs`, and `lhs` tests the bit
+            # in the SHIFTED word (`w >>> 5`) while `sign_mask` is applied to
+            # `w` — so it is the immediate's sign bit shifted back up by 5.**
+            # The two families' immediates start at bit 5 (the model reads
+            # `(insn >>> 5) &&& 0x7ffff` / `&&& 0x3fff`), so the sign bit the
+            # model's `if` splits on is bit 23 of `w` for imm19 and bit 18 for
+            # imm14.  Writing the immediate-domain mask here (0x40000 / 0x2000)
+            # instead reads bit 18 / bit 13 of `w` and decides the WRONG branch
+            # whenever those disagree with the real sign bit — a `hb` that is
+            # false about the word, which `native_decide` rejects outright
+            # (measured: the `not n` → CMP+CSET dylib's own TBZ, word
+            # 0x36312064, bit 18 = 0 but bit 13 = 1).
             if idx == 14:
                 immv = w & 0x03ffffff
                 lhs = f"(({immv} : UInt32) &&& (33554432 : UInt32))"
-                sign_mask = 0x02000000
             elif idx in (52, 53):
                 lhs = f"(({w} : UInt32) >>> 5 &&& 16383 &&& 8192)"
-                sign_mask = 0x2000
             else:
                 lhs = f"(({w} : UInt32) >>> 5 &&& 524287 &&& 262144)"
-                sign_mask = 0x00040000
-            if w & sign_mask:
+            if w & _sign_extend_mask(idx):
                 tactics.append(f"have hb : \u00ac ({lhs} = 0) := by native_decide")
             else:
                 tactics.append(f"have hb : ({lhs}) = 0 := by native_decide")
@@ -9833,12 +9918,21 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
                    entry_values: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
-    Appends a RET sentinel after the code and executes the whole program
-    (starting from the entry stub) with the initial link register pointing
-    at that sentinel, using arm64_exec_go_exit (which only stops at the
-    designated exit address, so recursion is traced correctly). The result
-    in x0 is verified against the semantic model by native_decide.
-    Additional inputs are executed from the function entry directly.
+    Appends a RET sentinel after the code and executes from the ENTRY FUNCTION
+    with the initial link register pointing at that sentinel, using
+    arm64_exec_go_exit (which only stops at the designated exit address, so
+    recursion is traced correctly). The result in x0 is verified against the
+    semantic model by native_decide. Every input starts at the function entry,
+    which is what x86-64's `_gen_runs_test` already does.
+
+    **It starts at `func_entry`, not at `base`, and the startup stub is why.**
+    The stub now reads `RLIMIT_STACK` once (`formal/arm64_codegen.py::
+    _emit_stack_floor_init`), and that is a `bl` to a `__TEXT,__stubs`
+    trampoline the model cannot follow — so a run that started at the stub
+    would halt on the `br` inside the trampoline and report a result that is
+    not the program's, which is what every arm64 run test did until this. The
+    state the entry function sees (x0 = the materialised argument, x30 = the
+    sentinel) is the same one the stub hands it, so nothing is lost.
     """
     exit_addr = base + len(code)
     # The entry function's ARGUMENT words as the startup stub materialized
@@ -9850,7 +9944,7 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     # that says "input 10" about a two-parameter entry whose second argument is
     # 20 would be describing a different program.
     tinput = test_input if arity <= 1 else ", ".join(vals)
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    init = (f"{{ {_entry_run(vals, func_entry, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     _tac = _decide_or_admit(admitted_model)
     # The admission note goes on the FIRST block only, and every docstring here
@@ -9898,10 +9992,12 @@ def _program_extern_calls(info: dict) -> list:
     """The extern calls the PROGRAM makes — `extern_calls` less this backend's own.
 
     `info["extern_calls"]` is every unbound `BL` the image carries, and
-    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted as
-    its own bounded stops: the `BL fflush` inside each `_emit_exit`. Subtracting
-    it here is what puts the run tests back for a program whose only unbound
-    call is one of those.
+    `info["compiler_traps"]` is the subset `formal/arm64_codegen.py` emitted for
+    ITSELF: the `BL fflush` inside each `_emit_exit`. Subtracting it here is what
+    puts the run tests back for a program whose only unbound calls are the
+    compiler's. (The stack-floor guard's `getrlimit` is NOT a trap — it runs in
+    the startup stub, below the entry — and the paragraph after the next one
+    subtracts it by address.)
 
     **Measured on `formal/examples/mod_by_var.mojo` (`n % d`, a variable
     divisor), and this is the whole reason the subtraction exists.** Its image
@@ -9934,17 +10030,41 @@ def _program_extern_calls(info: dict) -> list:
     An image whose `info` has no `compiler_traps` — a dylib, or any emitter that
     predates the key — is read as having none, which is the conservative
     direction: nothing is subtracted and the refusal stands.
+
+    **And a call BELOW the entry function is not the program's either.** The
+    startup stub runs before the entry is called and reads `RLIMIT_STACK` once
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), so its `getrlimit` is in
+    the image, in `extern_calls`, and on NO path the run tests walk: they start
+    at `info["func_offset"]`, by which time the stub has finished. Counting it as
+    a program call suppressed every run test on this backend for every program —
+    the same failure `compiler_traps` was introduced to fix, arriving through the
+    front door instead, and `getrlimit` is not a trap at all (it returns, and the
+    floor the guard compares against is whatever it left in `__DATA`). This is
+    x86-64's `_program_externs` rule, read from the same field.
+
+    The subtraction is by ADDRESS against `func_offset` rather than by symbol,
+    for the same reason as above: a program can call `getrlimit` itself, and
+    dropping the symbol would drop that call too.
     """
     traps = set(info.get("compiler_traps") or ())
-    return [c for c in (info.get("extern_calls") or ())
-            if c.get("addr") not in traps]
+    entry = info.get("func_offset")
+    out = []
+    for c in (info.get("extern_calls") or ()):
+        addr = c.get("addr")
+        if addr in traps:
+            continue
+        if entry is not None and addr is not None and addr < entry:
+            continue
+        out.append(c)
+    return out
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
-                     entry_values: list = None, scope=None) -> tuple:
+                     entry_values: list = None, scope=None,
+                     func_entry: int = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -9995,12 +10115,23 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     not, plus `mod_by_var` itself through Lean's kernel.
     """
     exit_addr = base + len(code)
+    # **From the entry FUNCTION, not the startup stub** — the stub's
+    # `bl getrlimit` goes through a `__TEXT,__stubs` trampoline the model cannot
+    # follow, so a run started there stops before the program.  `func_entry` is
+    # the entry function's label; `base` remains the code's base address, which
+    # `exit_addr` and the addresses below are measured from.
+    if func_entry is None:
+        func_entry = base
     # The entry function's ARGUMENT words as the startup stub materialized
     # them (`model.entry_arg_values`, already widened to `arity`), so a
     # two-parameter entry's run starts from the same x0/x1 the binary was
     # given rather than from an x1 the model invented.
     vals = [str(v) for v in (entry_values or [test_input])]
-    init = (f"{{ {_entry_run(vals, base, arity)} "
+    # The run starts at the ENTRY FUNCTION, not at the startup stub, for the
+    # reason `_gen_runs_test`'s docstring gives: the stub's `getrlimit` is a
+    # `bl` through a `__TEXT,__stubs` trampoline the model cannot follow, so a
+    # run that started there would halt before reaching the call being split.
+    init = (f"{{ {_entry_run(vals, func_entry if func_entry is not None else base, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     ret_type_of = {e.name: e.return_type for e in externs}
     blocks = []
@@ -10709,6 +10840,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     check_step_conds()
     func_name = info.get("func_name") or (prog.functions[0].name if prog.functions else "unknown")
     base_addr = info["base_addr"]
+    # The ENTRY FUNCTION's address, NOT the startup stub's. The stub now reads
+    # `RLIMIT_STACK` once (`formal/arm64_codegen.py::_emit_stack_floor_init`),
+    # which is a `bl` through a `__TEXT,__stubs` trampoline the model cannot
+    # follow, so a concrete run that started at the stub would halt on the
+    # trampoline's `br` and report a result that is not the program's. Every
+    # concrete run starts at the function entry with x0 already holding the
+    # materialised argument — the same state the stub hands the function, and
+    # what x86-64's `_x86_entry` already does.
+    _func_entry = info["labels"].get(func_name, base_addr)
     test_input = info.get("test_input", 10)
     code = code or b""
 
@@ -10995,6 +11135,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     if extern_calls:
         run_test, step_tests = _gen_extern_test(
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            func_entry=info["labels"].get(func_name, base_addr),
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
             admitted_names=_admitted_used_names, scope=_vscope)
@@ -11013,10 +11154,27 @@ def generate_arm64_proof(prog, code, info) -> str:
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
+    # **The step lemmas cover the EXECUTABLE region only, not the string data.**
+    # `__TEXT` carries every function body and THEN every interned string
+    # (`compile`'s string-emission loop), and `_step_result_plan`/`_gen_step_
+    # lemmas` walk every 4-byte word of `code`.  A string byte pattern that
+    # decodes as an instruction the step table knows is therefore planned a step
+    # lemma for a word no execution reaches — and the step-OK lemma's `hne` for
+    # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
+    # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
+    # which every guarded image carries, so EVERY arm64 proof was red on it.
+    # `info["str_addrs"]` is the published string table, so the first string's
+    # address is the end of the code.  The run tests still read the whole
+    # `code` (`{name}_code` is unchanged), so nothing else moves.
+    _str_addrs = list((info.get("str_addrs") or {}).values())
+    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
+    code_end = max(0, min(code_end, len(code)))
+    step_code = code[:code_end]
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
-    step_lemmas = (_gen_step_result_lemmas(func_name, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(func_name, code, base_addr)
+    step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
+                   + "\n\n"
+                   + _gen_step_lemmas(func_name, step_code, base_addr)
                    + ("\n\n" + step_tests if step_tests else ""))
 
     # Fuel for the concrete closed correctness proof. Large enough to let the
@@ -11274,7 +11432,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"    the RET sentinel, and the machine halts once the program has returned to\n"
             f"    it. Proved by native_decide, which scales to any program size. -/\n"
             f"theorem {func_name}_compiles_correctly :\n"
-            f"  (match arm64_exec_go {{ {_entry_run(elist, base_addr, arity)}\n"
+            f"  (match arm64_exec_go {{ {_entry_run(elist, _func_entry, arity)}\n"
             f"      with x30 := UInt64.ofNat {sentinel_addr} }} {func_name}_code {concrete_fuel} with\n"
             f"   | some s => s.x0\n"
             f"   | none => 0) = {_apply_args('mojo', elist)} := by\n"

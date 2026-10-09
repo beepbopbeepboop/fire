@@ -4727,9 +4727,10 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
     # trailing comma is a spelling rather than a second slot. Declaring the raw
     # string emitted `int64_t (x,);`, which is not a C declaration, so the
-    # comprehension did not compile. A multi-slot target over a generator whose
-    # yield arity was never recorded is the other mismatch and is filed
-    # (bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md).
+    # comprehension did not compile. A real MULTI-slot target over a generator
+    # whose yield arity is not a recorded tuple is the other mismatch and is
+    # refused by name in the non-tuple arm below, exactly as
+    # `_gen_for_generator_iter` refuses it.
     #
     # Read once, above the branch, because BOTH arms need it: the non-tuple arm
     # declares and binds it, and the `_compr_restore_target` call after the loop
@@ -4743,6 +4744,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = target_slots(_inner_str)
     else:
         var_names = None
+        if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
+            raise RuntimeError(
+                "cannot compile a multi-slot comprehension target over a "
+                f"generator whose yield arity is not a tuple (`{gen0.target} "
+                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
+                "yields one value per resume, and unpacking that value needs a "
+                "runtime iterator protocol this scalar generator model does "
+                "not have")
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -5352,20 +5361,22 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     The boxed word is fetched with `_ensure_local`, not `_new_val`, and that
     is not a style choice — it is what makes the closure compile. This
     helper's subject is a value whose C type is NOT statically known, so the
-    expression handed to it is regularly declared as something else:
-    `mojo/middle/coro.py`'s `_visit_call` declares `int pinfo` (from
-    `pinfo = None`) and then assigns a boxed dict into it, so `len(pinfo)`
-    arrives here as the expression `pinfo`, declared `int`. `_new_val` casts
-    only a bare integer LITERAL, so it emitted `int64_t _tN = pinfo;` — and
-    under `-fgimple`'s strict verifier that is `non-trivial conversion in
-    'var_decl'`, a hard gcc error with no binary at all: measured, four of
-    them in that function plus one in `myinterpreter.py`'s `MojoString`, i.e.
-    `fire.py build fire.py` stopped building (see
-    `bugs/CODEGEN_a_local_declared_from_None_holds_a_boxed_pointer.md`).
-    `_ensure_local` is the existing chokepoint for exactly this question —
-    "give me this value in a temp of MY type, casting when its DECLARED type
-    is a different scalar" — and it emits nothing extra when there is no
-    mismatch, so every input that compiled before compiles the same.
+    expression handed to it is regularly declared as something else. The
+    nested-`def` local declared from `None` (which used to truncate a boxed
+    pointer to `int`) is fixed at its DECLARATION now — `_gen_lifted_closure`
+    gives a lifted closure the same per-function local-type pre-pass a
+    top-level `def` gets — but `_ensure_local` remains the right fetch for
+    every subject whose declared type is genuinely a different scalar.
+    `_new_val` casts only a bare integer LITERAL, so on such a subject it
+    emitted `int64_t _tN = <var>;`, and under `-fgimple`'s strict verifier
+    that is `non-trivial conversion in 'var_decl'`, a hard gcc error with no
+    binary at all: measured, four of them in `mojo/middle/coro.py`'s
+    `_visit_call` plus one in `myinterpreter.py`'s `MojoString`, i.e.
+    `fire.py build fire.py` stopped building. `_ensure_local` is the existing
+    chokepoint for exactly this question — "give me this value in a temp of
+    MY type, casting when its DECLARED type is a different scalar" — and it
+    emits nothing extra when there is no mismatch, so every input that
+    compiled before compiles the same.
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
@@ -5467,6 +5478,16 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     propagation each already does. A value with no callable return type is a
     no-op, so the common non-callable store costs two dict misses."""
     _rt = gen._callable_ret_types.get(value_text)
+    if _rt is None:
+        # A bound METHOD stored into a module global: its return type lives in
+        # `_bound_method_ret_types` (the per-function table), not
+        # `_callable_ret_types`. Both must survive the store into a global,
+        # because the call site is often a DIFFERENT function than the one
+        # that stored it (`f = None` ... `global f; f = m.truthy` ... `f()`),
+        # where the per-function table has already been reset and the
+        # whole-program one is the only source. Without this the call fell to
+        # the `int64_t` box and a `-> bool` method printed `1` for `True`.
+        _rt = gen._bound_method_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
     _drt = gen._container_callable_ret.get(value_text)

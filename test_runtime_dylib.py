@@ -253,6 +253,48 @@ def test_cache_hit_is_the_same_file_and_reverified():
               'an unusable flag fails loudly rather than being dropped', str(e))
 
 
+_RT_LEAK_WORKER = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import build_stdlib_dylib as bsd
+print(bsd.runtime_dylib(arch=bsd.normalize_arch()))
+'''
+
+
+def test_a_cold_build_removes_its_staging_directory():
+    """A cold runtime-dylib build stages its objects in a `mojo_rt_*` temp
+    directory and `os.replace`s only the finished dylib out. The directory must
+    not be left behind.
+
+    This is not a tidiness assertion: the per-test models that set
+    `GMOJO_HOME` to a fresh `mkdtemp()` build into a cold CAS on every run, so a
+    leaked directory is ~520 kB per test that happens to build a `mojo_*` name,
+    and nothing about the ARTIFACT can see it — every other assertion in this
+    file reads the dylib. One reproducibility sweep measured 34 such
+    directories, ~17 MB, from a 312-case corpus, before the `finally` landed.
+
+    The build runs in a subprocess with a CAS home and a TMPDIR of its own, so
+    the build is genuinely COLD (a shared home would be a cache hit and never
+    reach `mkdtemp`), the leak is observable in a directory this test owns, and
+    the throwaway CAS is removed with it rather than growing the real one."""
+    home = tempfile.mkdtemp(prefix='test_rt_leak_home_')
+    tmp = tempfile.mkdtemp(prefix='test_rt_leak_tmp_')
+    try:
+        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+        r = subprocess.run([sys.executable, '-c', _RT_LEAK_WORKER, HERE],
+                           capture_output=True, text=True, env=env)
+        check(r.returncode == 0,
+              'a cold runtime_dylib build in a fresh CAS home succeeds',
+              (r.stderr or '').strip()[-300:])
+        leftovers = sorted(n for n in os.listdir(tmp) if n.startswith('mojo_rt_'))
+        check(not leftovers,
+              'a cold runtime_dylib build removes its mojo_rt_ staging directory',
+              f'left behind: {leftovers}')
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_wrong_arch_object_is_rejected():
     """The check that makes the flag trustworthy. An object built for the OTHER
     architecture must be refused by name, with both architectures in the
@@ -886,8 +928,136 @@ def test_concurrent_builds_of_one_output_path_do_not_collide():
         shutil.rmtree(wd, ignore_errors=True)
 
 
-# ── 7. the optional-runtime-unit registry agrees with the export table ──────
+# ── 6c. the staging directory is not left behind ───────────────────────────
 #
+# `runtime_dylib` compiles every runtime unit and links them in a
+# `tempfile.mkdtemp(prefix='mojo_rt_')` and `os.replace`s only the DYLIB out, so
+# without a cleanup the objects and the generated C stay in `$TMPDIR` on every
+# COLD CAS. The cost is per cache MISS, and this tree has many per-test
+# `GMOJO_HOME`s, so one test that builds an image calling a `mojo_*` name leaked
+# ~500 kB, and a single corpus sweep left 34 directories (~17 MB). The bug was
+# found by a reproducibility sweep (it builds the same thing hundreds of times
+# under fresh caches) and is fixed by the `finally` these tests pin.
+
+def test_runtime_dylib_removes_its_staging_directory():
+    """The staging directory is gone after `runtime_dylib`, on the SUCCESS and
+    the FAILURE path.
+
+    The heavy halves — toolchain selection, every object compile, the reflection
+    table, the link — are stubbed so this is a control-flow check and not a
+    build, which is what lets it run in the `tiny` class beside the real builds
+    in this file. Every command is told to produce its output, so the function
+    reaches `os.replace`; a failure case then raises AFTER the staging directory
+    exists, because a build that raises is exactly when debris is easiest to
+    leave."""
+    from unittest import mock
+    root = tempfile.mkdtemp(prefix='test_rt_stage_')
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def fake_mkdtemp(prefix='', dir=None):
+        d = real_mkdtemp(prefix=prefix, dir=root)
+        made.append(d)
+        return d
+
+    def fake_run(argv, check=False, **kw):
+        if '-o' in argv:
+            target = argv[argv.index('-o') + 1]
+        elif argv and argv[0] == '_dylink_stub':
+            target = argv[1]
+        else:
+            return None
+        with open(target, 'w') as f:
+            f.write('stub')
+
+    src = os.path.join(root, 'unit.c')
+    with open(src, 'w') as f:
+        f.write('/* stub */')
+    out = os.path.join(root, 'out.dylib')
+
+    def run_once(export_entries, expect_error):
+        if os.path.exists(out):
+            os.unlink(out)
+        made.clear()
+        with mock.patch.object(bsd, 'toolchain_for',
+                               lambda *a, **k: ('cc', 'cxx')), \
+             mock.patch.object(bsd, 'runtime_units',
+                               lambda *a, **k: [(src, 'c', ())]), \
+             mock.patch.object(bsd, 'runtime_export_entries', export_entries), \
+             mock.patch.object(bsd, '_arch_or_die', lambda *a, **k: None), \
+             mock.patch.object(bsd, '_dylink',
+                               lambda cc, staged, objs, **k:
+                                   ['_dylink_stub', staged]), \
+             mock.patch.object(bsd, 'subprocess', mock.Mock(run=fake_run)), \
+             mock.patch.object(bsd.reflect, 'emit_table_c',
+                               lambda entries: ''), \
+             mock.patch.object(bsd.cas, 'path_for',
+                               lambda rel, ext='.o': out), \
+             mock.patch.object(bsd.cas, '_hash', lambda *a, **k: 'deadbeef'), \
+             mock.patch.object(bsd.cas, 'compiler_fingerprint',
+                               lambda *a, **k: 'cf'), \
+             mock.patch.object(bsd.cas, 'toolchain_fingerprint',
+                               lambda *a, **k: 'tf'), \
+             mock.patch.object(bsd, 'tempfile',
+                               mock.Mock(mkdtemp=fake_mkdtemp)):
+            if expect_error:
+                try:
+                    bsd.runtime_dylib(arch=bsd.normalize_arch(None))
+                except RuntimeError:
+                    pass
+                else:
+                    check(False, 'the staged build raised as instructed')
+                    return
+            else:
+                bsd.runtime_dylib(arch=bsd.normalize_arch(None))
+        check(len(made) == 1,
+              'the staged build made exactly one staging directory', str(made))
+        check(all(not os.path.isdir(d) for d in made),
+              'and removed it afterwards, so nothing is left in $TMPDIR',
+              str([d for d in made if os.path.isdir(d)]))
+
+    try:
+        run_once(lambda cc, objs: ([], []), expect_error=False)
+        def boom(cc, objs):
+            raise RuntimeError('staged build failed')
+        run_once(boom, expect_error=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_driver_probe_removes_its_staging_directory():
+    """The same leak, one function up the file: `_driver_targets` probes a
+    candidate driver by compiling a throwaway program in a `mojo_archprobe_`
+    directory and caches the (driver, arch) ANSWER, never the directory — so the
+    directory stayed in `$TMPDIR` for the life of the process. Fixed by the same
+    `finally`, and pinned here so a future edit cannot drop it."""
+    from unittest import mock
+    root = tempfile.mkdtemp(prefix='test_probe_stage_')
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def fake_mkdtemp(prefix='', dir=None):
+        d = real_mkdtemp(prefix=prefix, dir=root)
+        made.append(d)
+        return d
+
+    arch = bsd.normalize_arch(None)
+    driver = bsd.find_gcc()
+    try:
+        with mock.patch.object(bsd, 'tempfile', mock.Mock(mkdtemp=fake_mkdtemp)):
+            bsd._driver_probe.pop((driver, arch), None)
+            ok, why = bsd._driver_targets(driver, arch)
+        check(ok, f'the real driver probes positive for {arch} ({why})')
+        check(bool(made), 'the probe actually made a staging directory')
+        check(all(not os.path.isdir(d) for d in made),
+              'and removed it afterwards, so nothing is left in $TMPDIR',
+              str([d for d in made if os.path.isdir(d)]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── 7. the optional-runtime-unit registry agrees with the export table ──────
+
 # The coupling this file pins is a CROSS-AGENT one, and it is the reason the
 # check is here rather than in the registry's own test. `build_config`'s
 # optional-unit registry derives each unit's `mojo_<unit>_` namespace as the
@@ -1015,6 +1185,7 @@ def main():
     test_unreachable_arch_fails_with_a_reason()
     test_both_arch_dylibs_build_and_are_distinct()
     test_cache_hit_is_the_same_file_and_reverified()
+    test_a_cold_build_removes_its_staging_directory()
     test_wrong_arch_object_is_rejected()
     test_export_table_entries_are_all_real_definitions()
     test_every_defined_entry_point_is_advertised()
@@ -1031,6 +1202,8 @@ def main():
     test_runtime_dylib_leaves_no_staging_directory()
     test_arch_probe_leaves_no_directory()
     test_concurrent_builds_of_one_output_path_do_not_collide()
+    test_runtime_dylib_removes_its_staging_directory()
+    test_driver_probe_removes_its_staging_directory()
     test_derived_namespaces_cover_exactly_their_own_symbols()
     test_unit_namespaces_are_disjoint()
     test_no_unit_namespace_catches_a_runtime_symbol()

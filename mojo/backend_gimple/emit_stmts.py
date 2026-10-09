@@ -1182,7 +1182,15 @@ def _gen_stmt_AssignStmt(gen, node):
             # (it runs before the cross-call element contract), so it can hint
             # an integer for what is really a double read. A local assigned a
             # double value is a double — don't silently truncate it.
-            if ctype in ('int', 'int64_t') and vtype == 'double':
+            #
+            # NOT for a conflicting name (`_multi_kind_locals`): its `int64_t`
+            # is the BOX, not a stale scalar hint, and narrowing it to
+            # `double` here left the later container store as `double = list*`
+            # — "pointer value used where a floating-point was expected". Real:
+            # `q = 2.5; if q > 1: q = [1, 2]; return q`, the one shape of a
+            # local rebound from a scalar to a container that refused to build.
+            if (ctype in ('int', 'int64_t') and vtype == 'double'
+                    and tname not in ginf.multi_kind_locals(gen)):
                 ctype = 'double'
             # Every "trust ground truth" rule below reads the pre-pass's
             # `int`/`int64_t` hint as a STALE SCALAR that the freshly-lowered
