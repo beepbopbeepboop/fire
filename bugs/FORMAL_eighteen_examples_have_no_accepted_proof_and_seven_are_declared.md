@@ -267,3 +267,37 @@ run had produced, since corrected with `--remeasure` (below).
 are `disabled=`,** so the four re-measurements above were taken by running it
 directly rather than by a gate, and the integration run over the whole corpus
 belongs to whoever re-enables that job.
+
+## Status, 2026-10-08 (`formal221-docs`): row #1 (`fact`) is re-banked, and it is
+## `too-large` rather than `lean-rejected`
+
+`ffe27e1a` changed `formal/examples/fact.mojo`'s precondition to the range
+`@refines` already claimed (`n <= 20`), but did not re-seed the census row, so
+`test_formal_proof_census.py::test_each_row_is_tied_to_the_example_it_measured`
+was red: the committed `source_sha256` was the PRE-`ffe27e1a` source. Re-measured
+with the document's own command, and the row moved classes:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label fact -- \
+      python3 tools/formal_proof_census.py --only fact --write-baseline
+  [1/1] fact: too-large 202.5s
+   1 examples: 0 of them reach a proof Lean accepted, 1 measured by this run
+   and 0 replayed from the verdict cache, largest Lean peak 6.90 GB
+   too-large         1   <- not a verdict on the proof
+```
+
+So `fact` is **not** `lean-rejected` any more and the test is green. But the
+movement is a COST change and not a proof: the same run measures **249.4 s Lean
+CPU and 6.90 GB peak**, against the previous row's 227.7 s / 2.91 GB. It now
+exceeds `formal/lean.py`'s `LEAN_MEMORY_MB = 6144` and is classified `too-large`,
+which is the honest "the checker ran out" rather than a verdict — the same class
+`both`/`either` (#7/#8) are in, and item 4 above decided. `fact` was the ONLY row
+whose `source_sha256` had drifted (checked against all 93), so the run above
+touched only it and the other 92 rows are unchanged. The table's `lean-rejected`
+cells for rows #2/#3 and the `rfl` family describe their proofs and are not
+claims about the ledger's freshness.
+
+**What is still NOT done is items 1-3** (the `fact`/`sqsum`/`sum` `rfl` family,
+the `floordiv`/`udivmod` universal-theorem refusals, and `sum_range`), which the
+Next-step list already assigns to their own documents. The re-bank closes the
+stale-ledger defect and nothing else.
