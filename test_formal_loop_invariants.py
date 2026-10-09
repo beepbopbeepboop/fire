@@ -426,6 +426,25 @@ def test_a_program_the_search_cannot_run_is_recorded_as_skipped(tmpdir=None):
           str(v.why_family))
 
 
+def test_a_body_with_floor_division_is_not_a_skip(tmpdir=None):
+    """`collatz` halves with `v = v // 2`, and the search now reads it.
+
+    `formal/contracts.py`'s IR spells integer division `/` and the source spells
+    it `//`; before the reader took both, every halving step raised
+    `Unsupported('//')` and EVERY candidate of `collatz` was recorded as skipped
+    -- which `classify` folds into "the search says nothing", and a reader of
+    the counts alone can mistake for agreement.  `formal/loop_invariants.py` used
+    to work around it by rewriting the node before the reader saw it; that
+    second translation is gone, so this row is what keeps the reader the one
+    place the operator is read.
+    """
+    v = verdicts_of("collatz")[0]
+    check(bool(v.candidates),
+          "collatz: the search ran and reported per candidate")
+    check(not any(c["skipped"] for c in v.candidates),
+          "collatz: NO candidate is skipped now that `//` has a reading",
+          str([(c["role"], c["skipped"]) for c in v.candidates]))
+
 
 # ── 4. the ladder, and the shape of the emitted file ──────────────────────────
 
@@ -669,28 +688,6 @@ def test_the_ladder_discharges_what_the_baseline_records(lean_bin, tmpdir):
             print(f"{severity:<11} {stem}: {text}")
 
 
-def test_a_body_with_floor_division_is_run_and_not_skipped(tmpdir=None):
-    """`collatz` halves a variable with `v // 2`, and the reader used to refuse
-    `//` — it was keyed on `/` alone.
-
-    Before `formal/contracts.py`'s IR learned the spelling, EVERY input to this
-    loop was a skip, and a skip reads as "no counterexample": the loop's variant
-    row said nothing while looking like agreement.  Now the search runs it, so
-    the candidate is not skipped and names a witness — which is the difference
-    between "the loop is clean" and "the search could not read it".
-    """
-    v = verdicts_of("collatz")[0]
-    check(bool(v.candidates),
-          "collatz: the search ran and reported a candidate")
-    skipped = [c for c in v.candidates if c["skipped"]]
-    check(not skipped,
-          "collatz: NO candidate is a skip (the body's `//` has a reading)",
-          str([(c["role"], c["skipped"]) for c in v.candidates]))
-    check(any(c["witness"] for c in v.candidates),
-          "collatz: and the variant names a witness, so it was really run",
-          str([(c["role"], c["witness"]) for c in v.candidates]))
-
-
 ALL = [
     test_every_loop_answers_even_when_nothing_was_derived,
     test_a_refusal_row_can_never_be_proved,
@@ -698,7 +695,7 @@ ALL = [
     test_a_wrong_claim_is_refuted_and_the_right_one_is_not,
     test_a_variant_that_goes_negative_is_refuted,
     test_a_program_the_search_cannot_run_is_recorded_as_skipped,
-    test_a_body_with_floor_division_is_run_and_not_skipped,
+    test_a_body_with_floor_division_is_not_a_skip,
     test_the_ladder_is_the_shared_one,
     test_the_emitted_file_imports_nothing,
     test_the_proof_states_the_loop_it_is_about,
