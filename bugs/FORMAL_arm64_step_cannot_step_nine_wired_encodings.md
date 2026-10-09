@@ -4,20 +4,21 @@
 
 **RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
 claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
-produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
-its own document now:**
+produced a state the machine never reached — `WRONG`, not `NOSTEP` — and both are
+now FIXED (2026-10-08, `work/formal231-docs`):**
 
-| defect | document |
+| defect | status |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — `arm64_step`'s arm now writes `Rd` (the identity at `Rd = 31` covers the CMN spelling) |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms |
 
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
-which is the generalisable half: this file's §5 is right that "the gap is the
-model is silent", and the two new defects are the OTHER failure — the model is
-*loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
-see. Re-read §6 before using this file's tooling as a coverage claim.
+The fixes landed as a single `lib/ProofLib.lean` change (past a bounded worker's
+8 GB ceiling then, which is why these were written down rather than attempted
+and why they sat open for three days). **Neither was in this file's `NOSTEP`
+table**, which is the generalisable half: this file's §5 is right that "the gap
+is the model is silent", and the two defects were the OTHER failure — the model
+is *loud* and *wrong*, which is worse, and which no NOSTEP tally in this file
+could see. Re-read §6 before using this file's tooling as a coverage claim.
 
 **The CMN one is this file's own doing**, and that is worth stating rather than
 burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so

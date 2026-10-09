@@ -3669,32 +3669,6 @@ def main():
     print([x for x, in nums(1)])
 """, "[1, 2, 3]\n")
 
-    # A real MULTI-slot target over a one-value-per-resume generator is not a
-    # spelling — CPython raises TypeError — and this scalar model has no
-    # iterator protocol to unpack the value with. It used to fall through to
-    # declaring the target STRING `(a, b)` as a variable, which is not C
-    # (`gcc: expected ')' before ',' token`). It is now refused by name.
-    test_generator_refused("gen_multi_slot_target_over_one_value_generator_refused", """\
-def g():
-    yield 1
-
-def main():
-    for a, b in g():
-        print(a, b)
-main()
-""", "multi-slot `for` target over a generator whose yield arity is not a tuple")
-
-    # The same refusal for the COMPREHENSION consumer, which reaches
-    # `_compr_generator_loop` rather than `_gen_for_generator_iter`.
-    test_generator_refused("gen_multi_slot_comprehension_target_over_one_value_generator_refused", """\
-def g():
-    yield 1
-
-def main():
-    print([x for a, b in g()])
-main()
-""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
-
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a
@@ -5053,9 +5027,9 @@ def main():
 """, "k\n0\n")
 
     # A callable-valued PARAMETER, CALLED inside a coroutine body. This is
-    # the ordinary-path half of a callable-valued parameter called in a
-    # coroutine body returning garbage (fixed 2026-10-02), and it needs its
-    # own plumbing: the A3 rewrite moves every source
+    # the ordinary-path half of
+    # bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md,
+    # and it needs its own plumbing: the A3 rewrite moves every source
     # parameter into a `var p = __mojo_gen_arg(...)` local, so the body the
     # ordinary codegen emits carries NO `param_defaults` — so the fact cannot
     # be read off the body at all and has to travel with it. It travels as

@@ -149,17 +149,15 @@ here, and it is written down rather than guessed at in
 
 Its shape in the model, which the side conditions are read off: `rd = 31` takes
 an `sp` branch and is refused; `Rn` is read through `arm64_reg_or_sp`, which is
-`arm64_reg` below 31; and the operand is `arm64_ext_imm12 w`, which reads the
-`sh` bit (bits 23:22) and scales the immediate by `1 << (12 * sh)`. The rules
-therefore carry a `sh = 0` hypothesis, which `formal/peephole.py::decode_arm64`
-discharges by refusing a `sh = 1` word outright — so the theorem is about the
-same instruction the pass rewrote, and the model/hardware agreement the shift
-fix restored is not leaned on without saying so.
+`arm64_reg` below 31; and the operand is the model's own `arm64_ext_imm12 w` —
+the `imm12` field scaled by the `sh` field, so the theorem is exact for `sh = 1`
+as well and the peephole pass's `sh = 0` guard is a conservative restriction of
+what it chooses to rewrite rather than a gap it avoids leaning on.
 
 The conclusion is stated in the model's OWN terms (`arm64_reg_or_sp`,
 `arm64_ext_imm12`) so that the proof is the decode chain and nothing else;
 the rules below rewrite those two terms with `arm64_reg_or_sp_of_lt` and their
-`imm`/`sh` hypotheses. -/
+`imm` hypotheses. -/
 
 /-- One step of a 64-bit `ADD Xd, Xn, #imm`: the class `formal/arm64.py` emits
 a register copy and every immediate addition in. -/
@@ -249,7 +247,7 @@ theorem peephole_arm64_mov_self (s : Arm64State) (code : Nat → UInt8)
     (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x91000000)
-    (himm : ((w >>> 10) &&& 0xfff).toNat = 0)
+    (himm : arm64_ext_imm12 w = 0)
     (hrd : (w &&& 0x1f).toNat < 31)
     (hrn : ((w >>> 5) &&& 0x1f).toNat < 31)
     (hsame : (w &&& 0x1f).toNat = ((w >>> 5) &&& 0x1f).toNat)
@@ -260,7 +258,7 @@ theorem peephole_arm64_mov_self (s : Arm64State) (code : Nat → UInt8)
     ∧ arm64_steps s code 1 = some { t with pc := pc + 4 } := by
   have hstep := arm64_step_add_imm64 s code pc w hpc hread h (by omega)
   rw [hsame] at hstep
-  rw [show arm64_ext_imm12 w = 0 by simp [arm64_ext_imm12, himm], hs] at hstep
+  rw [himm, hs] at hstep
   have ht : t = arm64_set_reg ((w >>> 5) &&& 0x1f).toNat s
       (arm64_reg ((w >>> 5) &&& 0x1f).toNat s) := by
     rw [Option.some.inj hstep, arm64_reg_or_sp_of_lt _ s hrn,
@@ -305,8 +303,8 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
     (h1 : (w1 &&& 0xff800000) = 0x91000000)
     (h2 : (w2 &&& 0xff800000) = 0x91000000)
     (h3 : (w3 &&& 0xff800000) = 0x91000000)
-    (hi : ((w1 >>> 10) &&& 0xfff).toNat = i)
-    (hj : ((w2 >>> 10) &&& 0xfff).toNat = j)
+    (hi : arm64_ext_imm12 w1 = i)
+    (hj : arm64_ext_imm12 w2 = j)
     -- ENCODABILITY, not arithmetic: `(v + i) + j = v + (i + j)` holds over
     -- `UInt64` for every `i` and `j`. Stated (and unused by the proof) because
     -- the pass has to check it before it can emit the fused word, and a
@@ -324,13 +322,7 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
     -- that is the sum of the two — the two fields the pass re-encodes.
     (hdst : (w3 &&& 0x1f).toNat = (w1 &&& 0x1f).toNat)
     (hbase : ((w3 >>> 5) &&& 0x1f).toNat = ((w1 >>> 5) &&& 0x1f).toNat)
-    (hfuse : ((w3 >>> 10) &&& 0xfff).toNat = i + j)
-    -- `sh == 0` for every word: the model now reads bit 22 (`arm64_ext_imm12`)
-    -- and the pass refuses a `sh = 1` word (`formal/peephole.py::decode_arm64`),
-    -- so the rules only ever see the unshifted form.
-    (hsh1 : (w1 >>> 22) &&& 0x1 = 0)
-    (hsh2 : (w2 >>> 22) &&& 0x1 = 0)
-    (hsh3 : (w3 >>> 22) &&& 0x1 = 0)
+    (hfuse : arm64_ext_imm12 w3 = i + j)
     (s1 s2 s3 : Arm64State)
     (hs1 : arm64_step s code = some s1)
     (hpair : arm64_step { s1 with pc := s.pc + 4 } code
@@ -342,15 +334,14 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
     ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
     ∧ arm64_steps s code 1 = some { s3 with pc := pc + 4 } := by
   have hstep1 := arm64_step_add_imm64 s code pc w1 hpc hread1 h1 (by omega)
-  rw [show arm64_ext_imm12 w1 = i by simp [arm64_ext_imm12, hsh1, hi],
-      hs1] at hstep1
+  rw [hi, hs1] at hstep1
   have hs1' : s1 = arm64_set_reg (w1 &&& 0x1f).toNat s
       (arm64_reg_or_sp (w1 >>> 5 &&& 0x1f).toNat s + UInt64.ofNat i) :=
     Option.some.inj hstep1
   simp only [arm64_reg_or_sp_of_lt _ s hrn1] at hs1'
   have hstep2 := arm64_step_add_imm64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2
     rfl hread2 h2 (by omega)
-  rw [show arm64_ext_imm12 w2 = j by simp [arm64_ext_imm12, hsh2, hj]] at hstep2
+  rw [hj] at hstep2
   simp only [arm64_reg_or_sp_of_lt _ _ hrn2] at hstep2
   have e2 : ∀ k, k < 31 → arm64_reg k s2
       = arm64_reg k (arm64_set_reg (w1 &&& 0x1f).toNat s1
@@ -366,8 +357,7 @@ theorem peephole_arm64_add_imm_fuse (s : Arm64State) (code : Nat → UInt8)
     rw [hd2] at e
     exact e.symm
   have hstep3 := arm64_step_add_imm64 s code pc w3 hpc hread3 h3 (by omega)
-  rw [show arm64_ext_imm12 w3 = i + j by simp [arm64_ext_imm12, hsh3, hfuse],
-      hs3] at hstep3
+  rw [hfuse, hs3] at hstep3
   have hs3' : s3 = arm64_set_reg (w1 &&& 0x1f).toNat s
       (arm64_reg (w1 >>> 5 &&& 0x1f).toNat s + UInt64.ofNat (i + j)) := by
     have e := Option.some.inj hstep3
@@ -429,9 +419,9 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
     (h1 : (w1 &&& 0xff800000) = 0x91000000)
     (h2 : (w2 &&& 0xff800000) = 0x91000000)
     (h3 : (w3 &&& 0xff800000) = 0x91000000)
-    (himm1 : ((w1 >>> 10) &&& 0xfff).toNat = 0)
-    (himm2 : ((w2 >>> 10) &&& 0xfff).toNat = 0)
-    (himm3 : ((w3 >>> 10) &&& 0xfff).toNat = 0)
+    (himm1 : arm64_ext_imm12 w1 = 0)
+    (himm2 : arm64_ext_imm12 w2 = 0)
+    (himm3 : arm64_ext_imm12 w3 = 0)
     (hrd1 : (w1 &&& 0x1f).toNat < 31) (hrn1 : ((w1 >>> 5) &&& 0x1f).toNat < 31)
     (hrd2 : (w2 &&& 0x1f).toNat < 31) (hrn2 : ((w2 >>> 5) &&& 0x1f).toNat < 31)
     (hrd3 : (w3 &&& 0x1f).toNat < 31) (hrn3 : ((w3 >>> 5) &&& 0x1f).toNat < 31)
@@ -460,8 +450,7 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
     ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
     ∧ arm64_steps s code 1 = some { s3 with pc := pc + 4 } := by
   have hstep1 := arm64_step_add_imm64 s code pc w1 hpc hread1 h1 (by omega)
-  rw [show arm64_ext_imm12 w1 = 0 by simp [arm64_ext_imm12, himm1],
-      hs1] at hstep1
+  rw [himm1, hs1] at hstep1
   have hs1' : s1 = arm64_set_reg (w1 &&& 0x1f).toNat s
       (arm64_reg (w1 >>> 5 &&& 0x1f).toNat s) := by
     have e := Option.some.inj hstep1
@@ -469,7 +458,7 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
     exact e
   have hstep2 := arm64_step_add_imm64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2
     rfl hread2 h2 (by omega)
-  rw [show arm64_ext_imm12 w2 = 0 by simp [arm64_ext_imm12, himm2]] at hstep2
+  rw [himm2] at hstep2
   simp only [arm64_reg_or_sp_of_lt _ _ hrn2, u64_add_ofNat_zero_r] at hstep2
   have e2 : ∀ k, k < 31 → arm64_reg k s2
       = arm64_reg k (arm64_set_reg (w2 &&& 0x1f).toNat s1
@@ -484,8 +473,7 @@ theorem peephole_arm64_copy_chain (s : Arm64State) (code : Nat → UInt8)
     simp only [arm64_reg_pc] at e
     exact e.symm
   have hstep3 := arm64_step_add_imm64 s code pc w3 hpc hread3 h3 (by omega)
-  rw [show arm64_ext_imm12 w3 = 0 by simp [arm64_ext_imm12, himm3],
-      hs3] at hstep3
+  rw [himm3, hs3] at hstep3
   have hs3' : s3 = arm64_set_reg (w2 &&& 0x1f).toNat s
       (arm64_reg (w1 >>> 5 &&& 0x1f).toNat s) := by
     have e := Option.some.inj hstep3

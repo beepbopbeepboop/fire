@@ -1916,19 +1916,21 @@ theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
   unfold t32s t16s
   bv_decide
 
-/-- The `add`/`sub`/`cmp` immediate forms' 12-bit immediate, SHIFTED by the `sh`
-    field (bits 23:22): `sh = 0` is `LSL #0` and `sh = 1` is `LSL #12`.
+/-- The `#imm12` of an `ADD`/`SUB`/`CMP` immediate form: the 12-bit field at
+    bits 21:10, scaled by the `sh` field at bits 23:22 (`LSL #0` or `LSL #12`).
 
-    The arm's mask (`0xff800000`) keeps bit 23, so a word this helper is reached
-    for has `sh ∈ {0, 1}` — `sh ≥ 2` is RESERVED in this class and does not match
-    the arm at all. `&&& 0x1` states that rather than relying on it: it keeps the
-    shift total without ever computing an immediate no instruction can encode.
+    One definition because the same decode appeared in FIVE arms (`ADD` 32/64,
+    `SUB` 32/64 and `CMP`), and the defect it fixes was exactly a decode written
+    out once per arm with the `sh` field in none of them.
 
-    One helper for all five arms (ADD 32/64, SUB 32/64, CMP): a shift present in
-    one copy and absent from another is exactly the duplicate-decoder defect this
-    replaces. -/
+    The `sh` field is bits 23:22 but the arm's mask (`0xff800000`) keeps bit 23
+    and leaves only bit 22 free, so `sh ∈ {0, 1}` inside every class this helper
+    is called from: the `LSL #24`/`#36` spellings (`sh = 2`/`3`, and the
+    different instruction they would name) can never reach an arm that calls
+    this. The `Nat` shift is total regardless, and `UInt64.ofNat` is where the
+    result is taken mod 2^64. -/
 def arm64_ext_imm12 (insn : UInt32) : Nat :=
-  (((insn >>> 10) &&& 0xfff).toNat) <<< (12 * (((insn >>> 22) &&& 0x1).toNat))
+  ((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)
 
 /-- ARM64 step function: decode and execute one instruction. -/
 def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
@@ -2082,7 +2084,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val2 := arm64_reg xm s
     let result := val1 ^^^ val2
     some (arm64_set_reg rd s result)
-  -- ADD Xd, Xn, #imm12{, lsl #12}: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  -- ADD Xd, Xn, #imm12: 0x11000000 (32-bit) / 0x91000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x11000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2094,12 +2096,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base + UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- SUB Xd, Xn, #imm12{, lsl #12}: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
+      some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
+  -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x51000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2111,12 +2113,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base - UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+      some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
+  -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
   -- literal floor.
@@ -2680,17 +2682,19 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
                   (arm64_reg_or_sp rn s) + UInt64.ofNat imm9
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   else if (insn &&& 0xffe00000) = 0xab000000 then
-    -- ADDS Xd, Xn, Xm (shifted register): writes `Rd` AND the flags of the SUM.
-    -- The mask does not include `Rd` (bits 4:0), so this class covers both the
-    -- `Rd = 31` spelling — `CMN Xn, Xm`, i.e. `ADDS XZR, Xn, Xm`, which writes no
-    -- register because `arm64_set_reg 31` is the identity — and `Rd ≠ 31`, which
-    -- is the `ADDS Xd, Xn, Xm` the backend emits for a signed `+` overflow check
-    -- (`formal/arm64_codegen.py::_emit_int_alu_checked`, `encode_adds_xd_xn_xm(0,
-    -- 0, 1)`). The one body covers both, exactly as the CMP arm's `Rd` does.
+    -- ADDS Xd, Xn, Xm (and CMN Xn, Xm at the one spelling `Rd = 31`): the
+    -- flags of the SUM, and the sum in `Rd`. The mask `0xffe00000` covers the
+    -- WHOLE class — `Rd` is bits 4:0 and is not in the mask — so this arm must
+    -- write `Rd`, and the first version of it did not: it set the flags
+    -- correctly and left the destination at its old value for every `Rd ≠ 31`,
+    -- which `encode_adds_xd_xn_xm` emits (`formal/model.py::int_overflow_traps`'s
+    -- `+` arm is this instruction). `arm64_set_reg 31` is the identity, so the
+    -- `Rd = 31` CMN spelling writes no register and this one body covers both.
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s))
+    let sum := arm64_reg rn s + arm64_reg xm s
+    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } sum)
   else if (insn &&& 0xffe00000) = 0xea000000 then
     -- TST Xn, Xm: `ANDS XZR, Xn, Xm`, the logical sibling of CMP. The mask is
     -- 0xffe00000 and NOT 0x8a000000 (the AND shifted-register arm) because the
