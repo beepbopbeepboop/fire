@@ -15463,6 +15463,15 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
 #: runs off the end of it.
 _REDUCED_STACK_SOURCES = (
     # name, program, the depth that must still ANSWER, the depth that must refuse
+    #
+    # The shallow depth is EIGHT rather than the round hundred it used to be,
+    # and the reason is arm64's frame: under `ulimit -s 2048` arm64's budget is
+    # `2097152 - 262144 - 131072` = 1703936 bytes, which is thirteen 128 KiB
+    # frames, so a shallow row must be well inside that or arm64 itself refuses
+    # it. Eight leaves four frames of margin for the prologue's own pushes.
+    # x86-64's 16 KiB frame affords over a hundred, so eight is shallow there
+    # too; the row that carries the weight is the deep one, and both depths
+    # together say the threshold is BETWEEN them rather than a constant.
     ("reduced_stack_a_shallow_recursion_still_answers",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15470,8 +15479,8 @@ _REDUCED_STACK_SOURCES = (
      "    return deep(n - 1) + 1\n"
      "\n"
      "def main(n: Int) -> Int:\n"
-     "    printf(\"%d\\n\", deep(100))\n"
-     "    return 0\n", 100),
+     "    printf(\"%d\\n\", deep(8))\n"
+     "    return 0\n", 8),
     ("reduced_stack_a_deep_recursion_is_refused_not_a_crash",
      "def deep(n: Int) -> Int:\n"
      "    if n <= 0:\n"
@@ -15483,26 +15492,16 @@ _REDUCED_STACK_SOURCES = (
 )
 
 
-#: Architectures this group does NOT yet cover, and why — a DECLARED per-arch
-#: gap, not a skip, and per architecture rather than per row because the whole
-#: group is one defect.
-#:
-#: arm64 reads `RLIMIT_STACK` in the GUARD'S OWN PROLOGUE (x86-64 reads it once
-#: in the startup stub, `x86_64_codegen.py::_emit_stack_floor_init`), and a
-#: `call getrlimit` there is exactly what
-#: `formal/arm64_proof_gen.py` refuses run tests over, so the read cannot be
-#: moved without first fixing the extern-stub layout: an extern call emitted
-#: from the startup stub lands its `bl` past the end of `__TEXT`, because the
-#: `__TEXT,__stubs` region is sized before that point. Measured on this tree:
-#: `def main(): printf("hi")` writing 187 MB of "hi" and still running.
-#:
-#: Until that is fixed arm64 keeps a compile-time budget, and a budget larger
-#: than the process's real stack never fires — so under a reduced `ulimit -s` it
-#: SIGSEGVs where x86-64 refuses. The bug doc carries the reproduction and the
-#: next step.
-_REDUCED_STACK_DEFERRED = {
-    "arm64": "bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md",
-}
+#: Architectures this group does NOT cover, and why — a DECLARED per-arch gap,
+#: not a skip. EMPTY now, and the reason it stopped being `{"arm64": …}` is the
+#: fix this group exists for: arm64 reads `RLIMIT_STACK` in the guard's own
+#: prologue (x86-64 reads it once in the startup stub) and used to store the
+#: RETURN CODE of `getrlimit` — always 0 — instead of `rlim_cur`, so its budget
+#: was the full 7.5 MiB cap whatever `ulimit -s` said, and under a reduced limit
+#: it SIGSEGVed where x86-64 refused. It now loads `rlim_cur` from the struct,
+#: both backends refuse at a status, and the mechanism is kept (rather than
+#: deleted) because a future architecture may again need a declared gap here.
+_REDUCED_STACK_DEFERRED = {}
 
 
 def reduced_stack_cases(tmpdir, verbose=False):
@@ -15559,7 +15558,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
                 else:
                     out_rows.append((name, arch, True, ""))
             else:
-                if "100" not in run.stdout:
+                if str(depth) not in run.stdout:
                     out_rows.append((name, arch, False,
                                      "stdout %r does not answer" % run.stdout[:80]))
                 else:

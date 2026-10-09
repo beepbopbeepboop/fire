@@ -1947,20 +1947,27 @@ dylib_exports: list = None, globals_base: int = None,
         # unprivileged process raise, and which says nothing about what it
         # enforces — is not read.
         #
-        # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
-        # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
-        # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
-        # …and argument 0 goes back, from X14.
+        # **`rlim_cur` is a LOAD from the struct, NOT the value `getrlimit`
+        # returned in X0.** `getrlimit` returns 0 on success, and X0 is
+        # caller-saved, so the previous spelling here (`mov x13, x0`) stored 0
+        # into the limit word. A limit of 0 made `limit - MARGIN - frame`
+        # underflow below `STACK_FLOOR_MIN_BUDGET_BYTES`, so the MAX clamp took
+        # the full `STACK_FLOOR_BUDGET_BYTES` and the process's REAL `ulimit -s`
+        # was never used — the guard then fired at 59 frames on a process whose
+        # usable stack was 14, and `deep(14)` under `ulimit -s 2048` died of
+        # SIGSEGV instead of refusing. Measured before the fix: the same binary
+        # under 1024/2048/4096/8176 KiB all read the limit as 0.
+        #
+        # X1 was the scratch address at the call, but it is caller-saved like
+        # X0, so the address is RE-DERIVED here rather than read back out of a
+        # register the callee was free to destroy — the same correction the
+        # x86-64 half's `_emit_stack_floor_init` records for RSI. X0 still holds
+        # the caller's first argument at this point (this runs BEFORE the
+        # prologue's `add x19, x0, #0` that saves it), so it is restored from
+        # the X14 it was parked in before X0 was used for the call.
         self.asm.emit(encode_mov_zr_xn(0, 14))
-        # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value
-        # has to be moved into it before the cache store. Storing X16 directly
-        # wrote the scratch's own address into the limit word, and the next
-        # guarded prologue then read an address in `__DATA` as a byte count —
-        # `address - 262144` is still enormous, so neither clamp caught it.
-        self.asm.emit(encode_mov_zr_xn(16, 13))
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))
         self._adrp_add_abs(17, limit_word)
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
         if False:
