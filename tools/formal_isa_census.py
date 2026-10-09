@@ -246,29 +246,29 @@ def encoder_names(arch):
 
 
 def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only, by AST.
+    """{encoder: [(file, count)]} over the emitter files only.
 
-    The walk is over the two `LEVER_ROOTS` files and counts `encode_*` NAMES
-    and ATTRIBUTES in code — not a regex over their text. The distinction is the
-    one this module states for the FUZZ column ("a docstring mentioning an
-    encoder is not coverage") and it has to hold here for the same reason: an
-    encoder an emitter only NAMES in prose is not an instruction any image can
-    contain. Measured 2026-10-05: the regex version counted x86-64's
-    `encode_cmov_r64_r64`, which `formal/x86_64_codegen.py` mentions only in the
-    `_emit_stack_floor_init` docstring recording *why it was not used*, and
-    reported the form as an emitted gap it never was.
+    AST, not a regex over the file's TEXT: `\\bname\\b` counts an encoder named
+    in a comment or a docstring as a call site, which made
+    `encode_cmov_r64_r64` — named once in `formal/x86_64_codegen.py`'s prose
+    explaining why this emitter does NOT use it — read as an EMITTED form with
+    no model, no fuzz case and no `as` check. The unit is the call site, and a
+    sentence about an instruction is not one (the same rule the FUZZ and AS
+    columns already state, applied to the column those two are built on).
     """
-    out = {name: [] for name in encoder_names(arch)}
+    names = set(encoder_names(arch))
+    out = {name: [] for name in names}
     for rel in LEVER_ROOTS[arch]:
         tree = ast.parse(_read(os.path.join(ROOT, rel)))
-        counts = {}
+        per = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in out:
-                counts[node.attr] = counts.get(node.attr, 0) + 1
-            elif isinstance(node, ast.Name) and node.id in out:
-                counts[node.id] = counts.get(node.id, 0) + 1
-        for name, n in counts.items():
-            out[name].append((os.path.basename(rel), n))
+            if isinstance(node, ast.Name) and node.id in names:
+                per[node.id] = per.get(node.id, 0) + 1
+            elif isinstance(node, ast.Attribute) and node.attr in names:
+                per[node.attr] = per.get(node.attr, 0) + 1
+        base = os.path.basename(rel)
+        for name, n in per.items():
+            out[name].append((base, n))
     return out
 
 
@@ -543,6 +543,13 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "`FF /2` with mod=11 jumps to a REGISTER's contents, so "
+                       "the target is outside the harness's one `MAP_FIXED` "
+                       "region and a random 64-bit value leaves the generated "
+                       "stub — the same reason as arm64's `encode_br_xn`, and "
+                       "measured: the decoder, the model arm "
+                       "(`x86_step_call_r64`) and the `as` check are all there, "
+                       "only the fuzz case cannot exist",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -586,36 +593,27 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: EMPTY since 2026-10-08.  Every x86-64 row has a model, a
+    # fuzz case and an `as` check, or is a `HARNESS_LIMITS` entry above.
+    # The rows that left:
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
-    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
-    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
-    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`. The previous pass recorded that and left it
-    # here on purpose because the tool was "another claim's write set"; the
-    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
-    # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
+    #   * `encode_imul_r64_r64_imm` — removed 2026-10-06
+    #     (`work/x86-coverage-endtoend`); `yes/yes/yes`, and its note
+    #     ("`69 /r id`: no decoder arm …") was false twice over (the encoder
+    #     emits `6B /r ib` and the wiring has existed since `4a680153`);
+    #   * the nine SSE2 rows `addsd`/`subsd`/`mulsd`/`divsd`/`ucomisd`/
+    #     `xorpd`/`movq_r64_xmm`/`cvtsi2sd`/`cvttsd2si` — removed 2026-10-06
+    #     (`work/x86-coverage-endtoend`); each gained a decoder arm, a model
+    #     arm, a `samples()` row and a fuzz-pool entry;
+    #   * `encode_call_r64` — moved to `HARNESS_LIMITS` 2026-10-08: the target
+    #     is a register's contents, outside the harness's one `MAP_FIXED`
+    #     region (the arm64 `encode_br_xn` reason);
+    #   * `encode_and_r8_r8` / `encode_or_r8_r8` — removed 2026-10-08: both
+    #     read `yes yes yes` because the byte-wise ALU class was this tree's own
+    #     REX-prefix omission (`_byte_rex_required`), and the anti-rot half of
+    #     `test_formal_isa_census.py` is what caught the entries outliving their
+    #     gap.
+    #
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
