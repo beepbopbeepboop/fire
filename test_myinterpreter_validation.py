@@ -125,11 +125,6 @@ def interpreter_py_tokenize():
     from fire_compiler import Parser
     stmts = Parser(python_tokenize(src)).with_filename(SUBJECT).parse_module()
     interp = Interpreter(filename=SUBJECT, argv=None)
-    # The subject is being IMPORTED here, not run: its `if __name__ ==
-    # '__main__':` block reads the program from sys.stdin, so executing it
-    # as __main__ blocks forever on any stdin that is not at EOF (the
-    # runner's is an open pipe -- a 3601 s TIMEOUT, not a 1 s test).
-    interp.scope.define('__name__', os.path.splitext(SUBJECT)[0])
     for stmt in stmts:
         interp.execute(stmt)
     fn = interp.scope.get('py_tokenize')

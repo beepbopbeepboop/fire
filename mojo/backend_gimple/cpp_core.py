@@ -34,11 +34,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -5959,7 +5954,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")
         return lines
-    if for_target_is_tuple(target):
+    if gimple_ctypes.for_target_is_tuple(target):
         # `for (a, b) in enumerate(iterable):` — tuple-unpack loop target
         # (statistics.py's `for n, x in enumerate(iterable, start=1):`,
         # the one shape this scalar body model supports: enumerate's
@@ -5972,7 +5967,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # Depth-aware split — a naive `.split(',')` here breaks a
         # NESTED tuple target's own inner commas (`(i, (y, m, d))`
         # would wrongly split into 4 pieces: 'i', '(y', 'm', 'd)').
-        _names = target_slots(target[1:-1].strip())
+        _names = gimple_ctypes.target_slots(target[1:-1].strip())
         # `for i, (a, b, ...) in enumerate(...):` — a NESTED tuple
         # target whose second element is ITSELF a (flat, depth-1)
         # tuple of plain names (calendar.py's `itermonthdays4`: `for
@@ -5984,7 +5979,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # either real-world case and isn't attempted here.
         _nested_inner = None
         if len(_names) == 2 and _names[1].startswith('(') and _names[1].endswith(')'):
-            _cand = target_slots(_names[1][1:-1].strip())
+            _cand = gimple_ctypes.target_slots(_names[1][1:-1].strip())
             if _cand and all(gimple_ctypes.re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', n) for n in _cand):
                 _nested_inner = _cand
         if (_nested_inner is not None
@@ -6631,8 +6626,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # the accessor matching that name's ALREADY-DECLARED
                 # type when known (an earlier declaration wins — its C++
                 # type cannot change), int64_t otherwise.
-                _tuple_names = (target_slots(target)
-                                if for_target_is_tuple(target) else None)
+                _tuple_names = (gimple_ctypes.target_slots(target)
+                                if gimple_ctypes.for_target_is_tuple(target) else None)
                 if _tuple_names:
                     _tupvar = gen._cpp_fresh_name("_mg_tup")
                     for _nm in _tuple_names:
