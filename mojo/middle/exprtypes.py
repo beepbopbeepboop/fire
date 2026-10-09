@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -617,6 +617,17 @@ def is_python_bool_expr(gen, node) -> bool:
         return False
 
 
+def _name_set_has(names, member) -> bool:
+    """`member in names` for a registry value that is a SET of names (or absent).
+    The inline `member in (names or ())` was compiled as a LIST membership test
+    over the set's header on the self-hosted path -- `mojo_list_contains_str`
+    strcmp'ing slot words (0xffffffff) -- so every `print` of an int field
+    crashed the binary."""
+    if not names:
+        return False
+    return _as_str(member) in _as_set(names)
+
+
 def _is_python_bool_field(gen, node) -> bool:
     """Is this `x.f` / `self.f` a struct field whose ANNOTATION says `bool`?
 
@@ -655,13 +666,13 @@ def _is_python_bool_field(gen, node) -> bool:
     _recv = getattr(node, 'obj', None)
     if isinstance(_recv, IdentExpr) and _recv.name == 'self':
         _sn = getattr(gen, '_current_struct_name', None)
-        if _sn and _member in (_bf.get(_sn) or ()):
+        if _sn and _name_set_has(_bf.get(_sn), _member):
             return True
     for _rt in _receiver_ctypes(gen, _recv):
         if not _rt or not _rt.endswith(' *'):
             continue
         _rsn = _struct_name_of(_rt)
-        if _rsn and _member in (_bf.get(_rsn) or ()):
+        if _rsn and _name_set_has(_bf.get(_rsn), _member):
             return True
     return False
 
@@ -700,7 +711,7 @@ def _is_python_bool_method(gen, node) -> bool:
     for _rt in _receiver_ctypes(gen, _f.obj):
         if not _rt or not _rt.endswith(' *'):
             continue
-        if _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ()):
+        if _name_set_has(_bm.get(_struct_name_of(_rt)), _as_str_node(_f.member)):
             return True
     return False
 
