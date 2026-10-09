@@ -232,7 +232,8 @@ the frame receiver), `globals` (module-level `__DATA` slots, read through a
 local and written by a helper through its own `global`), `generics` (`def
 f[T](x: T, …)` called at more than one type, which is what monomorphisation
 acts on), `environ` (`os.getenv` against a FIXED process environment,
-`FIXED_ENV`).
+`FIXED_ENV`: the value printed, and compared against a literal — the two
+spellings this path lowers; `len` of the value is refused and not drawn).
 
 The value-model half: `strings` (binding, `len`, comparison, the byte
 subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
@@ -1380,7 +1381,14 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+    #
+    # `environ_get` prints the value and `environ_cmp` compares it against a
+    # literal — the two spellings this path LOWERS. `len(os.getenv(k))` was a
+    # third and is deliberately absent: `len` of a kernel-supplied string is
+    # refused (`formal/model.py`'s character-vs-byte refusal, which the sweep's
+    # own refusal audit calls a TRUE one), so drawing it produced a mix that
+    # measured nothing and reported refusals as though they were numbers.
+    "environ": (("environ_get", 4), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2009,7 +2017,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_len", "environ_cmp",
+"environ_get", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2116,7 +2124,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+        elif kind in ("environ_get", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3050,11 +3058,20 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
+    #
+    # **The two constructs drawn here are the two this path lowers**: the value
+    # itself (`print`) and a comparison against a literal (`!= ""`). A `len` of
+    # the value is deliberately NOT drawn and is not a gap in this harness:
+    # `formal/model.py` refuses `len` of a kernel-supplied string outright,
+    # because a `strlen` counts BYTES and CPython counts CHARACTERS and nothing
+    # in the source says which the value is. Drawing it made this mix report
+    # `0/2` answers — a family that measured nothing — which is what
+    # `test_formal_fuzz.py`'s anti-vacuity check caught; the refusal audit read
+    # `true=4, false=0`, i.e. every refusal was a TRUE one. So the mix was
+    # withdrawn from the construct the path refuses and left the two it lowers,
+    # rather than the construct being special-cased.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_len":
-            self.emit(indent, f"print(len(os.getenv({key!r})))")
-            return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
             return
