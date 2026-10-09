@@ -5,6 +5,24 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
+**Status 2026-10-08 (`work/formal233-docs`): step 1 of "The exact next step"
+LANDED — the class checks its own mechanism.** `setUpClass` now records whether
+the fixture generated a file and whether `_ADMIT` was in the text it built, and
+`test_the_measurement_mechanism_fires` (plus the shared guard each goal row calls
+first) fails with the truth when it did not, instead of reporting "fdiv64's div0
+arm may have been corrected" about a file that was never dissected. On this tree
+the fixture now RAISES rather than producing a theorem-less file: the generator
+refuses `a // b` with TWO opaque out-of-image calls — the stack-floor guard's
+`getrlimit` and the div0 trap's `fflush`, with `compiler_traps` empty — which is
+`formal/arm64_codegen.py`'s and is owned by
+`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
+step 2 (subtract `info["compiler_traps"]` in `_unfollowable_calls`, or a
+literal-divisor fixture) is still blocked on that claim, and the class is now
+red with the TRUTH rather than red with a wrong diagnosis. Measured:
+`test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean` — the mechanism
+row plus the two goal rows each fail naming the getrlimit doc and quoting the
+fixture's own refusal text.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
