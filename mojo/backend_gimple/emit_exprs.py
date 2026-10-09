@@ -33,11 +33,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1283,31 +1278,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return gen.lower_expr(node.obj)
 
     # Check if obj is a simple identifier (module access)
-    # `os.path.sep` / `os.path.pathsep` / `os.path.curdir` / `os.path.pardir`:
-    # `os.path` itself lowers to a bare module MARKER (the int 0), so the outer
-    # `.sep` fell to the dynamic-getattr dispatch with obj=NULL and raised a
-    # fatal `AttributeError: sep` at RUN time -- which is what
-    # `imports.cpython_lib_root`'s `d == os.path.sep` did, caught by the module
-    # loader's blanket `except`, so every import of a sibling module silently
-    # resolved to nothing in the self-hosted compiler. The four are `posixpath`'s
-    # literals and `os`'s own (this platform is POSIX), i.e. the same table
-    # `os.sep` is answered from.
-    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
-            and node.obj.member == 'path'
-            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
-            and node.member in ('sep', 'pathsep', 'curdir', 'pardir')):
-        _opc = _as_str(node.obj.obj.name)
-        _opb = gen.imported_symbols.get(_opc)
-        if _opb:
-            _opm = _opb.get('module')
-            if _opm:
-                _opc = _as_str(_opm)
-        if _opc == 'os':
-            _opk = builtin_module_constant('os', node.member)
-            if _opk is not None:
-                _opk_ctype, _opk_val = _opk
-                _opk_text = gen._intern_string(gimple_ctypes._c_escape(_opk_val))
-                return _opk_ctype, gen._new_val(_opk_ctype, _opk_text)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
         # The REAL module this identifier is bound to, for `import X as Y`.
@@ -6097,8 +6067,8 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
     # re-lowered comprehension lands the same way.
     for _gen0 in node.generators:
-        if isinstance(_gen0.target, str) and not for_target_is_tuple(_gen0.target):
-            _gen0.target = for_target_single_name(_gen0.target)
+        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
+            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
 
     gen0 = node.generators[0]
 
@@ -6184,7 +6154,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # declines it for the `for`-statement form.
     _cur = None
     if (isinstance(gen0.iterable, gimple_ctypes.IdentExpr)
-            and not for_target_is_tuple(_as_str(gen0.target))):
+            and not gimple_ctypes.for_target_is_tuple(_as_str(gen0.target))):
         _cur = itc.cursor_for(gen, gen._cname(gen0.iterable.name))
     if _cur is not None:
         gen._compr_cursor_loop(node, gen0, res, res_type, _cur)

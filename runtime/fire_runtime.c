@@ -95,14 +95,6 @@ void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLO
 void mojo_cleanup_cancel_n(int64_t n)
 {
     _mojo_cleanup_top -= (int)n;
-    /* A cancel the matching pushes did not cover (a free emitted on a path
-     * that never ran its push) must not drive the top below the empty state:
-     * the NEXT push would index the arrays at a negative offset and scribble
-     * over whatever static data precedes them -- measured, the self-hosted
-     * compiler's own regex group-name table, which then crashed the tokenizer
-     * far from the cause. Clamping makes the imbalance a harmless no-op. */
-    if (_mojo_cleanup_top < -1)
-        _mojo_cleanup_top = -1;
 }
 
 void mojo_cleanup_checkpoint_save(void)
@@ -5317,14 +5309,6 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
-    /* A NULL key is Python's `None` (or an erased `str` that was never set):
-     * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
-     * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
-     * `x in TABLE` over a `dict.get(...)` result that came back None is
-     * everywhere in the compiler's own codegen (`eq_operand_kind`'s
-     * `at in _EQ_CTYPE_KIND`), and was the SIGSEGV every self-hosted compile of
-     * a program with an `==` hit. */
-    if (!key) return NULL;
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_lookup_ik(d, iv);
     /* cap is always a power of two (mojo_dict_init: 8, _dict_grow: doubles). */

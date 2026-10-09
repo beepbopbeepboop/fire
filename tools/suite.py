@@ -401,12 +401,12 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('the full `gate` of 2026-10-07 on master 8df5b273 (61 passed), '
-                'build/suite.log per-job peaks, applied with --apply-peaks. '
-                'Rows that run did not move by more than the log\'s 0.1 GB '
-                'resolution, or that it could not trust (a job that failed or '
-                'ran under 2 s), keep their earlier measurement, as their '
-                'comments say.')
+MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jobs, "
+                'one at a time (2026-10-09, arm64, python 3.14.7), merged from the '
+                'per-run logs .tmp/logs/*.log and applied with --apply-peaks; only '
+                'jobs that PASSED and ran >= 2 s are trusted, and the rows added '
+                'before this run keep the 2026-10-07 `gate` they were read from, as '
+                'their own comments say.')
 
 # `measured`: read off that run for this job.
 # `derived`:  the same command over the same inputs by the same engine, so the
@@ -703,6 +703,57 @@ MEASURED_PEAK_GB = {
     'runtimedylib':                           (0.4, 'measured'),
     'silentnoop':                             (0.2, 'measured'),
     'suite-self-test':                        (0.6, 'measured'),
+    # Added by --apply-peaks (see MEASURED_RUN for the run).
+    'comptime-parity':                        (0.3, 'measured'),
+    'formal-globals':                         (0.1, 'measured'),
+    'formal-link-accounting':                 (0.1, 'measured'),
+    'formal-re':                              (0.2, 'measured'),
+    'formal-run':                             (0.2, 'measured'),
+    'formal-runtime-link':                    (0.2, 'measured'),
+    'formal-sweep':                           (0.1, 'measured'),
+    # The WARM peak, and deliberately not the one its class is sized from: this
+    # job calls `ensure_library` itself, so on a cold store it is the 9.0 GB
+    # build recorded under `prooflib` above, which is what `mem='module'`
+    # covers. 1.5 GB is what it did on the run this row was read from.
+    'formal-sweep-truth':                     (1.5, 'measured'),   # warm store, 35 s
+    # The one measurement here that is NOT a run of the job as registered, and
+    # the reason is in the row: `prooflib` on a WARM tree costs 0.06 GB, because
+    # `lib/*.olean` is current and `ensure_library` takes its stamp-valid early
+    # return. The number its class has to cover is the build, so that is what was
+    # measured: the same `ensure_library` call against a private copy of
+    # `lib/*.lean` with its own empty `GMOJO_HOME` cas (so every module really
+    # elaborates), polled at 50 ms — 9.0 GB across 5 procs, 281 s for all eight
+    # modules. That is the whole RUN, and it is consistent with the 7.8 GB
+    # `formal/lean.py` records rather than a correction to it: 7.8 is one
+    # `lean` elaborating the largest module alone, and this is that plus the
+    # driver's Python half and the other seven modules. The class is sized for
+    # the run — `module` (24 GB) covers 1.5x of 9.0 = 13.5, `small` (8) does
+    # not, and a RESOURCE verdict on the step every proof job deps on is not a
+    # saving. Measured on a copy: the repo's own `lib/` and the shared cas were
+    # not written to.
+    'prooflib':                               (9.0, 'measured'),   # cold store, 8 modules
+    # The nine of this branch's never-measured 36 that `--apply-peaks` CANNOT
+    # record, because the runner's own instrument cannot resolve them: they PASS
+    # in under `MIN_MEASURED_SECS` (2 s), and `tools/memcap.py`'s report rounds
+    # to 0.1 GB. Same instrument as every row above and the reason the earlier
+    # sub-0.1 GB batches are written to two decimals — `procrun.tree_rss`, the
+    # poll memcap enforces its ceiling with — at 20 ms instead of memcap's 500,
+    # one job at a time under `tools/memslot.py --gb 8` on this tree,
+    # 2026-10-09, arm64, python 3.14.7.
+    #
+    # `preflight` is the floor of the whole registry: it imports the parser and
+    # the codegen and prints OK, and nothing else in the tree is cheaper.
+    'preflight':                              (0.06, 'measured'),  # 0.6 s, 3 procs
+    'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
+    'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
+    'doc-refs':                               (0.15, 'measured'),  # 1.4 s
+    'returned-frame-layout':                  (0.09, 'measured'),  # 0.8 s
+    'formal-typed-flag':                      (0.08, 'measured'),  # 0.8 s
+    'examples-parse':                         (0.09, 'measured'),  # 0.8 s
+    'comprehension-parse-shape':              (0.09, 'measured'),  # 0.8 s
+    'doc-refs-stale-verdicts':                (0.07, 'measured'),  # 0.9 s
+    # Added by --apply-peaks (see MEASURED_RUN for the run).
+    'memslot':                                (0.5, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -943,6 +994,26 @@ def memclass_ratios():
     return sorted(rows, key=lambda r: (-(r[5] or 0), r[0]))
 
 
+# Jobs whose class is deliberately NOT the one their recorded peak asks for,
+# because the peak is not the job's worst path. A ratchet with no exceptions is
+# a ratchet that shrinks a class onto a measurement taken on a warm tree: this
+# is the list where that would happen, and each entry has to say what the
+# unmeasured path costs, or the exception is indistinguishable from drift.
+#
+# `formal-sweep-truth` is the one that exists today. Its recorded peak is a WARM
+# run (1.5 GB, 35 s), but the job calls `formal/lean.py::ensure_library` itself,
+# so on a cold store it pays the whole lib/*.olean build: measured 9.0 GB under
+# `prooflib`, for which `class_for_peak` says `module` (24 GB covers 1.5x of
+# 9.0 = 13.5). Recording the warm peak and letting the ratchet assign `tiny`
+# would cap a job that can need 9.0 GB at 4 GB, and the verdict would be
+# RESOURCE — which says nothing about the output and forgives nothing.
+CLASS_ABOVE_PEAK = {
+    'formal-sweep-truth': 'the cold-store lib/*.olean build it can start: 9.0 '
+                          'GB (see MEASURED_PEAK_GB["prooflib"]), not the '
+                          '1.5 GB warm peak recorded here',
+}
+
+
 def class_mismatches():
     """Measured jobs whose class is not the one the ratchet assigns.
 
@@ -953,7 +1024,7 @@ def class_mismatches():
     is checked in one place, by a test, with both numbers in the message.
     """
     return [(n, c, w) for n, _p, _h, c, _g, _f, w in memclass_ratios()
-            if c != w]
+            if c != w and n not in CLASS_ABOVE_PEAK]
 
 
 def is_over_provisioned(peak_gb, ceiling, floor=None) -> bool:
@@ -980,9 +1051,17 @@ def over_provisioned():
     allowed to be over-provisioned on purpose, and the everyday jobs are not.
     It is the shape a regression takes when a class is left at a historical
     number — invisible in the run, since nothing fails, and visible here.
+
+    `CLASS_ABOVE_PEAK` is not consulted, deliberately and for the same reason
+    `class_mismatches` consults only the other half of the story: a job in it is
+    over-provisioned against a peak that is NOT its worst path, so the ratio
+    here is the ratio of the warm run, and saying so on the gate's screen every
+    time would be noise about a decision that is written down. The gate that
+    matters for those is the one above — the class must cover the cold path, and
+    `class_mismatches` is what says whether it does.
     """
     return [(n, p, c, g / p) for n, p, _h, c, g, _f, _w in memclass_ratios()
-            if is_over_provisioned(p, g)]
+            if is_over_provisioned(p, g) and n not in CLASS_ABOVE_PEAK]
 
 
 def at_floor():
@@ -1578,14 +1657,14 @@ test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
 # ~275 s, because it builds and runs real programs on both paths. `proofs`, not
 # `check`: the everyday inner loop should not pay for it every time.
 test('comptime-parity', [PY, 'test_comptime_parity.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='comptime measured on both paths, including the one silent cell')
 # [4]'s returned-frame layout, which existed and ran by NOTHING until agent
 # [5]'s test-estate check reported it.  That is the whole argument for that
 # check in one line: the test was written, it passes 10/10, and a suite with
 # no inventory of test files could not tell you it was not running.
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
 # `formal/model.py`, `bugs/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
@@ -1596,7 +1675,7 @@ test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
 # exactly the edits that break it — the failure mode `extra` exists for, and one
 # the `cache key: cached spec X hashes its own test` check cannot see, because
 # that check only asks whether the spec hashes ITS OWN test.
-test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
+test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
@@ -1678,7 +1757,7 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
                              'driver.py', 'test_link_mode.py'],
      desc='the real driver.compile_program link-mode pipeline')
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
-     extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
+     mem='tiny', extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
@@ -1717,6 +1796,7 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # and a key that cannot see a change there serves the last green run. Same
 # promise `suite-self-test` makes with `**/test_*.py`.
 test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
+     mem='tiny',
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
@@ -1727,10 +1807,10 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
 # report can never fail -- and the Comprehension shape test pins the field names
 # a dict comprehension's key and value live in, which formal/model.py reads.
 test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
-     extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
+     mem='tiny', extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
      desc='the stale-verdict report flags a wrong row and passes a right one')
 test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
-     cache=True, extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
+     cache=True, mem='tiny', extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
      desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
@@ -1839,7 +1919,7 @@ test('interporacle', [PY, 'test_interp_oracle.py'], cache=True, mem='tiny',
 # coverage number that had quietly gone 41/4/0 -> 26/6/13. A 0.1s,
 # toolchain-free, `expect`-free structural check turns the next one into a
 # `check` failure. See test_examples_parse.py's docstring.
-test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
+test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # The 45 example files are hashed as a DIRECTORY, not as 45 paths.
      # `fire_compiler.py` is redundant here — it is already in
      # cas._COMPILER_SOURCES, so cas.compiler_fingerprint() covers it — and it
@@ -2008,6 +2088,7 @@ test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
                    'assert fire_compiler.Parser; print("parser+codegen OK")'],
+     mem='tiny',
      desc='import-level smoke check of the parser and codegen')
 # The runner tests itself. `make check` is a one-line recipe that hands the
 # whole bucket to tools/suite.py, so a bug in the runner does not fail one
@@ -2066,7 +2147,7 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
 # `covering` in tools/memslot.py), and every job in every bucket goes through
 # it. Cheap — its own private ledger, a 10 GB budget of made-up gigabytes, and
 # nothing compiled.
-test('memslot', [PY, 'test_memslot.py'], cache=True,
+test('memslot', [PY, 'test_memslot.py'], cache=True, mem='tiny',
      extra=['test_memslot.py', 'tools/memslot.py', 'tools/memcap.py'],
      desc='the machine-wide memory ledger: FIFO, budgets, crash, tree coverage')
 test('coro', [PY, 'test_coro_runtime.py'], cache=True, mem='tiny',
@@ -2145,10 +2226,20 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # defect "really" belongs to a sibling job. A RED job with no marker is a hole
 # in the gate: nothing reports it, and `expect=` costs 4 s here.
 SELFHOST_STAGE2_EMPTY_DUMP = (
-    'the compiled binary dumps every single-module input (46 of 46, `.tok` '
-    'byte-identical) but cannot yet compile its own closure: '
-    '`bootstrap-stage2-transitive` is disabled (it does not finish), so the '
-    'stage3 trees these compare do not exist. See '
+    'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
+    'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) and no longer '
+    'emits `mojo_unsupported_iter` (re-measured 2026-10-03: the per-item '
+    'fanout rejects none), but `--dump` on the compiled binary writes a correct '
+    '`.pyi` and a `.tok`/`.ast` BYTE-IDENTICAL to stage1\'s and then fails: 43 '
+    'of its 46 inputs exit non-zero — 41 of them die on SIGSEGV/SIGBUS with no '
+    'output at all, and the two `.py` closure inputs are refused with '
+    '`Unexpected SEMICOLON(\';\')` — so no `.ci` is written. (Re-measured '
+    '2026-10-04: this text said the `.tok`/`.ast` were ABSENT and the `.ci` '
+    'EMPTY, which was the shape before the tokenizer and parser fixes landed, '
+    'and 45 of 46 before `mojo_id` closed the `TypeError` class.) stage2 and '
+    'stage3 agree with each other exactly '
+    '(0 diffs), so it is the binary computing something other than the '
+    'reference, deterministically. See '
     'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
@@ -2422,19 +2513,37 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # tokenizer and the parser made `.tok`/`.ast` byte-identical and moved the
 # failure into the compiled codegen, where it is loud.
 #
+# `expect=` IS here, and it is COUNT-CHECKED, because this fanout is RED:
+# measured 2026-10-04, 43 of the 46 items exit non-zero (45 of them before
+# `mojo_id` closed the `TypeError` class) and only `mojo_failures.mojo`,
+# `t1.mojo` and `bootstrap_test_single_expr.mojo` pass. See the 2026-10-04 entry in the history block
+# above for why the "this fanout cannot see the class" reasoning that retired
+# the marker on 2026-10-03 stopped being true: the compiled binary no longer
+# writes a silent empty `.ci`, it fails. The count is what makes the marker a
+# claim rather than a category — as items go green this has to be updated (or
+# dropped, which the runner says out loud), and a NEW failure inside the
+# already-marked sweep is a FAILURE rather than an absorbed EXPECTED.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
+       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
+              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — all 40 '
+              'die on SIGSEGV/SIGABRT/SIGBUS with no diagnostic, which is the '
+              'whole of what is left (the loud classes are gone: no more '
+              '`TypeError: unhashable type: \'list\'`, no more `Unexpected '
+              'SEMICOLON`). Re-measured 2026-10-04: 45 of 46 before `mojo_id` '
+              'closed the TypeError class, 43 before the struct-tag read was '
+              'validated. See '
+              'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      driver='mem', mem='tiny', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'],
@@ -2446,14 +2555,12 @@ fanout('bootstrap-stage3-dumps',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
@@ -2529,11 +2636,16 @@ test('prooflib', [PY, '-c',
                   'L.ensure_library(L.find_lean(), '
                   'os.path.join(L._default_root(), "lib"))'],
      mem='module', timeout=2400, dep=True,
-     memwhy='unmeasured: the only job in the registry run by an EXTERNAL tool '
-            '(Lean, a 27 MB .olean), so there is no peak to size a class from '
-            'and `module` is the standing guess. Over the 4 GB line because we '
-            'do not know, not because 24 GB was measured — one `make gate` '
-            'replaces this with a number. See ' + MEM_DEBT_DOC,
+     memwhy='measured 9.0 GB: the cold-store lib/*.olean build, all eight '
+            'modules, which is the work this step exists to have happen once. '
+            'Over the 4 GB line and therefore a debt rather than a fact — '
+            "Lean's own -M is 12 GB for a library build (6144 for a generated "
+            'proof) and a 4 GB ceiling is not a tighter policy but a red suite, '
+            'measured: see formal/lean.py and '
+            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. `module` (24) is '
+            'the smallest class covering 1.5x of 9.0 = 13.5 GB; `small` (8) is '
+            'not, and a RESOURCE verdict here takes down every proof job that '
+            'deps on it. See ' + MEM_DEBT_DOC,
      desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
           'without this step. `dep=True`: a DEPENDENCY, not a test — see the '
           'field in `Spec`, and `test_suite.py` checks that it is the only '
@@ -2577,7 +2689,7 @@ test('prooflib', [PY, '-c',
 test('formal', [PY, 'test_formal.py'], j=True,
      deps=['preflight', 'prooflib'],
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
-test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
+test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'], mem='tiny',
      desc='formal arm64 executables that actually build AND run (no lean)')
 # REPRODUCIBILITY. Its own file because the assertion is about BYTES rather than
 # about what an image computes, so every other formal suite is structurally
@@ -2620,7 +2732,7 @@ test('formal-reproducible', [PY, 'test_formal_reproducible.py'],
 # before its value was in it) — all of which presented as a crash somewhere
 # else entirely.
 test('formal-globals', [PY, 'test_formal_globals.py'], deps=['preflight'],
-     desc='module-global state: image + interpreter agree, on both backends')
+     mem='tiny', desc='module-global state: image + interpreter agree, on both backends')
 # `deps=['preflight', 'prooflib']` and NOT in `check`: half this file's
 # assertions are "Lean accepts the generated file", and without `prooflib` they
 # SKIP -- which would be a silent coverage hole of exactly the kind `prooflib`
@@ -2696,7 +2808,7 @@ test('formal-ast', [PY, 'test_ast_formal.py'],
 # `j` is a claim about the tool, not a request — test_formal.py, which does
 # parse -j, keeps it above.
 test('formal-sweep', [PY, 'test_formal_sweep.py'],
-     deps=['preflight', 'prooflib'],
+     deps=['preflight', 'prooflib'], mem='tiny',
      desc='the formal sweep')
 # The two suites that pin the reach claims and the bind audit.  Unregistered
 # until now, and the second is the one standing between a real backend defect
@@ -2720,22 +2832,27 @@ test('formal-sweep', [PY, 'test_formal_sweep.py'],
 # adding it would put an 80 s / 27 MB build in the everyday loop.
 #
 # `mem='module'` follows from that, and is the same argument `prooflib`'s own
-# registration makes: the guard is free on a warm store (measured 0.3 s, and
-# 1.4 GB peak for the whole job WITH the library, on 2026-10-05) and is one
-# ~80 s / 7.8 GB `lib/ProofLib.lean` build on a cold one, so the class is sized
-# for the build this job can now start rather than for the warm case.  An 8 GB
-# ceiling over a 7.8 GB build is a RESOURCE verdict, and `expect=` forgives
-# neither that nor a skipped dep.
+# registration makes: the guard is free on a warm store (this job measured
+# 1.5 GB and 35 s here on 2026-10-09) and is the whole cold lib/*.olean build on
+# a cold one (measured 9.0 GB across 5 procs, 281 s for all eight modules — the
+# number is in MEASURED_PEAK_GB under `prooflib`), so the class is sized for the
+# build this job can now start rather than for the warm case.  An 8 GB ceiling
+# over a 9.0 GB build is a RESOURCE verdict, and `expect=` forgives neither that
+# nor a skipped dep.  Its table row is the WARM peak on purpose: a row is what
+# the job was measured doing, and 1.5 GB is what it did here.
 test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
      deps=['preflight'], mem='module',
-     memwhy='may reach Lean\'s 27 MB lib/*.olean build through '
-            'formal/lean.py::ensure_library (measured 1.4 GB warm, 7.8 GB on a '
-            'cold store), so it is capped like the `prooflib` step whose work '
-            'it can now do itself rather than like the pure-python check it '
-            'mostly is. See ' + MEM_DEBT_DOC,
+     memwhy='reaches Lean\'s lib/*.olean build through '
+            'formal/lean.py::ensure_library — measured 1.5 GB warm and 9.0 GB on '
+            'a cold store (the same build `prooflib` exists to pay for, which '
+            'this job can be the one to pay) — so it is capped like the step '
+            'whose work it can now do itself rather than like the pure-python '
+            'check it mostly is. The 1.5 GB warm peak is its table row and is '
+            'NOT what may size this class; see '
+            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. See ' + MEM_DEBT_DOC,
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
 # `formal/hostmods/re.mojo` against CPython's own `re`: 112 patterns, eight
 # sections each, every integer compared.  In `proofs` rather than `check` for
@@ -2744,7 +2861,7 @@ test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
 # the whole class of bug this one exists for (a silently wrong span is
 # indistinguishable from a right one to anything downstream).
 test('formal-re', [PY, 'test_re_formal.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      extra=['test_re_formal.py', 'formal/hostmods/re.mojo',
             'formal/hostmods/os/_syscalls.mojo', 'formal/imports.py'],
      desc='the `re` host module, span for span, against CPython')
@@ -2754,7 +2871,7 @@ test('formal-re', [PY, 'test_re_formal.py'],
 # `check` because it builds ~20 images across both architectures and needs
 # `otool`; no `prooflib` dep because it asserts without Lean.
 test('formal-runtime-link', [PY, 'test_formal_runtime_link.py'],
-     deps=['preflight'],
+     deps=['preflight'], mem='tiny',
      desc='the mojo_* runtime library is on a formal link line, and what is still refused')
 # output/x86_64/ keeps these from colliding with the arm64 verdicts above, so
 # they can share the machine with them.

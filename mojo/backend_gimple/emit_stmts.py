@@ -31,11 +31,6 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1317,23 +1312,6 @@ def _gen_stmt_AssignStmt(gen, node):
                                                   getattr(node, 'type_ann', None))
             if _ann_ctype is not None:
                 ctype = _ann_ctype
-            # `x = None` lowers to ('int', '0'): a 32-bit `int` of no kind, and
-            # `_declare_var` is first-declaration-wins, so a local whose FIRST
-            # binding is the None placeholder was declared `int` for the whole
-            # function and every LATER pointer store into it was truncated to
-            # its low 32 bits. The pre-pass hint covers a top-level function,
-            # but a lifted closure has no `_inferred_var_types` row: `cand =
-            # None` ... `cand = 'MojoList *'` in `_prebound_local_ctypes`'s
-            # `note` came back as 0x76ea40 where the string lives at
-            # 0x10076ea40, which `join_all` then handed `strcmp` -- every
-            # self-hosted compile of a function with a `return <container
-            # local>` died there. None is the null WORD, so it takes the word
-            # type.
-            if ctype == 'int' and (
-                    isinstance(node.value, gimple_ctypes.NoneLiteral)
-                    or (isinstance(node.value, gimple_ctypes.IdentExpr)
-                        and node.value.name == 'None')):
-                ctype = 'int64_t'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an
@@ -3260,8 +3238,8 @@ def _gen_stmt_ForStmt(gen, node):
     #
     # Idempotent, so a module compiled twice (as an import and again inline)
     # lands on the same target both times.
-    if isinstance(node.target, str) and not for_target_is_tuple(node.target):
-        node.target = for_target_single_name(node.target)
+    if isinstance(node.target, str) and not gimple_ctypes.for_target_is_tuple(node.target):
+        node.target = gimple_ctypes.for_target_single_name(node.target)
     # `for i in reversed(range(...))` — rewrite to an equivalent descending
     # `range(...)` ForStmt and take the fast integer-loop path, instead of
     # `_lower_builtin_reversed` (which only materializes list/str/bytes and
@@ -3867,18 +3845,8 @@ def _gen_stmt_ExprStmt(gen, node):
                       or gen._func_param_defaults.get(raw_name) or [])
             _n_req = len(expected_params) - len(_dflts)
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
-            # By parameter NAME when the callee's names line up with its C
-            # parameters -- see `_kwarg_param_names` (this twin used to append
-            # keyword values in call-site order, to whatever slot was next).
-            _kwn_names = gen._kwarg_param_names(raw_name, fname,
-                                                len(expected_params), kwarg_dict)
             while len(arg_pairs) < len(expected_params):
-                if _kwn_names is not None:
-                    _kwn_here = _as_str(_kwn_names[len(arg_pairs)])
-                    if _kwn_here in kwarg_dict:
-                        arg_pairs.append(kwarg_dict[_kwn_here])
-                        continue
-                elif kwarg_values:
+                if kwarg_values:
                     arg_pairs.append(kwarg_values.pop(0))
                     continue
                 _pos = len(arg_pairs)

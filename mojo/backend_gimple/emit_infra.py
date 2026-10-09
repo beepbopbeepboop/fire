@@ -33,11 +33,6 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, target_slots, _as_list
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -1762,18 +1757,6 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
-def _is_pointer_view_helper(fname: str) -> bool:
-    """Is `fname` one of fire_compiler.py's pointer-view identity helpers
-    (`_as_dict`/`_as_list`/`_as_set`/`_as_str`), spelled bare (inside
-    fire_compiler.py) or module-qualified (`fire_compiler__as_dict_<hash>`)?
-    `_as_int` is deliberately not one: it asks for the raw word, and
-    `mojo_box_int` would truncate a boxed double."""
-    for base in ('_as_dict', '_as_list', '_as_set', '_as_str'):
-        if fname == base or fname.startswith('fire_compiler_' + base):
-            return True
-    return False
-
-
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
@@ -1887,26 +1870,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             slit_name = gen._str_literal_to_slit(aval)
             temp = gen._new_val('char *', f'{slit_name}')
             aval = temp
-        if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
-                and _is_pointer_view_helper(fname)):
-            # `_as_dict(t[1])` / `_as_list(...)` / `_as_set(...)` / `_as_str(...)`
-            # exist to put a pointer-typed STATIC view on a value the compiled
-            # backend erased to int64_t -- and a slot read out of a
-            # heterogeneous tuple/list is exactly such a value, handed back as
-            # a BOX (`mojo_list_get_boxed`) for every non-int kind. The helper
-            # body is a bare cast, so passing the box through hands the
-            # CONTAINER FUNCTION the box itself: `mojo_dict_update (dst, box)`
-            # walked the box's first word (MOJO_BOX_MAGIC) as a slot table and
-            # SIGSEGV'd on 0x4d4a424f58310001 in `infer_return_elem_type`'s
-            # `_scratch_et.update(_as_dict(_saved[1]))`, which is the first
-            # thing every self-hosted compile runs
-            # (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). The box has to
-            # come apart before the cast; `mojo_box_int` returns a non-double
-            # box's raw word (the pointer) and anything that is not a box
-            # unchanged.
-            _ub = gen._new_temp('int64_t')
-            gen._emit(f"  {_ub} = mojo_box_int ({aval});")
-            aval = _ub
         if ptype == atype or ptype == '...':
             # Skip coercion only if C types match exactly
             coerced_args.append(aval)
@@ -2875,14 +2838,8 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
         # declared `int64_t` -- `char * = mojo_set_iter_val_str(...)` then
         # failed to gimplify. Distinct variables per loop, always.
         gen._shadow_seq_box[0] += 1
-        # Module-level `re` (imported at the top of this file), NOT a
-        # function-local `import re as _re`: the self-hosted lowering routes
-        # `re.sub` with a literal pattern through its own regex engine but
-        # raises "module 're' is not compiled into this binary" for an aliased
-        # local import -- which made every self-shadowing loop target (any
-        # input with a second `for x in ...` over the same name) fail with
-        # "compile_to_gimple failed".
-        safe = re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
+        import re as _re
+        safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
         if safe and safe[0].isdigit():
             safe = '_' + safe
         c_name = f"_shadow{gen._shadow_seq_box[0]}_{safe}"
@@ -2900,7 +2857,8 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
             inner = name[1:-1]
             if inner and inner[0].isdigit():
                 inner = '_' + inner
-            c_name = re.sub(r'[^a-zA-Z0-9_]', '_', inner)
+            import re as _re
+            c_name = _re.sub(r'[^a-zA-Z0-9_]', '_', inner)
             gen._c_names[name] = c_name
             gen.decls.append(f"  {ctype} {c_name};")
             gen.var_types[name] = ctype
@@ -4417,7 +4375,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # print `(0,)` where CPython prints `0`.
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if for_target_is_tuple(target_str):
+    if gimple_ctypes.for_target_is_tuple(target_str):
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -4721,7 +4679,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # target is spelled `'(a,)'` and the comma is the only thing that says so,
     # so a comma test here has to be the one that knows about it (see
     # fire_compiler.py's "Unpacking-target representation").
-    is_tuple_target = (for_target_is_tuple(_target_str)
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(_target_str)
                        and tuple_slot_ctypes is not None)
     # `[x for x, in gen()]` binds ONE name, and `gen0.target` is the literal
     # string `'(x,)'` — `_single_loop_target_name` is the reader that knows the
@@ -4741,7 +4699,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _tgt = _one if _one is not None else gen0.target
     saved_target = None
     if is_tuple_target:
-        var_names = target_slots(_inner_str)
+        var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
@@ -5976,7 +5934,7 @@ def _split_top_level_comma(s: str) -> list[str]:
     owns the target representation (see its "Unpacking-target
     representation" section) and this is where the empty-slot rule is paid
     for once."""
-    return target_slots(s)
+    return gimple_ctypes.target_slots(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.
@@ -6105,12 +6063,9 @@ def _dedup_variadic_externs(parts: list) -> str:
                 return True
         return False
 
-    def _fragment_names(stmt: str) -> list:
+    def _fragment_names(stmt: str) -> tuple:
         """The extern name ONE `;`-delimited fragment contributes, as
-        `[concrete_name, variadic_name]` — either may be '' (none; a LIST of two
-        strings and not a tuple holding `None`s, because a tuple's slots box on the
-        self-hosted path and `c_name is not None` then held for a garbage word, which
-        `_str_hash` SIGSEGV'd on), and a
+        `(concrete_name, variadic_name)` — either may be None, and a
         fragment never contributes both (they are disjoint by construction).
 
         A name is `concrete` when its parameter list is neither `...` nor
@@ -6126,25 +6081,23 @@ def _dedup_variadic_externs(parts: list) -> str:
         per-fragment reading, one function, so the two cannot drift.
         """
         if not _is_extern_decl(stmt):
-            return ['', '']
+            return (None, None)
         paren = stmt.find('(')
         if paren < 0:
-            return ['', '']
+            return (None, None)
         close = stmt.rfind(')')
         if close < paren:
-            return ['', '']
+            return (None, None)
         params = stmt[paren + 1:close].strip()
         head_toks = stmt[:paren].strip().split()
         if not head_toks:
-            return ['', '']
-        # `[len(...) - 1]`, not `[-1]`: a negative index on the erased result of
-        # `.split()` read the slot before the list (0xffffffff) self-hosted.
-        name = _as_str(head_toks[len(head_toks) - 1]).lstrip('*')
+            return (None, None)
+        name = head_toks[-1].lstrip('*')
         if params == '...':
-            return ['', name]
+            return (None, name)
         if params != '':
-            return [name, '']
-        return ['', '']
+            return (name, None)
+        return (None, None)
 
     def _parse_part(part: str) -> tuple:
         """One part's extern declarations, as (concrete, variadic) name lists.
@@ -6166,21 +6119,15 @@ def _dedup_variadic_externs(parts: list) -> str:
         """
         if 'extern' not in part:
             return ([], [])
-        # `_pp_*`, not `concrete`/`variadic`: the ENCLOSING function binds
-        # `concrete = set()` below, and first-declaration-wins gave this closure's
-        # list that SET's type (self-hosted), so the 'list' it returned was a
-        # MojoSet whose slot words (0xffffffff) were then hashed as strings.
-        _pp_concrete = []
-        _pp_variadic = []
+        concrete = []
+        variadic = []
         for stmt in part.split(';'):
-            _fnm = _fragment_names(stmt)
-            c_name = _as_str(_fnm[0])
-            v_name = _as_str(_fnm[1])
-            if c_name != '':
-                _pp_concrete.append(c_name)
-            if v_name != '':
-                _pp_variadic.append(v_name)
-        return _pp_concrete, _pp_variadic
+            c_name, v_name = _fragment_names(stmt)
+            if c_name is not None:
+                concrete.append(c_name)
+            if v_name is not None:
+                variadic.append(v_name)
+        return concrete, variadic
 
     def _boundaries_preserve_parse(joined: list) -> bool:
         """Does `'\\n'.join(joined)` parse as the concatenation of the parts'
@@ -6246,20 +6193,16 @@ def _dedup_variadic_externs(parts: list) -> str:
                 if 'extern' not in frag:
                     continue
                 any_extern = True
-                _fnm = _fragment_names(frag)
-                c_name = _as_str(_fnm[0])
-                v_name = _as_str(_fnm[1])
-                if c_name != '':
+                c_name, v_name = _fragment_names(frag)
+                if c_name is not None:
                     sides_c.append(c_name)
-                if v_name != '':
+                if v_name is not None:
                     sides_v.append(v_name)
             if any_extern:
                 merged = frags[0]
                 for k in range(1, len(frags)):
                     merged = merged + '\n' + frags[k]
-                _mnm = _fragment_names(merged)
-                m_c = _as_str(_mnm[0])
-                m_v = _as_str(_mnm[1])
+                m_c, m_v = _fragment_names(merged)
                 # EVERY piece's name must be exactly the merged
                 # fragment's, and a merged fragment with no name must have
                 # had none. Checking the first piece alone is not enough:
@@ -6268,7 +6211,7 @@ def _dedup_variadic_externs(parts: list) -> str:
                 # fragment whose `find('(')`/`rfind(')')` span all three,
                 # naming `a` and swallowing `b` — equal to the first piece,
                 # different from the union.
-                if m_c == '':
+                if m_c is None:
                     if len(sides_c) > 0:
                         return False
                 elif len(sides_c) == 0:
@@ -6277,7 +6220,7 @@ def _dedup_variadic_externs(parts: list) -> str:
                     for k in range(len(sides_c)):
                         if sides_c[k] != m_c:
                             return False
-                if m_v == '':
+                if m_v is None:
                     if len(sides_v) > 0:
                         return False
                 elif len(sides_v) == 0:
@@ -6318,20 +6261,13 @@ def _dedup_variadic_externs(parts: list) -> str:
             exact_concrete = set()
             for p in out_parts:
                 entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-                for name in _as_list(entry[0]):
-                    exact_concrete.add(_as_str(name))
+                for name in entry[0]:
+                    exact_concrete.add(name)
         out_variadic = []
         for vl in variadic_by_out_part:
             for name in vl:
                 out_variadic.append(name)
-        # The cached name collection is a LIST here, as `_parse_part`'s entries
-        # are: the reader iterates `entry[0]` and the self-hosted path cannot
-        # iterate a value that is sometimes a list and sometimes a set -- it read
-        # a published SET's slot words (0xffffffff) as string pointers.
-        _out_concrete = []
-        for _cn in _as_set(exact_concrete):
-            _out_concrete.append(_as_str(_cn))
-        _DEDUP_EXTERN_PARTS_CACHE[out] = (_out_concrete, out_variadic)
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (exact_concrete, out_variadic)
 
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
@@ -6362,14 +6298,9 @@ def _dedup_variadic_externs(parts: list) -> str:
         if entry is None:
             entry = _parse_part(p)
             _DEDUP_EXTERN_PARTS_CACHE[p] = entry
-        # Index, then `_as_list`: a cached `(concrete, variadic)` pair unpacked
-        # by `a, b = entry` boxes both slots on the self-hosted path, and
-        # `for name in part_concrete` was then "'for' loop over unsupported
-        # iterable type int64_t" -- the dedup silently never ran.
-        part_concrete = _as_list(entry[0])
-        part_variadic = _as_list(entry[1])
+        part_concrete, part_variadic = entry
         for name in part_concrete:
-            concrete.add(_as_str(name))
+            concrete.add(name)
         variadic_by_part.append(part_variadic)
     if not concrete:
         out = '\n'.join(parts)

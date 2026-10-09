@@ -32,7 +32,6 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.backend_gimple.emit_funcs as _ggf
-from fire_compiler import _as_set
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1374,7 +1373,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"generator .send() on a value with no known generator "
                     f"API ({av!r}) — bind the generator to a variable first "
                     f"(g = gen(); g.send(v))")
-            return gen._lower_generator_send(node, av, api)
+            return ggc._lower_generator_send(gen, node, av, api)
 
     if func.member in ('send', 'throw', 'close'):
         at, av = gen.lower_expr(func.obj)
@@ -1387,10 +1386,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"generator API ({av!r}) — bind the generator to a "
                     f"variable first (g = gen(); g.{func.member}(...))")
             if func.member == 'send':
-                return gen._lower_generator_send(node, av, api)
+                return ggc._lower_generator_send(gen, node, av, api)
             if func.member == 'throw':
-                return gen._lower_generator_throw(node, av, api)
-            return gen._lower_generator_close(node, av, api)
+                return ggc._lower_generator_throw(gen, node, av, api)
+            return ggc._lower_generator_close(gen, node, av, api)
 
     # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
     # static heap-allocation constructor, whose receiver is the type
@@ -3030,7 +3029,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and gen._get_actual_type(ot, ov) == 'MojoGenerator *'):
         api = gen._generator_var_api.get(ov)
         if api is not None:
-            return gen._lower_generator_next(ov, api)
+            return ggc._lower_generator_next(gen, ov, api)
 
     # `it.__next__()` on a resumable iterator local is `next(it)` — Python
     # spells the same operation both ways, and this branch used to fall
@@ -3047,7 +3046,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(func.obj, gimple_ctypes.IdentExpr)):
         _cur = itc.cursor_for(gen, gen._cname(func.obj.name))
         if _cur is not None:
-            return gen._lower_next_iter_cursor(node, _cur, ())
+            return ggc._lower_next_iter_cursor(gen, node, _cur, ())
 
     # struct.Struct instance namespace — receiver holds a compiled
     # `MojoStructFmt *`. Deliberately TOTAL (not gated on a method-name
@@ -3188,13 +3187,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     'int64_t', '__mojo_future_set_running_or_notify_cancel', [('int64_t', ov)])
             if method == 'add_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
-                _tag = gen._future_done_callback_kind_tag(_ct)
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 gen._emit_call('void', '', '__mojo_future_add_done_callback',
                                [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
                 return 'void', ''
             if method == 'remove_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
-                _tag = gen._future_done_callback_kind_tag(_ct)
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 return 'int64_t', gen._call_expr('int64_t', '__mojo_future_remove_done_callback',
                                                  [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
 
@@ -4537,7 +4536,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         t = gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
-        gen._copy_dict_metadata(t, ov)
+        ginf._copy_dict_metadata(gen, t, ov)
         return 'MojoDict *', t
     if method == 'clear':
         gen._emit(f"  mojo_dict_clear ({ov});")
@@ -4685,19 +4684,8 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # the table's key would depend on whether the list was written
             # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
             # inside the helper.
-            gen._note_container_callable_ret(ov, av, at, args[0])
-            # An argument whose pointer type exists only because an enclosing
-            # `isinstance(x, Struct)` guard NARROWED it says nothing about the
-            # list: `if isinstance(_s, TryStmt): out.append(_s)` / `else:
-            # out.append(_s)` appends two different static types of the SAME
-            # heterogeneous value, and recording the narrowed one typed the whole
-            # list `TryStmt *` -- so `stmts = out` (gen_module_impl's
-            # `_try_replaced`) made every later `for s in stmts` declare `s` as a
-            # `TryStmt *`, and `s.body` on a FunctionDef read the NAME. The
-            # narrowed type holds in the branch, not in the container.
-            _arg_narrowed = (gen._narrow_key_for_expr(args[0])
-                             in getattr(gen, '_narrowed_exprs', {}))
-            if (not _arg_narrowed) and (at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *'))):
+            ginf.note_container_callable_ret(gen, ov, av, at, args[0])
+            if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
                 if actual_elem == 'MojoList *' and av in gen._elem_types:
@@ -4804,7 +4792,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                                 and not _v.value)
         _keys_val = 'NULL'
         if _key_expr is not None:
-            _keys_val = gen._build_sort_keys(ov, _elem, _key_expr)
+            _keys_val = ggc._build_sort_keys(gen, ov, _elem, _key_expr)
             # The KEYS are what get compared, so the kind argument describes
             # them, not the elements (the same split mojo_sorted_by_keys
             # makes). Its own recorded type is the one the builder just
@@ -6330,15 +6318,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # emitted the real `int64_t __GIMPLE lm_helper_Thing_show (Thing * self)`.
     # The struct-typedef pass's OWN guard is `_MOJO_STUB_<Struct>` (no method
     # name), so it could never have suppressed this one.
-    # `_as_set`: `_struct_method_names` is `dict[str, set[str]]`, but the value
-    # type is not recorded on the self-hosted path, so the bare lookup was
-    # compiled as a LIST and `method not in _methods_here` ran
-    # `mojo_list_contains_str` over a `MojoSet` -- a strcmp on garbage, the
-    # SIGSEGV that killed every self-hosted compile that lowered a method call.
-    _mh_raw = (getattr(gen, '_struct_method_names', {}) or {}).get(struct_name)
-    _methods_here: set = set()
-    if _mh_raw:
-        _methods_here = _as_set(_mh_raw)
+    _methods_here = (getattr(gen, '_struct_method_names', {}) or {}).get(
+        struct_name) or []
     if (mangled not in gen._KNOWN_SIGS
             and mangled not in gen.func_return_types
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types
