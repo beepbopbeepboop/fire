@@ -662,6 +662,67 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
           f"{got.returncode}, expected 0")
 
 
+def test_an_imported_hostmod_dylib_call_runs(tmpdir, shared):
+    """`from os.path import getsize` builds, runs under Rosetta, and answers.
+
+    `os.path.getsize` is the imported hostmod `os_path___syscalls`, whose
+    `fs_stat_field64` calls `lstat`/`lseek` out to libSystem — the shape that
+    used to execute at address 0 under Rosetta. `macho_linker` declared
+    `__LINKEDIT` at `TEXT_BASE + file_offset`, BELOW the `__DATA` mapped 4 MB
+    up, so an image with module state had its segments out of ascending order;
+    Rosetta computed the extent from the last segment and slid the whole image
+    wrongly, and a pointer the imported dylib formed landed `0x3f8000` below
+    its mapping. `_linkedit_vm` places `__LINKEDIT` above every earlier segment,
+    which is what makes the ordering check below an assertion about the cause
+    rather than a restatement of the fix.
+
+    The reduced reproduction is `bugs/FORMAL_x86_64_getsize_crashes_in_an_
+    imported_hostmod_dylib.md`, deleted with this test.
+    """
+    target = os.path.join(tmpdir, "getsize_target.bin")
+    with open(target, "wb") as f:
+        f.write(b"0123456789" * 37)                    # 370 bytes, known here
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main():\n"
+                f'    printf("%d\\n", getsize("{target}"))\n'
+                "    return 0\n")
+    out = os.path.join(tmpdir, "getsize.x86")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"an x86-64 program importing os.path did not build: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+
+    # The cause, at the container level: each segment's vmaddr is at or above
+    # the end of the one before it, so the loader's extent is the LAST segment
+    # and no pointer is computed from a slid image.
+    with open(out, "rb") as f:
+        data = f.read()
+    _hdr, segs = segments_and_sections(data)
+    vms = [(s[0], s[1], s[2]) for s in segs if s[0] != "__PAGEZERO"]
+    check(len(vms) >= 2, "the image carries fewer than two real segments")
+    for (n0, a0, z0), (n1, a1, _z1) in zip(vms, vms[1:]):
+        check(a1 >= a0 + z0,
+              f"segment {n1} is at {a1:#x}, below the end of {n0} "
+              f"({a0 + z0:#x}) — segments out of ascending order, which is "
+              f"what `macho_linker._linkedit_vm` fixes")
+
+    got = run_x86_64(out)
+    check("Bad CPU type" not in (got.stderr or ""),
+          f"the image was rejected by the loader: {got.stderr!r}")
+    want = os.path.getsize(target)
+    check(got.stdout == f"{want}\n",
+          f"the x86-64 image printed {got.stdout!r}, expected {want} "
+          f"(CPython's os.path.getsize of the same file)")
+    check(got.returncode == 0,
+          f"the x86-64 image exited {got.returncode}, expected 0")
+
+
 def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
     """The export trie carries the module's prefixed API and nothing else.
 
@@ -973,6 +1034,8 @@ TESTS = [
      test_program_importing_an_extern_module_matches_cpython),
     ("an x86-64 dylib with an extern call links and runs",
      test_module_dylib_with_an_extern_call_loads_into_a_program),
+    ("an imported hostmod dylib call runs and answers",
+     test_an_imported_hostmod_dylib_call_runs),
     ("the x86-64 dylib exports its module API",
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",
