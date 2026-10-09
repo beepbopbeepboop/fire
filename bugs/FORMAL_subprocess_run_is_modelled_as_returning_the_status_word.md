@@ -117,6 +117,30 @@ claimed work; the caller-side substitution is deliberately NOT made, because the
 one spelling that compiles on both sides (`rc = completed_process_returncode(r)`)
 is option 3 and option 3 is the decision this doc is asking for.
 
+**DECIDED 2026-10-08 (`work/formal224-docs`): option 3, and the decision is now
+recorded in `formal/hostmods/subprocess.mojo`** (see its "WHAT `run` HANDS BACK"
+section).  Two measurements were taken to decide it, and one of them removes
+option 1 outright:
+
+* **Option 1 is not available for `version.py` even if the model returned a
+  struct, and not because of the one-word admitted ABI alone.**  `version.py`
+  reads TWO fields off `r`: `r.returncode` (lines 83 and 89) and `r.stdout`
+  (line 83).  `stdout` is a captured STREAM, which this target does not model at
+  all, so a one-field `CompletedProcess` — the shape option 1 needs, since a
+  formal value is one word — would move `version.py` onto `r.stdout` rather than
+  past it.  A struct that carried `stdout` too is a frame blob, and an admitted
+  host contract is one word wide
+  (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`).
+* **The line references the doc quotes are stale**: the two files written the
+  CPython way are `test_re_formal.py:661` and `test_x86_64_decode.py:440`, not
+  `:607` and `:359` (both files have moved).  Neither is a caller that only
+  reads `.returncode`.
+
+Option 3 is the only one of the three that needs no capability change, and it is
+the spelling the sibling capability doc reaches for the same family —
+`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §5, whose
+"the cheapest honest form is not a struct at all" is the same answer.
+
 ## Next step, exactly
 
 Decide between 1, 2 and 3 above, and record it in
