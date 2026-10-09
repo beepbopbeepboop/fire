@@ -183,42 +183,12 @@ per-name judgements against the rule, which is exactly what §0.1 says there is 
 measurement for and exactly what §"Why the 222 are filed and not fixed here"
 warns against doing by category.
 
-**What this section did NOT do:** it classified nothing. The five
-`find_spec`-decided names it named were the first entries a worker could add
-with a measurement behind each, and they are **private**, so adding them moves
-the public count by zero; §0.1's reason for the rest — nothing imports them, so
-no measurement can tell a right entry from a plausible one — is what this
-section re-measured and left standing.
-
-## 0.6 The five `find_spec`-missing names are classified (`work/formal248-docs`,
-## 2026-10-08)
-
-**§0.5's "worker could add" is now done, and it is exactly those five.** `_gdbm`,
-`_overlapped`, `_tkinter`, `_winapi` and `_wmi` are on `HOST_UNREACHABLE`'s
-existing "another operating system's runtime / a library outside libSystem" row,
-so `host_module_verdict` answers `unreachable` for each rather than
-`unclassified`, and `host_module_tier` answers `unreachable` rather than `''`.
-Each was placed by the RULE at the top of `formal/imports.py` — does
-implementing it need an object a freestanding image that links libSystem and
-nothing else does not have — with §0.5's measurement as the evidence rather than
-the rule: `find_spec` cannot find `_gdbm` (the gdbm database library) or
-`_tkinter` (Tk, which additionally needs a display) on this host either, and
-`_overlapped`/`_winapi`/`_wmi` are Windows' own I/O, API and management layers.
-
-**What it changes, and it is small by construction:** the COUNT of unclassified
-names (`205 -> 200` on this interpreter), and the verdict a report prints for
-these five. It moves no build and no public name, which is what §0.5 said about
-them. The queue for the remaining 200 is unchanged and §0.1's reason for it —
-zero corpus exposure, so no measurement distinguishes a right entry from a
-plausible one — still stands; this is the one part of that queue an oracle could
-settle, and it is settled.
-
-Pinned by `test_formal_imports.py::test_the_find_spec_missing_names_are_unreachable`
-(both halves: `find_spec` is still None here, and the verdict is `unreachable`)
-and `test_formal_link_accounting.py`'s `HOST_SET_ADDED_TIERS` ledger, which now
-carries all five with the tier and the reason. Measured:
-`test_formal_imports.py` PASS=90 FAIL=0, `test_formal_link_accounting.py`
-302/302.
+**What this section does NOT do, and it is the whole of what is left:** it
+classifies nothing. The five `find_spec`-decided names are the first entries a
+worker could add with a measurement behind each, and they are **private**, so
+adding them moves the public count by zero; §0.1's reason for the rest — nothing
+imports them, so no measurement can tell a right entry from a plausible one — is
+what this section re-measured and left standing.
 
 ## 0. What landed, 2026-10-03 (`work/formal10-4`)
 
