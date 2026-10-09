@@ -1,69 +1,23 @@
 # The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12`
 
-**Status update 2026-10-07 (`work/formal125-docs`): FIXED IN SOURCE; the
-`lib/ProofLib.lean` build is still owed to the integrator.** One helper,
-`arm64_ext_imm12 (insn : UInt32) : Nat := (((insn >>> 10) &&& 0xfff).toNat) <<< (((insn >>> 22) &&& 0x3).toNat * 12)`,
-is called by ALL FIVE `imm12` arms (ADD 32/64, SUB 32/64, CMP), so the shift
-cannot be present in one and absent from another; `work_step_add_imm32/64`,
-`work_step_sub_imm32/64` and `work_step_cmp_imm` state the shifted value, and
-`_step_rhs`/`_step_rhs_generic` for indices 9-13 scale the literal the same way.
-On the `sh = 2`/`sh = 3` decision §1 asks for: the `Nat` shift is total and the
-model spells the architectural decode for all four; only `sh ∈ {0,1}` can be
-assembled (the encoder is `encode_add_xd_xn_imm_sh`/`encode_sub_xd_xn_imm_sh`),
-so no image reaches the reserved encodings and there is nothing to refuse. The
-CPU-vs-model rows `add x12, x29, #1675, lsl #12`,
-`sub x25, x14, #545, lsl #12` and — the anti-rot a helper that always shifted
-would fail — an UNSHIFTED `add x12, x29, #1675` are in
-`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`. **The library rebuild
-is the one step this worker may not run** (it breaches the 8 GB worker ceiling);
-the model change was verified in isolation against the served `ProofLib.olean`,
-where the scratch `arm64_step` + the five lemmas elaborate (rc=0, 1.4 GB) and
-`#eval`s `x29 + (1675 << 12) = 6860805` and a wrapped `x14 - (545 << 12)`.
-
-**Status 2026-10-07 (`work/formal131-docs`): FIXED in source, and the one
-remaining step is the `lib/ProofLib.olean` rebuild, which is over this worker's
-8 GB ceiling.** One helper, `arm64_ext_imm12`, decodes bits 21:10 AND the `sh`
-field at 23:22, and **all five** arms (ADD 32/64, SUB 32/64, CMP) call it, so the
-shift cannot be present in one and absent from another.  The six `work_step_*`
-lemmas for those arms (`add_imm32/64`, `sub_imm32/64`, `cmp_imm`) are restated to
-the shifted value, and `formal/arm64_proof_gen.py`'s `_step_rhs` (indices 9-12,
-13) and `_step_rhs_generic` (9-13) mirror them.
-
-Verified WITHOUT rebuilding the library.  A scratch `arm64_step` carrying the
-edits plus the five restated lemmas elaborates against the served
-`ProofLib.olean` at **rc=0 / 1.3 GB**, and `#eval`s the three anti-rot rows
-`add x12, x29, #1675, lsl #12` -> `5 + (1675 << 12)` = **6860805**,
-`sub x25, x14, #545, lsl #12` -> `9 - (545 << 12)` (the wrapped `UInt64`), and
-the UNSHIFTED `add x12, x29, #1675` -> **1680** (a helper that always shifted
-would fail this third row).  Those are the `TestUnsignedOffsetAccess` rows this
-change adds; the `lib/ProofLib.olean` rebuild measures `memcap: BREACH 8.0 GB`,
-so `prooflib` and the test row are the integrator's to run.
-
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
-**Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
-returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and
-that build peaks at **9.8 GB** measured with `formal/lean.py::ensure_library`'s
-own invocation — over a bounded worker's 8 GB ceiling, under the tree's
-`LIBRARY_MEMORY_MB = 12288`, so the blocker is memory alone and the library is
-not broken. (The `-T 0` trap that measurement has is written up in
-`bugs/FORMAL_contract_ladder_reach.md`.)
+**Status: FIXED IN CODE (2026-10-08, `work/formal214-docs`); the library build
+that would verify it is a light worker's blocker, so the doc stays until the
+`prooflib` job runs.** One helper (`arm64_ext_imm12`) now reads the `sh` field
+(bits 23:22) and all five `ADD`/`SUB`/`CMP` `#imm12` arms call it, their five
+`work_step_*` statements carry the shift, and `_step_rhs`/`_step_rhs_generic`
+rows 9-13 emit it. The `lib/ProofLib.lean` build is measured at `memcap: BREACH
+8.0 GB` on this tree (`-j 4` and `-j 1`), so the Lean half is the integrator's
+`prooflib` job; the semantics are verified against the CPU — see "What landed
+2026-10-08" at the end. Everything below is the original measurement.
 
-**Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
-verification is what is still owed.** One helper,
-`arm64_ext_imm12 (insn : UInt32) : Nat`, decodes `imm12` AND its `sh` field
-(`((insn >>> 10) &&& 0xfff).toNat <<< (12 * ((insn >>> 22) &&& 0x1).toNat)`), and
-all five `add`/`sub`/`cmp` immediate arms call it — the two 32-bit and two
-64-bit ADD/SUB plus CMP — so the shift cannot be present in one and absent from
-another. `work_step_add_imm32/add_imm64/sub_imm32/sub_imm64/cmp_imm` state the
-same, and `formal/arm64_proof_gen.py`'s `_step_rhs` rows 9-13 emit the shifted
-value. `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` gained rows for
-`add x12, x29, #1675, lsl #12`, `sub x25, x14, #545, lsl #12` and an UNSHIFTED
-`add x12, x29, #1675`, the last one so a helper that always shifts fails. What
-is NOT done is the `lib/ProofLib.olean` rebuild that would show them green:
-measured on this tree 2026-10-07 it still breaches a bounded worker's 8 GB
-ceiling (`memcap: BREACH 8.0 GB`, `-j 4` and `-j 1` alike), so `prooflib` and
-`formal-call-proofgen` are the integrator's to run. The doc is kept until that
-run rather than `git rm`'d.
+**Status (original): OPEN, MEASURED on the CPU, and a SOUNDNESS defect —
+`arm64_step` returns a state the machine never reached.** Not fixed:
+`lib/ProofLib.lean`, and that build peaks at **9.8 GB** measured with
+`formal/lean.py::ensure_library`'s own invocation — over a bounded worker's 8 GB
+ceiling, under the tree's `LIBRARY_MEMORY_MB = 12288`, so the blocker is memory
+alone and the library is not broken. (The `-T 0` trap that measurement has is written up in
+`bugs/FORMAL_contract_ladder_reach.md`.)
 
 ## 1. What I ran
 
@@ -190,3 +144,49 @@ passes `heartbeats=0`, so its model side is not the invocation
 1680 is `x29 + 1675` exactly — the immediate with its shift simply absent — and
 the two classes (ADD and SUB) fail identically, which is what a decode omission
 in a shared shape looks like and is not what a wrong operation would look like.
+
+## What landed 2026-10-08 (`work/formal214-docs`)
+
+One decode helper, beside `arm64_read_insn`, and all five arms read it:
+
+```lean
+def arm64_ext_imm12 (insn : UInt32) : Nat :=
+  ((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)
+```
+
+* the two `ADD` arms, the two `SUB` arms and the `CMP` arm each changed
+  `let imm12 := ((insn >>> 10) &&& 0xfff).toNat` to `let imm12 :=
+  arm64_ext_imm12 insn`;
+* the five `work_step_add_imm32`/`add_imm64`/`sub_imm32`/`sub_imm64`/`cmp_imm`
+  statements changed `UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)` to
+  `UInt64.ofNat (arm64_ext_imm12 w)`;
+* `_step_rhs` rows 9-13 and `_step_rhs_generic` rows 9-13 (the new `_EXT12`)
+  emit `imm << (12 * sh)`, spelled out so the helper does not leak into the
+  downstream `simp only` value-flow lists — the two sides only have to be
+  `defeq`, and unfolding `arm64_ext_imm12` makes them.
+
+**Why `sh = 2`/`sh = 3` is not a decision here.** §4's step 2 worried that a
+total `Nat` shift would compute an immediate no instruction encodes. It cannot
+be reached: the mask is `0xff800000`, whose bit 23 is FIXED at 0 in the
+`0x11`/`0x91`/`0x51`/`0xd1`/`0xf1` bases, and `sh` is bits 23:22 — so `sh` is
+`0` or `1` for every word any of these five arms can match. The expression is
+still total (it computes what the hardware would) rather than partial, which is
+the honest shape for a decoder.
+
+**Verified without the library**, through `tools/formal_model_fuzz.py`'s
+`run_native` on the words from §1/§6:
+
+```
+add x12, x29, #1675, lsl #12   0x915a2fac   cpu x12 = 6860805  (1675<<12 + 5)
+sub x25, x14, #545,  lsl #12   0xd14885d9   cpu x25 = 2^64-2232311
+add x12, x29, #1675            0x911a2fac   cpu x12 = 1680     (unshifted)
+```
+
+and the edited `ProofLib.lean` elaborates through the helper and all five arms
+to line 5099 under Lean's `-M 4096`, where the kernel memory limit fires inside
+a `bv_decide` `hne` lemma — i.e. the arms and the new lemma STATEMENTS
+elaborate, and the kernel-heavy proofs are the integrator's `prooflib` job.
+`test_formal_call_proof_gen.py::TestGeneratorSource::
+test_the_flag_setting_compare_arms_write_their_destination` pins the generator
+rows and the source text; `TestUnsignedOffsetAccess` carries the CPU-vs-model
+rows for both `sh = 1` spellings and, as the anti-rot, the `sh = 0` one.

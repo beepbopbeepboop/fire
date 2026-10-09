@@ -1800,6 +1800,19 @@ def arm64_read_insn (code : Nat → UInt8) (pc : Nat) : UInt32 :=
   ((code (pc + 2)).toUInt32 <<< 16) |||
   ((code (pc + 3)).toUInt32 <<< 24)
 
+/-- The extended-immediate field of the `ADD`/`SUB`/`CMP` `#imm12` classes: the
+    12-bit immediate at bits 21:10, shifted by `sh` (bits 23:22) times 12.
+    `sh = 0` is `lsl #0` and `sh = 1` is `lsl #12`; bit 23 is fixed at 0 in
+    every class this backend emits, so the shift is never more than 12, but the
+    expression is total and `sh = 2`/`sh = 3` (a different class) are computed
+    the way the hardware would rather than left undefined.
+
+    One helper so the shift cannot be present in one arm and absent from
+    another: the two `ADD` arms, the two `SUB` arms and the `CMP` arm all read
+    it, and before it existed every one of them dropped the shift. -/
+def arm64_ext_imm12 (insn : UInt32) : Nat :=
+  ((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)
+
 /-- Check if condition code matches NZCV flags. -/
 def arm64_matches_condition (cond : Nat) (nzcv : UInt8) : Bool :=
   let n := (nzcv >>> 0) &&& 0x1
@@ -1915,20 +1928,6 @@ theorem t32s_t8s (x : UInt64) : t32s (t8s x) = t8s x := by
 theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
   unfold t32s t16s
   bv_decide
-
-/-- The `add`/`sub`/`cmp` immediate forms' 12-bit immediate, SHIFTED by the `sh`
-    field (bits 23:22): `sh = 0` is `LSL #0` and `sh = 1` is `LSL #12`.
-
-    The arm's mask (`0xff800000`) keeps bit 23, so a word this helper is reached
-    for has `sh ∈ {0, 1}` — `sh ≥ 2` is RESERVED in this class and does not match
-    the arm at all. `&&& 0x1` states that rather than relying on it: it keeps the
-    shift total without ever computing an immediate no instruction can encode.
-
-    One helper for all five arms (ADD 32/64, SUB 32/64, CMP): a shift present in
-    one copy and absent from another is exactly the duplicate-decoder defect this
-    replaces. -/
-def arm64_ext_imm12 (insn : UInt32) : Nat :=
-  (((insn >>> 10) &&& 0xfff).toNat) <<< (12 * (((insn >>> 22) &&& 0x1).toNat))
 
 /-- ARM64 step function: decode and execute one instruction. -/
 def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
@@ -2082,7 +2081,15 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val2 := arm64_reg xm s
     let result := val1 ^^^ val2
     some (arm64_set_reg rd s result)
-  -- ADD Xd, Xn, #imm12{, lsl #12}: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  -- ADD Xd, Xn, #imm12: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  --
+  -- `imm12` is `arm64_ext_imm12 insn` and NOT `((insn >>> 10) &&& 0xfff).toNat`:
+  -- the class has a `sh` field at bits 23:22 and the mask `0xff800000` leaves
+  -- bit 22 free, so `add x12, x29, #1675, lsl #12` (word 0x915a2fac) is in this
+  -- arm and used to be stepped as if it were the UNSHIFTED immediate. Every
+  -- `lsl #12` immediate in an image was affected, and the shape that computes a
+  -- large constant offset (a blob offset, `formal/arm64_codegen.py:46`) is
+  -- exactly the shape that produces one.
   else if (insn &&& 0xff800000) = 0x11000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2094,12 +2101,12 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base + UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- SUB Xd, Xn, #imm12{, lsl #12}: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
+      some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
+  -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x51000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
@@ -2111,15 +2118,16 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
     if rd = 31 then
-      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat (arm64_ext_imm12 insn)
+      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
       some { s with sp := result }
     else
       let base := arm64_reg_or_sp rn s
-      some (arm64_set_reg rd s (base - UInt64.ofNat (arm64_ext_imm12 insn)))
-  -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+      some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
+  -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
-  -- literal floor.
+  -- literal floor. The immediate carries the same `sh` field as the ADD/SUB
+  -- arms, so it reads the same helper.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
@@ -2680,17 +2688,20 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
                   (arm64_reg_or_sp rn s) + UInt64.ofNat imm9
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   else if (insn &&& 0xffe00000) = 0xab000000 then
-    -- ADDS Xd, Xn, Xm (shifted register): writes `Rd` AND the flags of the SUM.
-    -- The mask does not include `Rd` (bits 4:0), so this class covers both the
-    -- `Rd = 31` spelling — `CMN Xn, Xm`, i.e. `ADDS XZR, Xn, Xm`, which writes no
-    -- register because `arm64_set_reg 31` is the identity — and `Rd ≠ 31`, which
-    -- is the `ADDS Xd, Xn, Xm` the backend emits for a signed `+` overflow check
-    -- (`formal/arm64_codegen.py::_emit_int_alu_checked`, `encode_adds_xd_xn_xm(0,
-    -- 0, 1)`). The one body covers both, exactly as the CMP arm's `Rd` does.
+    -- ADDS Xd, Xn, Xm. `cmn Xn, Xm` is the `Rd = 31` spelling — `ADDS XZR, Xn,
+    -- Xm` — and this class is the WHOLE `0xab000000` word, whose `Rd` is bits
+    -- 4:0 and is not in the mask. The arm used to set only the flags, so every
+    -- `adds xd, xn, xm` in an image (`formal/arm64.py`'s
+    -- `encode_adds_xd_xn_xm`, which `formal/model.py::int_overflow_traps` emits
+    -- for the signed-overflow check of `+`) modelled as "set the flags, change
+    -- no register" — a state the machine never reached. `arm64_set_reg 31 s v =
+    -- s`, so writing `Rd` unconditionally is exactly right for the CMN spelling
+    -- and for `adds` alike, which is also how the CMP arm spells its `Rd`.
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s))
+    some { (arm64_set_reg rd s (arm64_reg rn s + arm64_reg xm s)) with
+           nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) }
   else if (insn &&& 0xffe00000) = 0xea000000 then
     -- TST Xn, Xm: `ANDS XZR, Xn, Xm`, the logical sibling of CMP. The mask is
     -- 0xffe00000 and NOT 0x8a000000 (the AND shifted-register arm) because the
@@ -5998,7 +6009,8 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xab000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
+      nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
