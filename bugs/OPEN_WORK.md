@@ -60,7 +60,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | `formal112-docs` | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal115-docs` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 13 documents, 9 claimed
+### `formal/arm64_codegen` — 12 documents, 9 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -75,8 +75,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | `formal116-docs` | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
-| `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | **unclaimed** | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
-| `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
+| `FORMAL_arm64_exit_flush_is_not_published_as_a_compiler_trap.md` | **unclaimed** | `_emit_exit`'s `BL fflush` is not published as a compiler trap, so it reads as a program call |
 
 ### `formal/arm64_proof_gen` — 19 documents, 12 claimed
 
