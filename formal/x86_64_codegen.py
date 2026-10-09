@@ -9440,9 +9440,25 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
-            param_kind=self._param_kinds.for_function(name))
+            param_kind=self._param_kinds.for_function(name),
+            pointee_kind=self._pointee_kind_for(fn))
         self._vkinds_cache[name] = vk
         return vk
+
+    def _pointee_kind_for(self, fn):
+        """`pointee_kind` bound to `fn`, for `ValueKinds`.
+
+        arm64's `_pointee_kind_for` over the same shared reader,
+        `model.pointer_dereference_kind`, with the struct and function tables
+        bound — one answer per dereference across both machines, which is the
+        point: a `Pointer[Float64]` load that classified as a float on one
+        architecture and as a word on the other would be a wrong answer on one
+        of them.
+        """
+        structs = self._structs
+        fdefs = self._functions
+        return lambda expr: M.pointer_dereference_kind(
+            fn, expr, structs, fdefs, structs)
 
     def _declared_is_dict_for(self, fn_name):
         """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.

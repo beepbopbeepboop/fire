@@ -10617,11 +10617,13 @@ def return_annotation_kind_refusal(func_name: str, declared_return, value,
     **4615964438073389875** — `0x400F333333333333`, which is `3.9` — where the
     interpreter answers **3.9**. Green build, exit 0.
 
-    **This is the consumer that makes the pointer row load-bearing rather than
-    cosmetic.** `Int(p.value())` and `return p.value()` under `-> Int` are the
-    two shapes `POINTEES_REFUSED`'s `Float64` row is written for, and a kind hook
-    that let the load through would have turned both into this same silent
-    answer, one call boundary away.
+    **This is the consumer that made the `Float64` pointer row load-bearing
+    rather than cosmetic, and it is what keeps the kind channel honest now that
+    the load goes through.** `Int(p.value())` and `return p.value()` under
+    `-> Int` are the two shapes the row was written for; the kind hook
+    (`pointer_dereference_kind` through `ValueKinds`' `pointee_kind`) makes the
+    dereference a `FLOAT_KIND`, so both are refused here rather than turned into
+    this same silent answer, one call boundary away.
 
     **The annotation is the only evidence, and `None` never refuses** — the same
     asymmetry as `call_argument_kind_refusal` and for the same reason: an
@@ -16235,6 +16237,14 @@ POINTEE_WIDTHS = {
     "UInt": (4, False),
     "Int64": (8, True), "UInt64": (8, False), "c_long": (8, True),
     "c_ulong": (8, False), "NoneType": (8, False),
+    # A `Float64` pointee is EIGHT BYTES of IEEE binary64 and the load of it is
+    # bit-exact — one word holding the bit pattern, the same `LDR`/`movq` an
+    # integer pointee uses — so the WIDTH question is answered here and never
+    # was the obstacle.  It was refused until `pointer_dereference_kind` gave
+    # the dereference a KIND, which is the one thing a width table cannot
+    # carry; the float formats whose BITS are not a double sub-pattern stay in
+    # `POINTEES_REFUSED` BY NAME.  See `FLOAT_POINTEE_WIDTHS`.
+    "Float64": (8, False),
     # A pointer-to-pointer is a load of an ADDRESS, so the pointee here is
     # another pointer and the width is the pointer's own.  This is the one
     # recursive entry, and it terminates because a pointer to a pointer to a
@@ -16255,10 +16265,20 @@ POINTEE_WIDTHS = {
 # the signedness, and every row's unsigned twin is in `POINTEE_WIDTHS` beside it.
 WIDTH_POINTEES = {1: "Int8", 2: "Int16", 4: "Int32", 8: "Int64"}
 
+# The pointee widths whose value is a FLOAT this path can hold, and the reason
+# it is a separate name rather than a second entry in `POINTEE_WIDTHS`: a width
+# is not a kind, and every reader of a dereference needs to tell a `Float64`
+# load from an eight-byte integer load.  `pointer_dereference_kind` is the one
+# reader that does, and `ValueKinds.kind_of` inherits it through the
+# `pointee_kind` hook so both backends answer from here rather than each
+# re-deriving "which pointees are doubles".
+FLOAT_POINTEE_WIDTHS = {"Float64": 8}
+
 # Pointee base names that are refused BY NAME, with the reason, rather than
 # merely absent from POINTEE_WIDTHS.  A refusal that says "the pointee is not a
 # width I know" is true but unhelpful when the answer is a specific fact, and
-# these are the two that are specific facts: a float and a SIMD.
+# these are the specific facts: a float format whose bits are not a double's, a
+# SIMD, and the three blobs.  `Float64` is NOT here — see `FLOAT_POINTEE_WIDTHS`.
 POINTEES_REFUSED = {
     "Float16": "a Float16 is two bytes of IEEE binary16 and this path has no "
                "float kind to hold them",
@@ -16266,27 +16286,12 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
-    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
-    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
-    # is bit-exact — one word holding the bit pattern, loaded with the same
-    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
-    # for a reason that is about the CALL SITE rather than about the value: what
-    # a pointer dereference yields here is a word, and whether that word is an
-    # integer or a double is decided by the CONTEXT it lands in, and a context
-    # that has established neither answers `int` — so `Int(p.value())` on a
-    # double would read the exponent field.  Answering it means making the
-    # pointee's kind flow into the dereference and every context around it,
-    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
-    # work and this row is its starting state.  A row whose stated reason is
-    # FALSE is worse than an absent one, because the reader who finds it cannot
-    # tell which half of it still holds.
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
-               "bit-exact — one word holding the bit pattern — but this "
-               "dereference path yields a word whose KIND is decided by the "
-               "context it lands in, and a context that has established none "
-               "answers `int`, so `Int(p.value())` would read the exponent "
-               "field; see bugs/FORMAL_float_pointer_pointee.md",
+    # **`Float64` WAS here and is now in `POINTEE_WIDTHS`** (2026-10), because
+    # its width was never the obstacle: the load is bit-exact and the only
+    # missing piece was the KIND, which `pointer_dereference_kind` now supplies.
+    # The formats whose bits are NOT a double sub-pattern stay here BY NAME,
+    # because for them there is no kind to flow — a `binary32` word read as a
+    # double is a wrong answer, not an approximation.
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -17421,7 +17426,8 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     if inner in ("SIMD", "Scalar"):
         args = pointee_args(_rhs_declared_text(fn, expr, decls, functions) or "")
         n = args[1] if len(args) > 1 else None
-        if n == "1" and args and args[0] in POINTEE_WIDTHS:
+        if (n == "1" and args and args[0] in POINTEE_WIDTHS
+                and args[0] not in FLOAT_POINTEE_WIDTHS):
             width, signed = POINTEE_WIDTHS[args[0]]
             return (("load", width, signed),
                     f"the pointee is {inner}[{args[0]}, 1], which is one word "
@@ -17509,6 +17515,41 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                   f"must not emit, because an 8-byte load of a 1-byte pointee "
                   f"returns a plausible number assembled from adjacent bytes and "
                   f"faults at a page edge. {_declared_note(why)}")
+
+
+def pointer_dereference_kind(fn, expr, decls: dict, functions: dict = None,
+                             structs_by_name: dict = None):
+    """`FLOAT_KIND` when `expr` is a dereference whose pointee is a float this
+    path can hold, else `None`.
+
+    The KIND channel a `Pointer[Float64]` dereference needs, and the one thing a
+    width cannot carry: `dereference_lowering` says how many BYTES to load and
+    this says what the loaded word MEANS.  Without it
+    `p.value()` on a `Pointer[Float64]` classified as the `int` every
+    unclassified word defaults to, so `Int(p.value())` was an identity over the
+    bits rather than `FCVTZS` — and, the failure the doc calls worse, a double
+    reaching a call argument or a `-> Int` return was a silent wrong answer
+    rather than a refusal.
+
+    Only a pointee in `FLOAT_POINTEE_WIDTHS` answers, and only when the
+    dereference is a real LOAD: a nullable pointer's `.value()` is the UNWRAP of
+    the pointer rather than the pointee (`dereference_lowering` returns
+    `identity`), so it stays whatever it was.  `None` everywhere else, which
+    leaves every existing decision exactly where it was — this hook can change
+    the answer only for a shape that used to be refused at the dereference.
+    """
+    if not (isinstance(expr, F.CallExpr)
+            and isinstance(expr.func, F.MemberExpr)
+            and expr.func.member in DEREFERENCE_TRY_NAMES):
+        return None
+    recv = expr.func.obj
+    inner, _ = pointer_pointee(fn, recv, decls, functions)
+    if inner not in FLOAT_POINTEE_WIDTHS:
+        return None
+    how, _ = dereference_lowering(fn, recv, decls, functions, structs_by_name)
+    if how is None or how[0] != "load":
+        return None
+    return FLOAT_KIND
 
 
 def _declared_note(why) -> str:
@@ -23247,13 +23288,24 @@ class ValueKinds:
         of what those bits mean — the same argument `string_names` makes for
         `STR_KIND`.  Empty (the default) leaves every existing decision exactly
         where it was, which is why it is a hook and not a derivation.
+      * `pointee_kind(expr)` — the KIND a pointer DEREFERENCE yields, or None.
+        The seventh hook, and the one a width cannot carry: `p.value()` on a
+        `Pointer[Float64]` is an eight-byte load whose word is a double, and
+        without this it classified as the integer an unclassified word defaults
+        to (`Int(p.value())` moved bits rather than converting, and a double
+        reaching an annotated call argument or `-> Int` return was a silent
+        wrong answer).  The backend supplies it from `pointer_dereference_kind`
+        because it has the struct and function tables that reader walks; `None`
+        leaves every existing decision exactly where it was, which for this hook
+        means every shape that was not a float-pointer dereference.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=()):
+                 callee_returns_value=None, float_names=(),
+                 pointee_kind=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -23342,6 +23394,16 @@ class ValueKinds:
         # keeps the answer it had.
         self._callee_returns_value = callee_returns_value or (
             lambda name: True)
+        # The KIND a POINTER DEREFERENCE yields, or None.  The seventh hook,
+        # and the one a width cannot express: `dereference_lowering` says how
+        # many bytes to load, and `p.value()` on a `Pointer[Float64]` then
+        # classified as the integer an unclassified word defaults to, so
+        # `Int(p.value())` moved bits instead of converting and a double in a
+        # call argument or under a `-> Int` return was a silent wrong answer.
+        # The backend supplies the answer (it has the struct and function
+        # tables `pointer_pointee` walks); `None` leaves every existing
+        # decision exactly where it was.  See `pointer_dereference_kind`.
+        self._pointee_kind = pointee_kind or (lambda expr: None)
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -24566,6 +24628,15 @@ class ValueKinds:
             skind = self._string_method_kind(e)
             if skind is not None:
                 return skind
+            # A POINTER DEREFERENCE whose pointee is a float.  Asked BEFORE the
+            # call's own answer, because `p.value()` reaches the extern
+            # fallback below as an INT and that default is exactly the wrong
+            # answer here: the bits are a double, and `Int(p.value())` must be
+            # `FCVTZS` rather than a move.  A `None` (every other dereference
+            # and every non-dereference) leaves the arms below unchanged.
+            pk = self._pointee_kind(e)
+            if pk is not None:
+                return pk
             kind = _kind_of_call(callee, self._func_kind(callee))
             if kind is not None:
                 return kind
@@ -26844,8 +26915,9 @@ BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 #: the admitted ones are.
 #:
 #: **This list is also where the CONSTRUCTOR half of `POINTEES_REFUSED` comes
-#: from.**  `POINTEES_REFUSED` refuses `Float16`, `Float32` and `Float64` BY
-#: NAME at a dereference, and the constructor `Float32(1.0)` had no name to be
+#: from.**  `POINTEES_REFUSED` refuses `Float16` and `Float32` BY NAME at a
+#: dereference (`Float64` moved to `POINTEE_WIDTHS` when its kind channel
+#: landed), and the constructor `Float32(1.0)` had no name to be
 #: refused by — it took `type_constructor_kind`'s documented `None` ("not a type
 #: constructor at all"), emitted a `BL Float32`, and failed at the LINK AUDIT
 #: with a message about a SYMBOL about a fact that is a TYPE's.

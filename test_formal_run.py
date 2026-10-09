@@ -6402,9 +6402,11 @@ BOTH_ARCH_CASES = [
      "    return 0\n", 0, "eq=1"),
     # THE TWO WORKING SHAPES that bound the two `REFUSAL_CASES` rows reading a
     # double's kind against a callee's own integer annotation, and they are here
-    # because the REFUSALS are in `bugs/FORMAL_float_pointer_pointee.md`'s
-    # remaining-work section as the two consumers that had to be refused by name
-    # before a `Pointer[Float64]` load could go through.  **What makes a check on
+    # because the REFUSALS are the two consumers that had to be refused by name
+    # before a `Pointer[Float64]` load could go through (those pointer rows are
+    # `a_dereferenced_double_in_word_position_is_refused` and
+    # `a_dereferenced_double_under_an_integer_return_is_refused` in
+    # `POINTER_DEREF_REFUSALS`).  **What makes a check on
     # a call boundary safe to add to a path with 664 stdlib files behind it is
     # that it can only fire where the source contradicts itself**, and these two
     # rows are what that sentence is measured on.
@@ -15977,6 +15979,35 @@ POINTER_DEREF_CASES = [
      "    t.b = 7\n"
      "    var u = give(t)\n"
      "    return Int(u.b)\n", 7, None),
+    # A BINARY64 pointee, and it is the case `deref_refuse_a_binary64_pointee...`
+    # used to refuse.  The load was never the obstacle — it is one word holding
+    # the bit pattern, an `LDR`/`movq` exactly like an integer load — so what
+    # this pins is the KIND: `p.value()` is a double, and `Int(p.value())` must
+    # be `FCVTZS` (truncate toward zero, CPython's rule) rather than a move of
+    # the bits.  The pointer is a string's bytes, the shape every answered case
+    # here uses; the bytes encode the double 3.9 (`\x0f@` is the little-endian
+    # tail of its bit pattern), so CPython's `int(3.9)` is 3.  The kind comes
+    # from `model.pointer_dereference_kind` through `ValueKinds`'
+    # `pointee_kind` hook — one answer both architectures read.
+    ("deref_binary64_pointee_converts_to_int",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"333333\\x0f@\"\n"
+     "    if read_f(s) == 3:\n"
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # …and the same word at a `%f`, which is item 3 of the doc: the placement
+    # is the format's on both backends, so once the operand's kind is seen
+    # through the dereference the double is formatted as a double.  Measured
+    # 3.9 here, the value the bytes encode.
+    ("deref_binary64_pointee_prints_as_a_double",
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"%f\", p.value())\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"333333\\x0f@\"\n"
+     "    return show(s)\n", 0, "3.900000"),
 ]
 
 POINTER_DEREF_REFUSALS = [
@@ -16100,24 +16131,31 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return read_f(s)\n",
      "refuse:this path has no float kind distinct from an int", None),
-    # A BINARY64 pointee, and the row that says why it is refused when its LOAD
-    # is not the problem.  It used to be refused for the same words as the row
-    # above, which became FALSE the moment `FLOAT_KIND` landed: the load of a
-    # `Float64` is one word holding the bit pattern, and it is bit-exact — it is
-    # an `LDR` of eight bytes.  What is missing is that the DEREFERENCE yields a
-    # word whose kind the context decides, and a context that has established
-    # none answers `int`, so `Int(p.value())` here would read the exponent
-    # field.  A row whose stated reason the tree no longer believes is worse
-    # than a missing row: nothing reports it, and the reader cannot tell which
-    # half of the sentence still holds.  `bugs/FORMAL_float_pointer_pointee.md`
-    # is the work that would let the load through.
-    ("deref_refuse_a_binary64_pointee_for_a_different_reason",
-     "def read_f(p: Pointer[Float64]) -> Int:\n"
-     "    return Int(p.value())\n"
+    # A BINARY64 POINTER is no longer refused — `deref_binary64_pointee_...`
+    # above answer it — and these two rows are what keeps the KIND channel
+    # load-bearing rather than cosmetic.  A `p.value()` on a `Pointer[Float64]`
+    # is a double, and the two consumers the doc names must still refuse it
+    # where the source said the word would be read as an integer: without the
+    # `pointee_kind` hook each of these BUILT and printed 3.9's bit pattern as a
+    # decimal, because `p.value()` fell to the "an unclassified word is an int"
+    # default.  A `refuse:` row cannot say that, which is why the two answered
+    # rows above sit beside them.
+    ("a_dereferenced_double_in_word_position_is_refused",
+     "def g(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "def f(p: Pointer[Float64]) -> Int:\n"
+     "    return g(p.value())\n"
      "def main(n: Int) -> Int:\n"
-     "    var s = \"ABCDEFGH\"\n"
-     "    return read_f(s)\n",
-     "refuse:the LOAD is bit-exact", None),
+     "    var s = \"333333\\x0f@\"\n"
+     "    return f(s)\n",
+     "refuse:declares its parameter 0 an Int", None),
+    ("a_dereferenced_double_under_an_integer_return_is_refused",
+     "def f(p: Pointer[Float64]) -> Int:\n"
+     "    return p.value()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"333333\\x0f@\"\n"
+     "    return f(s)\n",
+     "refuse:is declared to return Int and returns", None),
     # THE TWO CONSUMERS THAT ROW'S DOC NAMES as the reason the load cannot go
     # through yet, and both are reachable WITHOUT the pointer, which is what
     # makes them rows here rather than a note in that document.  They are the

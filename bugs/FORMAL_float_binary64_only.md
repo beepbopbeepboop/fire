@@ -42,8 +42,13 @@ VALUE is on this path, so a tag for a format this path cannot HOLD is not a lie.
 and this path has no float kind distinct from an int"* — is TRUE and only true of
 binary32, and `test_formal_run.py`'s `deref_refuse_float_pointee` pins it as such.
 Its `Float64` sibling was CORRECTED in the same change, because that half of the
-sentence had become false: a `Float64` load IS bit-exact now. The corrected text
-and the reason are in `bugs/FORMAL_float_pointer_pointee.md`.
+sentence had become false: a `Float64` load IS bit-exact. It was then removed
+from `POINTEES_REFUSED` altogether when the KIND channel landed
+(`formal/model.py`'s `FLOAT_POINTEE_WIDTHS` + `pointer_dereference_kind`, read
+through `ValueKinds`' `pointee_kind` hook), so a `Pointer[Float64]` load now
+builds and `Int(p.value())` is `FCVTZS`; `test_formal_run.py`'s
+`deref_binary64_pointee_converts_to_int` and
+`deref_binary64_pointee_prints_as_a_double` pin it.
 
 ## What the next slice would be
 
@@ -132,11 +137,11 @@ still pass the three refusals). `FLOAT_CASES` is 21/21 and the new group 5/5.
 **What this does NOT close.** It is a hole in the boundary of the scope, not a
 change to it: the scope is still binary64, `Float32` is still refused by name for
 the reason §"What is NOT" gives, and the SECOND slice is still a second kind. It
-also removes one hazard from
-`bugs/FORMAL_float_pointer_pointee.md`'s remaining work rather than doing any of
-it: letting a `Pointer[Float64]` load through without a kind would have made
-`printf("%d", p.value())` print a bit pattern, so the rule above is a
-PREREQUISITE for that change and not an alternative to it.
+also removed one hazard from the `Pointer[Float64]` load's path rather than doing
+any of that load's work: letting the load through without a kind would have made
+`printf("%d", p.value())` print a bit pattern, so the rule above was a
+PREREQUISITE for the kind channel (`pointer_dereference_kind`) that landed
+afterwards — and is not an alternative to it.
 
 ## Status, 2026-10-05 (`formal28-3`): §"What is NOT"'s second sentence was
 ## FALSE about the CONSTRUCTOR, and that is now the refusal the doc always said

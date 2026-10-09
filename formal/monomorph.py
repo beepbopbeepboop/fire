@@ -545,9 +545,8 @@ def type_arg_text(expr, values=()) -> str:
     `formal/model.py::is_type_name` is the existing "spells a TYPE on this
     path" predicate and it is the wrong one to ask: its own docstring says it
     must never be used to answer "can this name be read", and it is INCOMPLETE
-    for this purpose by construction — `Float64` and `Float32` are in none of
-    its four tables (`POINTEE_WIDTHS` has `Int` and no float), so asking it
-    would refuse `Pair2[Float64]()`, which is correct Mojo.  A name that nothing
+    for this purpose by construction — `Float32` is in none of its four tables,
+    so asking it would refuse `Pair2[Float32]()`, which is correct Mojo.  A name that nothing
     binds is a type; a name something binds is a value unless a type is
     declared with that spelling, and the second half of that sentence is the
     documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type

@@ -4535,9 +4535,25 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
-            param_kind=self._param_kinds.for_function(name))
+            param_kind=self._param_kinds.for_function(name),
+            pointee_kind=self._pointee_kind_for(fn))
         self._vkinds_cache[name] = vk
         return vk
+
+    def _pointee_kind_for(self, fn):
+        """`pointee_kind` bound to `fn`, for `ValueKinds`.
+
+        One shared reader, `model.pointer_dereference_kind`, with the function,
+        struct table and function table bound — so this hook and the emitters'
+        own `dereference_lowering` call cannot come to different answers about
+        what a `p.value()` is.  The tables are snapshotted for the same reason
+        `_declared_kind_for` snapshots them: `_vkinds_cache` outlives the
+        function being emitted.
+        """
+        structs = self._structs
+        fdefs = self._functions
+        return lambda expr: M.pointer_dereference_kind(
+            fn, expr, structs, fdefs, structs)
 
     def _declared_kind_for(self, fn_name):
         """`_declared_kind` bound to the function `fn_name`, for `ValueKinds`.
@@ -6552,8 +6568,8 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _refuse_return_annotation_kind_mismatch(self, value) -> None:
         """Raise when this function returns a double under an integer annotation.
 
-        The SECOND consumer `POINTEES_REFUSED`'s `Float64` row names, and the one
-        that makes the kind hook load-bearing rather than cosmetic: `func_kind`
+        The SECOND consumer of a `Float64` in integer position, and the one that
+        makes the kind hook load-bearing rather than cosmetic: `func_kind`
         reads a callee's DECLARED return type first, so `def f() -> Int:
         return h()` looks like an integer producer to every consumer of the
         call and is holding a bit pattern. Measured on both architectures it
