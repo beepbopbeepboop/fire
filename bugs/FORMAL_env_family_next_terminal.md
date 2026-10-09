@@ -244,3 +244,36 @@ untouched by this; nothing here re-measures the 55, and step 3 (the
 `formal_sweep.py --stdlib-subtrees` re-run) is still not done — it remains the
 gate runner's, for the reason this document gives: tens of minutes and hundreds
 of builds.
+
+## Status, 2026-10-08 (`formal229-docs`): the file's OWN round trip was red, and that is fixed
+
+`test_formal_external_call.py`'s `env_round_trip` is `env.mojo`'s three functions
+transcribed and compared against CPython's `os.environ`. It was **red on master**
+and this document did not know it: the case builds a `getenv` whose result
+
+```mojo
+var ptr = external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)
+…
+return String(unsafe_from_utf8_ptr=ptr)
+```
+
+and `string_conversion_refusal` — added by `c8d877e9` after the round trip was
+last measured — refused the `String(...)` because `ptr`'s KIND is the "a word is
+an integer" default (a call result is a fact about the callee, and the model's
+conservative answer for one is a word). Its exemption covered only a
+`deref_receiver` operand, so the NAMED-pointer spelling `String(unsafe_from_utf8_ptr=ptr)`
+— which is exactly how `std/os/env.mojo` itself writes it — fell through to the
+positive-evidence refusal. Measured both architectures: `String(ptr) is refused …
+this build classifies ptr as 'int'`. That is a regression in this family's own
+round trip, not in the real stdlib build's terminal, which is the two named
+capability questions above and is unchanged.
+
+**Fixed** by `model.string_conversion_pointer_intent`: a conversion whose operand
+is passed as the `unsafe_from_utf8_ptr` keyword is the identity the source asked
+for, so it is exempt from the kind refusal whatever the kind table says. The
+keyword name is a table row (`STRING_POINTER_CONVERSION_KWARGS`), read by both
+backends. `test_formal_external_call.py` is **52/52** (was 51/1) and
+`test_formal_value_model.py` is 122/122 — the latter is the check that the
+refusal it bounds (`a_string_conversion_of_an_integer_is_refused`, i.e. `str(n)`
+with no such keyword) still fires. The family's TERMINAL is untouched: step 3 is
+still the gate runner's.

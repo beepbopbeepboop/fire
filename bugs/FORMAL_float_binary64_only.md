@@ -41,11 +41,13 @@ VALUE is on this path, so a tag for a format this path cannot HOLD is not a lie.
 `POINTEES_REFUSED["Float32"]`'s text — *"a Float32 is four bytes of IEEE binary32
 and this path has no float kind distinct from an int"* — is TRUE and only true of
 binary32, and `test_formal_run.py`'s `deref_refuse_float_pointee` pins it as such.
-Its `Float64` sibling is GONE rather than corrected: `POINTEE_FLOAT_NAMES` is the
-table of float pointees whose load lowers, and `model.pointer_deref_kind` carries
-the pointee's kind into every context, so `Pointer[Float64]` is no longer refused
-by name (`test_formal_run.py`'s
-`deref_a_binary64_pointee_is_a_double_and_int_of_it_converts`).
+Its `Float64` row has since LEFT `POINTEES_REFUSED` entirely, because a `Float64`
+load IS bit-exact — an `LDR` of eight bytes holding the double's pattern — and
+the only thing that was ever missing was the pointee's KIND reaching the
+dereference, which `model.pointee_kind_of` now supplies. A `Pointer[Float64]`
+load loads and converts (`Int(p.value())` is `FCVTZS`), and the contexts that
+would misread the word are refused by name; the `Float32` row above is unmoved,
+because that half of the old shared sentence is still true.
 
 ## What the next slice would be
 
@@ -133,11 +135,16 @@ still pass the three refusals). `FLOAT_CASES` is 21/21 and the new group 5/5.
 
 **What this does NOT close.** It is a hole in the boundary of the scope, not a
 change to it: the scope is still binary64, `Float32` is still refused by name for
-the reason §"What is NOT" gives, and the SECOND slice is still a second kind. It
-also removed the hazard that stood in front of letting a `Pointer[Float64]` load
-through: without a kind, `printf("%d", p.value())` would print a bit pattern, so
-the rule above was a PREREQUISITE for that change and not an alternative to it —
-and the change has since landed (`model.pointer_deref_kind`, above).
+the reason §"What is NOT" gives, and the SECOND slice is still a second kind.
+
+It was also the PREREQUISITE for letting a `Pointer[Float64]` load through: with
+no kind flowing, `printf("%d", p.value())` would have printed a bit pattern, so
+that change had to wait for this rule. **It has since landed** — `model.pointee_kind_of`
+carries the pointee's kind into the dereference, so `Int(p.value())` over a
+`Pointer[Float64]` is `FCVTZS` and the three contexts that would misread the word
+(`%d`, a word-position argument, a `-> Int` return) are each refused by name.
+That is a separate value-model change, not a change to this scope: the scope
+below is still the SECOND KIND.
 
 ## Status, 2026-10-05 (`formal28-3`): §"What is NOT"'s second sentence was
 ## FALSE about the CONSTRUCTOR, and that is now the refusal the doc always said
