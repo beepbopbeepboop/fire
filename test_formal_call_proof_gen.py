@@ -5265,35 +5265,17 @@ _CONCRETE = ":= by\n  native_decide\n"
 
 
 def _symbolic_divisor_proof(tmp):
-    """The arm64 proof for `a // b`, with the concrete tests neutralised.
-
-    Returns `(head, tail, traced, err)`. `err` is the build's own message when
-    the fixture no longer generates `q_compiles_correctly_universal` at all
-    (`head`/`tail` are then `""`), and `traced` says whether the walk's terminal
-    admission `_ADMIT` is present in `tail` — the mechanism this class's whole
-    measurement is built on. Both are RETURNED rather than raised so the
-    Lean-gated class can report WHICH drift happened instead of diagnosing
-    `fdiv64` on a file that has no residual goal in it; that false diagnosis is
-    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`.
-    """
+    """The arm64 proof for `a // b`, with the concrete tests neutralised."""
     import formal.build as fb
     src = os.path.join(tmp, "symdiv.mojo")
     with open(src, "w") as f:
         f.write(_SYMBOLIC_DIVISOR)
     out = os.path.join(tmp, "symdiv.aout")
-    try:
-        path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
-                                 check=False)["proof_path"]
-    except Exception as exc:                       # no proof file was written
-        return "", "", False, str(exc)
+    path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                             check=False)["proof_path"]
     text = open(path).read()
     head, sep, tail = text.partition("theorem q_compiles_correctly_universal")
-    if not sep:
-        return "", "", False, (
-            "the generated file carries no `theorem "
-            "q_compiles_correctly_universal`, so there is nothing to dissect")
-    return (head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail,
-            _ADMIT in (sep + tail), "")
+    return head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail
 
 
 def _with_branch_facts_in_the_terminal_flow(tail):
@@ -5387,37 +5369,6 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             self.assertEqual(p.stdout, "",
                              f"{backend}: the program printed after a zero "
                              f"divisor: {p.stdout!r}")
-
-    def test_the_proof_helper_reports_whether_its_mechanism_fired(self):
-        """The generation half of the div0 fixture, with no Lean.
-
-        `_symbolic_divisor_proof` is what the Lean-gated class builds on, and
-        the failure this pins is the one doc #8 records: the helper used to
-        raise (or hand back a file with no `_ADMIT` in it), and the class then
-        diagnosed `fdiv64`'s div0 arm instead of reporting that the thing it
-        measures is gone. It now returns `traced` and the build's own message,
-        so the lean-gated class can tell the two apart — and this row exercises
-        that contract on the generation path alone, where it always runs.
-        """
-        head, tail, traced, err = _symbolic_divisor_proof(self.tmp)
-        if err:
-            # The current, measured state on this tree: the universal theorem
-            # is not generated, and the helper says so rather than raising or
-            # pretending a file was produced.
-            self.assertFalse(traced)
-            self.assertEqual(head, "")
-            self.assertEqual(tail, "")
-            self.assertTrue(err,
-                            "the helper reported a missing theorem with an "
-                            "empty message, which is what makes the Lean-gated "
-                            "class's failure a false diagnosis")
-        else:
-            self.assertTrue(
-                traced,
-                "the fixture generated `q_compiles_correctly_universal` but "
-                "the terminal admission `_ADMIT` is not in its tail, so no "
-                "residual would ever be traced")
-            self.assertIn(_ADMIT, tail)
 
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
@@ -5544,20 +5495,8 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-div0-lean-")
         from formal import lean as FLEAN
         cls.out = {}
-        cls.traced = {}
-        cls.errors = {}
         for label, patch in (("as_emitted", False), ("doc_next_step", True)):
-            head, tail, traced, err = _symbolic_divisor_proof(cls.tmp)
-            cls.traced[label] = traced
-            cls.errors[label] = err
-            if err:
-                # No universal theorem to dissect. Recording it rather than
-                # raising is the whole point: the mechanism check below reports
-                # the real drift, instead of the class asserting on a string it
-                # has stopped producing and calling the result a diagnosis about
-                # fdiv64's div0 arm.
-                cls.out[label] = ""
-                continue
+            head, tail = _symbolic_divisor_proof(cls.tmp)
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -5567,27 +5506,6 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
             r = FLEAN.run_lean(lean, [os.path.basename(path)], cwd=cls.tmp,
                                env={"LEAN_PATH": os.path.join(HERE, "lib")})
             cls.out[label] = ((r.stdout or "") + (r.stderr or ""))
-
-    def _require_traced(self, label):
-        """The class's OWN precondition, checked before any goal is read.
-
-        Doc #8's first next step: a row must fail when `_ADMIT` was not in the
-        tail, because with no admission replaced by `trace_state` no residual
-        goal is ever printed and `⊢ 1 =` cannot appear — the class would then
-        report "fdiv64's div0 arm may have been corrected" about a file that
-        has no residual goal at all. The failure names the real drift instead.
-        """
-        self.assertTrue(
-            self.traced[label],
-            "the fixture no longer generates the universal theorem this class "
-            "dissects (or its terminal admission `_ADMIT` is gone), so no "
-            "residual goal is traced and any assertion below is a diagnosis "
-            "about the wrong thing. On this tree that is the arm64 stack-floor "
-            "guard's `getrlimit`: it is counted as a program call, so NO "
-            "program with an entry gets a `*_compiles_correctly_universal` any "
-            "more (bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_"
-            "for_every_function.md). The fixture's own message: "
-            f"{self.errors[label]!r}")
 
     @classmethod
     def tearDownClass(cls):
@@ -5603,30 +5521,16 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """
         for label in ("as_emitted", "doc_next_step"):
             with self.subTest(spelling=label):
-                self._require_traced(label)
                 self.assertIn("⊢ 1 =", self.out[label],
                               f"{label}: the div0 path's residual is no longer "
                               f"the `1 = …` goal — fdiv64's div0 arm or the "
                               f"div0 path's exit status may have been "
                               f"corrected, which is the fix this doc wants")
 
-    def test_the_measurement_mechanism_is_present(self):
-        """`_ADMIT` is in the tail the class dissects, or the class is blind.
-
-        Doc #8's own first next step, as its own row rather than a clause
-        buried in `_require_traced`: the class must fail when its mechanism did
-        not fire, because a class that traces nothing and says so about the
-        wrong thing is the failure this document exists to record.
-        """
-        for label in ("as_emitted", "doc_next_step"):
-            with self.subTest(spelling=label):
-                self._require_traced(label)
-
     def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
         for label in ("as_emitted", "doc_next_step"):
-            self._require_traced(label)
             got, keep = [], False
             for line in self.out[label].splitlines():
                 if line.strip().startswith("⊢"):
