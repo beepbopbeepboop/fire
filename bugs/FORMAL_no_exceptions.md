@@ -68,10 +68,15 @@ $ echo $?
 ```
 
 No output at all, and exit 1. `before` was printed (see the control below), so
-the `except` arm did not run and `after` did not either. **The lost `before` is
-a separate defect with its own document** —
-`bugs/FORMAL_raise_skips_the_stdio_flush.md` — and it is why this program's
-output is empty rather than `before`.
+the `except` arm did not run and `after` did not either. **The lost `before` was
+a separate defect** — arm64 terminated a `raise` with the Darwin `exit` syscall
+instead of libc's `exit()`, so the buffered `printf` was discarded — and it is
+why this program's output was empty rather than `before`. **That defect is
+FIXED and pinned** (`_emit_exit` calls `fflush(NULL)` on both backends;
+`test_formal_exceptions.py` runs this exact program against CPython and now sees
+`before`), though the document it was filed under
+(`bugs/FORMAL_raise_skips_the_stdio_flush.md`) still says "open" and is its
+owner's to delete.
 
 **(b) the control — the same program with `return 1`, no raise:**
 
@@ -180,10 +185,23 @@ Ordered by what unblocks the most:
    exception object is more than one 64-bit word). That is a real programme,
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.
-3. **Pin the behaviour so a backend change cannot quietly alter it.** There is
-   no test in the tree that raises on this path, which is why the arm64 flush
-   divergence in `bugs/FORMAL_raise_skips_the_stdio_flush.md` sat unnoticed
-   through both backends and both host-module waves. A three-case group —
-   raise under a handler, `try` with nothing raised, and `return 1` — is enough,
-   and it belongs beside `test_formal_link_accounting.py`, which is the
-   gate-resident file that already owns "does the thing this claim names exist".
+3. **Pin the behaviour so a backend change cannot quietly alter it.**
+   ~~There is no test in the tree that raises on this path~~ — **DONE
+   (2026-10-08, `formal221-docs`).** `test_formal_exceptions.py` now carries the
+   whole class, and far more than the three cases this list asked for: 297
+   checks, both architectures, against CPython's own stdout AND exit status —
+   raise of a builtin (called, bare, several arguments, argument expressions
+   run), a declared class, a subclass, an instance held in a local, a
+   non-exception, the five `SystemExit` statuses and the computed-status family,
+   `ZeroDivisionError` from integer/float/modulo, `assert`, `finally` on every
+   exit path, and the three REFUSED handler-arm spellings. The arm64 flush
+   divergence this item was written about is fixed and measured directly:
+   `printf("before@@")` then `raise 7` prints `before@@` and exits 1 on **both**
+   backends (was: arm64 printed nothing, because that backend terminated a
+   `raise` with the Darwin `exit` SYSCALL instead of libc's `exit()`; it now
+   routes through the one `_emit_exit`, which calls `fflush(NULL)` first). That
+   flush divergence is fixed and pinned; its own bug document
+   (`bugs/FORMAL_raise_skips_the_stdio_flush.md`) still carries a stale
+   "Status: open" and is its owner's to delete — left alone here because it is
+   outside this task's write set. Item 1 (one discoverable convention) is the
+   part still open, and item 2 stays a programme rather than a patch.
