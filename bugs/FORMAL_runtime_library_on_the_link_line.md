@@ -108,14 +108,16 @@ a way worth recording**: closing either means building a `runtime_dylib`
 variant, and `build_stdlib_dylib.py` is on this project's do-not-run list, so
 the measurement that would justify either change cannot be taken here.
 
-**`FORMAL.md` §2.2/§6's published figures are behind the tree** — it publishes
-206 exported / 166 reachable where the same census measures 216 / 176, and
-`test_formal_doc_truth.py` and `test_formal_runtime_link.py` are both red on
-exactly that. Pre-existing, measured on this document's base, and filed as
-`bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md` rather than
-fixed here: `FORMAL.md`'s figure sweep is another branch's project
-(`1dd68a48`/`ca50560f`, "DOCS vs REALITY"), and seven of its eight stale figures
-have nothing to do with the link line.
+**`FORMAL.md` §2.2/§6's published figures WERE behind the tree** — it published
+206 exported / 166 reachable where the same census measures 216 / 176. That is
+now fixed: `FORMAL.md` publishes the tree's 683/272/411 (§2.2) and 272/216/176
+(§6 phase 2), and `test_formal_doc_truth.py` reads those rows out of the document
+and compares them to `runtime_abi()` rather than to a constant of its own. The
+remaining stale restatements — the non-word count (406 → 411), `fire_runtime.c`'s
+size (486 → 524 KB) and the examples-corpus count (51 → 93) — were corrected in
+the same pass, and `bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md`
+was removed with them. The sweep that first moved §2.2/§6 is
+`1dd68a48`/`ca50560f` ("DOCS vs REALITY").
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
@@ -733,12 +735,12 @@ python3 tools/memslot.py --gb 8 --label t -- \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py`'s **4 failures were pre-existing and were not this
+document's**: they compared the live count against `FORMAL.md` §6 phase 2's
+published `206`/`166`, which the tree had outgrown (`1dd68a48` published them on
+2026-10-04). They are fixed: `FORMAL.md` now publishes the measured 272/216/176
+and the job compares against the document. `test_formal_doc_truth.py` was red on
+the same drift and is now green for the same reason. `.tmp/ceilings.py` is scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as
