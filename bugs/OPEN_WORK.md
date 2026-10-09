@@ -169,12 +169,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
 | `LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody.md` | **unclaimed** | one careless `repo_root` poisons the CAS for every other caller |
 
-### `formal/macho` — 1 document, 0 claimed
-
-| doc | claim | what it is (its own title) |
-|---|---|---|
-| `FORMAL_x86_64_a_dylib_extern_call_segfaults.md` | **unclaimed** | FORMAL/x86_64: a dylib's outbound call goes through the bound `__got` slot and dies under Rosetta |
-
 ### `formal/model` — 29 documents, 17 claimed
 
 | doc | claim | what it is (its own title) |
@@ -235,12 +229,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | `formal109-docs` | the 13-file row, split by what each call site actually hands over |
-
-### `formal/x86_64_codegen` — 1 document, 0 claimed
-
-| doc | claim | what it is (its own title) |
-|---|---|---|
-| `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` | **unclaimed** | FORMAL x86-64: `getsize` segfaults (executes at address 0) inside an imported hostmod dylib, where arm64 answers |
 
 ### `formal/x86_64_decode` — 2 documents, 0 claimed
 

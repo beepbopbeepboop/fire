@@ -24763,7 +24763,14 @@ def main():
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
                       | {c[0] for c in PRINT_KWARG_CASES}
                       | {c[0] for c in POINTER_DEREF_CASES
-                         if c[0].startswith("deref_struct_pointee")}) - {
+                         if c[0].startswith("deref_struct_pointee")}
+                      # `fd_write_on_an_open_result_writes` reaches
+                      # `os.path.getsize` through the `os_path` hostmod dylib,
+                      # and the x86-64 image of that chain once jumped to
+                      # address 0 inside the dylib (the row is host-only and no
+                      # gate ran it on x86).  It is checked on BOTH backends so
+                      # the pin is on the machine the defect was measured on.
+                      | {"fd_write_on_an_open_result_writes"}) - {
         c[0] for c in PRINT_KWARG_CASES
         if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything
