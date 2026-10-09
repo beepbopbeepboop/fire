@@ -11786,6 +11786,24 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+    # A DUPLICATE KEY INSIDE THE LITERAL is not a duplicate keyword: CPython's
+    # dict display keeps the LAST value (`{'b': 2, 'b': 3}` is `{'b': 3}`), so
+    # this is `f(b=3)` and both machines must print `1 3`.  Before the literal
+    # reader collapsed its own duplicate keys the un-spread handed the keyword
+    # check both pairs and this ordinary program was refused with "got multiple
+    # values for argument 'b'".
+    ("a_dict_literal_spread_collapses_its_own_duplicate_keys",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\", f(a=1, **{'b': 2, 'b': 3}))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2, 'b': 3}))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -11800,6 +11818,19 @@ SPREAD_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var p = P(a=1, **{'a': 2})\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:more than one value", None),
+    # …and the collapse inside the literal must NOT swallow the call-site
+    # duplicate: `{'a': 2, 'a': 3}` collapses to `a=3`, which is still a second
+    # `a` against the explicit `a=1`, so CPython raises and this is a refusal.
+    ("a_collapsed_literal_still_duplicates_an_explicit_keyword",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **{'a': 2, 'a': 3})\n"
      "    printf(\"%d\", p.a)\n"
      "    return 0\n",
      "refuse:more than one value", None),
