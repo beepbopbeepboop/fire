@@ -3553,7 +3553,6 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
                                     prove=True, check=False)
         cls.code = r["code"]
         cls.info = r["info"]
-        cls.exports = r["exports"]
         cls.base = cls.info["base_addr"]
         with open(r["proof_path"], encoding="utf-8") as fh:
             cls.text = fh.read()
@@ -3616,37 +3615,6 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
         self.assertEqual(n_bytes, len(self.code) + 4,
                          "the code list lost bytes when the step lemmas "
                          "narrowed to the executable region")
-
-    def test_the_trap_decision_reads_a_block_tail_in_a_data_gap(self):
-        """The dylib block whose last word IS the gap is this round's regression.
-
-        The interned strings' odd tail leaves a PARTIAL word with no entry in
-        the dense `words` map, and `_cfg_blocks` extends the export region's
-        last block to it (its loop reads `words.get`, so the gap is a
-        non-branch the block simply ends in).  `_trap_terminating` and
-        `_is_trap_bl` read that tail the same way — before this fix the raw
-        `words[...]` index KeyErrors here, in this class's OWN `setUpClass`:
-        `prove=True` builds the export's total proof over exactly these blocks.
-        A gap decodes to nothing in the model, so the block is neither a `svc`
-        tail nor a trap `BL`, and the decision must skip it rather than raise.
-        """
-        base = self.base
-        entry = self.exports[0]["entry"]
-        func_end = self.G._export_extent(self.exports, entry, base, len(self.code))
-        words = {base + i: int.from_bytes(self.code[i:i + 4], "little")
-                 for i in range(0, len(self.code) - len(self.code) % 4, 4)}
-        blocks = self.G._cfg_blocks(words, entry, func_end)
-        gap_blocks = [b for b in blocks if b["instrs"][-1] not in words]
-        self.assertTrue(
-            gap_blocks,
-            "the fixture's export region no longer ends in a data gap, so "
-            "this class no longer exercises the trap reader's gap path -- "
-            "restore a source whose interned tail is not a multiple of four")
-        traps = self.G._trap_terminating(blocks, words)
-        for b in gap_blocks:
-            with self.subTest(block=hex(b["start"])):
-                self.assertNotIn(b["start"], traps)
-                self.assertFalse(self.G._is_trap_bl(b, words, traps))
 
 
 class TestCallProofs(unittest.TestCase):

@@ -795,11 +795,7 @@ def _quick_type(gen, node) -> str:
         elif (isinstance(node.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
-            if node.func.member in ('join', 'basename', 'expanduser', 'abspath', 'normpath', 'realpath'):
-                # (`abspath`/`normpath`/`realpath` lower to a `char *` too -- see
-                # their rows in emit_methods -- so a local bound from one is a
-                # string, not the int64_t default. `dirname` is deliberately
-                # absent: it answers a WORD for a bytes argument.)
+            if node.func.member in ('join', 'basename', 'expanduser'):
                 # `join` included (measured flip): without a row here the
                 # answer fell to the chained `.join` row below, which fires
                 # only while `_quick_type(os.path)` is `char *` — and that

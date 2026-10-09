@@ -2268,25 +2268,6 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
-                if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
-                    # A STRING-valued expression bound to a local: `a = str(n)`,
-                    # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
-                    # `return a` from a function with no return annotation
-                    # inferred the int64_t default, so the function was
-                    # declared `int64_t`, the body laundered the `char *`
-                    # through it, and the caller's `print` formatted the
-                    # string's ADDRESS as a decimal number -- silently wrong
-                    # output with a clean build. `return d + "x"` directly
-                    # was already right: `_quick_type` types the returned
-                    # expression, but not a local that was bound from it,
-                    # because this map only accepted literals, containers,
-                    # struct constructors and `next()` as pointer evidence.
-                    # Asked through `gen._quick_type`, the SAME estimator the
-                    # `return` is typed with, so the two agree by
-                    # construction; only a `char *` answer is taken, so no
-                    # scalar, container or struct answer changes.
-                    if gen._quick_type(_v) == 'char *':
-                        cand = 'char *'
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second
