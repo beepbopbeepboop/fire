@@ -1276,17 +1276,6 @@ def _infer_return_elem_type(gen, body, func_def=None,
         gen._prepass_struct = _ps
         gen._scan_scratch_top = _scratch_mark
 
-def _is_scalar_literal_node(value) -> bool:
-    """A DIRECT numeric literal (`5`, `2.5`, `-3`) — the value shape whose
-    `int64_t`/`double` type is a real scalar rather than this scan's unknown
-    fallback. See `_infer_local_var_types`'s `literal_scalars`."""
-    if isinstance(value, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
-        return True
-    if isinstance(value, gimple_ctypes.UnaryOp) and value.op in ('+', '-'):
-        return _is_scalar_literal_node(value.operand)
-    return False
-
-
 def _local_value_type(gen, value) -> str:
     """The C type an unannotated local takes from one assigned VALUE, for the
     local-variable pre-pass.
@@ -1303,24 +1292,7 @@ def _local_value_type(gen, value) -> str:
     Bool literals and everything else keep `_quick_type`'s answer."""
     if isinstance(value, gimple_ctypes.IntLiteral):
         return 'int64_t'
-    # `None` is recorded under its own marker rather than as the `int64_t`
-    # box it lowers to. `None` is this codegen's NULL (the pointer-compatible
-    # sentinel a `MojoList *` slot can hold), so a local whose ONLY
-    # non-container assignment is `None` — `slots = None` then
-    # `slots = list(...)` — must keep the container type; boxing it there
-    # sent `len(slots)` through `mojo_list_len` on an `int64_t`
-    # (`_generator_tuple_yield_slot_ctypes` in this compiler's own source,
-    # which is how the self-host build caught it). A local that ALSO takes a
-    # real scalar (`q = 5`) still has no single C type and is boxed below.
-    if _is_none_literal(value):
-        return _NONE_TYPE_MARKER
     return gen._quick_type(value)
-
-
-# Marker `_local_value_type` uses for a `None` assignment (see its
-# docstring). Deliberately not a real C type: it is filtered out of both the
-# type join and the container-vs-scalar conflict test.
-_NONE_TYPE_MARKER = 'NoneType'
 
 
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
@@ -1337,15 +1309,6 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     # `mojo_dict_iter_key` (`it->dict->slots[it->order[...]]`) while
     # compiling `./mojoc fire.py --dump-full`.
     inferred: dict[str, list] = {}
-
-    # Names assigned a DIRECT numeric literal (`q = 5`, `q = 2.5`). An
-    # `int64_t` in `inferred[vname]` is ambiguous — it is both a real int
-    # and this scan's UNKNOWN fallback (`site = site + slots[...]`
-    # quick-types `site` as int64_t) — so only a literal makes an
-    # int-vs-container disagreement trustworthy enough to box (see the
-    # conflict test at the bottom). A float needs no such marker: `double`
-    # is never the fallback.
-    literal_scalars: set = set()
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -1426,11 +1389,6 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
-                        if _is_scalar_literal_node(_as_node.value) or (
-                                isinstance(_as_node.value, gimple_ctypes.TupleExpr)
-                                and _zi < len(_as_node.value.elements)
-                                and _is_scalar_literal_node(_as_node.value.elements[_zi])):
-                            literal_scalars.add(vname)
             elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
                     and ',' not in node.name):
                 # Fresh local, not a `node` reassignment — see the
@@ -1472,8 +1430,6 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                     _vt = _local_value_type(gen, _vd_node.value)
                 if _vt:
                     inferred.setdefault(vname, []).append(_vt)
-                if _is_scalar_literal_node(_vd_node.value):
-                    literal_scalars.add(vname)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                 # Fresh local, not a `node` reassignment — see the
                 # AssignStmt branch's identical comment above.
@@ -1487,15 +1443,12 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # type. See bugs/hard/CODEGEN_multi_assign_local_var_
                 # type_not_inferred.md.
                 vtype = _local_value_type(gen, _ma_node.value)
-                _ma_lit = _is_scalar_literal_node(_ma_node.value)
                 for target in _ma_node.targets:
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
-                        if _ma_lit:
-                            literal_scalars.add(vname)
             elif isinstance(node, gimple_ctypes.IfStmt):
                 collect_assigned_types(node.then_body)
                 if node.else_body:
@@ -1529,8 +1482,6 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 if vname not in inferred:
                     inferred[vname] = []
                 inferred[vname].append(gen._quick_type(node.value.value))
-                if _is_scalar_literal_node(node.value.value):
-                    literal_scalars.add(vname)
 
     try:
         collect_assigned_types(func.body)
@@ -1541,13 +1492,9 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
 # Join all types for each variable using TypeLattice
     result: dict[str, str] = {}
     for vname in inferred:
-        # Drop the `None` marker before joining (see `_local_value_type`):
-        # `None` is the NULL sentinel and must not narrow a pointer slot.
-        # A name whose only assignment is `None` is still the int64_t box.
-        types = [t for t in inferred[vname] if t != _NONE_TYPE_MARKER]
-        if not types:
-            types = ['int64_t']
-        result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
+        types = inferred[vname]
+        if types:
+            result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
 
     # Names bound to containers/structs of MORE THAN ONE kind, recorded in
     # their own table because the join above cannot say WHICH of the two
@@ -1593,56 +1540,9 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         _kinds = {t for t in inferred[vname]
                   if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
                   or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)}
-        if not _kinds:
-            continue
-        # A container kind and a real SCALAR is the same "no single C type"
-        # situation as two container kinds, and leaving it to the
-        # pointer-wins lattice join is unsound: `q = 2.5; if q > 1: q =
-        # [1, 2]` was declared `MojoList *` and the `2.5` store became
-        # `q = (MojoList *)2.5`, which is not valid C ("pointer value used
-        # where a floating-point was expected"); `q = 5; if q > 1: ...`
-        # built but raised `TypeError` at run time because the compare
-        # lowered as list-vs-int. The box is the answer there, exactly as
-        # for two container kinds.
-        #
-        # Widened from `len(_kinds) > 1`, but NOT to "any non-container
-        # kind": an `int64_t` in `inferred[vname]` is also this scan's
-        # UNKNOWN fallback (`site = site + slots[...]` quick-types `site`
-        # as int64_t), and boxing on it declared genuinely-one-container
-        # locals `int64_t` — measured, `_generator_tuple_yield_slot_ctypes`'s
-        # `site` — and broke the self-host closure. `double` is never the
-        # fallback, and an INT is trusted only with a direct numeric-literal
-        # assignment (`literal_scalars`).
-        #
-        # `_non_kind` excludes the `None` marker: `None` is the NULL
-        # sentinel, pointer-compatible, and `slots = None` then
-        # `slots = list(...)` must keep the container type.
-        _non_kind = {t for t in inferred[vname]
-                     if t not in _kinds and t != _NONE_TYPE_MARKER}
-        _float_conflict = any(
-            gimple_ctypes.TypeLattice.is_float(t) for t in _non_kind)
-        # An INT conflict is trusted only when this name was assigned a
-        # DIRECT numeric literal — the one `int64_t` that is provably not
-        # this scan's unknown fallback. `q = 5` then `q = [1, 2]` boxes;
-        # `site = [comprehension]` then `site = site + slots[...]` (whose
-        # int64_t is the fallback for the unresolved `site`) does not.
-        _int_literal_conflict = (
-            _as_str(vname) in literal_scalars
-            and any(gimple_ctypes.TypeLattice.is_int(t) for t in _non_kind))
-        if len(_kinds) > 1 or _float_conflict or _int_literal_conflict:
+        if len(_kinds) > 1:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
-    # A conflicting name has no single C type, so its inferred type is the
-    # BOX (`int64_t`), not whatever the pointer-wins lattice join answered.
-    # For two container kinds the join already lands on `int64_t`; for a
-    # container/struct pointer joined with a SCALAR it lands on the POINTER,
-    # which is exactly the unsound slot: the scalar store becomes a pointer
-    # cast (`q = (MojoList *)5`) and `q > 1` lowers as list-vs-int, refused
-    # at run time. This is the declaration half of `_multi_kind_locals`
-    # (whose only other effect is to disable the "trust ground truth" pin at
-    # the assignment site).
-    for _cv in conflicting:
-        result[_cv] = 'int64_t'
 
     return result
 

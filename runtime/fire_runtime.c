@@ -95,14 +95,6 @@ void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLO
 void mojo_cleanup_cancel_n(int64_t n)
 {
     _mojo_cleanup_top -= (int)n;
-    /* A cancel the matching pushes did not cover (a free emitted on a path
-     * that never ran its push) must not drive the top below the empty state:
-     * the NEXT push would index the arrays at a negative offset and scribble
-     * over whatever static data precedes them -- measured, the self-hosted
-     * compiler's own regex group-name table, which then crashed the tokenizer
-     * far from the cause. Clamping makes the imbalance a harmless no-op. */
-    if (_mojo_cleanup_top < -1)
-        _mojo_cleanup_top = -1;
 }
 
 void mojo_cleanup_checkpoint_save(void)
@@ -633,26 +625,6 @@ static _PtrReg _reg_list;
 int mojo_is_registered_list(int64_t addr) {
     if (addr < 65536) return 0;
     return _pr_has(&_reg_list, (uint64_t)addr);
-}
-
-/* Registry of every `char *` string this runtime is responsible for that is
- * NOT a live heap allocation -- in practice the codegen's `__rodata`
- * string-literal pool, `static char * _slit_N = "...";`, for which
- * `malloc_size` returns 0. `mojo_boxed_is_str` needs it because a literal and
- * a bare `int64_t` are otherwise the same 64 bits with no tag: the range test
- * accepts both, and a shape/alignment check cannot tell them apart (a literal
- * is not 8-aligned and not malloc'd). The discriminator is a POSITIVE
- * membership: a word is a string when it is either a live heap allocation
- * (`malloc_size > 0`, which every runtime-built string is and no bare integer
- * is) or in this registry. Registered at startup from the codegen-emitted pool
- * and from this file's own test buffers. Never removed: a literal's address is
- * never freed, and a freed-and-reused address re-registering is the same LIFO
- * pattern the container registries already rely on. */
-static _PtrReg _reg_str;
-
-void mojo_str_register(char *s) {
-    if (!s) return;
-    _pr_add(&_reg_str, (uint64_t)(uintptr_t)s);
 }
 
 /* ── Per-slot element kinds on a MojoList ────────────────────────────────
@@ -1244,18 +1216,9 @@ static int _mojo_ptr_shaped(int64_t addr) {
 
 /* Is this boxed int64_t plausibly a `char *`?
  *
- * The RANGE test (`_mojo_ptr_shaped`, defined above) is only the FAST NEGATIVE
- * and the NOT-a-container gate. The sound answer for a word that survives both
- * is a POSITIVE membership: a live heap allocation (`MOJO_MALLOC_USABLE_SIZE >
- * 0`) or a registered non-heap string (`_reg_str`). That is the half the range
- * test alone could never give -- it accepts EVERY positive int64 in [2^31, 2^47)
- * as a pointer, so a bare integer in the window was handed to `strlen`. This
- * predicate is the SOUND version of that discriminator: the range test is the
- * cheap first gate, and the membership below is what makes "pointer-shaped"
- * mean "actually a string".
- *
- * The fuller `_mojo_tagged_addr_ok` the struct-box readers use is still NOT
- * this predicate. It answers a different question -- "may I read an
+ * DELIBERATELY the RANGE-only predicate (`_mojo_ptr_shaped`, defined above),
+ * not the fuller `_mojo_tagged_addr_ok` the struct-box readers use. That
+ * fuller predicate answers a different question -- "may I read an
  * `int64_t __mojo_type_id` at offset 0 of this?" -- and two of its extra
  * checks are properties of THAT read rather than of pointers in general:
  *
@@ -1263,19 +1226,27 @@ static int _mojo_ptr_shaped(int64_t addr) {
  *   - `MOJO_MALLOC_USABLE_SIZE(u) >= sizeof(int64_t)`, because that read
  *     must not run off the end of the allocation holding the address.
  *
- * `MOJO_MALLOC_USABLE_SIZE` does appear here, but as a SUFFICIENT condition
- * ("a live allocation is a string"), NOT as the sole discriminator. Using it
- * as the sole test was tried and rejected: it demotes a string LITERAL to "not
- * a string", because a codegen-emitted literal is a `char[N]` in
- * __TEXT/__rodata -- not a malloc allocation, so `malloc_size` returns 0, and
- * not reliably 8-aligned (measured on the `static char * _slit_N = "bb";`
- * pool shape: "a" at &7==7, "bb" at 1, "ccc" at 4, ... differently per build).
- * A literal demoted to "not a string" is a SILENT wrong answer --
- * `mojo_cstr_or_int_str` falls through to `mojo_str_from_int`, so a dict keyed
- * by a literal is looked up by the decimal of its own address. The membership
- * half fixes that: a literal is registered in `_reg_str` at startup, so
- * `malloc_size 0` no longer demotes it, and a bare integer (neither a live
- * allocation nor registered) is correctly answered "integer".
+ * A codegen-emitted string LITERAL is a `char[N]` in __TEXT/__rodata: it is
+ * not a malloc allocation at all, so `malloc_size` returns 0 for it, and
+ * 8-byte alignment is a property of the C compiler's section layout, not
+ * something the emitted `static char * _slit_N = "bb";` (module_gen.py's
+ * pool) can rely on. Measured on that exact declaration shape in a
+ * standalone C file, at both -O0 and -O2: "a" at &7==7, "bb" at 1, "ccc" at
+ * 4, "dddd" at 0, "x" at 3 -- i.e. mostly NOT 8-aligned, and differently per
+ * build. The full pipeline's pool has so far come out aligned in every
+ * variant tried (20+ first-key literals x pool padding, each probed at
+ * runtime), so the alignment half is LATENT rather than firing today -- but
+ * the malloc_usable_size half, which was briefly folded into this
+ * predicate, was exactly this bug: it trips on EVERY literal, and
+ * `sorted(["bb","a","ccc"], key=lambda s: s)` printed `['bb','a','ccc']`
+ * (the comparator saw three EQUAL keys, so the sort was a no-op) and
+ * `lambda k, d=d: d[k]` called as `f("a")` printed 0. Requiring either
+ * property here demotes a string literal to "not a string", and that is a
+ * SILENT wrong answer rather than a crash -- `mojo_cstr_or_int_str` falls
+ * through to `mojo_str_from_int`, so a dict keyed by a literal is looked up
+ * by the decimal of its own address and silently yields the not-found
+ * default. Two checks that are half a coin flip per build are two checks
+ * that should not be here at all.
  *
  * What IS shared with the struct predicate -- and is the reason this is a
  * range test at all -- is the 2 GiB floor, which rejects None, small ints,
@@ -1312,24 +1283,9 @@ int mojo_boxed_is_str(int64_t v) {
      * a boxed string", and a container of any kind is a different answer, so
      * adding one kind now and the other two later is how the list-only version
      * shipped in the first place. */
-    if (!(_mojo_ptr_shaped(v))) return 0;
-    if (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
-        || mojo_is_registered_set(v) || mojo_is_boxed(v)) return 0;
-    /* Pointer-shaped and not a container: the sound half the range test could
-     * never give. A LIVE heap allocation is a real pointer and no bare integer
-     * is one, and a registered non-heap string is the codegen's `__rodata`
-     * literal pool (`malloc_size` 0, registered by `mojo_str_register` at
-     * startup). Everything else -- a bare integer in the [2GiB, 2^47) window --
-     * is an INTEGER, returned as not-a-string, so `mojo_cstr_or_int_str`
-     * renders its decimal instead of dereferencing it. Before this half
-     * existed the predicate was the RANGE test alone, so `d[3000000000] = 1`
-     * read address 3000000000 as a `char *` and segfaulted; see
-     * `_reg_str`'s comment for why a shape/alignment test cannot replace a
-     * positive membership and for the `malloc_size` history. */
-    if (_pr_has(&_reg_str, (uint64_t)v)) return 1;
-    if (MOJO_HAVE_MALLOC_USABLE_SIZE
-        && MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)v) > 0) return 1;
-    return 0;
+    return _mojo_ptr_shaped(v) && !mojo_is_registered_list(v)
+        && !mojo_is_registered_dict(v) && !mojo_is_registered_set(v)
+        && !mojo_is_boxed(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -4215,32 +4171,19 @@ void mojo_struct_pack_into(const char *fmt, MojoBytes *buf, int64_t offset, Mojo
  * numeric byte value as a pointer (the boxed-int64_t-as-pointer convention
  * used elsewhere for containers of strings) produces a garbage address
  * (e.g. 0x22 for '"'). Build a real 1-char C string instead. */
-/* The 256 possible one-character strings are IMMORTAL and shared: this is
- * called once per character by every scan over a string (`c = s[i]`,
- * `c == "\\"`, `buf.append(c)`, `c in ('(', '[')`), and a fresh malloc each
- * time is a leak with no owner (a list of str never frees its elements). The
- * result is therefore NOT the caller's to free -- it is deliberately absent
- * from the codegen's _FRESH_STRING_RETURNS -- and is never written to. The
- * store below is idempotent (a slot only ever holds its own character), so
- * there is no init step to race or forget.
- *
- * File scope (not the function-local static it was) so the startup constructor
- * below can register every entry with the sound `mojo_boxed_is_str`: a
- * one-character string is a pointer into THIS table -- not a malloc block
- * (`malloc_size` 0) and not a codegen literal -- so without positive
- * membership `mojo_cstr_cmp_word` would answer "never equal" for the char and
- * the self-hosted parser's `_split_on_separators` would leave a string open
- * (the `;` after ``in_str != '`'`` read as content). */
-static char _mojo_char_tbl[256][2];
-
 char *mojo_char_to_str(char c) {
-    char *s = _mojo_char_tbl[(unsigned char)c];
+    /* The 256 possible one-character strings are IMMORTAL and shared: this is
+     * called once per character by every scan over a string (`c = s[i]`,
+     * `c == "\\"`, `buf.append(c)`, `c in ('(', '[')`), and a fresh malloc each
+     * time is a leak with no owner (a list of str never frees its elements). The
+     * result is therefore NOT the caller's to free -- it is deliberately absent
+     * from the codegen's _FRESH_STRING_RETURNS -- and is never written to. The
+     * store below is idempotent (a slot only ever holds its own character), so
+     * there is no init step to race or forget. */
+    static char tbl[256][2];
+    char *s = tbl[(unsigned char)c];
     s[0] = c;
     return s;
-}
-
-static void __attribute__((constructor)) _mojo_register_char_table(void) {
-    for (int i = 0; i < 256; i++) mojo_str_register(_mojo_char_tbl[i]);
 }
 
 /* `s[i]` on a str: the character at i, as a 1-character STRING — which is what
@@ -5366,14 +5309,6 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
-    /* A NULL key is Python's `None` (or an erased `str` that was never set):
-     * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
-     * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
-     * `x in TABLE` over a `dict.get(...)` result that came back None is
-     * everywhere in the compiler's own codegen (`eq_operand_kind`'s
-     * `at in _EQ_CTYPE_KIND`), and was the SIGSEGV every self-hosted compile of
-     * a program with an `==` hit. */
-    if (!key) return NULL;
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_lookup_ik(d, iv);
     /* cap is always a power of two (mojo_dict_init: 8, _dict_grow: doubles). */
