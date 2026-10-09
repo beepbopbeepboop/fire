@@ -2727,7 +2727,7 @@ test('formal-sweep', [PY, 'test_formal_sweep.py'],
 # ceiling over a 7.8 GB build is a RESOURCE verdict, and `expect=` forgives
 # neither that nor a skipped dep.
 test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
-     deps=['preflight'], mem='module',
+     deps=['preflight', 'prooflib'], mem='module',
      memwhy='may reach Lean\'s 27 MB lib/*.olean build through '
             'formal/lean.py::ensure_library (measured 1.4 GB warm, 7.8 GB on a '
             'cold store), so it is capped like the `prooflib` step whose work '
