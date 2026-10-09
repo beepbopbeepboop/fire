@@ -2160,37 +2160,71 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "print() is asked to render the value of g(…)"),
-    # THE SAME POSITION AT THE OTHER SPELLING OF "RENDER THIS WORD", and it was
-    # unguarded: `print` builds its format from its operands and asks
-    # `_print_call` about each, while a `printf` the SOURCE wrote was only
-    # checked for a usable FORMAT — so `printf("%d", g(…))` for a `g` with no
-    # `return` built (both architectures) and printed the leftover word, exit 0,
-    # where `print(g(…))` was refused. The conversion consumes the word exactly
-    # as `print`'s does, so the same value this path cannot carry becomes the
-    # same TEXT; `model.returnless_printf_argument_refusal` is the one reader of
-    # which printf arguments those are, asked from `_emit_call`'s printf line in
-    # both emitters. The needle is the RENDERING spelling because it is the fact
-    # that distinguishes this refusal from the `print` ones above.
-    ("a_printf_argument_of_a_return_less_function_is_refused",
-     "def g(a, b):\n"
+    # …and one hop further out, through a `return`: `f` has a `return`, so a
+    # reader that stops at the first hop says `f` returns a value, but `f`
+    # returns `g`'s result and `g` returns nothing.  CPython evaluates `f(1)` to
+    # `None` and this path printed the leftover word, exactly as the direct row
+    # does — the `returned` half of the same `None` the doc measures.  The fix is
+    # that "returns nothing" is closed over `return <call>` chains
+    # (`model.returnless_function_names`), so the refusal names `f`.
+    ("a_printed_function_whose_return_is_a_return_less_call_is_refused",
+     "def g(a):\n"
      "    w = 1\n"
      "\n"
-     "def main():\n"
-     "    printf(\"%d\\n\", g(1, 2))\n"
-     "    return 0\n",
-     "printf() is asked to render the value of g(…)"),
-    # …and through a LOCAL, which needs the `no_value_callee_of` evidence on the
-    # name rather than a test on the operand — the same second shape `print`
-    # has, so a fix that only recognised the direct call would build this one.
-    ("a_printf_argument_named_by_a_return_less_local_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
+     "def f(a):\n"
+     "    return g(a)\n"
      "\n"
      "def main():\n"
-     "    v = g(1, 2)\n"
-     "    printf(\"%d\\n\", v)\n"
+     "    print(f(1))\n"
      "    return 0\n",
-     "printf() is asked to render the value of g(…)"),
+     "print() is asked to render the value of f(…)"),
+]
+
+# ── the return-less predicate CLOSED over the call graph ──
+#
+# `model.returnless_function_names` is the reader both emitters'
+# `_callee_returns_value` asks, and it is a LEAST fixed point: a name enters the
+# set only when every value-returning `return` is a call to a name already in
+# it.  That is what lets a real value break the chain and — the row that matters
+# — what keeps a CYCLE from entering it, because two functions returning each
+# other are never PROVABLY value-less and reading them as `None` would refuse
+# programs that build today.  Each row is `(name, source, expected set)`, asked
+# of the reader directly because the cycle case is one no image can show.
+RETURNLESS_CHAINS = [
+    ("a_return_chain_is_closed_over_every_hop",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a):\n"
+     "    return h(a)\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     {"h", "f", "g"}),
+    ("a_real_value_breaks_the_chain",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a):\n"
+     "    return 5\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     {"h"}),
+    ("a_cycle_is_not_provably_return_less",
+     "def f(a):\n"
+     "    return g(a)\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     set()),
+    ("a_declared_return_type_keeps_a_name_out",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a) -> Int:\n"
+     "    return h(a)\n",
+     {"h"}),
 ]
 
 # ── the builtin allow-list, one differential case per name ──
@@ -2469,6 +2503,27 @@ def run_model_rule(name, source, fn_name, want, verbose):
     return True, ""
 
 
+def run_returnless_chain(name, source, want, verbose):
+    """Ask `model.returnless_function_names` about a whole source, no build.
+
+    The transitive reader both emitters' `_callee_returns_value` now asks, and
+    the cycle row it carries is one no image can show: a cycle BUILDS (the
+    functions are read as returning a value), so the least-fixed-point direction
+    is only observable as this set.
+    """
+    import formal.model as M
+    from formal.build import parse_module
+    stmts = parse_module(source, filename=name + ".mojo")
+    fns = [st for st in stmts if isinstance(st, F.FunctionDef)]
+    got = M.returnless_function_names(fns)
+    if got != set(want):
+        return False, (f"returnless_function_names answered {sorted(got)} "
+                       f"where the row says {sorted(set(want))}")
+    if verbose:
+        print(f"      returnless: {sorted(got)}")
+    return True, ""
+
+
 def run_refusal(name, source, needle, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -2573,6 +2628,7 @@ def main():
 + [(c, True) for c in REFUSALS]
                   + [(c, True) for c in BUILTIN_REFUSALS]
                   + [(c, "model") for c in MODEL_RULES]
+                  + [(c, "chain") for c in RETURNLESS_CHAINS]
                   + [(c, "layout") for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
@@ -2588,6 +2644,9 @@ def main():
                 if kind == "model":
                     ok, detail = run_model_rule(entry[0], entry[1], entry[2],
                                                 entry[3], args.verbose)
+                elif kind == "chain":
+                    ok, detail = run_returnless_chain(entry[0], entry[1],
+                                                      entry[2], args.verbose)
                 elif kind == "layout":
                     ok, detail = run_layout(entry[0], entry[1], entry[2],
                                             entry[3], args.verbose)

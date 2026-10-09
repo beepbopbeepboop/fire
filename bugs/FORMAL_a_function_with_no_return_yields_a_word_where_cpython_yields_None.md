@@ -9,8 +9,7 @@ nothing in the pair knows the callee returns nothing.
 **Status: PARTIAL, and the half that is OBSERVABLE is FIXED (2026-10-04,
 `formal/model.py` + both emitters).** `print` of a call to a function of this
 module that returns nothing — and of a local every one of whose bindings is such
-a call, and, since 2026-10-07 (§0d), the same value as a `printf` vararg — is
-now REFUSED on both architectures, with a message that names the
+a call — is now REFUSED on both architectures, with a message that names the
 callee, says what CPython answers (`None`) and says what this path would have
 printed instead. §0b is what landed and §0b's measurement is the one §4 step 1
 was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
@@ -21,65 +20,82 @@ the rule is asked at is.
 OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
 read local), which need either a liveness pass or direction (b) below.**
 
-## 0d. The other spelling of "render this word" was unguarded and is now fixed
-## (2026-10-07, `work/formal142-docs`)
+**PARTIAL PROGRESS 2026-10-08 (`work/formal241-docs`): the OBSERVATION refusal
+now closes over `return <call>` chains, so the one-hop shape `def f(a): return
+g(a)` with `g` return-less is refused rather than printed.** The per-function
+reader `function_returns_a_value` read `f`'s `return g(a)` as a value — `f` has
+a `return` — so `print(f(1))` built and printed the leftover word (`0`), the
+SAME silent wrong answer as the direct `print(g(1))` one hop out. `model.py`'s
+`returnless_function_names` is the closure (least fixed point over bare-name
+`return <call>` edges, so a cycle reads as a value and an existing build is
+unchanged) and both emitters' `_callee_returns_value` ask it. See §0d. This is
+the `returned` bucket reached through the OBSERVATION position, and it is still
+NOT direction (b): `None` is still not a word, and the operand/argument/assigned
+positions §0b's list names are unchanged.
 
-**§0b's one reader was asked at `_print_call` only, so `printf` — the second
-place a value this path cannot carry becomes TEXT — was never checked.** `print`
-builds its format from its operands and refuses each; a `printf` the source
-wrote was checked for a usable FORMAT and for the callee's declared parameter
-kinds, and nothing asked whether a vararg was a return-less call. Measured,
-both architectures, before the fix:
+## 0d. The OBSERVATION refusal closed over `return <call>` chains (2026-10-08)
 
-```console
-$ cat .tmp/rn2/p2.mojo
-def g(a, b):
+**What it fixes.** A chain whose first hop has a `return` was read as a value by
+`fn_returns_a_value`, which stops at the first value-returning `return` and does
+not look at what that return RETURNS. So this program built and printed `0`
+where CPython prints `None`:
+
+```python
+def g(a):
     w = 1
 
-def main() -> Int32:
-    printf("%d\n", g(1, 2))
+def f(a):
+    return g(a)
+
+def main():
+    print(f(1))     # CPython: None;  this path before: 0
     return 0
-$ python3 tools/memslot.py --gb 8 --label rn -- python3 fire.py build --formal \
-      --no-prove -o .tmp/rn2/y .tmp/rn2/p2.mojo     # and --backend=x86_64
-Built: .tmp/rn2/y  [arm64/macho]      # exit 0
-$ .tmp/rn2/y
-0                                    # where print(g(1, 2)) was already refused
 ```
 
-`0` is the word `g`'s epilogue left behind — the same divergence §0b refuses,
-at the other spelling of the same position. The conversion consumes the word
-exactly as `print`'s does, so there is no reading on which this is a different
-question.
+This is the direct row of §0b one `return` statement deeper, and it is the shape
+`formal/hostmods/argparse.mojo` writes (`return _err(msg)`) — the `returned`
+bucket §0c measures, reached at the position that is already refused for the
+direct call. It is NOT a refusal at the `return` position (which §0c correctly
+calls unaffordable for `argparse`): the `return` is left alone and only the
+OBSERVATION of the function's result is refused, exactly as the direct call
+already was.
 
-**What landed.** `formal/model.py::returnless_printf_argument_refusal` is the one
-reader of which arguments of a printf-style call become text: the varargs after
-`printf_format_arg_index`'s format, each asked through the SAME
-`ValueKinds.no_value_callee_of` hook `_print_call` uses, so the two positions
-cannot answer "is this a return-less result" differently. `returnless_value_refusal`
-grew a `rendering` parameter so the message names the call that renders
-(`printf()` here, `print()` by default), and the taxonomy row's two clauses are
-unchanged. Both emitters ask it at the same line they ask
-`_refuse_unusable_printf_format`, so the two architectures cannot disagree.
+**What landed.** `formal/model.py::returnless_function_names(functions)` — "the
+names whose CALLS produce no value", closing `fn_returns_a_value` over bare-name
+`return <call>` edges. It is a LEAST fixed point: a name enters the set only when
+every value-returning `return` is a call to a name already in it, so
 
-**The measurement, and it is the one §0b's table claimed and did not take.**
-`grep -n 'printf([^)]*([^)]*)'` over this repository and
-`../new-modular/Mojo/stdlib/std` finds six lines, every one of them either prose
-in a docstring (`formal/hostmods/math.mojo:79,146`), a callee that returns a
-value (`snprintf(b, 24, "%d", get_int(out, name) + 1)` — the `+ 1` is the
-proof), or a memcheck fixture, so the refusal reaches **0 build sites** — as
-§0b said of `print`. The real builds behind it stay green:
-`test_formal_hostmods_census.py` 74/74 rows, `test_formal_argparse.py` PASS=10,
-`test_formal_external_call.py` 51 (its one red, `env_round_trip`, is a
-`str(n)`-conversion refusal that reproduces with this change reverted).
+* `h` return-less, `f: return h()`, `g: return f()` ⇒ `{h, f, g}` (every hop);
+* a member that returns a real value breaks the chain (`g: return f()` with
+  `f: return 5` leaves only `h`);
+* a CYCLE (`f: return g()`, `g: return f()`) is never provably value-less, so
+  neither enters the set and the program builds as it did — the direction that
+  cannot regress an existing build, and the reason `NO STACK` is no longer the
+  whole story for this question.
 
-Rows: `test_formal_value_model.py`'s `REFUSALS` —
-`a_printf_argument_of_a_return_less_function_is_refused` and
-`a_printf_argument_named_by_a_return_less_local_is_refused`, each a build on
-BOTH architectures that must refuse naming `printf() is asked to render the
-value of g(…)`. PASS=124 FAIL=0.
+Both emitters' `_callee_returns_value` now ask it (lazily, from `self._functions`)
+instead of `function_returns_a_value`, so `ValueKinds`' direct-call and local
+evidence are transitive too, and the two backends cannot disagree. The message is
+unchanged — `print() is asked to render the value of f(…)` — because the callee
+named is the one whose result is unrepresentable.
 
-**What is still not fixed is unchanged** — the positions where nothing OBSERVES
-the value are §0c's, and direction (b) is still the only answer for them.
+**Measured, both backends.** `python3 test_formal_value_model.py` — **PASS=127
+FAIL=0** (was 122): the new `REFUSALS` row
+`a_printed_function_whose_return_is_a_return_less_call_is_refused` builds both
+architectures and pins the refusal, and `RETURNLESS_CHAINS` (four rows, the
+reader asked directly, no image) pins the hop, the real-value break, the cycle
+and the declared-type exclusion. `test_formal_run.py` 1187, `test_formal_with.py`
+352, `test_formal_hostmods_census.py` 74/74 rows, `test_formal_argparse.py` 10
+and `test_formal_returnless_census.py` are all green — the `argparse.mojo` build
+that §0c names still builds, because its `return _err(msg)` sites are not printed.
+
+**What is NOT done, and it is still direction (b).** `None` is not a word, so the
+operand, argument and assigned-and-never-read positions §0b's list names are
+unchanged, and `tools/formal_returnless_census.py` still measures the PER-FUNCTION
+rule (`M.fn_returns_a_value`), so its candidate count does not include the chains
+this refusal now reaches. The census half is a measurement follow-up, not a
+behaviour gap; a `print` site reached only through a chain is exactly what the
+new `REFUSALS` row covers.
 
 ## 0c. What is left, measured per POSITION (2026-10-04, `work/formal28-1`) —
 ## and the one bucket that decides nothing is 62 sites in one file the gate
