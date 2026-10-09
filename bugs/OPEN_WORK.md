@@ -60,12 +60,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` | **unclaimed** | The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register |
 | `FORMAL_model_fuzz_ledger.md` | **unclaimed** | what `tools/formal_model_fuzz.py` has measured |
 
-### `formal/arm64_codegen` — 13 documents, 2 claimed
+### `formal/arm64_codegen` — 14 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `formal227-docs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | `formal227-docs` | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
+| `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal228-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md` | **unclaimed** | An arm64 conditional whose immediate is on the LEFT never elaborates |
 | `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | **unclaimed** | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
@@ -78,13 +79,14 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` | **unclaimed** | FORMAL_the_flagged_fuzz_pool_does_not_draw_tst |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 
-### `formal/arm64_proof_gen` — 19 documents, 3 claimed
+### `formal/arm64_proof_gen` — 19 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | `formal227-docs` | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
 | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | `formal227-docs` | `bv_decide` reports a counterexample for a flag the spill hid |
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal228-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
+| `FORMAL_float_step_functions.md` | `formal229-docs` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | **unclaimed** | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | **unclaimed** | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` | **unclaimed** | `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach |
@@ -93,7 +95,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` | **unclaimed** | the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it |
 | `FORMAL_ast_bridge_carries_one_argument_per_call.md` | **unclaimed** | `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | **unclaimed** | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
-| `FORMAL_float_step_functions.md` | **unclaimed** | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
 | `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | **unclaimed** | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
@@ -102,17 +103,17 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 
-### `formal/build` — 15 documents, 2 claimed
+### `formal/build` — 15 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal228-docs` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
+| `FORMAL_env_family_next_terminal.md` | `formal229-docs` | where the 55-file family stands, and what the next reader needs |
+| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | `formal229-docs` | what `==` still does not reach |
 | `FORMAL_string_value_model.md` | `formal224-docs` | what a string IS on the formal path, and the two things that want to be one |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | `FORMAL_build_cost_2026-10-03.md` | **unclaimed** | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
-| `FORMAL_env_family_next_terminal.md` | **unclaimed** | where the 55-file family stands, and what the next reader needs |
-| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | **unclaimed** | what `==` still does not reach |
 | `FORMAL_generic_local_binding_has_no_home.md` | **unclaimed** | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
 | `FORMAL_module_state_no_storage.md` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
@@ -128,14 +129,14 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_dataclass_runtime_reflection.md` | `formal228-docs` | `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag |
 
-### `formal/imports` — 12 documents, 4 claimed
+### `formal/imports` — 12 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_call_result_field_access_has_no_representation.md` | `formal227-docs` | every remaining host-import row is one capability, and it is not a module |
 | `FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md` | `formal227-docs` | `Span[StaticString, ImmStaticOrigin]` is two links behind an MLIR template, and neither link says so |
-| `FORMAL_a_linked_library_path_is_in_the_image.md` | `formal225-docs` | one image cannot be byte-identical across two CAS roots, and the reason is dyld |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal224-docs` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |
+| `FORMAL_a_linked_library_path_is_in_the_image.md` | **unclaimed** | one image cannot be byte-identical across two CAS roots, and the reason is dyld |
 | `FORMAL_binary_heap_mojo_after_the_len_value.md` | **unclaimed** | `std/collections/binary_heap.mojo` builds nothing yet, and the 165 files behind it have TWO walls |
 | `FORMAL_dotted_base_bracket_list_is_not_classified.md` | **unclaimed** | the predicate answers no for every dotted base, and the asking pass cannot have the table it needs |
 | `FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md` | **unclaimed** | the backend applies a callee's defaults across a dylib now, and four hostmods still spell theirs out |
@@ -145,19 +146,19 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 15 documents, 5 claimed
+### `formal/lean` — 15 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_conditional_value_in_a_dylib_export.md` | `formal227-docs` | A conditional VALUE in a dylib export: the block layer already takes it, and the cost is the certificate |
-| `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | `formal225-docs` | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
-| `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md` | `formal225-docs` | A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone |
-| `FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_contract.md` | `formal225-docs` | 8 of the 44 examples added to `formal/examples` on 2026-10-05, and the model it used to emit for them was a diverging `partial def` |
 | `FORMAL_contract_ladder_reach.md` | `formal228-docs` | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
+| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `formal229-docs` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
+| `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | **unclaimed** | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
+| `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md` | **unclaimed** | A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone |
+| `FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_contract.md` | **unclaimed** | 8 of the 44 examples added to `formal/examples` on 2026-10-05, and the model it used to emit for them was a diverging `partial def` |
 | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` | **unclaimed** | 20 of 78 functions, the largest cause in the proof-breadth census |
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | **unclaimed** | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | **unclaimed** | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
-| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | **unclaimed** | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
 | `FORMAL_lean_verdict_cache_publishes_a_timeout.md` | **unclaimed** | A Lean TIMEOUT is published to the proof-verdict cache as if it were a verdict |
 | `FORMAL_nested_short_circuit_chain_in_a_condition.md` | **unclaimed** | `((a or b) or c)` is still unproved |
 | `FORMAL_proof_coverage_census_2026-10-03.md` | **unclaimed** | FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on |
@@ -175,18 +176,18 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | `formal225-docs` | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
-| `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | `formal225-docs` | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
-| `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | `formal225-docs` | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
+| `FORMAL_five_run_rows_refuse_at_a_different_point_than_they_pin.md` | `formal229-docs` | Five `test_formal_run.py` rows are red on `master`, and three of the five refuse at a DIFFERENT point than the row pins |
+| `FORMAL_float_binary64_only.md` | `formal229-docs` | binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice |
+| `FORMAL_float_pointer_pointee.md` | `formal229-docs` | A `Pointer[Float64]` load is bit-exact and is still refused, because the KIND is decided by the context |
 | `FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` | `formal224-docs` | CLOSED for programs — every prologue of an image that has an entry carries the guard |
 | `FORMAL_std_builtin_sys_time_slice_2026-10-04.md` | `formal224-docs` | FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's |
 | `FORMAL_string_composition_has_no_buffer.md` | `formal224-docs` | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
 | `CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md` | **unclaimed** | The parser DISCARDS a `comptime` FUNCTION-TYPE alias, and silently erases a `comptime` call whose bracket mixes a keyword with a later positional |
+| `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | **unclaimed** | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
+| `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | **unclaimed** | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
+| `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | **unclaimed** | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | **unclaimed** | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | **unclaimed** | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
-| `FORMAL_five_run_rows_refuse_at_a_different_point_than_they_pin.md` | **unclaimed** | Five `test_formal_run.py` rows are red on `master`, and three of the five refuse at a DIFFERENT point than the row pins |
-| `FORMAL_float_binary64_only.md` | **unclaimed** | binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice |
-| `FORMAL_float_pointer_pointee.md` | **unclaimed** | A `Pointer[Float64]` load is bit-exact and is still refused, because the KIND is decided by the context |
 | `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
 | `FORMAL_functools_is_unbuildable_as_a_host_module.md` | **unclaimed** | every name in CPython's `functools` needs a capability this path lacks, and a module that exports nothing is refused |
 | `FORMAL_fuzz_ledger.md` | **unclaimed** | what `tools/formal_fuzz.py` has measured, and what came of it |
@@ -205,13 +206,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |
 | `FORMAL_type_name_as_a_value.md` | **unclaimed** | a bare TYPE name in a value position is refused as a name with no register |
 
-### `formal/monomorph` — 4 documents, 1 claimed
+### `formal/monomorph` — 4 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` | `formal227-docs` | the row the per-edge export gate hands 98 of the 163 files to |
+| `FORMAL_five_pre_existing_red_rows_in_test_formal_run.md` | `formal229-docs` | Five rows of `test_formal_run.py` are red on `master`, in the `comptime` class-attribute area |
 | `FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` | **unclaimed** | a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source |
-| `FORMAL_five_pre_existing_red_rows_in_test_formal_run.md` | **unclaimed** | Five rows of `test_formal_run.py` are red on `master`, in the `comptime` class-attribute area |
 | `FORMAL_generic_monomorph_scope.md` | **unclaimed** | what a generic's instantiation does NOT cover |
 
 ### `formal/peephole` — 1 document, 0 claimed
@@ -240,11 +241,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_x86_64_cross_module_function_value_call_segfaults.md` | **unclaimed** | x86-64: a comptime specialization through a FUNCTION VALUE across a dylib boundary SIGSEGVs |
 | `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` | **unclaimed** | FORMAL x86-64: `getsize` segfaults (executes at address 0) inside an imported hostmod dylib, where arm64 answers |
 
-### `formal/x86_64_decode` — 2 documents, 1 claimed
+### `formal/x86_64_decode` — 2 documents, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | `formal225-docs` | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
+| `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | **unclaimed** | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
 | `FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_decode.md` | **unclaimed** | An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py` |
 
 ### `formal/x86_64_endtoend_test` — 4 documents, 1 claimed
@@ -268,11 +269,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_one_field_mutator_has_no_method_contract.md` | `formal228-docs` | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 
-### `unclassified` — 3 documents, 2 claimed
+### `unclassified` — 2 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal228-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | `formal224-docs` | `.returncode` is a field access on an integer |
 | `FORMAL_proof_census_baseline_covers_52_of_93_examples.md` | **unclaimed** | `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus |
 
