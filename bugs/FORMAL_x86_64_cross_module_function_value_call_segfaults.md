@@ -59,12 +59,11 @@ linked dylib.
 
 ## What I expected
 
-`18`, exit 0, on both architectures — the shape
-`bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
-records as "builds, runs and answers CPython on both architectures, single-module
-and across a dylib boundary" (its 2026-10-03 Status). So either that record has
-gone stale or this is a regression; a fix should decide which by bisecting the
-x86-64 dylib call path.
+`18`, exit 0, on both architectures — the shape the
+`work/formal18-tile-specialization` lowering claims: "builds, runs and answers
+CPython on both architectures, single-module and across a dylib boundary". So
+either that claim has gone stale or this is a regression; a fix should decide
+which by bisecting the x86-64 dylib call path.
 
 ## Why this is not this worker's change
 

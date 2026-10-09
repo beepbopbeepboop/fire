@@ -21142,8 +21142,7 @@ REFUSAL_CASES = [
     # program: a function value is its entry ADDRESS (each backend's
     # `_load_var`), so `g` holds one word and `g(5)` is one `BLR` / `CALL r64`.
     # It moved from this table to `BOTH_ARCH_CASES` when the lowering landed
-    # (`bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_
-    # value.md` §"What landed"); `test_formal_specialization.py` carries the
+    # (`work/formal18-tile-specialization`); `test_formal_specialization.py` carries the
     # same construct with the CPython comparison this table's `refuse:` rows
     # could not make.
     ("a_function_name_passed_as_an_argument_is_named_as_one",
