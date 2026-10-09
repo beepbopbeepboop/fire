@@ -24042,6 +24042,16 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
+    # `a & b` (intersection). arm64-only for the same reason `a | b` is: the
+    # operator is a real lowering for two sets on arm64 and x86-64 refuses it by
+    # name (`model.set_algebra_refusal`). The operands must be SETS — `&` on two
+    # lists is a `TypeError` and `container_set_algebra_refusal` refuses it — so
+    # this is the only program that reaches the site, and the reservation `nL +
+    # nR` is shared with the union.
+    ("arm64", "set",
+     "def main(n):\n    var a = {1, 2, 3}\n    var b = {2, 4}\n"
+     "    var u = a & b\n    return len(u)\n",
+     {"a set operation"}),
 ]
 
 # The fewest instructions a guard can emit and still BE one. Both backends'

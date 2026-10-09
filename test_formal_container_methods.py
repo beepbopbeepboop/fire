@@ -624,21 +624,35 @@ SET_CASES = [
     ("s_union_ior", ["s = {1, 2}", "s |= {3}"], "len(s)",
      "the AUGMENTED union, which reached the integer ALU before the desugaring: "
      "it answered 1 on arm64 and 0 on x86-64 where CPython answers 3"),
-    ("s_intersection_r", ["s = {1, 2}", "t = s & {2}"], None,
-     "`&` is INTERSECTION and needs a per-element membership scan per element. "
-     "Measured before the operator gate: 2 on arm64 and 163061056 on x86-64 "
-     "where CPython answers 1"),
-    ("s_difference_r", ["s = {1, 2}", "t = s - {2}"], None,
-     "`-` is SET DIFFERENCE. Measured before the gate: SIGSEGV on both "
+    ("s_intersection", ["s = {1, 2, 3}", "t = s & {2, 4}",
+                        "u = 0", "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`&` is INTERSECTION — the elements of the left the right holds. Measured "
+     "before the lowering: 2 on arm64 and 163061056 on x86-64 where CPython "
+     "answers 1. The CONTENTS are observed through a sum as well as the length, "
+     "because a wrong result of the right length is invisible to `len` alone"),
+    ("s_difference", ["s = {1, 2, 3}", "t = s - {2}",
+                      "u = 0", "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`-` is SET DIFFERENCE. Measured before the lowering: SIGSEGV on both "
      "architectures, no output, because the result is a word nowhere near a "
      "blob and `len` read a count out of it"),
-    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^` is SYMMETRIC DIFFERENCE. Measured before the gate: SIGSEGV on both"),
-    ("s_sub_r", ["s = {1, 2}", "s -= {2}"], None,
+    ("s_symdiff", ["s = {1, 2}", "t = s ^ {3}",
+                   "u = 0", "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`^` is SYMMETRIC DIFFERENCE, which is the ONE of the three that takes an "
+     "element from EACH side, so the right-hand pass is exercised: `{1, 2} ^ "
+     "{3}` is `{1, 2, 3}` and a left-only implementation answers len 0"),
+    ("s_sub", ["s = {1, 2, 3}", "s -= {2}",
+               "u = 0", "for x in s:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
      "the augmented difference, which is where the SIGSEGV was reproduced "
-     "through the SECOND emitter as well"),
-    ("s_andassign_r", ["s = {1, 2}", "s &= {2}"], None,
-     "the augmented intersection: 2 on arm64 and garbage on x86-64"),
+     "through the SECOND emitter as well — it desugars onto `-` and rebinds"),
+    ("s_andassign", ["s = {1, 2, 3}", "s &= {2, 4}",
+                     "u = 0", "for x in s:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
+     "the augmented intersection: 2 on arm64 and garbage on x86-64 before the "
+     "lowering, and answered through the same `&` emitter the binary form uses"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
@@ -777,12 +791,21 @@ OPERATOR_CASES = [
     ("o_sub", ["a = [1, 2]", "t = a - [2]"], None,
      "`-` between two containers: a TypeError in CPython, and measured as a "
      "SIGSEGV here before the gate"),
-    ("o_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate"),
-    ("o_and", ["s = {1, 2}", "t = s & {2}"], None,
+    # `^` and `&` on two SETS are LOWERED now (see the `set` group's
+    # `s_symdiff`/`s_intersection`), so these two rows are the same operators on
+    # the operands Python REFUSES: two LISTS are a `TypeError` in CPython, so
+    # there is no correct program on the far side and the gate must still refuse
+    # them on both backends. Re-pointed rather than deleted, because a deleted
+    # gate row is a hole and this pair is what keeps the operator set from being
+    # widened to "a container is involved".
+    ("o_xor", ["a = [1, 2]", "b = [2]", "t = a ^ b"], None,
+     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate; this "
+     "row is the LIST operand, a TypeError in CPython"),
+    ("o_and", ["a = [1, 2]", "b = [2]", "t = a & b"], None,
      "`&`: INTERSECTION, measured as 2 on arm64 and 163061056 on x86-64 where "
      "CPython answers 1 — the two architectures disagreeing is the clearest "
-     "possible sign that neither computed a set"),
+     "possible sign that neither computed a set. This row is the LIST operand, "
+     "a TypeError in CPython"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -857,6 +880,14 @@ BACKEND_ONLY = {
     "s_union_elems": "x86_64",
     "s_union_str": "x86_64",
     "s_union_ior": "x86_64",
+    # And no set INTERSECTION/DIFFERENCE/symmetric-difference emitter either —
+    # the same absence, for the same reason. arm64 lowers all three, and the
+    # augmented forms desugar onto them.
+    "s_intersection": "x86_64",
+    "s_difference": "x86_64",
+    "s_symdiff": "x86_64",
+    "s_sub": "x86_64",
+    "s_andassign": "x86_64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

@@ -13862,7 +13862,82 @@ CONTAINER_OP_MEANING = {
 #: literals are two distinct blocks and so two distinct addresses, which is
 #: what identity is.  `==`/`!=` on a blob and the ordering operators are the
 #: same defect wearing different operators, so they belong in one gate.
-CONTAINER_GATED_OPS = tuple(CONTAINER_OP_MEANING)
+#:
+#: `&`, `-` and `^` are absent TOO, but for the opposite reason: each is a
+#: real lowering now, for two SETS on arm64, so a blob on either side is asked
+#: about by `container_set_algebra_refusal` (and the backend with no emitter
+#: answers with `set_algebra_refusal`) rather than by this gate.  They are
+#: still in `CONTAINER_OP_MEANING`, because that table is the sentence the
+#: refusal is written from and this gate is not the only thing that reads it.
+CONTAINER_GATED_OPS = ("<", "<=", ">", ">=", "==", "!=",
+                       "/", "//", "%", "**", "<<", ">>")
+
+#: The three operators Python defines for two SETS and for nothing else:
+#: intersection (`&`), difference (`-`) and symmetric difference (`^`).  A
+#: `list`/`tuple`/`dict` operand is a `TypeError` in CPython, so the only
+#: correct lowering is set-vs-set — which is why this is its own predicate
+#: rather than an arm of `container_operator_refusal`, whose whole subject is
+#: "a blob is an ADDRESS and no element is compared".  The element-wise loops
+#: these need per-element stride, which `model.blob_elem_stride` answers.
+SET_ALGEBRA_OPS = ("&", "-", "^")
+
+
+def container_set_algebra_refusal(op: str, left: str, right: str,
+                                  left_is_set: bool,
+                                  right_is_set: bool) -> str | None:
+    """Why `left {op} right` is not a set operation here, or None when it is.
+
+    The one decision both backends ask before lowering `&`/`-`/`^` on a blob,
+    and its twin is `container_union_refusal` for `|`.  Python defines these
+    three for two SETS and for nothing else: `[1, 2] & [2]`, `[1, 2] - [2]`
+    and `[1, 2] ^ [2]` are all `TypeError` there, and `{1} & {2}` is
+    intersection.  A blob whose set-ness is not established on BOTH sides is
+    therefore a program CPython rejects, and answering it from an element scan
+    would be answering a different program — the defect
+    `container_operator_refusal` records (`s & {2}` answered 2 on arm64 and
+    163061056 on x86-64 with exit 0).
+
+    Set-ness is a QUESTION because a set lowers as a list here
+    (`is_set_expr`'s docstring), so `ValueKinds` cannot tell the two apart and
+    each backend carries `_set_vars` for a name and `is_set_expr` for a
+    literal.  Only the both-sets case returns None; the caller lowers it.
+    """
+    if left_is_set and right_is_set:
+        return None
+    on_left = left_is_set
+    which = ("the left operand" if not on_left
+             else "the right operand" if not right_is_set else "an operand")
+    return (
+        f"{left} {op} {right} is refused because {which} is not established "
+        f"to be a SET. `{op}` is defined in Python for two sets and for "
+        f"nothing else — `[1, 2] {op} [2]` raises `TypeError` there — and "
+        f"Python's `{op}` on two sets is {CONTAINER_OP_MEANING[op]}, which "
+        f"needs a per-element stride this path must know before anything runs. "
+        f"Measured on this tree before the gate, both backends: `s = {{1, 2}}` "
+        f"then `s {op} {{2}}` "
+        + ("answered 2 on arm64 and 163061056 on x86-64 where CPython answers "
+           "1" if op == "&" else
+           "died with SIGSEGV and no output, because the result was a word "
+           "nowhere near a blob and `len` read a count out of it")
+        + ". Write the operation over elements you can name, or build the "
+          "result with a loop and a membership test")
+
+
+def set_algebra_refusal(op: str, spelled: str, left: str, right: str) -> str:
+    """Why `left {op} right` is not lowered on the backend that asks, sets.
+
+    The SECOND question, asked only once `container_set_algebra_refusal` has
+    said both operands really are sets — so the operator is CPython's
+    intersection/difference/symmetric difference and this backend has no
+    emitter for it.  arm64 lowers all three correctly, so this is x86-64's
+    answer and it names that backend so a reader knows the program is not
+    broken and arm64 answers it.
+    """
+    return (
+        f"{left} {op} {right} is a SET operation between two sets, and this "
+        f"backend lowers no set operation — arm64 lowers `&`, `-` and `^` on "
+        f"two sets correctly. Write the operation over elements you can name, "
+        f"or build the result with a loop and a membership test")
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
@@ -13908,6 +13983,14 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
+
+    **`&`, `-` and `^` are no longer in `CONTAINER_GATED_OPS`** — arm64 lowers
+    all three for two sets now (`_emit_set_algebra`), and a pair that is not two
+    sets is refused by `container_set_algebra_refusal` instead.  The
+    measurements above are kept because they are the record of what the gate was
+    answering BEFORE the lowering existed, which is the state a reader of the
+    `bugs/FORMAL_container_operators_that_need_a_per_element_stride.md` history
+    needs; they are not a claim about this gate's current membership.
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:

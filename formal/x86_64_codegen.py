@@ -7469,6 +7469,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
+        # `&`, `-` and `^` on a blob: intersection, difference and symmetric
+        # difference, defined for two SETS and nothing else.  This backend has no
+        # set-operation emitter, so a real set operation is refused by NAME of
+        # the missing emitter (`model.set_algebra_refusal`) rather than lowered —
+        # and a pair that is not two sets is refused by
+        # `container_set_algebra_refusal`, exactly as arm64 refuses it, so the
+        # two architectures cannot disagree about which programs are legal.
+        if op in M.SET_ALGEBRA_OPS and (M.container_operand_is_blob(
+                self._expr_str_kind(e.left))
+                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            reason = M.container_set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right),
+                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
+            if reason is not None:
+                raise CodegenError(reason)
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(e), M.spelled(e.left), M.spelled(e.right)))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -10118,6 +10135,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`/`-`/`^` produce a SET only when BOTH operands are sets —
+            # unlike `+`/`|`, a non-set on either side is a CPython `TypeError`
+            # whose refusal belongs to `container_set_algebra_refusal`.  arm64's
+            # twin answers the same question, so `s & t` cannot be a set to one
+            # backend and not the other before `set_algebra_refusal` is reached.
+            return (self._expr_is_set_like(e.left)
+                    and self._expr_is_set_like(e.right))
         return False
 
 
