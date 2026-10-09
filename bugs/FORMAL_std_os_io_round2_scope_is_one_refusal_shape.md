@@ -569,21 +569,6 @@ next to the file's three existing `no_public_api_reason` message-accuracy guards
 still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
 `formal16-2`'s. This item asked for a sentence, and the sentence is now true.
 
-**Status (2026-10-08, `work/formal248-docs`): a later merge DROPPED two phrases
-this item's pin requires, and both are restored.** Two independent branches
-fixed this sentence (`c1f99d80`, which added the pin in `test_formal_imports.py`,
-and `00ac52bb`, which rewrote the wording and pinned only in
-`test_formal_monomorph.py`); the merge kept `00ac52bb`'s text and left
-`c1f99d80`'s pin RED, because the rewrite lost `BACKEND` and the exact phrase
-`nothing an importer could bind` the pin asserts. The sentence now says both
-again — "what would remove it is not a declaration this file is missing … and a
-decision about the BACKEND: a rule that a module nothing binds needs no library
-at all" — while keeping `00ac52bb`'s accuracy (it names BOTH missing things and
-both docs, rather than claiming the constants "are inlined at their use site",
-which §0.4 established is false of a refused module). Measured:
-`test_formal_imports.py` PASS=89 FAIL=0 (was 88/1), `test_formal_sweep.py`
-135/135, `test_formal_monomorph.py` 37/37.
-
 ## 6. What is left
 
 1. ~~**The cause-ranking instrument cannot rank this scope's causes.**~~ **CLOSED
