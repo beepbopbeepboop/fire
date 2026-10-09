@@ -290,6 +290,24 @@ def group_blake2b(tmpdir, verbose):
               f"CPython's digest_size={d} is a prefix of its 64-byte digest, "
               f"so this oracle cannot tell the two implementations apart")
 
+    # The ONE-ARGUMENT form, which is CPython's `digest_size=64` default and is
+    # the point of the signature: a default now survives the dylib boundary
+    # (`formal/imports.py::external_declarations`), so `blake2b_hex(data, n)` is
+    # a spelling a caller writes and must be the full 64-byte digest. A separate
+    # program rather than a record in the loop above, because that loop's key
+    # shape (`b<len>_<size>`) is what its numeric sort reads.
+    lines = ["import hashlib", "", "def main() -> int:",
+             "  var m: Pointer[UInt8] = malloc(200)",
+             "  memset(m, 97, 200)",
+             '  printf("dflt=%s@@", hashlib.blake2b_hex(m, 200))',
+             "  return 0"]
+    dflt_got = _records(run(build("\n".join(lines) + "\n", "b2dflt")),
+                        r"(dflt)=([0-9a-f]*)")
+    want = hashlib.blake2b(b"a" * 200).hexdigest()
+    check(dflt_got.get("dflt") == want,
+          "the one-argument blake2b_hex differs from CPython's default: got "
+          f"{str(dflt_got.get('dflt'))[:24]} want {want[:24]}")
+
     if verbose:
         print(f"    {len(got)} BLAKE2b digests byte-exact over "
               f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes")

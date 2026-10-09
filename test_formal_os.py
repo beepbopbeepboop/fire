@@ -287,6 +287,16 @@ def main(n):
     printf("makedirs-deep=%d@@", makedirs(join(root, "a/b/c/d/e"), 511))
     printf("makedirs-kept=%d@@", makedirs(join(root, "p/q/r"), 511))
     show("made-deep", join(root, "p/q/r"))
+    # ── the DEFAULTED one-argument forms ──
+    # A default now survives the dylib boundary, so `mkdir(p)` and `makedirs(p)`
+    # are CPython's spellings and must make CPython's directory: mode 0o777
+    # masked by the process umask. The trees are left behind so this process can
+    # compare their mode with one CPython's own `os.mkdir` makes — existence
+    # alone would pass for a default that arrived as 0.
+    printf("mkdir-default=%d@@", mkdir(join(root, "dflt")))
+    printf("makedirs-default=%d@@", makedirs(join(root, "df/a/b")))
+    show("made-default", join(root, "dflt"))
+    show("made-default-deep", join(root, "df/a/b"))
     printf("rmdir=%d@@", rmdir(join(root, "a/b/c/d/e")))
     show("removed", join(root, "a/b/c/d/e"))
     printf("rmdir-missing=%d@@", rmdir(join(root, "a/b/c/d/e")))
@@ -325,6 +335,12 @@ def main(n):
     printf("chmod-missing=%d@@", chmod(join(root, "no-such"), 384))
     # ── the working directory, and coming back from it ──
     printf("cwd-rel=[%s]@@", relpath(join(root, "a"), getcwd()))
+    # The ONE-ARGUMENT `relpath`, which is CPython's `start=os.curdir` default
+    # and is the point of the signature: a default now survives the dylib
+    # boundary. Kept out of the `strings` corpus because that corpus includes
+    # `""`, which CPython's `relpath` REFUSES rather than answering — a
+    # deviation this module already documents and pins separately.
+    printf("cwd-rel-default=[%s]@@", relpath(join(root, "a")))
     printf("chdir=%d@@", chdir(join(root, "a")))
     printf("cwd-in=%s@@", getcwd())
     printf("chdir-back=%d@@", chdir(root))
@@ -592,9 +608,12 @@ def group_fs(tmpdir, verbose):
         "replace": "0",
         "unlink": "0",
         "makedirs-kept": "0",
+        "mkdir-default": "0",
+        "makedirs-default": "0",
         "chmod": "0",
         "chmod-missing": "-1",
         "cwd-rel": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
+        "cwd-rel-default": f"[{posixpath.relpath(p('a'))}]",
         "chdir": "0",
         "cwd-in": p("a"),
         "chdir-back": "0",
@@ -622,6 +641,8 @@ def group_fs(tmpdir, verbose):
     })
     for tag, path in (("made", p("a", "b", "c")),
                       ("made-deep", p("p", "q", "r")),
+                      ("made-default", p("dflt")),
+                      ("made-default-deep", p("df", "a", "b")),
                       ("removed", p("a", "b", "c", "d", "e")),
                       ("removed-file", p("f.txt")),
                       ("gone", p("x1")), ("renamed", p("z2")),
@@ -644,6 +665,26 @@ def group_fs(tmpdir, verbose):
     else:
         if mode != 0o600:
             bad.append(f"chmod(…, 384) left mode {mode:o}, expected 600")
+    # The DEFAULTED `mkdir`'s mode, against CPython's own default: `os.mkdir(p)`
+    # in this process uses 0o777 masked by the umask, which is the same
+    # directory the one-argument hostmod form must make. This is the assertion
+    # that a default arriving as garbage would fail while `made-default-isdir`
+    # above still passed.
+    try:
+        os.mkdir(p("dflt-cpython"))
+    except OSError as e:
+        bad.append(f"could not make the CPython reference directory: {e}")
+    else:
+        want_mode = stat.S_IMODE(os.stat(p("dflt-cpython")).st_mode)
+        try:
+            got_mode = stat.S_IMODE(os.stat(p("dflt")).st_mode)
+        except OSError as e:
+            bad.append(f"the defaulted mkdir produced no directory to stat: {e}")
+        else:
+            if got_mode != want_mode:
+                bad.append(
+                    f"mkdir(p) with the defaulted mode left {got_mode:o}, but "
+                    f"CPython's os.mkdir(p) left {want_mode:o}")
     if bad:
         return False, ("%d disagreements with the filesystem:\n      %s"
                        % (len(bad), "\n      ".join(bad[:20])))

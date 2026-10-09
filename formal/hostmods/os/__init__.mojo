@@ -121,12 +121,9 @@ because it is not a matter of taste:
     now hands the emitter the callee's own declaration, so the register is
     filled from the default and the measurement above no longer reproduces
     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is). Every parameter CPython gives a default is
-    still spelled REQUIRED here — that is a choice now, not a limit, and
-    restoring the defaults is written down as its own step in
-    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
-    because it wants a sweep to confirm it, not a comment to assert it. The one
-    place a default was always wanted — `getenv`'s — is a SECOND function,
+    deleted, as a fixed bug's is). `mkdir`/`makedirs` therefore carry CPython's
+    `mode=0o777` and the one-argument spelling is the one a caller writes; the
+    one place a default was always wanted — `getenv`'s — is a SECOND function,
     `getenv_or(name, default)`, so the two-argument form has a name of its own
     rather than a signature that silently does nothing.
 """
@@ -969,14 +966,16 @@ def rmdir(path) -> int:
     return fs_rmdir(path)
 
 
-def mkdir(path, mode) -> int:
+def mkdir(path, mode=0o777) -> int:
     """Create the directory `path` with permission bits `mode`. 0 or -1.
 
-    `mode` is REQUIRED, not defaulted to 0777: a default argument is not
-    applied to a call from another image, and a directory created with an
-    arbitrary mode is a real directory with unusable permissions. Pass 511 for
-    0777, which is what CPython's default is — the C library masks it with the
-    process umask either way.
+    `mode` defaults to `0o777`, which is CPython's default: the C library masks
+    it with the process umask either way, so this is the same directory CPython
+    makes. It is spelled out rather than left to a bare `511` because the octal
+    form is the one the mode is written in everywhere else and the two are the
+    same value. A default now survives the dylib boundary
+    (`formal/imports.py`'s `external_declarations` hands the emitter the
+    callee's own declaration), so the one-argument form is CPython's.
 
     -1 with EEXIST when the directory is already there, which is the same
     signal `makedirs` below uses to decide it has nothing to do.
@@ -984,11 +983,11 @@ def mkdir(path, mode) -> int:
     return fs_mkdir(path, mode)
 
 
-def makedirs(path, mode) -> int:
+def makedirs(path, mode=0o777) -> int:
     """Create `path` and every directory above it that is missing.
 
-    `mode` is required, for the reason `mkdir` gives. 0 when the whole path
-    exists afterwards, -1 otherwise. An intermediate
+    `mode` defaults to `0o777`, for the reason `mkdir` gives. 0 when the whole
+    path exists afterwards, -1 otherwise. An intermediate
     component that is already a directory is not an error, so this is
     CPython's `makedirs(path, exist_ok=True)` and there is no spelling of the
     other one: a target with no exceptions cannot report "FileExistsError" to
