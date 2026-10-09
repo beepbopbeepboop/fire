@@ -115,8 +115,7 @@ now fixed: `FORMAL.md` publishes the tree's 683/272/411 (§2.2) and 272/216/176
 and compares them to `runtime_abi()` rather than to a constant of its own. The
 remaining stale restatements — the non-word count (406 → 411), `fire_runtime.c`'s
 size (486 → 524 KB) and the examples-corpus count (51 → 93) — were corrected in
-the same pass, and `bugs/FORMAL_the_published_surface_figures_are_behind_the_tree.md`
-was removed with them. The sweep that first moved §2.2/§6 is
+the same pass. The sweep that first moved §2.2/§6 is
 `1dd68a48`/`ca50560f` ("DOCS vs REALITY").
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
