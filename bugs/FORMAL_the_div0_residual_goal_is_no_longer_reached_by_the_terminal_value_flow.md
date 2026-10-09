@@ -7,6 +7,45 @@ merge. NOT reproduced on `master`, and the difference is the library, not the
 code** — see §1. **Needs a Lean-backed read, so it is filed rather than
 guessed at**; this session is a light worker and may not launch lean.
 
+## 0. UPDATE 2026-10-08 (`work/formal219-docs`): the class no longer gets far
+## enough to see the residual at all — it now ERRORS in `setUpClass`
+
+Re-run on this tree, with the library current (all eight `lib/*.olean` report
+`_library_is_current=True` through `formal.lean._effective_digest`):
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label div0 -- \
+      python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean
+ERROR: setUpClass … formal.build.FormalBuildError: no proof was generated: …
+  universal theorem: 2 calls this walk cannot follow
+  (0x100000424 -> 0x100000890 (opaque), 0x100000518 -> 0x100000884 (opaque)),
+  every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge them
+Ran 0 tests … FAILED (errors=1)
+```
+
+So the premise in the title — that the residual `⊢ 1 = …` goal is no longer
+REACHED — is no longer measurable here: `_symbolic_divisor_proof` cannot even
+produce a `_proof.lean` to read a residual out of. **The cause is NOT this
+doc's subject and is not the terminal value flow**: `q(a, b) = a // b` now has
+TWO opaque calls in its entry function, and the second is the stack-floor
+guard's `bl getrlimit`, which
+`bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md`
+measures and owns (`work/formal104-docs`, and it is the same regression that
+doc's `TestTheBranchFlagLemmaIsTheBranchOwns` row is red for). That doc's
+`getrlimit`-off-the-walk fix is the prerequisite: until the guard's read is
+moved to the startup stub, no program with a source conditional — this class's
+`//` included — generates a universal theorem, so neither "reached" nor "closed"
+can be told apart. Confirmed not caused by this branch: reverting the branch's
+own arm64 guard change (`a4d5bf58`) and re-running gives the SAME
+`setUpClass` error with the same two addresses.
+
+**What to do with this doc:** it stays OPEN and its next step is now the
+`getrlimit` doc's, not `formal/arm64_proof_gen.py`'s terminal flow. Once the
+guard's call is off the walked path, re-run this class and read §3's two
+outcomes; if the residual then reappears, §3/§5 stand as written, and if the
+proof still refuses, the refusal is a third state and this doc should say so.
+
 ## 1. What I ran, and why `master` is green
 
 ```console
