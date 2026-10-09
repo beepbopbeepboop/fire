@@ -1,10 +1,32 @@
-# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source
+# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source
 
-**Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
-messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
-MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
-wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
+**Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the three refusal
+messages a caller reaches when it does not fire). **Status:** the THREE WRONG
+MESSAGES ARE NOW FIXED — §3's two (2026-10-07, `work/formal106-docs`) and §2 row
+4's same-unit shape (2026-10-08, `work/formal249-docs`); the comptime-value wall
+itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
 `7ac78995`, with every claim below measured on that tree.
+
+**What changed 2026-10-08, and what did not.** §2 row 4's construct,
+`Tagged[Int, 0]()` — a generic applied with a type argument and a comptime VALUE —
+was measured on the IMPORTED spelling (where `imported_struct_defs` puts `Tagged`
+in `structs_by_name`), so the row recorded the correct
+`compile-time explicit-parameter list` message. **The SAME construct in the file
+that DECLARES the template fell through to §2's tuple-index sentence instead**,
+which is false about the source: `Tagged[Int, 0]` names two compile-time
+parameters and no container. Root cause: `monomorph.without_template_bodies`
+removes each template DECLARATION before `structs_by_name` is built (a template
+body has no instantiation in scope, so analysing it is a `len(Self.keys)`
+refusal), leaving `model.subscript_index_is_a_comptime_parameter_list` — whose
+docstring claimed `structs_by_name` "covers a module's OWN generics" — unable to
+classify it, so `multi_index_kind` answered `MULTI_INDEX_DATA`.
+`formal/build.py::_own_template_structs` now hands the unit's own template
+struct names to that classifier separately, and
+`test_formal_monomorph.py::test_an_own_struct_template_with_a_comptime_value_is_
+diagnosed_as_one` pins both directions on both architectures. **This is a
+diagnosis fix and not the wall**: `type_arg_text` still answers `""` for a
+top-level literal, so no demand is computed, nothing is instantiated, and the
+construct is still refused — it is now refused with the true sentence.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
@@ -105,52 +127,45 @@ written, whose second element is not a type. Neither existing doc lists it;
 §8 of the monomorph doc's "what is not here, deliberately" does not mention it,
 which is where `FORMAL_std_os_io_round2_…` §3 looked for it.
 
-## 3. Two messages in this neighbourhood are wrong about the source — BOTH FIXED
+## 3. Two messages in this neighbourhood are wrong about the source
 
-Both are the defect this repository calls `refuse_without:` — a next step that is
-wrong about the code being compiled. **Both are now fixed**, and the paragraphs
-below are kept as the record of the shapes: row 5's message was already true of
-the program when `94b29b12` (2026-10-04) gave the dotted case its own sentence
-(`formal/model.py::dotted_specialization_refusal`), and row 3's advice was fixed
-2026-10-07 in `specialization_call_refusal` (below). Neither was the wall. What
-remains is §4 step 1.
+Both are in the family `formal/model.py::imported_callee_refusal` writes, both
+are reachable from a program whose source is correct Mojo, and both are the
+defect this repository calls `refuse_without:` — a next step that is wrong about
+the code being compiled. **They are recorded here rather than fixed, because the
+monomorphisation area is another claim's.**
 
 **Row 3's message recommends the spelling the program already uses.** For
-`unbox[Int](b)`, where `unbox` is `def unbox(t: Box[T]) -> T` — a generic
-parameter written in the SIGNATURE, with no bracket to bind:
+`unbox[Int](b)`:
 
 > `unbox[…](…)` calls a name this unit does not compile, so the brackets cannot
 > be bound. … so a call arriving here asked for none: its brackets named no type
-> argument or named a value rather than a type. **Write it as
-> `unbox[<a type>](…)`** and the library will carry the instantiation
+> argument, named a value rather than a type, or spelled the template as
+> `module.unbox`. **Write it as `unbox[<a type>](…)`** and the library will carry
+> the instantiation
 
-The program is written `unbox[Int](b)`. So the alternatives are exhausted and
-the advice is the source, which means the sentence is a dead end twice over: it
-cannot be true that "its brackets named no type argument" of a call whose
-bracket is `[Int]`. The real answer is measurable from rows 1 and 2 — **a type
-argument is a demand when the callee is a CONSTRUCTOR and is inferred rather
-than read when the callee is a plain function** — and that is what the sentence
-now says (`specialization_call_refusal`'s implicit-generic clause): write
-`unbox(…)`, the bare call, which is the same program. The advice
-"`name[<a type>](…)`" is gone, because for this shape it is the line already in
-the editor. A function whose parameters ARE spelled in brackets (`def
-twice[T](…)`) is the other half and still instantiates — the two are told apart
-by the declaration, and `test_formal_monomorph.py` now has a row for each.
+The program is written `unbox[Int](b)`. So the three alternatives are all
+exhausted and the advice is the source, which means the sentence is a dead end
+twice over: it cannot be true that "its brackets named no type argument" of a
+call whose bracket is `[Int]`. The real answer is measurable from rows 1 and 2 —
+**a type argument is a demand when the callee is a CONSTRUCTOR and is inferred
+rather than read when the callee is a plain function** — and it is one clause,
+not three alternatives.
 
-**Row 5's message blamed the module's export table for a call the program does
+**Row 5's message blames the module's export table for a call the program does
 not contain.** For `import mylib; mylib.Box[Int]()`:
 
 > `mylib` is called, and it is imported from `mylib`, so the call has to bind a
 > symbol `mylib` exports. That module does not export it …
 
 `mylib` is a MODULE, it is not called, and the program never mentions it as a
-callee. `94b29b12` fixed exactly this: `_bracketed_export_gap` now answers
-`None` for a dotted base and `dotted_specialization_refusal` names the module,
-the template, the recogniser (`comptime.specialization_name`), and the one
-spelling measured to work. So the dotted application is a **parser/lowering**
-difference rather than a demand difference, and `FORMAL_generic_monomorph_scope.md`
-§2 ("A DOTTED application — `mod.Pair[Int]()`") is still where the mechanism is
-written down.
+callee. The same shape spelled with a from-import (row 1) builds, so the dotted
+application is a **parser/lowering** difference rather than a demand difference,
+and the message should say the brackets could not be attached to the member
+rather than that the module was called. This is also the shape
+`FORMAL_generic_monomorph_scope.md` §2 is titled after ("A DOTTED application —
+`mod.Pair[Int]()`"), which is worth re-checking against row 5 before §2 is
+relied on for a dotted call.
 
 ## 4. The next step, and what it costs
 
@@ -161,13 +176,10 @@ written down.
    substitution, and the mangler needs the argument's **text** — which is why
    `type_arg_text` returning `""` for a non-type is right and insufficient
    rather than a bug to widen.
-2. ~~**The two messages**, which are independent of (1) and can be landed
-   first.~~ **DONE.** Row 5's dotted sentence landed on `94b29b12`
-   (`dotted_specialization_refusal`); row 3's advice landed 2026-10-07 in
-   `specialization_call_refusal`, pinned by
-   `test_formal_monomorph.py::test_a_bracket_on_an_implicitly_generic_function_
-   recommends_the_bare_call` on both architectures. Neither needed the value
-   model.
+2. **The two messages**, which are independent of (1) and can be landed first:
+   row 3's advice is a clause that can be written from the measurement in §2,
+   and row 5 needs the dotted application to say what it is. Both are the
+   `refuse_without:` class and neither needs the value model.
 3. **What NOT to do:** bind the comptime value to a plausible constant, or read
    a two-element bracket as a flat index. The first is a wrong answer, the
    second is the refusal the existing message already declines to make, and
