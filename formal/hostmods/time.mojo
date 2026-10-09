@@ -80,19 +80,19 @@ rather than of this module, and every function below is shaped by them.
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
-  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT. A call into another image USED not
-    to materialize the callee's defaults — the caller had no signature to read
-    them from, so the argument register was whatever the caller last left in it,
-    measured as `need_two(1)` returning 511 in one image and 1867609072 across a
-    dylib. `formal/imports.py`'s `external_declarations` now hands the emitter
-    the callee's own declaration, so that measurement no longer reproduces
+  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT, and there is nothing here that
+    needs one. A call into another image USED not to materialize the callee's
+    defaults — the caller had no signature to read them from, so the argument
+    register was whatever the caller last left in it, measured as `need_two(1)`
+    returning 511 in one image and 1867609072 across a dylib.
+    `formal/imports.py`'s `external_declarations` now hands the emitter the
+    callee's own declaration, so that measurement no longer reproduces
     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
-    deleted, as a fixed bug's is). The parameters CPython gives defaults are
-    still REQUIRED here — a choice rather than a limit, and the step that
-    restores them is written down in
-    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
-    because it wants a sweep behind it. The one place a default is genuinely
-    wanted is a SECOND function of its own.
+    deleted, as a fixed bug's is). The `time` names CPython gives a default to
+    (`strftime`/`strptime`'s optional argument, `sleep`'s spelling) are not
+    implemented here, and every function that IS here takes exactly the
+    arguments CPython's does — so this is a fact about the subset rather than a
+    limit of the path.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------

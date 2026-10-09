@@ -23,15 +23,13 @@ deviations that are properties of this target and are stated on each one:
     alias say that too, because which one you got decides whether there is
     anything to free.
 
-  * NO PARAMETER HAS A DEFAULT. A call from another image USED not to
-    materialize a callee's default arguments — the caller had no signature to
-    read them from, so a defaulted parameter arrived as a stack address — and
-    that is fixed (`formal/imports.py`'s `external_declarations`). `relpath` is
-    the one function here that CPython gives a default to, and it still requires
-    its argument: a choice rather than a limit, and the step that gives it back
-    is written down in
-    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
-    because it wants a sweep behind it.
+  * A DEFAULT ARGUMENT IS APPLIED ACROSS A DY LIB BOUNDARY. A call from another
+    image USED not to materialize a callee's default arguments — the caller had
+    no signature to read them from, so a defaulted parameter arrived as a stack
+    address — and that is fixed (`formal/imports.py`'s `external_declarations`).
+    `relpath` is the one function here that CPython gives a default to, so it
+    now defaults `start` to `"."` and the omitted-argument spelling is pinned
+    against CPython's own in `test_formal_os.py`.
     (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
     deleted, as a fixed bug's is.)
 
@@ -721,7 +719,7 @@ def realpath(p) -> str:
     return r
 
 
-def relpath(path, start) -> str:
+def relpath(path, start=".") -> str:
     """`path` relative to `start` — CPython's `os.path.relpath`.
 
     Both are made absolute, the components they share are dropped, one `..` is
@@ -729,14 +727,12 @@ def relpath(path, start) -> str:
     `path` is appended. `"."` is the answer when the two are the same path, as
     in CPython. A fresh buffer unless the answer is the literal `"."`.
 
-    `start` is REQUIRED rather than defaulting to `"."`. A default argument is
-    applied to a call from another image now — `formal/imports.py`'s
-    `external_declarations` gives the emitter the callee's declaration, so the
-    omitted register is filled from the default rather than left holding
-    whatever the caller last put there — so this is a choice, not a limit, and
-    the step that gives the default back is in
-    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`.
-    Pass `"."` for CPython's one-argument form.
+    `start` defaults to `"."`, which is CPython's one-argument form. A default
+    argument is applied to a call from another image now —
+    `formal/imports.py`'s `external_declarations` gives the emitter the callee's
+    declaration, so the omitted register is filled from the default rather than
+    left holding whatever the caller last put there — and the omitted-argument
+    spelling is pinned against CPython's own in `test_formal_os.py`.
 
     There is no `ValueError` for a relative `path` on a target that cannot
     change directory, which CPython raises on Windows; on a POSIX target the

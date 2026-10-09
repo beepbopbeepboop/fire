@@ -286,6 +286,14 @@ def main(n):
     printf("makedirs-again=%d@@", makedirs(join(root, "a/b/c"), 511))
     printf("makedirs-deep=%d@@", makedirs(join(root, "a/b/c/d/e"), 511))
     printf("makedirs-kept=%d@@", makedirs(join(root, "p/q/r"), 511))
+    # The OMITTED-argument spelling, which is CPython's one-argument form: the
+    # default is materialized at the call site from the callee's own
+    # declaration (`formal/imports.py::external_declarations`). A default that
+    # did not survive the dylib boundary would leave the argument register
+    # holding whatever the caller last put there, so a `mode` of 0 here would
+    # make a real directory nobody can enter.
+    printf("mkdir-default=%d@@", mkdir(join(root, "one-default")))
+    printf("makedirs-default=%d@@", makedirs(join(root, "q/r/s")))
     show("made-deep", join(root, "p/q/r"))
     printf("rmdir=%d@@", rmdir(join(root, "a/b/c/d/e")))
     show("removed", join(root, "a/b/c/d/e"))
@@ -325,6 +333,10 @@ def main(n):
     printf("chmod-missing=%d@@", chmod(join(root, "no-such"), 384))
     # ── the working directory, and coming back from it ──
     printf("cwd-rel=[%s]@@", relpath(join(root, "a"), getcwd()))
+    # `start` OMITTED, which is CPython's one-argument form and defaults to
+    # `os.curdir`. Asked before the `chdir` below, so the working directory it
+    # resolves against is the one this test's own `os.getcwd()` names.
+    printf("cwd-rel-default=[%s]@@", relpath(join(root, "a")))
     printf("chdir=%d@@", chdir(join(root, "a")))
     printf("cwd-in=%s@@", getcwd())
     printf("chdir-back=%d@@", chdir(root))
@@ -582,6 +594,8 @@ def group_fs(tmpdir, verbose):
         "makedirs": "0",
         "makedirs-again": "0",        # exist_ok: already there is not an error
         "makedirs-deep": "0",
+        "mkdir-default": "0",         # `mode` omitted: CPython's 0777 default
+        "makedirs-default": "0",
         "rmdir": "0",
         "rmdir-missing": "-1",
         "remove": "0",
@@ -595,6 +609,7 @@ def group_fs(tmpdir, verbose):
         "chmod": "0",
         "chmod-missing": "-1",
         "cwd-rel": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
+        "cwd-rel-default": f"[{posixpath.relpath(p('a'))}]",
         "chdir": "0",
         "cwd-in": p("a"),
         "chdir-back": "0",

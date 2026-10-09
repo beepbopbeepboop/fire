@@ -134,13 +134,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_dataclass_runtime_reflection.md` | `formal109-docs` | `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag |
 
-### `formal/imports` — 12 documents, 7 claimed
+### `formal/imports` — 11 documents, 6 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_binary_heap_mojo_after_the_len_value.md` | `formal108-docs` | `std/collections/binary_heap.mojo` builds nothing yet, and the 165 files behind it have TWO walls |
 | `FORMAL_dotted_base_bracket_list_is_not_classified.md` | `formal109-docs` | the predicate answers no for every dotted base, and the asking pass cannot have the table it needs |
-| `FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md` | `formal111-docs` | the backend applies a callee's defaults across a dylib now, and four hostmods still spell theirs out |
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | `formal113-docs` | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
 | `FORMAL_stdlib_module_names_are_not_classified.md` | `formal114-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_row_measured_b7.md` | `formal115-docs` | the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking |

@@ -290,9 +290,40 @@ def group_blake2b(tmpdir, verbose):
               f"CPython's digest_size={d} is a prefix of its 64-byte digest, "
               f"so this oracle cannot tell the two implementations apart")
 
+    # The OMITTED-`digest_size` spelling, which is CPython's one-argument form
+    # and defaults to 64. The default is materialized at the call site from the
+    # callee's own declaration (`formal/imports.py::external_declarations`); a
+    # default that did not survive the dylib boundary would leave the argument
+    # register holding whatever the caller last put there, and for a digest
+    # size that is a DIFFERENT HASH rather than a different length.
+    omit_lens = [0, 1, 128, 200]
+    omit_lines = ["import hashlib", "", "def main() -> int:"]
+    omit_want = {}
+    for n in omit_lens:
+        key = f"b{n}_default"
+        omit_want[key] = hashlib.blake2b(b"a" * n).hexdigest()
+        omit_lines.append(f"  var m{n}: Pointer[UInt8] = malloc({max(n, 1)})")
+        omit_lines.append(f"  memset(m{n}, 97, {n})")
+        omit_lines.append(f'  printf("{key}=%s@@", '
+                          f'hashlib.blake2b_hex(m{n}, {n}))')
+    omit_lines.append("  return 0")
+    omit_got = _records(run(build("\n".join(omit_lines) + "\n", "b2d")),
+                        r"(b\d+_default)=([0-9a-f]*)")
+    check(len(omit_got) == len(omit_want),
+          f"got {len(omit_got)} records for {len(omit_want)} omitted-"
+          f"digest_size cases")
+    omit_bad = [(k, v, omit_want[k]) for k, v in omit_got.items()
+                if v != omit_want[k]]
+    check(not omit_bad,
+          f"{len(omit_bad)}/{len(omit_got)} omitted-digest_size digests differ "
+          f"from CPython"
+          + (f"; first: {omit_bad[0][0]} got {omit_bad[0][1][:24]} "
+             f"want {omit_bad[0][2][:24]}" if omit_bad else ""))
+
     if verbose:
         print(f"    {len(got)} BLAKE2b digests byte-exact over "
-              f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes")
+              f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes, "
+              f"{len(omit_got)} with digest_size omitted")
     return True, f"{len(got)} digests byte-exact"
 
 
