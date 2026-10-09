@@ -497,6 +497,23 @@ def test_corpus():
           "%d examples" % len(ex))
 
 
+def _ledger_keys(corpus):
+    """The keys `--write-ledger` would write for a corpus of basenames.
+
+    The ledger is keyed `basename|backend` (`formal_memcheck.ledger_key`), so a
+    coverage check has to build the same namespace. Comparing a row COUNT
+    against a list of full paths only asks whether the totals agree, which is
+    true for any two equally-sized sets and false for a stale ledger that
+    happens to have the same number of rows as the corpus.
+    """
+    return {"%s|%s" % (name, backend)
+            for name in corpus for backend in BACKENDS}
+
+
+def _ledger_missing(rows, corpus):
+    return sorted(_ledger_keys(corpus) - set(rows))
+
+
 def test_ledger():
     """The committed ledger is well-formed and covers the corpus."""
     path = M.DEFAULT_LEDGER
@@ -507,10 +524,22 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
-    check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+    corpus = {os.path.basename(p)
+              for p in M.memcheck_sources() + M.example_sources()}
+    missing = _ledger_missing(rows, corpus)
+    check("the ledger covers every corpus row on both backends", not missing,
+          "%d of %d (program, backend) keys have no row; first missing: %s"
+          % (len(missing), len(corpus) * 2, ", ".join(missing[:6])))
+    # The coverage check above is a SET comparison, and this pins that it
+    # actually reports a gap rather than passing on a matching count: drop one
+    # key from a copy of the ledger and require it to be named.
+    synthetic = dict(rows)
+    dropped = sorted(_ledger_keys(corpus))[0]
+    synthetic.pop(dropped)
+    check("the coverage check names a program whose rows are missing",
+          _ledger_missing(synthetic, corpus) == [dropped],
+          "dropped %s; the check said %s"
+          % (dropped, _ledger_missing(synthetic, corpus)[:6]))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
