@@ -232,7 +232,8 @@ the frame receiver), `globals` (module-level `__DATA` slots, read through a
 local and written by a helper through its own `global`), `generics` (`def
 f[T](x: T, …)` called at more than one type, which is what monomorphisation
 acts on), `environ` (`os.getenv` against a FIXED process environment,
-`FIXED_ENV`).
+`FIXED_ENV`; it draws the Optional's `print` and `==` and deliberately not
+`len`, which the backend refuses on purpose).
 
 The value-model half: `strings` (binding, `len`, comparison, the byte
 subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
@@ -1380,7 +1381,17 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+    #
+    # `len(os.getenv(k))` is deliberately NOT drawn. It is a REFUSAL with a
+    # repair — `formal/model.py` explains that a byte count and a character
+    # count agree for ASCII names and disagree for every other one, and nothing
+    # in the source says which the kernel supplied — so a mix that drew it
+    # produced programs that were all refused and reported `refusal=N` as though
+    # it had measured something. `test_formal_fuzz.py`'s anti-vacuity check
+    # (`environ_produced_no_answer`) is what caught the dead mix. The optional
+    # `os.getenv` returns carries `print` and `==`/`is None`, which is what the
+    # two kinds below draw.
+    "environ": (("environ_get", 4), ("environ_cmp", 4),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2009,7 +2020,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_len", "environ_cmp",
+"environ_get", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2116,7 +2127,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+        elif kind in ("environ_get", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3050,11 +3061,16 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
+    #
+    # `len(os.getenv(k))` is NOT a kind here, and that is the fix for a dead
+    # mix rather than a missing construct: the backend REFUSES it on purpose
+    # (a byte count of kernel-supplied bytes is a character count only while
+    # the name is ASCII, and the source does not say), so every program that
+    # drew it was refused and the mix returned numbers for a corpus that
+    # measured nothing. The remaining two shapes are the ones the Optional
+    # `os.getenv` returns actually carries.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_len":
-            self.emit(indent, f"print(len(os.getenv({key!r})))")
-            return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
             return
