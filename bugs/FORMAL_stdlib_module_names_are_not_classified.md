@@ -1,5 +1,22 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
+**Status 2026-10-08 (`work/formal233-docs`): §0.5's next step LANDED — the five
+`find_spec`-decided names are in `HOST_UNREACHABLE`.** §0.5 measured the
+oracle's split of the 205 unclassified names and named `_gdbm`, `_tkinter`,
+`_overlapped`, `_winapi` and `_wmi` as "the first entries a worker could add
+with a measurement behind each"; all five are placed by the rule at the top of
+`formal/imports.py` applied rather than a new category. `importlib.util.find_spec`
+returns no spec for every one here, and the object each is missing is one a
+freestanding image cannot have (`_gdbm`/`_tkinter` need a library outside
+libSystem; the other three are Windows-only, so their no-spec measurement is
+host-independent). All five are private, so the PUBLIC unclassified count moves
+by zero. `test_formal_imports.py::test_the_five_find_spec_decided_names_are_unreachable`
+pins the tier, the verdict and the no-spec measurement;
+`test_formal_link_accounting.py::HOST_SET_ADDED_TIERS` carries all five with the
+tier and the reason. **What is still not done is unchanged:** the remaining ~200
+per-name judgements, which §0.1's ZERO-corpus-exposure measurement says cannot be
+told apart from plausible ones without a consumer to measure against.
+
 **Area:** FORMAL (module classification — `formal/imports.py`'s
 `HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED` / `HOST_NOT_A_MODULE`,
 and the wording of `unresolvable_import_error`). **Status: the FALSE SENTENCE is
