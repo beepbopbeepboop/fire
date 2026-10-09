@@ -44783,6 +44783,30 @@ def _export_rule_why() -> dict:
     }
 
 
+def _generic_inference_tail(name: str) -> str:
+    """The bare-call half of `imported_callee_refusal`, shared by its generic
+    branch and its unqualified fallback so the two cannot say it differently."""
+    return (
+        f"A generic template's instantiations ARE compiled into that module's "
+        f"library when an importer asks for them (`formal/monomorph.py`), so "
+        f"this call is one that asked for none — it names no type argument, or "
+        f"names one that is a value rather than a type, or spells the template "
+        f"as `module.{name}`. **If the call names no type argument at all, the "
+        f"SOURCE is right and this path is short**: Mojo infers a template "
+        f"call's type arguments, so `{name}(…)` with no bracket is correct "
+        f"code — the stdlib's own `FormatStruct(writer, \"Allocation\")` is "
+        f"spelled that way — and this path does not infer them yet. Its demand "
+        f"pipeline reads type arguments off an explicit bracket, so a bare call "
+        f"arrives here with no instantiation to bind; the inference, the 123 "
+        f"measured files it is worth, and the shape of the missing piece are "
+        f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+        f"inferrable.md. So write the operation in this module, or call a "
+        f"public function that does it — which is the same program with a "
+        f"definition this image can bind. Spelling it `{name}[<a type>](…)` "
+        f"will carry the instantiation, and is a workaround for this gap rather "
+        f"than a correction to your code")
+
+
 def imported_callee_refusal(name: str, sym, fn_name: str,
                             rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
