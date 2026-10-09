@@ -30,7 +30,15 @@ obvious:
    `_for_target_never_binds`, which were the same question asked twice (and the
    second time without the preheader). It also widens the decidable set to a
    literal SEQUENCE: `for i in []` and `for c in ""` bind no target, which they
-   did not before, because only a `range` call was ever read.
+   did not before, because only a `range` call was ever read. **A literal
+   container of any spelling is read now** (2026-10-08): a list/tuple/set, a
+   string, a DICT literal (`for k in {}` binds no target — before, `DictExpr`
+   was unread and the target stayed defined, so a read after it took whatever
+   the caller left in the register, the same unsafe gap this doc is about), and
+   a `*`/`**` spread by its LITERAL operand's length (`[*[]]` is empty, `[*[1,
+   2]]` is not), answering `'maybe'` for a spread whose operand is a run-time
+   fact. `_literal_sequence_emptiness` is the one reader of a container's item
+   count; `test_formal_read_before_store.py` pins all seven shapes.
 2. **`_range_is_nonempty(args, consts)` reads `_preheader_literals`' table**, so
    `k = 0` then `range(0, k)` is an emptiness this build decides. That is the
    doc's option 2, and the table was already there — `_loop_body_always_runs`

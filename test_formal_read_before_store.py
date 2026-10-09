@@ -326,6 +326,32 @@ CASES = [
      "    for c in \"\":\n        pass\n    return c\n", "refuse"),
     ("nonempty_literal_list_target_is_still_a_definition",
      "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
+    # A DICT literal is a literal container too, and its emptiness is decided by
+    # the same reader.  A `for` over a dict yields its KEYS, so an empty `{}`
+    # binds no target and a read after it is CPython's `UnboundLocalError`; the
+    # row below it pins the other direction.  Before `DictExpr` was read here
+    # the answer was `'maybe'`, which kept the target defined and let a read
+    # through on whatever the caller left in the register — the same unsafe gap
+    # as `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    ("empty_dict_target_is_not_a_definition",
+     "    for i in {}:\n        pass\n    return i\n", "refuse"),
+    ("nonempty_dict_target_is_still_a_definition",
+     "    for i in {1: 2}:\n        pass\n    return i\n", "ok"),
+    ("empty_dict_body_store_refused",
+     "    for i in {}:\n        t = i\n    return t\n", "refuse"),
+    # A `*`/`**` spread contributes its OPERAND's length rather than one item, so
+    # the reader follows a LITERAL operand — `[*[]]` is the empty sequence and a
+    # read after it is CPython's `UnboundLocalError` — and falls back to
+    # `'maybe'` for any other operand, which keeps the target and is the same
+    # run-time residual the parameter-bound range row above records.
+    ("empty_starred_literal_target_is_not_a_definition",
+     "    for i in [*[]]:\n        pass\n    return i\n", "refuse"),
+    ("nonempty_starred_literal_target_is_still_a_definition",
+     "    for i in [*[1, 2]]:\n        pass\n    return i\n", "ok"),
+    ("starred_sequence_whose_operand_is_a_name_keeps_the_target",
+     "    xs = [1]\n    for i in [*xs]:\n        pass\n    return i\n", "ok"),
+    ("empty_starred_dict_target_is_not_a_definition",
+     "    for i in {**{}}:\n        pass\n    return i\n", "refuse"),
     # THE RESIDUAL, pinned as a case so it cannot rot: the preheader has to
     # STATE the value, and a parameter is not a literal it can state — which is
     # the same limit `while_body_store_from_a_parameter_refused` records for the
