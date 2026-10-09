@@ -171,6 +171,53 @@ def test_x86_64_dylib_stub_entries_are_jmpq_rrip(tmpdir, shared):
               f"— an arm64 stub (ADRP/LDR/BR) was written for an x86-64 image")
 
 
+def test_dylib_flags_and_stub_reserved_fields_are_the_headers(tmpdir, shared):
+    """The two Mach-O header facts the bisect got wrong, pinned byte for byte.
+
+    * the mach_header flags: `build_macho_dylib` used to write `0x800005`,
+      which set `MH_HAS_TLV_DESCRIPTORS` (a bit this library does not mean) and
+      omitted `MH_TWOLEVEL`.  `ld` emits `0x100085` for the same dylib:
+      `MH_NOUNDEFS|MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS`.
+    * a `S_SYMBOL_STUBS` section's `reserved1`/`reserved2`: the header defines
+      `reserved1` as the indirect-symbol-table index and `reserved2` as the
+      size of one stub.  These images carry no indirect symbol table, so
+      `reserved1` is 0 and `reserved2` is the stub size — the writer used to
+      have them the other way round.
+    """
+    path = shared["extern_dylib"]
+    with open(path, "rb") as f:
+        data = f.read()
+    flags = struct.unpack_from("<I", data, 24)[0]
+    want_flags = 0x1 | 0x4 | 0x80 | 0x100000
+    check(flags == want_flags,
+          f"dylib mach_header flags are {flags:#x}, expected {want_flags:#x} "
+          f"(MH_NOUNDEFS|MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS)")
+
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    pos = 32
+    stub_section = None
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, pos)
+        if cmd == LC_SEGMENT_64:
+            nsects = struct.unpack_from("<I", data, pos + 64)[0]
+            so = pos + 72
+            for _i in range(nsects):
+                sname = data[so:so + 16].rstrip(b"\0").decode()
+                if sname == "__stubs":
+                    stub_section = struct.unpack_from("<II", data, so + 68)
+                so += 80
+        pos += cmdsize
+    check(stub_section is not None,
+          "the extern-calling dylib has no __stubs section to inspect")
+    reserved1, reserved2 = stub_section
+    check(reserved1 == 0,
+          f"__stubs reserved1 is {reserved1}, expected 0 — reserved1 is the "
+          f"indirect-symbol-table index and these images have no such table")
+    check(reserved2 == X86_64_STUB_SIZE,
+          f"__stubs reserved2 is {reserved2}, expected {X86_64_STUB_SIZE} — "
+          f"reserved2 is the size of one stub")
+
+
 def test_x86_64_dylib_passes_strict_validation(tmpdir, shared):
     """`codesign -v` accepts the library.
 
@@ -953,6 +1000,8 @@ def test_a_receiver_bound_to_a_frame_is_refused_on_both_machines(tmpdir,
 TESTS = [
     ("x86-64 dylib stubs are jmpq *(%rip)",
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),
+    ("dylib flags and stub reserved fields are the header's",
+     test_dylib_flags_and_stub_reserved_fields_are_the_headers),
     ("x86-64 dylib passes codesign strict validation",
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
