@@ -5,10 +5,36 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
-**Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
-reverse-applying the `formal/arm64_codegen.py` +
-`formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
-class: 3 failures before, 3 failures after, identical messages.**
+**Status: OPEN, diagnosed; §"The exact next step" item 1 is LANDED
+(2026-10-08, `work/formal248-docs`) and the class now reports the real drift.
+Pre-existing on this tree — verified by reverse-applying the
+`formal/arm64_codegen.py` + `formal/arm64_proof_gen.py` diff of the branch that
+found it and re-running the class: 3 failures before, 3 failures after,
+identical messages.**
+
+**Update 2026-10-08: the mechanism check is in, and it changes the DIAGNOSIS
+rather than the count.** `_symbolic_divisor_proof` no longer raises on a build
+that produces no universal theorem — it returns the build's own message and a
+`traced` flag — and every row of `TestTheZeroDivisorGuardAgainstLean` now begins
+with `_require_traced`, which fails with *"the fixture no longer generates the
+universal theorem this class dissects … so no residual goal is traced"* and
+names the actual blocker instead of asserting `⊢ 1 =` on an empty string and
+calling the result a diagnosis about `fdiv64`'s div0 arm. A new row,
+`test_the_measurement_mechanism_is_present`, is the dedicated form of that check.
+The class is still RED, and for a DIFFERENT and now-accurate reason: on today's
+tree the blocker is no longer just the div0 arm's `BL fflush` — it is the
+**arm64 stack-floor guard's `getrlimit`**, which is counted as a program call,
+so *no* program with an entry gets a `*_compiles_correctly_universal` at all
+(`bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md`).
+That means §"The exact next step" item 2's option (b) (a literal divisor) does
+not work either: measured, `def q(a, b): return a // 4` refuses with the same
+two unfollowable calls. The representation question this document
+is really about comes back only when the universal theorem does, so the class
+is correctly blocked on that fix — and the generation half of the contract is
+pinned without Lean by
+`TestTheZeroDivisorGuardIsAFalseGoal::test_the_proof_helper_reports_whether_its_
+mechanism_fired`. `TestTheZeroDivisorGuardIsAFalseGoal` is 3/3 (its three rows
+run with no Lean).
 
 ## What I ran
 
