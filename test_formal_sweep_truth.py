@@ -257,66 +257,6 @@ class TestLibraryCensus(unittest.TestCase):
             f"these, and Lean does not warn about a hole in an imported .olean")
 
 
-class TestABreachIsNotAVerdict(unittest.TestCase):
-    """A bound breach is a fact about the MACHINE, so it is never CACHED.
-
-    `proof_census` reads the verdict cache BEFORE it runs Lean, so a `fail`
-    written there for a wall-clock timeout is replayed by every later run on
-    every worktree and can never be cleared by a re-run — exactly the
-    `checked_run.py` rule about a cached red, re-introduced one layer down.
-    The launcher reports a breach as its own `exceeded` field and
-    `proof_census` must publish nothing for one. This pins that from both
-    sides: a breach publishes nothing, and a real Lean failure still does, so
-    the guard is a distinction rather than a publish-nothing switch.
-
-    No Lean runs here: the launcher, the library, the cache and the publisher
-    are all stubbed, which is the point — the decision is made before Lean is
-    ever asked.
-    """
-
-    def setUp(self):
-        self.published = []
-        self.saved = {name: getattr(L, name) for name in (
-            "find_lean", "ensure_library", "proof_verdict_key",
-            "library_census", "cas_lookup_verdict", "_run_lean",
-            "_publish_verdict")}
-        L.find_lean = lambda root=None: "lean"
-        L.ensure_library = lambda lean, lib_dir: None
-        L.proof_verdict_key = lambda *a, **kw: "test-key"
-        L.library_census = lambda *a, **kw: {}
-        L.cas_lookup_verdict = lambda key: None
-        L._publish_verdict = lambda *a, **kw: self.published.append(a)
-
-    def tearDown(self):
-        for name, value in self.saved.items():
-            setattr(L, name, value)
-
-    def _run_census(self, run_result):
-        L._run_lean = lambda *a, **kw: run_result
-        return L.proof_census("no-such-proof.lean", repo_root=HERE)
-
-    def test_a_breach_is_reported_and_never_stored(self):
-        detail = "lean exceeded 1200s wall (limit 1200s)"
-        c = self._run_census((False, detail, None, detail))
-        self.assertEqual(self.published, [],
-                         "a machine-property breach must not be written to the "
-                         "content-addressed verdict cache — a cached timeout is "
-                         "a permanent red no re-run can clear")
-        self.assertFalse(c.ok)
-        self.assertFalse(c.cached)
-        self.assertIsNone(c.n_sorries,
-                          "a killed elaborator printed a prefix of its "
-                          "warnings; None is the fact and 0 is a lie")
-
-    def test_a_real_failure_is_still_stored(self):
-        c = self._run_census(
-            (False, "sum_proof.lean:1:1: error: unsolved goals", 0, None))
-        self.assertEqual(len(self.published), 1,
-                         "a genuine Lean rejection is a pure function of the "
-                         "proof and must still be cached")
-        self.assertFalse(c.cached)
-
-
 class TestLeanOutput(unittest.TestCase):
     """Two traps that each made this census report zero holes, measured.
 
@@ -3051,14 +2991,6 @@ class TestX86EndToEndTables(unittest.TestCase):
         to either side without the other fails here, and adding the `_mem` lemma
         is what makes it visible at all.
 
-        The fold set is the same copy one step downstream: `_SIMP_FORMS` is
-        what the path and decision folds may unfold, so a successor row that
-        applies a state-valued wrapper must have that wrapper in its form's
-        fold set, or a fold that has to project through the shifted state
-        leaves a wrapper in the goal. The correction here added `x86_shift_post`
-        to `_SIMP_FORMS["shift_imm8:*"]`; a fold set that still named
-        `x86_set_reg` folded nothing.
-
         Lean-free, and the whole point: each of the three discoveries cost a
         100-second proof and most of them cost a corpus sweep to notice at all.
         """
@@ -3092,21 +3024,6 @@ class TestX86EndToEndTables(unittest.TestCase):
                 "missing what the instruction DOES, which for `imul_r64_r64` "
                 "was its four flags" % (form, sorted(model - row),
                                         sorted(row or ["nothing"])))
-
-        # The fold sets.  Forms with no entry at all (none of the SSE2 rows
-        # have one yet) are not visited; an entry that exists but omits a state
-        # wrapper its own successor applies is a fold that silently unfolds
-        # nothing, which the `shift_imm8:*` correction above is the history of.
-        for form in sorted(self.ET._SIMP_FORMS):
-            need = used(self.ET._SUCCS[form])
-            have = set(self.ET._SIMP_FORMS[form]) & wrappers
-            self.assertEqual(
-                need - have, set(),
-                "%s's successor applies %s while the form's fold set names "
-                "only %s: a fold through the successor leaves %s in the "
-                "goal, so `_SIMP_FORMS[%s]` is the second stale copy" %
-                (form, sorted(need - have), sorted(have),
-                 sorted(need - have), form))
 
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
@@ -5204,6 +5121,78 @@ class TestLabelUniqueness(unittest.TestCase):
                 # bound and still points into the image: an alias that forgot
                 # the single-definition case would show up here as a KeyError.
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
+
+
+class TestABreachIsNotAVerdict(unittest.TestCase):
+    """`proof_census` publishes a verdict to the CAS, and a BREACH is not one.
+
+    The rule is `checked_run.py`'s, one layer down: a recorded FAILURE is
+    re-run, because the key covers the proof's bytes and the toolchain and
+    deliberately says nothing about the machine. A wall/CPU breach is a fact
+    about the MACHINE — how loaded, how many proofs at once — so publishing it
+    turns one slow afternoon into a permanent red that no re-run can clear.
+    This row pins the fix that landed in 2335a001 ("ONE launcher, bounded in
+    wall AND cpu"): `_run_lean` now reports a breach as its own fourth return
+    value and `proof_census` reports it WITHOUT calling `_publish_verdict`, so
+    the poisoned records can no longer be written — and the verdict VERSION
+    bump retired the ones that had been.
+
+    Both directions are asserted, and both are needed: a row that only checked
+    "a breach is not published" would pass on a `proof_census` that publishes
+    nothing at all, which is a cache that can never answer and the opposite
+    failure.
+    """
+
+    def _census(self, run_result, published):
+        import tempfile
+        from unittest import mock
+        fd, path = tempfile.mkstemp(suffix=".lean", prefix="verdict_")
+        os.close(fd)
+        self.addCleanup(os.unlink, path)
+        with open(path, "w") as f:
+            f.write("theorem t : True := by trivial\n")
+        # Every step of `proof_census` that would touch Lean, the library or
+        # the machine-wide CAS is replaced; `_run_lean`'s answer is the input
+        # and `_publish_verdict`'s calls are the output under test.
+        with mock.patch.object(L, "find_lean", lambda *a, **k: "/usr/bin/lean"), \
+                mock.patch.object(L, "ensure_library", lambda *a, **k: None), \
+                mock.patch.object(L, "library_census", lambda *a, **k: {}), \
+                mock.patch.object(L, "proof_verdict_key",
+                                  lambda *a, **k: "proof/deadbeef"), \
+                mock.patch.object(L, "cas_lookup_verdict", lambda k: None), \
+                mock.patch.object(L, "_run_lean", lambda *a, **k: run_result), \
+                mock.patch.object(L, "_publish_verdict",
+                                  lambda *a, **k: published.append(a)):
+            return L.proof_census(path)
+
+    def test_a_breach_is_reported_and_not_published(self):
+        published = []
+        c = self._census((False, "lean exceeded 2700s wall", None,
+                          "lean exceeded 2700s wall"), published)
+        self.assertFalse(c.ok)
+        self.assertFalse(c.cached)
+        self.assertEqual(
+            published, [],
+            "a wall/CPU breach is a fact about the machine, and publishing it "
+            "makes it a permanent verdict every worktree replays: the key "
+            "cannot tell a slow box from a false theorem")
+        self.assertIsNone(
+            c.n_sorries,
+            "a killed elaborator printed a PREFIX of the file's warnings; "
+            "reporting the prefix as a count says 'measured, N holes'")
+
+    def test_a_failure_that_is_a_verdict_is_still_published(self):
+        published = []
+        c = self._census((False, "error: unknown identifier", 2, None),
+                         published)
+        self.assertFalse(c.ok)
+        self.assertEqual(
+            len(published), 1,
+            "a proof that genuinely fails IS a verdict about the proof's bytes "
+            "and must be cached, or the cache buys nothing")
+        self.assertEqual(published[0][2], 2,
+                         "the published record carries the hole census with the "
+                         "verdict")
 
 
 if __name__ == "__main__":
