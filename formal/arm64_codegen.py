@@ -1947,19 +1947,26 @@ dylib_exports: list = None, globals_base: int = None,
         # unprivileged process raise, and which says nothing about what it
         # enforces — is not read.
         #
-        # X0 is argument 0 and this runs BEFORE the prologue's `add x19, x0, #0`
-        # saves it, so the result has to be parked and the argument restored.
-        # X13 is the one register this prologue leaves alone: locals are X19..X28
-        # (`_CALLEE_SAVED`), the address scratch is X16/X17, and the budget
-        # arithmetic is X14/X15.
-        self.asm.emit(encode_mov_zr_xn(13, 0))
-        # …and argument 0 goes back, from X14.
+        # **`rlim_cur` is in the STRUCT, not in X0.** X0 here is `getrlimit`'s
+        # RETURN CODE (0 on success) — copying X0 into X13 as the limit is the
+        # one thing this block had wrong, and it made the whole runtime half a
+        # no-op: the limit word was always 0, `0 - MARGIN` wrapped, and both
+        # clamps then collapsed the budget to the BUILD-TIME `BUDGET`. That is
+        # invisible under the default 8 MiB stack (the cap is smaller than what
+        # is really there) and fatal under a reduced one (the cap is LARGER than
+        # what is there, so `SP >= floor` never goes false and the process
+        # SIGSEGVs at the cap's own depth). The struct's address has to be
+        # re-derived because X16/X17 are caller-saved and were clobbered by the
+        # call; the FIRST word is `rlim_cur` (`rlim_max` is not read — see
+        # above).
+        self._adrp_add_abs(16, scratch)
+        self.asm.emit(encode_ldr_xt_xn_imm(13, 16, 0))
+        # …and argument 0 goes back, from the X14 it was parked in before the
+        # call (that window is unchanged; the load above does not touch X14).
         self.asm.emit(encode_mov_zr_xn(0, 14))
-        # X16 holds the SCRATCH ADDRESS, not the limit, so the parked value
-        # has to be moved into it before the cache store. Storing X16 directly
-        # wrote the scratch's own address into the limit word, and the next
-        # guarded prologue then read an address in `__DATA` as a byte count —
-        # `address - 262144` is still enormous, so neither clamp caught it.
+        # The budget arithmetic reads the limit in X16, and the cached word is
+        # what every later guarded prologue loads instead of calling
+        # `getrlimit` again.
         self.asm.emit(encode_mov_zr_xn(16, 13))
         self._adrp_add_abs(17, limit_word)
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))

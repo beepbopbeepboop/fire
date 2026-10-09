@@ -1,5 +1,30 @@
 # arm64: an extern call emitted from the startup stub lands its `bl` past the end of `__TEXT`
 
+**Status 2026-10-08: the REDUCED-LIMIT gap this doc was the `_REDUCED_STACK_
+DEFERRED` reason for is CLOSED; the PROOF-GENERATION half is still OPEN and is
+what the startup-stub layout below is for.**
+
+* **The reduced-limit half is fixed, by the guard-prologue route this doc argued
+  against — and the reason it could be is that the read was a NO-OP.**
+  `bfeec991` kept `getrlimit` in arm64's guard prologue and copied `getrlimit`'s
+  RETURN CODE (0) into the limit word instead of loading `rlim_cur` out of the
+  struct, so the limit was always 0, the subtraction wrapped, and both clamps
+  collapsed the budget to the build-time cap. That is invisible at the default
+  8 MiB stack and fatal under a reduced one: the cap is larger than what is
+  really there, so `SP >= floor` never goes false and the process SIGSEGVs at
+  the cap's depth. `formal/arm64_codegen.py::_emit_stack_floor_guard` now loads
+  the first word of the struct, `_REDUCED_STACK_DEFERRED` is `{}`, and both
+  `reduced_stack_*` rows pass on both backends.
+* **The proof half is NOT fixed, and it is the same extern call.** With
+  `getrlimit` in the guard prologue, arm64 proof generation cannot follow the
+  `bl` to the stub and refuses (`no proof was generated … 2 calls this walk
+  cannot follow … opaque`), which is what this doc measured as 42 failures + 15
+  errors in `test_formal_call_proof_gen.py`. That is a `bfeec991` regression,
+  independent of the load above, and the fix is still what this doc says: move
+  the read to the startup stub, which needs the `__TEXT,__stubs` region sized
+  for the externs the stub adds. Until then arm64 has a WORKING runtime budget
+  and a proof-generation hole, not the other way round.
+
 ## What I ran
 
     export PATH=/opt/homebrew/bin:$PATH
