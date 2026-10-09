@@ -9,31 +9,6 @@ now REFUSED whenever the build can fold the value. This is the half it cannot
 fold, stated rather than hidden, because the alternative was refusing a host
 module the corpus depends on.
 
-**Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself
-incomplete, and is now complete.** The gate's own docstring said the test was the
-returned value's truthiness, but the code tested `isinstance(value, int)` over
-`fold_literal_expr`'s answer, so two whole literal kinds were let through:
-
-* a non-empty STRING — `fold_literal_expr` folds it to a `str` and the gate then
-  discarded it for being the wrong type; and
-* a non-zero FLOAT — `fold_literal_expr` has no float arm at all (it is the word
-  reader, and a float is not an integer word), so a float never reached the test.
-
-Both are the same wrong answer as `return True`, measured on both architectures:
-`return "yes"` and `return 0.5` each built, printed `enter / body 7 / exit` and
-exited 1 where CPython prints `after` and exits 0. The decision now goes through
-`model._literal_return_truthiness`, which decides an int/bool/string from its
-folded value and a float (and a `+`/`-` over one) from its own — NOT through
-`fold_module_value`, whose `int(0.5)` is 0 and would answer the truthiness the
-wrong way. `return ""`, `return 0.0`, `return 0`, `return False` and `return
-None` all still lower. Pinned by `test_formal_with.py`'s truthy-string and
-truthy-float REFUSAL rows and their falsy siblings
-(`an_exit_returning_an_empty_string_still_runs_the_protocol`,
-`an_exit_returning_zero_point_zero_still_runs_the_protocol`). **§2's computed
-case is untouched and is still the whole of what is left.**
-
-
-
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of
 the gate: `model.context_exit_returns_truthy` asks "does some `return` in
 `__exit__` fold to a truthy value", and `fold_literal_expr` answers None for
