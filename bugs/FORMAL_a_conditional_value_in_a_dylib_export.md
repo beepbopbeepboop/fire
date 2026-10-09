@@ -113,36 +113,6 @@ declined for want of a claim rather than for want of a proof.
 * **The loop (row 6) is untouched** and still needs the per-block `pc` function.
   That is `OPUS-4` in `FORMAL_dylib_export_loops_and_frame_bounds.md`.
 
-### 1.4 2026-10-07: the pinning test's Lean rejection was a SECOND, independent bug, and it is fixed
-
-`test_formal_dylib.py`'s `a conditional value is not a branch` and `several
-exports, and one with no derivable spec` were **red on master before anything
-here was touched**, but not for the reason this document is about: Lean rejected
-the emitted file with `native_decide` counterexamples over the CSET's own
-condition bits. The cause was in `formal/arm64_proof_gen.py`'s
-`_gen_step_result_lemmas`: the sign-extend `hb` polarity was decided by the
-IMMEDIATE-domain mask (`0x40000` / `0x2000`) instead of the same bit in the RAW
-WORD (`0x800000` / `0x40000`) — the immediate starts at bit 5, so the mask on
-`w` is the immediate's sign bit shifted back up by 5. Whenever the two bits
-disagreed the `hb` was false about the word. Measured on the `not n` → CMP+CSET
-dylib's own TBZ, word `0x36312064`: bit 18 (the sign bit) is 0, bit 13 (what
-`0x2000` reads) is 1. `_sign_extend_mask` is now the one place the mask lives,
-and two cases in `test_formal_call_proof_gen.py`'s `TestBitTestBranches` pin it
-(a TBZ and a CBZ whose two bits disagree).
-
-**That fix is necessary for this document's test but not sufficient for it
-today**, and the rest is not this document's: with the step lemmas compiling,
-the two tests now fail one assertion later, on a HOLE COUNT — `dylib_export_N_
-…_semantics_total` is emitted as a `sorry` because the export's CFG contains a
-`bl`. That `bl` is the arm64 stack-floor guard's `getrlimit` call in every
-prologue, which is exactly the regression
-`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` measures and owns
-(its own text: "with the call in the prologue, `test_formal_call_proof_gen.py`
-goes from 21 failures to 42 failures and 15 errors"); the fix it names is to
-move the read into the startup stub. So the block layer's half of this document
-is landed and pinned, and the test goes green when that claimed regression is
-fixed — not before.
-
 ---
 
 ## 2. Modelling `CSEL` turns a NAMED OBLIGATION into a BUILD FAILURE
