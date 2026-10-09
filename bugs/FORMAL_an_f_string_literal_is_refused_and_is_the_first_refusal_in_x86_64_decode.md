@@ -7,7 +7,25 @@ itself is still the right answer and still stands. Filed by `work/formal23-1`
 exposes it belongs to another doc's reproduction). PARTIAL WORK 2026-10-05 on
 `work/formal27-2`, in "What landed" at the end: the refusal's ADVICE was false
 and is now true and pinned by a test, and the ceiling for this file was measured
-(it is `**kw`, not composition).**
+(it is `**kw`, not composition). PARTIAL WORK 2026-10-08: a field-LESS f-string
+no longer reaches the refusal at all — it is FOLDED to the plain literal it
+already is.**
+
+**Update 2026-10-08: the refusal was reaching literals that need no buffer.**
+`f"hello"` has no `{…}` replacement field, so CPython reads it exactly as
+`"hello"` and the `f` prefix changes nothing. The refusal keyed on the prefix
+alone, so it refused a literal that needs no composition and then told the
+reader to rewrite a literal that was already a plain one —
+`formal/model.py::fold_interpolated_literal` now rewrites a field-less `f"…"`
+in place to a plain `StringLiteral` (body joined from
+`interpolated_literal_segments`, `is_raw` carried from an `r` in the prefix, so
+`rf"c\nd"` keeps its four characters). A `t"…"` template is NOT folded even with
+no fields — its value is a `Template`, not the text — and **a field-bearing
+`f"…"` is still refused exactly as below**, which is the whole of what §'What is
+still missing' is about. Pinned in `test_formal_run.py`
+(`fstring_with_no_field_is_the_plain_literal_it_already_is`,
+`raw_fstring_with_no_field_keeps_its_backslash`, both against CPython on both
+backends).
 
 Found 2026-10-04 while re-measuring
 `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose

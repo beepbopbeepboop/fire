@@ -11583,8 +11583,50 @@ def _interpolated_shape_sentence(segs: list) -> str:
     return out
 
 
+def fold_interpolated_literal(node) -> bool:
+    """Rewrite an f-string with NO `{…}` fields into the plain literal it is.
+
+    `f"n=7"` has no replacement field, so its value is its text and CPython
+    treats it exactly as `"n=7"` — the `f` prefix changes nothing. On this path
+    there is no buffer, so a FIELD is refused (`interpolated_literal_refusal`),
+    but a field-LESS literal needs no buffer at all: it is the same interned
+    `__TEXT` bytes `"n=7"` already is, through the same `_intern_string`.
+    Refusing it refuses correct source and a spelling the corpus writes, and the
+    message then told the reader to rewrite a literal that was already a plain
+    one.
+
+    Returns True when `node` was rewritten IN PLACE and False when it still has a
+    field (and must be refused) or is not an f-string. The rewrite is a plain
+    `StringLiteral` step: `value` becomes the body, `is_interpolated` clears, and
+    `is_raw` records an `r` in the prefix, because the body of `rf"a\\nb"` must
+    stay four characters just as `r"a\\nb"` does (`fire_compiler.decoded_literal`
+    is the one reader of that distinction). A `t"…"` template is NOT folded even
+    with no fields: its value is a `Template`, not the text, so it stays on the
+    refusal path.
+    """
+    if not is_interpolated_literal(node):
+        return False
+    spelled = getattr(node, "value", "")
+    if not isinstance(spelled, str):
+        return False
+    quote_at = interpolated_literal_quote_start(spelled)
+    prefix = spelled[:quote_at]
+    if "t" in prefix or "T" in prefix:
+        return False
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError:
+        return False
+    if any(seg[0] != "lit" for seg in segs):
+        return False
+    node.value = "".join(seg[1] for seg in segs)
+    node.is_interpolated = False
+    node.is_raw = "r" in prefix or "R" in prefix
+    return True
+
+
 def refuse_interpolated_literals(stmts) -> None:
-    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+    """Fold a field-less f-string, and raise `CodegenError` on the first one WITH a field.
 
     Asked over the MODULE's statement list, once, by the one pipeline both
     front ends go through (`formal/build.py:_prepare_functions`) — the same
@@ -11603,7 +11645,7 @@ def refuse_interpolated_literals(stmts) -> None:
     is one of them.
     """
     for node in iter_nodes(stmts):
-        if is_interpolated_literal(node):
+        if is_interpolated_literal(node) and not fold_interpolated_literal(node):
             raise CodegenError(interpolated_literal_refusal(
                 node, getattr(node, "line", "")))
 
