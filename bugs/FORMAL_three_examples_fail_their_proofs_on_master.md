@@ -1,4 +1,22 @@
-# `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES`
+# `count` and `pow2` fail their generated proofs on master, and both are now DECLARED
+
+**Status 2026-10-08 (`work/formal255-docs`): re-measured on this tree — both
+rows are now `KNOWN-GAP`, so the title's "neither is in `EXPECTED_FAILURES`" is
+no longer true and is corrected above.** `python3 test_formal.py -j 1 count
+pow2` reports `PASS=0 KNOWN-GAP=2 FAIL=0`, and the declared reason is the
+return-frame read this doc is about. The diagnostics have MOVED: the current
+failure is the recursion contract's BASE case replaying the STEP walk —
+`count_proof.lean:5939` / `pow2_proof.lean:6232` report `Unknown identifier
+ih` and the `frameBound_descend_le` application does not typecheck against
+`hbnd : FrameBound 131152 st 0`, and each proof ends in "(kernel) excessive
+memory consumption detected". The x30 materialised-address read this doc was
+written about (`count_proof.lean:5909`) is still one of the sites. The fix is
+in `formal/arm64_proof_gen.py`'s recursion-contract emit (the base bullet is
+emitted with the step body); that file is claimed by a sibling formal worker,
+so it is recorded here rather than changed. `test_formal.py`'s
+`EXPECTED_FAILURES` and
+`test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`
+are the standing pins.
 
 **Area:** FORMAL, arm64 — `formal/arm64_proof_gen.py`'s frame-address goals and
 `lib/ProofLib.lean`'s address canonicalisation lemmas. **Status: the THREE reds
