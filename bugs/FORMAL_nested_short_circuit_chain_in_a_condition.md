@@ -4,6 +4,35 @@
 per-path entry statement they needed is in `formal/arm64_proof_gen.py`).
 A chain NESTED inside a chain is not, and this says why and what closes it.
 
+**Status 2026-10-08 (`work/formal247-docs`): the canaries emit a REACHABILITY
+theorem instead of the model theorem, measured, and the non-Lean half of this
+file's own test is red for it — but the CAUSE is the prologue stack guard, which
+is another worker's area, so this is a finding rather than a fix.** The doc's
+`either`/`both` are the canaries it says "must keep proving"; today NEITHER
+proves the model. Read off the generated arm64 proofs (the architecture this
+file's `TestShortCircuitProofs` compiles), `either` and `both` each carry
+exactly one universal theorem and it is
+
+    theorem both_reaches_call_at_0x10000041c (n : UInt64) … :
+      (match arm64_exec_go_exit … with | some s => True | none => False)
+
+— a claim that the run HALTS, with no `x0 = mojo n` anywhere in the file. The
+model theorem is not emitted, so `test_formal_short_circuit_cond.py`'s
+`test_the_terminal_leaves_see_a_source_condition_fact` fails (its
+`-- terminal value flow:` marker is absent because `_flow` is False on the
+`halt_only` path), and it fails on `either` too — `both` is only the first
+alphabetically. **This is not this document's subject and not this worker's to
+fix**: the halt the generator picks is the `getrlimit` BL the stack-floor guard
+puts in EVERY arm64 prologue, `_reached_without_a_condition` accepts it as the
+halt boundary when it is reached before any source conditional, and that area is
+`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`
+(measured 2026-10-06) plus `formal245-docs`'s
+`FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function` /
+`FORMAL_arm64_known_proof_gaps`. What this round contributes is the measurement
+that the getrlimit halt-boundary choice silently DROPS the model theorem for a
+program whose own logic sits after the guard, which is the "a proof about
+nothing" outcome the project treats as worst.
+
 **Status 2026-10-05 (`work/formal23-4`): the MODEL half is FIXED on both
 architectures, and the doc's premise that the whole failure is the machine half
 is only HALF of what a run reports. `eval_eq_mojo` — the AST evaluator against
