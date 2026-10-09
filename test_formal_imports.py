@@ -3718,6 +3718,50 @@ def test_a_bare_call_to_a_template_is_refused_by_the_export_rule(tmpdir, _shared
           f"{text.strip()[-300:]}")
 
 
+def test_a_call_to_a_name_the_module_does_not_declare_says_so(tmpdir, _shared):
+    """A call to a name the defining module does not DECLARE is not blamed on
+    `doc/ABI.md`'s export rule.
+
+    `model.imported_callee_refusal` enumerated four candidate exclusions, and
+    for a module that simply has no such name none of them is true — so the
+    sentence was false about the file it named. The measured case is
+    `runtime/stdlib_wrapper.mojo`'s `from time import now`: every one of the four
+    rules was false about `formal/hostmods/time.mojo`, which declares no `now`.
+    The rule is now READ from the defining module's own source
+    (`formal/build.py::export_rule_for`, through `reflect.export_exclusions`),
+    and the fifth answer — the module declares no name under that spelling — is
+    stated as itself.
+    """
+    root = os.path.join(tmpdir, "undeclared")
+    os.makedirs(root)
+    write_tree(root, {
+        "lib.mojo": "def present() -> Int:\n  return 1\n",
+        "prog.mojo": ("from lib import absent\n"
+                      "\n"
+                      "def main():\n"
+                      "  print(absent())\n"
+                      "  return 0\n"),
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a call to a name the module does not declare built successfully")
+    check("does not DECLARE it" in text and "absent" in text,
+          f"the refusal did not say the module declares no such name, which is "
+          f"the fact that decides it: {text.strip()[-400:]}")
+    check("a name with a leading `_` is private" not in text
+          and "a generic template is not one symbol" not in text,
+          f"the refusal still blamed an export rule for a name the module does "
+          f"not declare at all: {text.strip()[-400:]}")
+    # …and the sentence must not be the empty-name shape either: it names the
+    # module and the spelling, which is what the reader acts on.
+    check("`lib`" in text and "`absent`" in text,
+          f"the refusal did not name the module and the missing name: "
+          f"{text.strip()[-400:]}")
+
+
+
 METHOD_CALL_MODULE = (
     "def widen[T: Intable](v: T) -> T:\n  return v\n")
 
@@ -5156,6 +5200,8 @@ TESTS = [
      test_a_module_nobody_binds_a_concrete_name_from_needs_no_library),
     ("a bare call to a template is refused by the export rule",
      test_a_bare_call_to_a_template_is_refused_by_the_export_rule),
+    ("a call to a name the module does not declare says so",
+     test_a_call_to_a_name_the_module_does_not_declare_says_so),
     ("the bare-call refusal names the method the call is in",
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",

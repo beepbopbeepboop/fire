@@ -14595,6 +14595,72 @@ def _published_shape(module, link_line):
             _module_published_containers(module, link_line))
 
 
+def _module_source_path(module: str, link_line):
+    """The source file a module's library was built from, off the link line.
+
+    `load_dylib_manifests` records each library's own `source` (the manifest
+    writer stores it, and a library with no source of its own — the runtime
+    dylib — records None, which is the honest "there is no declaration to read").
+    `dylib_export_lists` used to project that field away, so a reader holding
+    only a module NAME had no way back to the file the module was built from.
+    Added back for `export_rule_for`, which reads the declarations the export
+    rule is a statement about. None for a module this unit did not import."""
+    if not link_line:
+        return None
+    for d in dylib_export_lists(link_line):
+        if d.get("module") == module and d.get("source"):
+            return d["source"]
+    return None
+
+
+def export_rule_for(module: str, name: str, link_line):
+    """WHICH `doc/ABI.md` export rule excludes `name` from `module`, or that the
+    module declares no such name.
+
+    `model.imported_callee_refusal` used to enumerate four candidate exclusions
+    and, for a module that simply does not declare the name, none of them is
+    true — the measured case is `runtime/stdlib_wrapper.mojo`'s
+    `from time import now`, where `formal/hostmods/time.mojo` has no `now`. So
+    the rule is READ from the defining module's own source rather than guessed
+    at the refusal: the path comes off the link line's manifest
+    (`_module_source_path`), and the rule is `reflect.export_exclusions`, the ONE
+    place the export rule is stated and the same table `collect_exports_src`
+    filters through. Returns
+
+      * one of `reflect.EXCL_PRIVATE`/`_GENERIC`/`_OVERLOADED`/`_CLIB` — the
+        rule that really applied;
+      * `reflect.EXCL_ABSENT` — the module declares no name under this spelling,
+        which is the fifth answer and is not an exclusion at all;
+      * None — the rule could not be determined (no link line, no source, or the
+        name IS declared and exported but simply absent from this link line, a
+        manifest/link mismatch the caller's own published-set check is about),
+        so the caller keeps the enumerated fallback rather than guessing.
+    """
+    source = _module_source_path(module, link_line)
+    if not source:
+        return None
+    try:
+        with open(source) as f:
+            src = f.read()
+    except OSError:
+        return None
+    import reflect                                  # lazy — see _abi_symbol
+    try:
+        excluded = reflect.export_exclusions(src)
+        if name in excluded:
+            return excluded[name]
+        exported = {e["name"].split(".", 1)[0]
+                    for e in reflect.collect_exports_src(src)}
+    except Exception:
+        # A source that will not parse is not evidence about the name, and this
+        # is a diagnostic: fall back to the enumerated sentence rather than turn
+        # a refusal into a different traceback.
+        return None
+    if name in exported:
+        return None
+    return reflect.EXCL_ABSENT
+
+
 def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
     """Does this link line bind a bare callee spelled `name`?
 
@@ -14701,7 +14767,8 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
     published = _module_published_names(module, link_line)
     if not published or base_name in published:
         return None
-    return M.imported_callee_refusal(base_name, sym, fn_name)
+    return M.imported_callee_refusal(base_name, sym, fn_name,
+                                     export_rule_for(module, base_name, link_line))
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None) -> None:
@@ -15893,7 +15960,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name))
+                        cname, csym, fn.name,
+                        export_rule_for(getattr(csym, "module", None), cname,
+                                        link_line)))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16025,7 +16094,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # `bracket_callees` note above for why this is refused here
                     # rather than allowed to reach a dangling `BL`.
                     raise CodegenError(M.imported_callee_refusal(
-                        name, sym, fn.name))
+                        name, sym, fn.name,
+                        export_rule_for(getattr(sym, "module", None), name,
+                                        link_line)))
                 # A module-level name with no slot, refused for the reason a
                 # module-level name is refused: nothing writes it, so its value
                 # is the module-level one, and the build can only know that if
@@ -20360,6 +20431,7 @@ def dylib_export_lists(dylibs: list) -> list:
     which of the two shapes it is (`model.dylib_module_variables`,
     `model.dylib_module_containers`)."""
     return [{"module": d.get("module") or "",
+             "source": d.get("source"),
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
              "constants": d.get("constants") or {},

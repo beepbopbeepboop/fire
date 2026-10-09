@@ -44321,8 +44321,22 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
-def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+def imported_callee_refusal(name: str, sym, fn_name: str, rule=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
+
+    `rule` is the ONE rule `doc/ABI.md`'s export rule applied to this name,
+    computed by the caller from the DEFINING MODULE's own source
+    (`formal/build.py::export_rule_for`) because that is the only place the rule
+    can be stated truthfully. It is one of `reflect.EXCL_PRIVATE`/`_GENERIC`/
+    `_OVERLOADED`/`_CLIB`, or `reflect.EXCL_ABSENT` when the module declares no
+    name under this spelling at all — which is the fifth answer and is NOT an
+    exclusion. When it is None (a caller with no link line or no readable
+    source, and the module-level-store path in `formal/imports.py`) the sentence
+    falls back to enumerating the four candidate rules, which is what it did
+    before the rule could be read. The measured case for `EXCL_ABSENT` is
+    `runtime/stdlib_wrapper.mojo`'s `from time import now`: every one of the
+    four enumerated rules was false about `formal/hostmods/time.mojo`, which
+    declares no `now` at all.
 
     Distinct from `module_global_refusal` because the two are different facts,
     and the generic one is FALSE about this one. `f[x](...)` roots at a name,
@@ -44369,36 +44383,67 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
-    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+    head = (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
             f"call has to bind a symbol `{mod}` exports. That module does not "
             f"export it, and the reason is `doc/ABI.md`'s export rule rather "
-            f"than anything about this call: a name with a leading `_` is "
-            f"private, a generic template is not one symbol but one per "
-            f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
-            f"both at once), an overload has no single symbol, and a C library "
-            f"name like `exit` or `write` is provided by libSystem. The "
-            f"exclusion is measured and settled in "
-            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
-            f"A generic template's instantiations ARE compiled into that "
+            f"than anything about this call: ")
+    # The generic half is shared by every rule, because a template call is the
+    # construct the four rules are most often asked about and the bare-call
+    # guidance is true whichever rule excluded the name.
+    tail = (f"A generic template's instantiations ARE compiled into that "
             f"module's library when an importer asks for them "
-            f"(`formal/monomorph.py`), so this call is one that asked for "
+            f"(`formal/monomorph.py`), so a call to a template that asked for "
             f"none — it names no type argument, or names one that is a value "
-            f"rather than a type, or spells the template as `module.{name}`. "
-            f"**If the call names no type argument at all, the SOURCE is right "
-            f"and this path is short**: Mojo infers a template call's type "
-            f"arguments, so `{name}(…)` with no bracket is correct code — the "
-            f"stdlib's own `FormatStruct(writer, \"Allocation\")` is spelled that "
-            f"way — and this path does not infer them yet. Its demand pipeline "
-            f"reads type arguments off an explicit bracket, so a bare call "
-            f"arrives here with no instantiation to bind; the inference, the 123 "
-            f"measured files it is worth, and the shape of the missing piece are "
-            f"in "
+            f"rather than a type, or spells the template as `module.{name}` — "
+            f"has no boundary symbol to bind. **If the call names no type "
+            f"argument at all, the SOURCE is right and this path is short**: "
+            f"Mojo infers a template call's type arguments, so `{name}(…)` with "
+            f"no bracket is correct code — the stdlib's own "
+            f"`FormatStruct(writer, \"Allocation\")` is spelled that way — and "
+            f"this path does not infer them yet. The inference, the 123 measured "
+            f"files it is worth, and the shape of the missing piece are in "
             f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md. "
             f"So write the operation in this module, or call a public function "
             f"that does it — which is the same program with a definition this "
             f"image can bind. Spelling it `{name}[<a type>](…)` will carry the "
             f"instantiation, and is a workaround for this gap rather than a "
             f"correction to your code")
+    if rule is not None:
+        # Lazy, as everywhere else this file needs reflect: the rule constants
+        # live in one place and this is a diagnostic, not a hot path.
+        import reflect
+        if rule == reflect.EXCL_ABSENT:
+            return (f"{who}`{name}` is called, and it is imported from `{mod}`, "
+                    f"so the call has to bind a symbol `{mod}` exports. That "
+                    f"module does not export it — and it does not DECLARE it "
+                    f"either: `{mod}` has no `{name}` at any visibility, so this "
+                    f"is not `doc/ABI.md`'s export rule (there is no private "
+                    f"declaration, generic template, overload or C library name "
+                    f"under that spelling to exclude). The name is simply not "
+                    f"there to export, so write the operation in this module, or "
+                    f"call a public function of `{mod}` that does it")
+        sentences = {
+            reflect.EXCL_PRIVATE: "a name with a leading `_` is private",
+            reflect.EXCL_CLIB: ("a C library name like `exit` or `write` is "
+                                "provided by libSystem"),
+            reflect.EXCL_OVERLOADED: "an overload has no single symbol",
+            reflect.EXCL_GENERIC: ("a generic template is not one symbol but one "
+                                   "per instantiation (`_get_kgen_string[asm]()` "
+                                   "is the measured case — both at once)"),
+        }
+        sentence = sentences.get(rule)
+        if sentence is not None:
+            return head + sentence + ". " + tail
+        # An unknown rule is a caller's bug rather than a fact about the file, so
+        # fall through to the enumerated sentence rather than print nothing.
+    return (head +
+            f"a name with a leading `_` is private, a generic template is not "
+            f"one symbol but one per instantiation (`_get_kgen_string[asm]()` "
+            f"is the measured case — both at once), an overload has no single "
+            f"symbol, and a C library name like `exit` or `write` is provided "
+            f"by libSystem. The exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. " +
+            tail)
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
