@@ -6,6 +6,17 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
+**Status (2026-10-08, `work/formal248-docs`): §6 item 4 is CLOSED, so ALL FIVE
+of §6's items are now closed and this document has no open item left.** Item 4
+was the resolver bug the probe's own fix surfaced — a dotted import could bind a
+nearer root's leaf instead of the module it spells — and it was fixed by
+`a4cdab9a` (measured: 31 such bindings over the stdlib). The item had cited a doc
+that was deleted with that fix, so the citation now names the bug and the commit
+instead. §0.4's message pin was also red on arrival (`work/formal248-docs`) and
+is green again: a later merge dropped two substrings the pin asserts, both
+restored. The per-file table's two features are still `formal19-1`'s and
+`formal16-2`'s, and §2's table remains the map of what is outside this scope.
+
 **Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
 (§0.4) — the false clause "nothing this backend could add" is gone and the
 sentence now names the backend RULE that would remove it and the feature that
@@ -19,8 +30,8 @@ import that is the *only statement* of an indented block) is **not** a parse
 error in this dialect, and the shape it did not name (a parenthesised import
 spanning lines) is. One repair covers both, and with it the walk measured **five
 links nobody had measured** instead of three (§0.2). §6 items 1 and 2 are
-unchanged and item 4 was filed by its own branch
-(`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`, `formal21-1`), so the two
+unchanged and item 4 — a dotted import binding a nearer root's leaf — was filed
+by its own branch (`formal21-1`, fixed by `a4cdab9a`), so the two
 features §2 names are still `formal19-1`'s and `formal16-2`'s and the per-file
 table is still §2's. §0.2 is what changed, and §0.1 (item 1) before it.
 
@@ -29,13 +40,13 @@ constants-only refusal was false in both of its clauses and no longer is, with
 cases on both architectures. The FEATURE it was standing in for is still
 `formal16-2`'s and still unlanded, so this document still has no fix of its own
 in it; what landed is the sentence.** §0.1 below is item 1, item 3 is unchanged,
-and item 4 was filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_
-nearer_leaf`, `formal21-1`).
+and item 4 (a dotted import binding a nearer root's leaf) was filed by its own
+branch (`formal21-1`, fixed by `a4cdab9a`).
 
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
-filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`,
+filed by its own branch (a dotted import binding a nearer root's leaf,
 `formal21-1`), so **this document has nothing left of its own**: the two
 features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
 §2's, and the only thing this document asked for was an instrument that can
@@ -204,12 +215,12 @@ group sizes: 19 + 11 + 4 + 3 + 2 + 2 + 1 + 1 = 43. The five groups whose key is 
 real refusing module for link 1 are 19 + 11 + 2 + 1 + 1 = **34**, and the three
 left over are the `std/_gpu/_utils.mojo` group — so **link 1's feature accounts
 for 37 files, exactly §2's 37, with 3 of them filed under the wrong name.**
-`std.format._utils` resolves to `std/_gpu/_utils.mojo` ITSELF, so the importer is
-named as the refuser; see §6.4 and
-`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`. It is the only group in the
-walk whose key is wrong, and it is wrong because of a defect in the resolver the
-walk and the build share — which is also why §2's table, read off the sweep log
-rather than off this walk, is the one to use.
+`std.format._utils` resolved to `std/_gpu/_utils.mojo` ITSELF, so the importer
+was named as the refuser; see §6.4. It is the only group in the walk whose key
+was wrong, and it was wrong because of a defect in the resolver the walk and the
+build share (a dotted import binding a nearer root's leaf, fixed 2026-10-04 by
+`a4cdab9a`) — which is also why §2's table, read off the sweep log rather than
+off this walk, is the one to use.
 
 **Link 2 HAS a doc and no claim, and it is not monomorphisation**
 (`work/formal25-5`): `std/sys/arg.mojo` is outside every package here, and the
@@ -640,14 +651,24 @@ which §0.4 established is false of a refused module). Measured:
    parenthesised import, and §0.2 names the file, the line and the error. The
    walk now measures 8 links on this scope where it measured 3, on both
    architectures, with 0 files reporting its own damage.
-4. **`formal.imports.resolve_module_path` is wrong for one importer in this
-   scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
-   — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
-   because `_candidates` puts a root's leaf fallback in the same list as its
-   dotted path and the root loop is nearest-first. Measured inside a real build,
-   not only by direct call. It surfaced here because the probe now resolves the
-   module a refusal names with that same function, and it put three files of one
-   round under a group keyed on the IMPORTER.
+4. ~~**`formal.imports.resolve_module_path` is wrong for one importer in this
+   scope**~~ **CLOSED (2026-10-08, `work/formal248-docs`).** The bug was: a
+   dotted name could bind a NEARER ROOT'S LEAF instead of the module it spells,
+   because `_candidates` offered the leaf fallback in the same list as the
+   dotted path and the root loop is nearest-first — so
+   `std/_gpu/_utils.mojo` importing `std.format._utils` resolved to ITSELF.
+   Fixed by `a4cdab9a` ("a dotted import must bind the module it NAMES, not a
+   nearer root's leaf"), which measured 31 such bindings in 252 stdlib files
+   (`std/sys/info.mojo` and `std/_gpu/host/info.mojo` each importing the other
+   and each getting THEMSELVES was the clearest). Re-measured here on today's
+   tree: `resolve_module_path("std.format._utils", relative_to=…/_gpu/_utils.mojo)`
+   now answers `std/format/_utils.mojo`. Pinned by
+   `test_formal_imports.py::test_the_spelling_outranks_a_nearer_roots_leaf` (the
+   synthetic rule, with a program whose exit code says which answer it got) and
+   `test_a_dotted_stdlib_import_resolves_to_the_module_it_names` (every
+   measured stdlib case). The document the item cited was deleted with its fix,
+   which is why the citation now names the BUG and the commit rather than a
+   path; that is the first half of this project's rule for deleting a doc.
 5. ~~**One link of §0.2's new table has no claim and no doc**:
    `hasher.mojo` re-exports `Span` from `std.collections` and no module it
    imports exports the name, so 9 files of this scope sit behind it. ~~
