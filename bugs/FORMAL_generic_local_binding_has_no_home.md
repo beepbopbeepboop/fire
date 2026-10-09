@@ -1,7 +1,31 @@
 # A generic struct constructed with inferred (or annotated) type arguments loses its binding's home
 
 **Area:** FORMAL/build — binding-home classification. **Found 2026-10-06,
-`work/formal94-docs`.** NOT FIXED.
+`work/formal94-docs`.**
+
+**Status 2026-10-08 (`work/formal234-docs`): PARTIALLY FIXED — this doc's own
+reproducer (an UNUSED type parameter) now builds and runs on both
+architectures; the USED-parameter case remains, and is why the doc stays.**
+
+`formal/monomorph.py::without_template_bodies` dropped EVERY struct template, so
+`Marker` was never in `structs_by_name` and the bare `Marker(b.a)` had no home to
+classify. It now keeps a struct template whose bracket parameters are ALL unused
+TYPE parameters (`T: AnyType`, no comptime parameter) AND which the source
+constructs BARE (`Marker(b.a)`; a `Marker[Int](…)` anywhere in the file drops it,
+so the explicit instantiation and the bracketed-callee refusal keep their
+meanings). Such a struct's layout does not depend on the argument, so its own
+declaration IS the layout. Pinned by `test_formal_monomorph.py`'s `a bare
+construction of an unused-parameter template` (CPython differential, both
+architectures) and by the re-pointed `test_formal_run.py` row
+`origin_of_in_a_local_type_annotation_is_still_a_type`, now the POSITIVE answer
+(7) instead of the refusal it used to record.
+
+**What is still open:** a type parameter the body USES — `struct Pair[T]: var a:
+T` built as `Pair(1, 2)` — is a real INFERENCE (bind `T` from the argument's
+type) and is still refused, as is `var p: Pair[Int] = Pair(1, 2)` through the
+annotation. Those need the constructor-argument unifier
+`elaborate.infer_struct_type_args` reached from the formal demand walk, which the
+compiled path already has and the formal path does not.
 
 ## What was run
 

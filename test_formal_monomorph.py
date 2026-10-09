@@ -427,6 +427,70 @@ def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
               f"anything this case wrote down")
 
 
+def test_a_bare_construction_of_an_unused_parameter_template(tmpdir):
+    """`Marker(b.a)` — the type argument INFERRED — has a home, both arches.
+
+    `bugs/FORMAL_generic_local_binding_has_no_home.md`. `struct Marker[T:
+    AnyType]: var v: Int` uses `T` nowhere, so its layout does not depend on the
+    argument and the bare construction is well defined — which is what the
+    interpreter and the gimple path already answer. The formal path dropped every
+    struct template (`monomorph.without_template_bodies`), so `Marker` was not in
+    `structs_by_name`, `_one_word_constructor_bindings` never classified `m`, and
+    the field read was refused:
+
+        build: tag: 'm.v' is a field access through 'm', and this path has no way
+        to say what 'm' holds …
+
+    The fix keeps a struct template whose bracket parameters are ALL unused type
+    parameters, and only when the source constructs it BARE — a `Marker[Int]()`
+    anywhere in the same file still drops it, so the explicit instantiation and
+    the bracketed-callee refusal keep their meanings. The annotated spelling
+    (`var m: Marker[Int] = Marker(b.a)`) is the same binding and is pinned beside
+    this one in `test_formal_run.py`'s
+    `origin_of_in_a_local_type_annotation_is_still_a_type`.
+    """
+    src = ("struct Marker[T: AnyType]:\n"
+           "    var v: Int\n"
+           "\n"
+           "struct Bag:\n"
+           "    var a: Int\n"
+           "    var b: Int\n"
+           "\n"
+           "def tag(b: Bag) -> Int:\n"
+           "    var m = Marker(b.a)\n"
+           "    return m.v\n"
+           "\n"
+           "def main():\n"
+           "    var g = Bag()\n"
+           "    g.a = 7\n"
+           "    g.b = 8\n"
+           "    print(tag(g))\n")
+    cpython = ("class Marker:\n"
+               "    def __init__(self, v):\n"
+               "        self.v = v\n"
+               "\n"
+               "class Bag:\n"
+               "    def __init__(self):\n"
+               "        self.a = 0\n"
+               "        self.b = 0\n"
+               "\n"
+               "def tag(b):\n"
+               "    m = Marker(b.a)\n"
+               "    return m.v\n"
+               "\n"
+               "def main():\n"
+               "    g = Bag()\n"
+               "    g.a = 7\n"
+               "    g.b = 8\n"
+               "    print(tag(g))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_bareunused", None, src, cpython)
+        check(got == "7\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
+
+
 def test_a_module_that_applies_its_own_template_publishes_it(tmpdir):
     """§9a: the OWN demand set is a library's too, not only an executable's.
 
@@ -2918,6 +2982,8 @@ TESTS = [
      test_a_generic_function_template_is_instantiated_too),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
+    ("a bare construction of an unused-parameter template",
+     test_a_bare_construction_of_an_unused_parameter_template),
     ("a dotted application says which word is the module",
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",

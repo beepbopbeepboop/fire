@@ -243,13 +243,116 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     gone from the next build's too.
     """
     import fire_compiler as F                        # lazy — the AST classes
+    bare, bracketed = _template_call_shapes(src)
     drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
+            if template_kind(src, n) == KIND_STRUCT
+            and not (n in bare and n not in bracketed
+                     and _layout_independent_struct(src, n))} - set(keep or ())
     if not drop:
         return stmts
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
+
+
+def _template_call_shapes(src: str) -> tuple:
+    """`(bare, bracketed)` template names in `src`, from ONE parse of it.
+
+    `bare` is a name a `Name(...)` construction CALLS; `bracketed` is a name a
+    `Name[...]` SUBSCRIPT applies to. The two decide whether an unused-parameter
+    struct template may be kept (see `_layout_independent_struct`), and the
+    distinction is not cosmetic: an explicitly instantiated template must still
+    be DROPPED so the instantiation and the bracketed-callee refusal keep their
+    meanings. Measured — keeping `struct Triple[A: AnyType, B: AnyType,
+    C: AnyType]` because its parameters are unused made
+    `type_argument_list_on_a_struct_this_unit_declares` refuse with a different
+    sentence, because `Triple[Int, s, False]` is then a recognized struct
+    instead of an unclassifiable bracket.
+
+    The walk is over the WHOLE statement list, so a construction inside a
+    function body counts, and it reads the AST rather than the text, so a
+    bracket in a comment or a docstring does not. A name used BOTH ways is
+    `bracketed` and is dropped: the explicit path owns it, and mixing the two is
+    the inference feature `bugs/FORMAL_generic_local_binding_has_no_home.md`
+    records.
+    """
+    import fire_compiler as F                      # lazy — the AST classes
+    from formal import model as M                  # lazy — cycle
+    bare: set = set()
+    bracketed: set = set()
+    for st in _consumer_statements(src):
+        for node in M.iter_nodes(st):
+            if not isinstance(node, F.CallExpr):
+                continue
+            fn = node.func
+            if isinstance(fn, F.IdentExpr):
+                bare.add(fn.name)
+            elif isinstance(fn, F.SubscriptExpr) \
+                    and isinstance(fn.obj, F.IdentExpr):
+                bracketed.add(fn.obj.name)
+    return bare, bracketed
+
+
+def _layout_independent_struct(src: str, name: str) -> bool:
+    """Whether struct template `name`'s layout is independent of its type args.
+
+    A generic struct whose type parameters occur NOWHERE in its body — no field
+    and no method mentions them — has a layout that does not depend on the
+    arguments, so its own declaration IS a valid layout and a BARE construction
+    of it (`Marker(b.a)`, no bracket) is well defined. `without_template_bodies`
+    drops every struct template because a body that READS a bracket parameter has
+    no value behind it; this is the case that reads none.
+
+    `struct Marker[T: AnyType]: var v: Int` is the shape: `T` is in the head and
+    nowhere else. Measured on both architectures — a bare `Marker(b.a)` was
+    refused (`'m.v' is a field access through 'm'`, the binding never classified
+    because the template had been dropped) while the same program with
+    `Marker[Int]` built and answered 7. With the template kept,
+    `structs_by_name` has it and `_one_word_constructor_bindings` classifies the
+    local, which is the whole of what was missing. The interpreter and the gimple
+    path already answer the bare form, so this is the formal path catching up
+    rather than a new construct.
+
+    Conservative on two axes, and both are load-bearing:
+
+      * every bracket parameter must be a TYPE parameter (`T: AnyType`). A
+        COMPTIME parameter (`struct Box[T: AnyType, keys: List[T]]`) supplies a
+        value the body may read, so its instantiation is not optional and the
+        template must still be dropped — measured: keeping `Box` made
+        `comptime_binding_with_a_literal_value_still_builds` refuse on a method
+        call, because the instantiation and the template then disagree about the
+        struct. A parameter with any other annotation — a comptime type, a trait
+        bound — returns False and is dropped as before.
+      * a type parameter that occurs in the body AT ALL — even in a position the
+        layout discards, like a pointer's origin (`elaborate.erased_only_params`)
+        — returns False, so only the templates whose body cannot mention a
+        parameter, and therefore cannot fail on one, are kept.
+
+    A type parameter that IS used (`struct Pair[T]: var a: T` built bare) is a
+    real inference, still refused, and is the remainder
+    `bugs/FORMAL_generic_local_binding_has_no_home.md` records.
+    """
+    import re
+    import elaborate
+    tmpl = _template_source(src, name, KIND_STRUCT)
+    if tmpl is None:
+        return False
+    head = elaborate.mm.head_match(tmpl)
+    if not head:
+        return False
+    params = []
+    for p in elaborate.split_top_level_commas(head.params):
+        p = p.strip()
+        if not p or elaborate._is_param_marker(p):
+            continue
+        name_part, sep, ann = p.partition(":")
+        if not sep or ann.strip() != "AnyType":
+            return False
+        params.append(name_part.strip())
+    if not params:
+        return False
+    code = elaborate._code_only(tmpl)
+    return not any(re.search(rf"\b{re.escape(p)}\b", code) for p in params)
 
 
 def template_kind(src: str, name: str) -> str:
