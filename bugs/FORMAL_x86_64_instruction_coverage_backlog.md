@@ -8,6 +8,32 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-07 (`work/formal240-docs`): the three stale x86-64 `BACKLOG` entries are GONE, so the tool matches the 2026-10-06 Status
+
+`tools/formal_isa_census.py` still carried the three x86-64 `BACKLOG` entries the
+2026-10-06 Status recorded as closed, and the anti-rot half of
+`test_formal_isa_census.py` was RED on two of them:
+`test_every_backlog_entry_still_describes_a_gap` reported
+`['encode_and_r8_r8', 'encode_or_r8_r8']`, whose note ("no REX.W, so the
+decoder's REX.W-only ALU arm does not reach it") `work/x86-hw-fuzz`'s decoder
+and model arms and `_byte_rex_required` had made false — the census reads
+`yes yes yes` for both. They are removed. `encode_call_r64` moved to
+`HARNESS_LIMITS`: decoder, model and `as` are all `yes` and only FUZZ cannot run
+a call through a register's contents, a permanent property of the harness (the
+same kind of answer as arm64's `encode_br_xn`) rather than a gap with a doc. The
+doc the entries named was the "another claim's write set" reason for leaving
+them; the tool is unclaimed here, so the removal is landed rather than reported
+once more.
+
+`python3 tools/formal_isa_census.py --arch x86_64` now ends
+**`0 backlog`** (6 harness). The two reds left in `test_formal_isa_census.py`
+are `encode_tst_xn_xm`, which is `formal238-docs`'
+(`FORMAL_the_flagged_fuzz_pool_does_not_draw_tst`), not this file's. Still open
+here and unchanged: the EMITTED column counting a DOCSTRING mention (why
+`encode_cmov_r64_r64` reads as an unexplained gap) and the EX column keying on
+disassembly mnemonic; both are instrument defects with their measurements in the
+sections below.
+
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
 This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed
