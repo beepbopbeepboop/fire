@@ -240,6 +240,19 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
+    # The five CPython-shipped private names whose spec CPython cannot find on
+    # the interpreter that runs this tree, re-measured 2026-10-08. Each wraps a
+    # platform object this target does not have, so each takes the SAME row as
+    # `msvcrt` above -- "the object is missing from the target" -- and not a new
+    # one: `_gdbm` is the gdbm database library and `_tkinter` is the Tk toolkit
+    # (both outside libSystem, and Tk additionally needs a display), while
+    # `_overlapped`/`_winapi`/`_wmi` are Windows' own I/O, API and management
+    # layers. They were the residue of
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5, which named
+    # them as the first entries a worker could add with a measurement behind
+    # each; the measurement is `importlib.util.find_spec`, pinned by
+    # `test_formal_imports.py::test_the_find_spec_missing_names_are_unreachable`.
+    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure

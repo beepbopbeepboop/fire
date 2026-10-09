@@ -4667,6 +4667,64 @@ def test_a_module_whose_content_is_not_code_is_still_a_wall(tmpdir, _shared):
           "answers cannot be told apart by the table alone")
 
 
+def test_the_find_spec_missing_names_are_unreachable(tmpdir, _shared):
+    """The five names `§0.5` named are `unreachable`, and `find_spec` is WHY.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measured that
+    `importlib.util.find_spec` cannot find five CPython-shipped private names on
+    the interpreter that runs this tree (`_gdbm`, `_overlapped`, `_tkinter`,
+    `_winapi`, `_wmi`) and named them as the first entries a worker could add
+    with a measurement behind each rather than a reading. They are now on the
+    existing `unreachable` row, which is a claim about the TARGET — the object
+    each wraps is missing from a freestanding image that links libSystem and
+    nothing else.
+
+    Both halves are asserted, because the classification without the
+    measurement is the "filling them by category from a distance" the doc's own
+    §"Why the 222 are filed" warns against, and the measurement without the
+    classification is what the doc measured and left open:
+
+    * the ORACLE: CPython cannot find a spec for each on this host, so the name
+      is not a typo and the object is not here;
+    * the VERDICT: each answers `unreachable` — not `unclassified` (the state
+      §0.5 left them in) and not `not-a-module` (which says there is nothing to
+      implement, false of a database library and a GUI toolkit).
+    """
+    import importlib.util as _iu
+    names = ["_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi"]
+    for name in names:
+        check(name in sys.stdlib_module_names,
+              f"{name} is not a CPython module on this interpreter, so this "
+              "row is about a name the oracle cannot see")
+        check(_iu.find_spec(name) is None,
+              f"`find_spec` now FINDS {name} on this host, so the measurement "
+              "that put it here has changed — re-apply the rule at the top of "
+              "`formal/imports.py` (does implementing it need an object a "
+              "freestanding image does not have?) rather than assuming the "
+              "answer this test pinned")
+        check(I.host_module_tier(name) == "unreachable",
+              f"{name} answers {I.host_module_tier(name)!r}, not 'unreachable' "
+              "— §0.5 measured it as one of the find_spec-missing names and it "
+              "is on the `unreachable` row now")
+        answer, detail = I.host_module_verdict(name)
+        check(answer == "unreachable" and detail == "",
+              f"{name} has a verdict of {answer!r} (detail {detail!r}), not "
+              "'unreachable'")
+    # …and the build, so the row is measured against the program that reads it:
+    # none of the five is provided here, so an import of one is refused the way
+    # every host module is.
+    root = os.path.join(str(tmpdir), "findspec")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": "import %s\ndef main() -> Int:\n    return 0\n"
+                      % names[0]})
+    fresh_cas()
+    res, _out = build(root, "prog.aout", expect_ok=False)
+    err = res.stderr or res.stdout
+    check(res.returncode != 0 and "host module" in err,
+          f"a program importing `{names[0]}` should be refused as a host "
+          f"module; it exited {res.returncode} with {err[-300:]!r}")
+
+
 def test_the_wall_instrument_separates_reach_from_alone(tmpdir, _shared):
     """`reach` and `alone` are different questions and the tool answers both.
 
@@ -5202,6 +5260,8 @@ TESTS = [
      test_a_dead_import_is_not_a_wall_this_tree_has_to_climb),
     ("a module whose content is not code is still a wall",
      test_a_module_whose_content_is_not_code_is_still_a_wall),
+    ("the find_spec-missing names are unreachable",
+     test_the_find_spec_missing_names_are_unreachable),
     ("the wall instrument measures a delta on one tree",
      test_the_wall_instrument_measures_a_delta_on_one_tree),
     ("the wall instrument reads the sweep column with its own peel",

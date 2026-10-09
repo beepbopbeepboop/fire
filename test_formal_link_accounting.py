@@ -633,6 +633,20 @@ HOST_SET_ADDED_TIERS = {
     "winreg": "unreachable",
     "winsound": "unreachable",
     "nt": "unreachable",
+    # ── 2026-10-08, `work/formal248-docs`: the five find_spec-missing names
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 named ──
+    #
+    # These are the last CPython-shipped private names whose `find_spec` is None
+    # on this interpreter, and each needs a platform object the target does not
+    # have: `_gdbm` the gdbm library, `_tkinter` Tk (both outside libSystem,
+    # and Tk needs a display), and `_overlapped`/`_winapi`/`_wmi` Windows' own
+    # I/O, API and management layers. So they are the EXISTING `unreachable` row
+    # applied by the rule at the top of `formal/imports.py`, not a new category.
+    "_gdbm": "unreachable",
+    "_overlapped": "unreachable",
+    "_tkinter": "unreachable",
+    "_winapi": "unreachable",
+    "_wmi": "unreachable",
     # …and these four are the OPPOSITE reading, which is why they are in the
     # table at all: `find_spec` DOES find every one of them here, because they
     # are frozen or arithmetic-over-strings modules CPython ships everywhere and
