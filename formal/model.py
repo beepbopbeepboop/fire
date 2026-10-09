@@ -13864,11 +13864,11 @@ CONTAINER_OP_MEANING = {
 #: same defect wearing different operators, so they belong in one gate.
 #:
 #: `&`, `-` and `^` are absent TOO, but for the opposite reason: each is a
-#: real lowering now, for two SETS on arm64, so a blob on either side is asked
-#: about by `container_set_algebra_refusal` (and the backend with no emitter
-#: answers with `set_algebra_refusal`) rather than by this gate.  They are
-#: still in `CONTAINER_OP_MEANING`, because that table is the sentence the
-#: refusal is written from and this gate is not the only thing that reads it.
+#: real lowering now, for two SETS on both backends, so a blob on either side
+#: is asked about by `container_set_algebra_refusal` rather than by this gate.
+#: They are still in `CONTAINER_OP_MEANING`, because that table is the sentence
+#: the refusal is written from and this gate is not the only thing that reads
+#: it.
 CONTAINER_GATED_OPS = ("<", "<=", ">", ">=", "==", "!=",
                        "/", "//", "%", "**", "<<", ">>")
 
@@ -13923,23 +13923,6 @@ def container_set_algebra_refusal(op: str, left: str, right: str,
           "result with a loop and a membership test")
 
 
-def set_algebra_refusal(op: str, spelled: str, left: str, right: str) -> str:
-    """Why `left {op} right` is not lowered on the backend that asks, sets.
-
-    The SECOND question, asked only once `container_set_algebra_refusal` has
-    said both operands really are sets — so the operator is CPython's
-    intersection/difference/symmetric difference and this backend has no
-    emitter for it.  arm64 lowers all three correctly, so this is x86-64's
-    answer and it names that backend so a reader knows the program is not
-    broken and arm64 answers it.
-    """
-    return (
-        f"{left} {op} {right} is a SET operation between two sets, and this "
-        f"backend lowers no set operation — arm64 lowers `&`, `-` and `^` on "
-        f"two sets correctly. Write the operation over elements you can name, "
-        f"or build the result with a loop and a membership test")
-
-
 def container_operator_refusal(op: str, left_kind, right_kind,
                                spelled_op: str | None = None) -> str | None:
     """Why `a {op} b` must not be lowered when an operand is a BLOB, or None.
@@ -13984,9 +13967,9 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
 
-    **`&`, `-` and `^` are no longer in `CONTAINER_GATED_OPS`** — arm64 lowers
-    all three for two sets now (`_emit_set_algebra`), and a pair that is not two
-    sets is refused by `container_set_algebra_refusal` instead.  The
+    **`&`, `-` and `^` are no longer in `CONTAINER_GATED_OPS`** — both backends
+    lower all three for two sets now (`_emit_set_algebra`), and a pair that is
+    not two sets is refused by `container_set_algebra_refusal` instead.  The
     measurements above are kept because they are the record of what the gate was
     answering BEFORE the lowering existed, which is the state a reader of the
     `bugs/FORMAL_container_operators_that_need_a_per_element_stride.md` history

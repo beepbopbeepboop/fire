@@ -1,25 +1,26 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED (2026-10-08) — item 3, set algebra, LANDED on arm64;
-items 1, 2 and 4 are still open.** `&`, `-` and `^` between two SETS are lowered
-on arm64 (`formal/arm64_codegen.py::_emit_set_algebra`), and x86-64 refuses them
-by NAME of the missing emitter (`model.set_algebra_refusal`) rather than
-answering an address. The three binary rows and the two augmented rows in
-`test_formal_container_methods.py`'s `set` group moved from `probe=None` to
-answers compared against CPython; the two rows in the `operator` group were
-re-pointed at LISTS, which are still a `TypeError` and still refused. `git log`
-on this branch has the commit; §"What landed 2026-10-08" below has the
-measurement and the exact remainder. `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green.
+**Status: PARTIALLY FIXED (2026-10-08) — item 3, set algebra, LANDED on BOTH
+backends; items 1, 2 and 4 are still open.** `&`, `-` and `^` between two SETS
+are lowered on arm64 (`formal/arm64_codegen.py::_emit_set_algebra`) AND on
+x86-64 (`formal/x86_64_codegen.py::_emit_set_algebra`), each in that backend's
+own register style and each sharing the same gate. The three binary rows and the
+two augmented rows in `test_formal_container_methods.py`'s `set` group moved
+from `probe=None` to answers compared against CPython on both architectures;
+the two rows in the `operator` group were re-pointed at LISTS, which are still a
+`TypeError` and still refused. `git log` on this branch has the commits;
+§"What landed 2026-10-08" below has the measurement and the exact remainder.
+`test_formal_container_methods.py` measures the whole surface against CPython on
+both architectures and is green.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
 has a named row in `test_formal_container_methods.py`.
 
-## What landed 2026-10-08 (`work/formal242-docs`): item 3, set algebra, arm64
+## What landed 2026-10-08 (`work/formal242-docs`): item 3, set algebra, both backends
 
 The cheapest of the four lowerings, done exactly as §"What to do" item 3
-prescribes, on arm64 and not on x86-64.
+prescribes, on arm64 and then ported to x86-64 in the same session.
 
 * **The gate split in two, and the split is the point.** `&`, `-` and `^` left
   `model.CONTAINER_GATED_OPS` — this gate's subject is "a blob is an ADDRESS, so
@@ -27,19 +28,23 @@ prescribes, on arm64 and not on x86-64.
   `model.container_set_algebra_refusal` is the new decision: it returns `None`
   only when BOTH operands are established sets, and otherwise refuses with the
   operator's CPython meaning (`[1, 2] & [2]` is a `TypeError`, so there is no
-  correct program on the far side). `model.set_algebra_refusal` is the second
-  question, asked only once the pair IS two sets, and it is x86-64's answer
-  because that backend has no emitter.
-* **The lowering is one element-wise pass, shared by all three.**
-  `formal/arm64_codegen.py::_emit_set_algebra` reserves `nL + nR` (the worst
-  case, which `^` reaches and `&`/`-` over-reserve), emits the shared
-  `_emit_blob_growth_guard`, and runs `_emit_set_keep` once for `&`/`-` and
-  twice for `^`. `_emit_set_keep(..., keep_found=)` appends each source element
-  whose membership in the other blob matches — intersection is `keep_found=True`
-  from the left, difference is `False` from the left, symmetric difference is
-  `False` from each side into the same result. The count word is written from
-  the append loop's own counter, not from an operand length: that is the union's
-  old `nL + nR` bug and a set operation has the same failure mode.
+  correct program on the far side).  Both backends ask it at the same site in
+  their `_emit_binop`, so the two cannot disagree about which programs are
+  legal.
+* **The lowering is one element-wise pass, shared by all three, on each
+  backend.** `formal/arm64_codegen.py::_emit_set_algebra` and
+  `formal/x86_64_codegen.py::_emit_set_algebra` reserve `nL + nR` (the worst
+  case, which `^` reaches and `&`/`-` over-reserve), emit the shared
+  `_emit_blob_growth_guard`, and run `_emit_set_keep` once for `&`/`-` and twice
+  for `^`.  `_emit_set_keep(..., keep_found=)` appends each source element whose
+  membership in the other blob matches — intersection is `keep_found=True` from
+  the left, difference is `False` from the left, symmetric difference is `False`
+  from each side into the same result.  The count word is written from the
+  append loop's own counter, not from an operand length: that is the union's old
+  `nL + nR` bug and a set operation has the same failure mode.  The x86-64 port
+  keeps its output count in a stack slot, because the nested scan and the append
+  need more caller-saved registers than the nine this backend has and RSP is the
+  only place a value survives an expression evaluation.
 * **Set-ness now propagates through the new operators.**
   `_expr_is_set_like` on both backends treats `a & b`/`a - b`/`a ^ b` as a set
   when BOTH sides are (unlike `+`/`|`, which are set-preserving when either
@@ -48,18 +53,20 @@ prescribes, on arm64 and not on x86-64.
   `s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
   `s_andassign_r` became `s_intersection`, `s_difference`, `s_symdiff`, `s_sub`
   and `s_andassign` with `sum+len` probes (a length alone cannot see a wrong
-  result of the right length) and `BACKEND_ONLY` entries for `x86_64`. The
-  `operator` group's `o_and`/`o_xor` rows were re-pointed at two LISTS — still a
-  `TypeError`, still refused on both backends — because their set-set forms now
-  answer; the `o_xor` operand is a NAME, because `a ^ [2]` misparses (`^` binds
-  as unary invert before the `[`), which cost one build to find. A fourth
-  `_BLOB_GROWTH_PROBES` row (`arm64/set`) pins the new site's guard.
+  result of the right length).  The `operator` group's `o_and`/`o_xor` rows were
+  re-pointed at two LISTS — still a `TypeError`, still refused on both backends
+  — because their set-set forms now answer; the `o_xor` operand is a NAME,
+  because `a ^ [2]` misparses (`^` binds as unary invert before the `[`), which
+  cost one build to find.  Two `_BLOB_GROWTH_PROBES` rows (`arm64/set` and
+  `x86_64/set`) pin the new sites' guards.
 
 Measured on this tree, 2026-10-08: `test_formal_container_methods.py` is 6/6
-groups green on both backends, and `check_blob_growth_guards` is 6/6 (including
-the new `arm64/set`). **What is still open is items 1, 2 and 4** — element-wise
-`==`/`!=`, ordering, and the length-changing slice store — plus item 3 on
-x86-64, which refuses by name until that backend grows the emitters.
+groups green on both backends (the `set` group now reports 22 answers, up from
+17), and `check_blob_growth_guards` is 7/7 (including both new rows). **What is
+still open is items 1, 2 and 4** — element-wise `==`/`!=`, ordering, and the
+length-changing slice store.  The `s_union` family is still arm64-only and still
+listed in `BACKEND_ONLY`: x86-64 has no set-UNION emitter, which is a separate
+absence from the three operators landed here.
 
 ## What was wrong, and what landed instead
 

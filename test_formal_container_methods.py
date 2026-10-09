@@ -880,14 +880,6 @@ BACKEND_ONLY = {
     "s_union_elems": "x86_64",
     "s_union_str": "x86_64",
     "s_union_ior": "x86_64",
-    # And no set INTERSECTION/DIFFERENCE/symmetric-difference emitter either —
-    # the same absence, for the same reason. arm64 lowers all three, and the
-    # augmented forms desugar onto them.
-    "s_intersection": "x86_64",
-    "s_difference": "x86_64",
-    "s_symdiff": "x86_64",
-    "s_sub": "x86_64",
-    "s_andassign": "x86_64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

@@ -6488,6 +6488,138 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
 
+    def _emit_set_algebra(self, op, left, right) -> None:
+        """`a & b`, `a - b`, `a ^ b` over two blobs, both operands SETS →
+        a fresh blob holding the kept elements, in RAX.
+
+        arm64's `_emit_set_algebra`, and the same register plan as this
+        backend's `_emit_list_concat` so the two shapes read alike.  `&` keeps
+        each LEFT element the RIGHT holds; `-` keeps each LEFT element the
+        RIGHT does not; `^` is `-` in both directions, so it runs the
+        difference pass once from each side into the SAME result.
+
+        The reservation is `nL + nR` whatever the operator (the `^` worst case,
+        a safe over-estimate for `&`/`-`), the runtime total is checked against
+        it by the shared guard, and the count word is the append loop's own
+        counter rather than an operand length.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                    + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                                # [rsp] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))     # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))     # pop left
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left, exactly as `_emit_list_concat` does.
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a set operation")
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))  # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))  # nR
+        # The guard: `^` can write every element of both sides, so the total is
+        # nL + nR.  Emitted before anything is written, as the union's is.
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R9))
+        self._emit_blob_growth_guard("a set operation", Reg.RAX, cap, "set")
+        self._emit_blob_base(offset, Reg.RDI)                   # out base
+        self._emit_mov_imm(Reg.RCX, 0)                          # out count
+        # RSI/R8 = left base/count, RDX/R9 = right base/count, RDI = out base,
+        # RCX = out count.
+        self._emit_set_keep(Reg.RSI, Reg.R8, Reg.RDX, Reg.R9,
+                            keep_found=(op == "&"))
+        if op == "^":
+            self._emit_set_keep(Reg.RDX, Reg.R9, Reg.RSI, Reg.R8,
+                                keep_found=False)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RCX))  # count word
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _emit_set_keep(self, src_base, src_count, other_base, other_count,
+                       keep_found: bool) -> None:
+        """Append each element of `src` whose membership-in-`other` matches.
+
+        One element-wise pass, shared by all of `&`/`-`/`^`: for each source
+        element, scan the other blob for an equal WORD, then append it to the
+        result iff `found == keep_found`.  `keep_found=True` is intersection,
+        False is difference; symmetric difference runs it twice, once from each
+        side.
+
+        Register contract, and it is what makes the shared pass safe to call
+        twice: `src_base`/`src_count` and `other_base`/`other_count` are
+        read-only, `RDI` is the OUTPUT base, and the output count lives in a
+        stack slot `[rsp]` (RSP moves as expressions are evaluated, so a
+        caller-saved register is not enough across an append that itself uses
+        one).  `RAX`, `RCX`, `R10` and `R11` are scratch.
+        """
+        self._push_slot(Reg.RCX)                                # [rsp] = count
+        self._emit_mov_imm(Reg.R10, 0)                          # i = 0
+        self._while_counter += 1
+        n = self._while_counter
+        loop = f"{self.func_name}_sa{n}"
+        done = f"{loop}d"
+        scan = f"{loop}s"
+        found = f"{loop}f"
+        miss = f"{loop}m"
+        nxt = f"{loop}x"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, src_count))
+        self._emit_jcc(COND_AE, done)
+        # R11 = src[8 + 8i]
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R10))
+        self.asm.emit(encode_imul_r64_r64_imm(Reg.R11, Reg.R11, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.R11, src_base))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 8))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 0))
+        # scan `other` for R11; RAX = k
+        self._emit_mov_imm(Reg.RAX, 0)
+        self.asm.label(scan)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, other_count))
+        self._emit_jcc(COND_AE, miss)
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
+        self.asm.emit(encode_imul_r64_r64_imm(Reg.RCX, Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RCX, other_base))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RCX, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.R11))
+        self._emit_jcc(COND_E, found)
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
+        self._emit_jmp(scan)
+        self.asm.label(found)
+        if keep_found:
+            self._emit_set_append(Reg.R11)
+        self._emit_jmp(nxt)
+        self.asm.label(miss)
+        if not keep_found:
+            self._emit_set_append(Reg.R11)
+        self.asm.label(nxt)
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self._pop_slot(Reg.RCX)                                 # out count
+
+    def _emit_set_append(self, elem) -> None:
+        """`result[count] = elem; count += 1`, with the count in `[rsp]`."""
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RCX))
+        self.asm.emit(encode_imul_r64_r64_imm(Reg.RAX, Reg.RAX, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 8))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, elem))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RCX))
+
     def _emit_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` / `needle not in haystack`, list blob or string.
 
@@ -7470,12 +7602,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if reason is not None:
                 raise CodegenError(reason)
         # `&`, `-` and `^` on a blob: intersection, difference and symmetric
-        # difference, defined for two SETS and nothing else.  This backend has no
-        # set-operation emitter, so a real set operation is refused by NAME of
-        # the missing emitter (`model.set_algebra_refusal`) rather than lowered —
-        # and a pair that is not two sets is refused by
-        # `container_set_algebra_refusal`, exactly as arm64 refuses it, so the
-        # two architectures cannot disagree about which programs are legal.
+        # difference, defined for two SETS and nothing else.  A pair that is not
+        # two sets is refused by `container_set_algebra_refusal`, exactly as
+        # arm64 refuses it, so the two architectures cannot disagree about which
+        # programs are legal; two sets are lowered by `_emit_set_algebra`.
         if op in M.SET_ALGEBRA_OPS and (M.container_operand_is_blob(
                 self._expr_str_kind(e.left))
                 or M.container_operand_is_blob(self._expr_str_kind(e.right))):
@@ -7484,8 +7614,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._expr_is_set_like(e.left), self._expr_is_set_like(e.right))
             if reason is not None:
                 raise CodegenError(reason)
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(e), M.spelled(e.left), M.spelled(e.right)))
+            self._emit_set_algebra(op, e.left, e.right)
+            return
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -10140,7 +10270,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # unlike `+`/`|`, a non-set on either side is a CPython `TypeError`
             # whose refusal belongs to `container_set_algebra_refusal`.  arm64's
             # twin answers the same question, so `s & t` cannot be a set to one
-            # backend and not the other before `set_algebra_refusal` is reached.
+            # backend and not the other.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False
