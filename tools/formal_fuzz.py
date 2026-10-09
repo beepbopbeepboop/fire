@@ -1380,7 +1380,7 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+    "environ": (("environ_get", 4), ("environ_none", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2009,7 +2009,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_len", "environ_cmp",
+"environ_get", "environ_none", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2116,7 +2116,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+        elif kind in ("environ_get", "environ_none", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3050,10 +3050,20 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
+    #
+    # `len(os.getenv(k))` is NOT generated, and the reason is the optional: this
+    # path lowers `os.getenv` as `Optional[String]`, and `len` of an optional is
+    # a real refusal ("len() of bytes the KERNEL supplied … this path cannot
+    # answer it"). A mix that drew it therefore produced a refusal for EVERY
+    # program — one unmodelled statement poisons the whole program — and
+    # `test_formal_fuzz.py`'s anti-vacuity check was right to call that out.
+    # `environ_none` draws the test a program that holds the optional actually
+    # writes (`is None`), which lowers, so the mix measures the model instead of
+    # re-deriving its own edge.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_len":
-            self.emit(indent, f"print(len(os.getenv({key!r})))")
+        if kind == "environ_none":
+            self.emit(indent, f"print(1 if os.getenv({key!r}) is None else 0)")
             return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
