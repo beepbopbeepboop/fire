@@ -1,5 +1,31 @@
 # `tools/formal_proof_census_baseline.json` has 52 rows against a 93-file corpus, so `formal-proof-census-tool` is RED on master and the census's ratchet is over 44 % of its own corpus
 
+**Status re-measured 2026-10-08 (`work/formal251-docs`): the 52-of-93 half is
+FIXED and the red that remains is a different one.** `07cc3260` (2026-10-05,
+"the proof ratchet described 52 examples; the corpus is 93 …") banked the rows,
+so the baseline is now **93 of 93** and
+`test_every_example_has_a_row_and_every_row_a_status` **passes** — the ratchet
+now watches its whole corpus. What is still red is one row whose
+`source_sha256` is stale: `ffe27e1a` (2026-10-05 17:50) rewrote
+`formal/examples/fact.mojo`'s contract, the merge-banking of `07cc3260` added
+the 41 new rows from the machine's CAS history and did **not** refresh a row it
+already had, so `test_each_row_is_tied_to_the_example_it_measured` fails with
+
+    66e21e6a…('baseline') != b2bbaf51…('on disk')  fact.mojo has changed since
+    the baseline was written; re-seed with --write-baseline
+
+and `formal-proof-census-tool` is still non-zero on a tree whose `lib/*.olean`
+are built. (`test_library_state_agrees_with_the_question_it_asks` also fails in
+a FRESH worktree, where `lib/*.olean` do not exist yet; that one is an
+environment fact and not this doc's.) **The exact next step is the doc's own
+recommendation, one row:** `python3 tools/memslot.py --gb 8 --label census-arm
+-- python3 tools/formal_proof_census.py --only fact --write-baseline`, which
+elaborates `fact` (~222 s Lean) and, if `lib/*.olean` are absent, builds the
+library first. That is a Lean run, so this light worker did not take it — it is
+the integrator's, and `fact`'s row is `lean-rejected` so the re-seed may change
+the stored verdict. **The x86-64 half is unchanged and still never run**:
+`formal_proof_census_baseline_x86_64.json` does not exist.
+
 **Claim** `project:loop-invariants` on `work/formal66-loop-invariants`.  **Not
 mine**: this is the census's file and its tool, and nothing on this branch
 touches either.  **Measured** on `master` @ `cd2a1678` on 2026-10-06, and it is
@@ -52,6 +78,11 @@ have nothing to compare against.
 
 ## The exact next step
 
+**Superseded by the Status at the head: half 1 is DONE (`07cc3260` banked the
+rows, 93 of 93) and half 2 resolved in favour of banking.** What remains is the
+re-seed of the one changed row, `fact`, and the x86-64 baseline; both are the
+head Status's. The text below is the record of what the work was.
+
 Two halves, and the order matters:
 
 1. **Bank the missing rows, in bounded runs.**  The census is a *timing*
@@ -75,7 +106,10 @@ Two halves, and the order matters:
    is the direction this project argues against every time
    (`tools/formal_proof_census.py`'s own docstring: *"A finding is not a failure;
    a REGRESSION is"*, and a corpus member with no row is a silent gap rather than
-   a finding).  **Recommendation: bank the rows.**
+   a finding).  **Recommendation: bank the rows.**  **Resolution: the rows were
+   banked, and a row that is already present but whose example changed is the
+   half the merge did not handle — that is the stale `fact` row the head Status
+   names.**
 
 ## Reproducing
 
