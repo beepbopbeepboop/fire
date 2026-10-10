@@ -272,5 +272,6 @@ being precise about what it is a result ABOUT:
 So the next session should not read this file as "the backend is right about 10,000
 pairs of the same program twice". It should read §6's item 2 — the stdlib — as the
 place where the shapes this corpus does not have actually live, and it should read
-`bugs/FORMAL_the_stack_floor_budget_is_in_bytes_so_x86_64_allows_8x_the_recursion_depth_arm64_does.md`
-as the place where a measured asymmetry turned up on a shape the corpus does have.
+`model.stack_floor_depth`'s per-architecture figure (60 frames on arm64 against
+480 on x86-64, one BYTE budget over two frame sizes) as the place where a measured
+asymmetry turned up on a shape the corpus does have.
