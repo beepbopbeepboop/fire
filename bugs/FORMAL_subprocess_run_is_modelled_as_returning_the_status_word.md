@@ -124,3 +124,51 @@ Decide between 1, 2 and 3 above, and record it in
 docstring is currently silent on whether `run`'s word return is a deliberate
 simplification or an accident of modelling `CompletedProcess` as a word, and
 `version.py` is not the only file that will need to know.
+
+## Status 2026-10-09 (`formal261-docs-r2-r2`): both cheap options priced by measurement
+
+The three options' cost claims were narrower than the module actually is, and
+each is now measured rather than assumed:
+
+* **Option 3's "no capability change" is FALSE as literally stated.** CPython
+  3.14's real `subprocess` module has no `completed_process_returncode`
+  attribute (`hasattr(subprocess, "completed_process_returncode")` is False),
+  so an "identical CPython definition" cannot live in the module the name is
+  imported from. And the interpreter oracle resolves `import subprocess` to
+  that REAL module — `fire.py run` of a program spelling
+  `subprocess.completed_process_returncode(r)` raises
+  `AttributeError: 'module' object has no attribute`, while the same program
+  builds and runs under `fire.py build --formal`. So option 3 as written would
+  make the corpus's differential oracle fail every file that adopted the shim
+  spelling. It can only be made to work by ALSO putting
+  `completed_process_returncode` somewhere the Python side imports — a new,
+  tree-owned shim name, which is a capability change rather than the free
+  option the doc called it.
+* **Option 1's cost is the admission contract, not just a frame blob.**
+  `formal/hostmods/subprocess.mojo`'s own module notes (`run`/`call`/`check_call`
+  deliver "the child's exit status word") say the twelve admitted contracts are
+  shaped `UInt64 → UInt64` ("the Lean declaration is UInt64 → UInt64"), so a
+  struct return from `run` is not a word-shaped contract any more. Making
+  `CompletedProcess` a struct reshapes every contract the file admits, and the
+  `completed_process_returncode` accessor is then the field read — which is
+  exactly the shape `formal/hostmods/struct.mojo` exists to say is a frame blob
+  on this path.
+* Option 2 (refuse `r.returncode` BY NAME, point at the word model) is the one
+  option whose cost has not moved: it still rejects correct-under-CPython
+  source, and the corpus's own `test_re_formal.py:607` /
+  `test_x86_64_decode.py:359` spell it that way (verified present, still the
+  CPython shape).
+
+The doc's middle-row warning stands and is the reason none of this is a
+spelling change: `rc = r` compiles and answers differently on a dirty tree,
+and the whole point of `version.py`'s `-dirty` suffix is the input that is
+wrongest under it.
+
+**The decision is therefore not "which option", as the three stood.** It is
+either "where may option 3's Python-side shim live" (a new tree-owned name the
+corpus, the interpreter and the image all resolve) or "may `run`'s admitted
+contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
+`formal/hostmods/subprocess.mojo` questions, which is the boundary this doc
+already named; this update is the measurement that makes the boundary concrete.
+`version.py` remains exactly as closed — refused at `r.returncode` — and no
+caller-side substitution was made for the same reason the doc originally gave.
