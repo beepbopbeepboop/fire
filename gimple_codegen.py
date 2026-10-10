@@ -537,19 +537,6 @@ _SELFHOST_SIGS = {
     # declarations of one symbol in one translation unit).
     '_compute_exc_descendants': (
         'MojoDict *', ['MojoList *'], None),
-    # The two helpers THIS file defines and its extracted siblings call back
-    # through `gimple_codegen.<name>(...)` (`funcs_shared`,
-    # `module_shared`, `module_gen`): the root module is the outermost of the
-    # compiler's import cycle, so while those siblings are lowered its
-    # functions have no registered signature and a qualified call to one was
-    # emitted as a weak "unavailable in compiled mode" stub that returned 0 --
-    # the self-hosted binary then saw an empty list of implementation files
-    # and an empty `_SELFHOST_SIGS`. Pinned the way `_merge_struct_inheritance`
-    # is (and for the same reason), with a bare C name via `_NO_OVERLOAD_MANGLE`.
-    '_selfhost_syms': (
-        'MojoList *', [], None),
-    '_selfhost_impl_py_files': (
-        'MojoList *', ['char *'], None),
     # Interpreter (myinterpreter.py)
     'Interpreter___init__': (
         'void', ['Interpreter *', 'char *', 'MojoList *'], 'myinterpreter'),
@@ -1975,15 +1962,6 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
-        # Which per-translation-unit device-introspection definitions have been
-        # emitted ('definitions' once the empty or full sidecar is out) -- shared
-        # by reference with every nested temp_gen (emit_resolve), exactly like
-        # `_emitted_ptr_helpers` just above. A declared field, NOT created on
-        # demand through `self.__dict__.setdefault(...)`: a compiled struct has no
-        # `__dict__`, so the self-hosted binary never saw the set, never emitted
-        # the four weak `_mojo_gpu_*` entry points, and every `.ci` it wrote lost
-        # its tail.
-        self._mg_introspection_emitted: set = set()
         # Same, for the device-side pack/unpack pairs. Initialised HERE, not
         # lazily, because `emit_resolve` reads it off the parent gen to share
         # it with each temp_gen -- a lazily-created attribute does not exist on
@@ -4082,7 +4060,6 @@ class GimpleGen:
         # gen_module's `_is_selfhost_file` block) makes call and definition
         # agree without any cross-module signature negotiation.
         '_merge_struct_inheritance', '_compute_exc_descendants',
-        '_selfhost_syms', '_selfhost_impl_py_files',
     })
 
     # ── Struct method generation ──────────────────────────────────────────
@@ -5206,51 +5183,6 @@ class GimpleGen:
                                      value_node=None) -> None:
         return ginf.note_container_callable_ret(self, container_val, value_text,
                                                 value_ctype, value_node)
-    # THIN DELEGATES for the backend functions that two sibling modules call
-    # on each other across the compiler's own import cycle
-    # (`emit_methods` -> `emit_infra` -> ... -> `emit_funcs` -> `emit_infra`).
-    # A `ginf.begin_function(gen, node)` written in `emit_funcs.py` is lowered
-    # while `emit_infra`'s statements are not yet part of the closure, so the
-    # self-hosted compile re-dispatches it on its bare name, finds no
-    # registered signature and emits a weak "unavailable in compiled mode"
-    # stub that prints and returns 0 -- the compiled binary silently lost the
-    # call (here: the whole per-function ownership/cleanup state machine, which
-    # then freed pointers it never owned). A method of `GimpleGen` is resolved
-    # through the frozen method-signature table instead, which does not depend
-    # on the order the cycle was entered, and these have always been the
-    # architecture's answer to exactly this (see `_reset_func` above).
-    def _kwarg_param_names(self, fname_raw: str, fname: str, n_expected: int,
-                           kwarg_dict: dict) -> list:
-        return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
-    def _begin_function(self, fn) -> None:
-        return ginf.begin_function(self, fn)
-    def _emit_fallthrough_frees(self, fn) -> None:
-        return ginf.emit_fallthrough_frees(self, fn)
-    def _reset_no_candidates(self) -> None:
-        return ginf.reset_no_candidates(self)
-    def _register_nested_env_free(self, def_name: str, env_var: str,
-                                  owner_body) -> None:
-        return ginf.register_nested_env_free(self, def_name, env_var, owner_body)
-    def _callable_param_generator_apis_of(self, fn_node) -> dict:
-        return ggc._callable_param_generator_apis(self, fn_node)
-    def _callable_param_ret_types_of(self, fn_node) -> dict:
-        return ggc._callable_param_ret_types(self, fn_node)
-    def _build_sort_keys(self, av: str, elem: str, key_expr) -> str:
-        return ggc._build_sort_keys(self, av, elem, key_expr)
-    def _copy_dict_metadata(self, dst: str, src: str) -> None:
-        return ginf._copy_dict_metadata(self, dst, src)
-    def _future_done_callback_kind_tag(self, cb_ctype: str) -> int:
-        return ggc._future_done_callback_kind_tag(cb_ctype)
-    def _lower_generator_next(self, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_next(self, av, api)
-    def _lower_generator_send(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_send(self, node, av, api)
-    def _lower_generator_throw(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_throw(self, node, av, api)
-    def _lower_generator_close(self, node, av: str, api: dict) -> tuple[str, str]:
-        return ggc._lower_generator_close(self, node, av, api)
-    def _lower_next_iter_cursor(self, node, rec, args) -> tuple[str, str]:
-        return ggc._lower_next_iter_cursor(self, node, rec, args)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:
@@ -5980,17 +5912,8 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
     if not names:
         return
     cpp = getattr(gen, 'generated_cpp', '') or ''
-    # An explicit loop through `_as_str`, not a comprehension over the raw
-    # element: `names` comes back from `desugar_genexps` as a list of erased
-    # words on the self-hosted path, and the f-string below stringified the
-    # POINTER as a decimal -- `__mgco_93825122318464_` is in no output, so every
-    # generator expression was reported "could not be compiled" and the whole
-    # dump failed.
-    missing = []
-    for _vn in names:
-        _vname = _as_str(_vn)
-        if f'__mgco_{_vname}_' not in code and f'__mojogen_{_vname}_' not in cpp:
-            missing.append(_vname)
+    missing = [n for n in names
+               if f'__mgco_{n}_' not in code and f'__mojogen_{n}_' not in cpp]
     if missing:
         raise RuntimeError(
             f"generator expression could not be compiled into a generator: "

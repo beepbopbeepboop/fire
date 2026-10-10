@@ -1389,15 +1389,6 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         _arch_or_die(out, arch, 'cached runtime dylib')
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # Everything below happens inside a staging DIRECTORY that is removed on the
-    # way out, whether the build succeeded or raised. Only the finished dylib
-    # leaves (`os.replace(staged, out)`), and without this `finally` the eight
-    # runtime objects, the reflection table's generated C and its object, and
-    # the linked dylib itself sit in `$TMPDIR` for the life of the machine —
-    # ~520 kB per COLD build, which per-test CAS homes make routine. The
-    # `ignore_errors=True` is deliberate: the failure that matters is the
-    # build's, and a stale directory is worth less than a cleanup error masking
-    # it. `formal/build.py::_publish_signed_image` is the same shape.
     wd = tempfile.mkdtemp(prefix='mojo_rt_')
     # The work directory holds the runtime objects, the generated reflection C
     # and its object, and the staged dylib — and `os.replace` below moves only

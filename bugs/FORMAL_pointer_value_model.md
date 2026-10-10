@@ -1,29 +1,5 @@
 # FORMAL_pointer_value_model: what a pointer IS on the formal path, and why the 54-file group was never about that
 
-**Status 2026-10-06 (`work/formal113-docs`): the SUBSCRIPT spelling of a
-dereference now reads and writes at the pointee's width, which is what
-`p.value()` already did.** §1.2 says "a load is never emitted at a width the
-model has not established", and §6 says `p[i]` and `p.value()` are "the same
-instruction pair from the SAME reader" — but the emitter's `_emit_subscript_load`
-was `width == 1 ? LDRB : LDR`, so every 2- and 4-byte pointee subscript did a
-full 64-bit load and the next element bled into the high half. Measured on BOTH
-architectures, from a green build, the filed parity row `aug_through_int32_pointer`:
-
-    var q: Pointer[Int32] = malloc(16)
-    q[0] = 10
-    q[1] = 21
-    printf("%d", q[0])        ->  90194313226   (0x15_0000000A)
-
-where the source says 10, and `q[0] += 5` read and wrote eight bytes for the same
-reason. The fix is the width dispatch `_emit_dereference` already had, in the
-subscript's load, store and augmented-assignment arms of both backends, with the
-pointee's signedness carried from `model.subscript_base_lowering` (so
-`Pointer[Int8]`'s `-1` is not 255). Pinned by `test_formal_run.py`'s
-`deref_subscript_reads_at_the_pointee_width`,
-`deref_subscript_store_and_aug_write_at_the_pointee_width` and
-`deref_subscript_sign_extends_a_signed_pointee`, and by the two parity rows that
-were red on master (`aug_through_int32_pointer`, `aug_every_operator`).
-
 **§9 status, re-measured 2026-10-04 (`work/formal23-5-r2`): SIX of the eight
 items in "Also found, and NOT fixed" are now closed, and the two that remain are
 both named as another lane's question.** Closed: the `p + k` offset scale

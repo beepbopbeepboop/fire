@@ -1075,6 +1075,30 @@ def _want(want, backend):
         if isinstance(want, dict) else want
 
 
+def judge_known_defect(row, tmpdir):
+    """One KNOWN-DEFECT row: the image's CURRENT stdout, on both backends.
+
+    Deliberately not compared with an oracle. A row that pins a wrong answer
+    cannot be compared with the right one — that is the failure it documents —
+    so it states the wrong answer, and says so in a comment beside CPython's.
+    Both architectures must produce the SAME wrong answer, because the defect
+    is in the shared `_flush_pending_finally` and a per-backend difference here
+    would mean something else is also wrong.
+    """
+    name, body, want, cpython, doc = row
+    source = mod_prog(body)
+    for backend in BACKENDS:
+        res = build_run(tmpdir, name, source, backend)
+        tag = "[%s] %s" % (backend, name)
+        if res[0] == "BUILD-FAIL":
+            check(False, tag + " builds", res[1][-400:])
+            continue
+        check((res[1], res[2]) == (want, 0),
+              tag + " still prints the documented wrong answer (%s)" % doc,
+              "printed %r exit %d; the pinned answer is %r (CPython: %r)"
+              % (res[1], res[2], want, cpython))
+
+
 def judge(name, backend, res, want, tmpdir, source):
     tag = "[%s] %s" % (backend, name)
     if res[0] == "BUILD-FAIL":
@@ -1200,6 +1224,8 @@ def main():
         rows = [(i, r) for i, r in rows if i == args.only_row]
     if args.substring:
         rows = [(i, r) for i, r in rows if args.substring in r[0]]
+    if not args.substring and args.only_row is None:
+        rows += [(1000 + i, r) for i, r in enumerate(KNOWN_DEFECT_ROWS)]
 
     ready, why_not = (False, "--no-lean") if args.no_lean \
         else _lean_ready()
@@ -1215,6 +1241,9 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="formal-match-") as tmp:
         for i, row in rows:
+            if i >= 1000:
+                judge_known_defect(row, tmp)
+                continue
             name, want = row[0], row[2]
             source = row_source(row)
             for backend in BACKENDS:
@@ -1225,8 +1254,9 @@ def main():
         check_proofs(tmp, PROOF_PAIRS, ready and not args.no_lean)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
-    print("%d/%d verdicts passed over %d rows"
-          % (passed, len(RESULTS), len(rows)))
+    print("%d/%d verdicts passed over %d rows (%d of them pinning a known "
+          "wrong answer)"
+          % (passed, len(RESULTS), len(rows), len(KNOWN_DEFECT_ROWS)))
     return 0 if passed == len(RESULTS) else 1
 
 

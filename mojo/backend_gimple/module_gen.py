@@ -210,15 +210,8 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     if not ipt:
         return
     names = getattr(gen, '_func_param_names', {})
-    # "<func>\x1f<param>" -> "\x1f"-joined DISTINCT ctypes of the unambiguous
-    # literal arguments seen for that parameter. FLAT, not a tuple-keyed dict of
-    # sets: a tuple key hashes by its heap address once self-hosted (see
-    # `_pair_key`), and `for (fname, pname), ctypes in evidence.items()` bound
-    # the key's content string where a list was read by index -- a SIGSEGV in
-    # `mojo_list_get_int` for any input with a call to a function it defines.
-    # `evidence_keys` keeps the first-seen order the dict had.
+    # (func, param) -> {ctype, ...} for unambiguous literal arguments only
     evidence: dict = {}
-    evidence_keys: list = []
     for call in _gmi_iter_calls(stmts):
         if not isinstance(call.func, gimple_ctypes.IdentExpr):
             continue
@@ -234,23 +227,10 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         for pname, arg in zip(params, args):
             ctype = _gmi_literal_ctype(arg)
             if ctype is not None:
-                _ek = fname + '\x1f' + _as_str(pname)
-                if _ek not in evidence:
-                    evidence[_ek] = ''
-                    evidence_keys.append(_ek)
-                _ev = _as_str(evidence[_ek])
-                if ('\x1f' + _as_str(ctype) + '\x1f') not in ('\x1f' + _ev + '\x1f'):
-                    if _ev:
-                        evidence[_ek] = _ev + '\x1f' + _as_str(ctype)
-                    else:
-                        evidence[_ek] = _as_str(ctype)
+                evidence.setdefault((fname, pname), set()).add(ctype)
 
     containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
-    for _ek in evidence_keys:
-        _ekp = _as_str(_ek).split('\x1f')
-        fname = _as_str(_ekp[0])
-        pname = _as_str(_ekp[1])
-        ctypes = _as_str(evidence[_ek]).split('\x1f')
+    for (fname, pname), ctypes in evidence.items():
         if len(ctypes) != 1:
             continue  # not unanimous
         # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
@@ -260,11 +240,8 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # `_gmi_apply_call_site_param_evidence`). The set is known to hold
         # exactly one element here, so a literal subscript is both equivalent
         # and linkable.
-        call_type = _as_str(ctypes[0])
-        _ipf = _as_dict(ipt.get(fname))
-        cur = None
-        if _ipf:
-            cur = _ipf.get(pname)
+        call_type = list(ctypes)[0]
+        cur = ipt.get(fname, {}).get(pname)
         # Every UNANIMOUS literal container also grounds the callee's
         # `==` / `!=` lowering, which cannot see through an erased
         # int64_t parameter: record the KIND separately, in a table of its
@@ -414,17 +391,7 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
     # snapshot taken before the first round, and a CHAIN would then resolve one
     # hop and stop (`mid1` -> `mid2` -> `leaf` left `mid1` on the name-based
     # guess, measured, and printed `0` where CPython prints `1`).
-    # FLAT, not `{(func, param): {(callee, cparam), ...}}`: a tuple key hashes
-    # by its heap address once self-hosted (see `_pair_key`), `for _key in fwd`
-    # over such a dict binds the key's content string where a tuple was read
-    # by index, and the inner set of tuples has no static element type -- the
-    # `for _hop in fwd[_key]` below was lowered as "'for' loop over unsupported
-    # iterable type int64_t", so the fixed point silently never ran. Keys are
-    # "<func>\x1f<param>" strings, hops are "<callee>\x1f<cparam>" strings in a
-    # first-seen-order list without duplicates (the set's only observable
-    # behaviour here), and `fwd_keys` keeps the key order the dict had.
     fwd: dict = {}
-    fwd_keys: list = []
     for s in all_functions:
         if not isinstance(s, gimple_ctypes.FunctionDef):
             continue
@@ -451,52 +418,39 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
                     continue
                 if _as_str(arg.name) != _as_str(params[_i]):
                     continue
-                _fk = fname + '\x1f' + _as_str(params[_i])
-                _fh = callee + '\x1f' + _as_str(cparams[_i])
-                if _fk not in fwd:
-                    fwd[_fk] = []
-                    fwd_keys.append(_fk)
-                _fhl = _as_list(fwd[_fk])
-                if _fh not in _fhl:
-                    _fhl.append(_fh)
+                fwd.setdefault((fname, _as_str(params[_i])), set()).add(
+                    (callee, _as_str(cparams[_i])))
     if not fwd:
         return
     ann = getattr(gen, '_annotated_params', {}) or {}
     changed = True
     while changed:
         changed = False
-        for _fk in fwd_keys:
-            _fkp = _as_str(_fk).split('\x1f')
-            _fname = _as_str(_fkp[0])
-            _pname = _as_str(_fkp[1])
+        for _key in fwd:
+            _fname = _key[0]
+            _pname = _key[1]
             # The callees' CURRENT conclusions, re-read every round — which is
-            # what lets a chain resolve from its real end backwards. Distinct
-            # conclusions are collected, so two forwards disagreeing leave the
-            # parameter exactly as it was, which is the same rule as everywhere
-            # else in this file.
-            _cts: list = []
-            for _hop in _as_list(fwd[_fk]):
-                _hp = _as_str(_hop).split('\x1f')
-                _hipt = _as_dict(ipt.get(_as_str(_hp[0])))
-                if not _hipt:
-                    continue
-                _ct = _hipt.get(_as_str(_hp[1]))
-                if _ct is not None and _as_str(_ct) in containers:
-                    if _as_str(_ct) not in _cts:
-                        _cts.append(_as_str(_ct))
+            # what lets a chain resolve from its real end backwards. A set, so
+            # two forwards disagreeing leave the parameter exactly as it was,
+            # which is the same rule as everywhere else in this file.
+            _cts = set()
+            for _hop in fwd[_key]:
+                _ct = (ipt.get(_hop[0]) or {}).get(_hop[1])
+                if _ct in containers:
+                    _cts.add(_ct)
             if len(_cts) != 1:
                 continue
-            _want = _as_str(_cts[0])
-            _fipt = _as_dict(ipt.get(_fname))
-            _cur = None
-            if _fipt:
-                _cur = _fipt.get(_pname)
-            if _cur is not None and _as_str(_cur) not in containers:
+            # `list(...)[0]`, NOT `next(iter(...))`: this function is inside
+            # the self-host closure and `next` is not a symbol the compiled
+            # path links (see the identical note in
+            # `_gmi_apply_call_site_param_evidence`).
+            _want = list(_cts)[0]
+            _cur = (ipt.get(_fname) or {}).get(_pname)
+            if _cur is not None and _cur not in containers:
                 continue
-            _fann = _as_dict(ann.get(_fname))
-            if _fann and _fann.get(_pname):
+            if (ann.get(_fname) or {}).get(_pname):
                 continue
-            if _cur is not None and _as_str(_cur) == _want:
+            if _cur == _want:
                 continue
             ipt.setdefault(_fname, {})[_pname] = _want
             # The KIND the callee concluded, recorded for the `==`/`!=`
@@ -1549,16 +1503,7 @@ def _emit_reflection_dispatch(self, parts):
         boxed = self.struct_boxed_fields.get(sn, set())
         bool_fields = self.struct_bool_fields.get(sn, set())
         nullable_containers = self.struct_nullable_container_fields.get(sn, set())
-        # Three PARALLEL lists of strings, not one list of `(name_lit, expr,
-        # owned)` triples: the self-hosted path boxes a tuple's slots to int64_t,
-        # so `for i, (name_lit, val_e, own) in enumerate(part_exprs)` handed the
-        # emitting f-strings three POINTERS and every compiled `_mojo_repr_<S>`
-        # came out as `mojo_str_cat_free(_buf, 516520174288);` -- not even valid
-        # C. `owned` is a code in the same spirit: 'T' the dump owns the string,
-        # 'F' a literal it must not free, 'I<cond>' owned only when <cond> holds.
-        pe_names: list = []
-        pe_vals: list = []
-        pe_owns: list = []
+        part_exprs = []
         # `owned` is the answer to ONE question per field: is the string this
         # field's expression produces a heap buffer the dump owns? It cannot be
         # derived from the emitted text afterwards, because the shapes differ in
@@ -1586,21 +1531,21 @@ def _emit_reflection_dispatch(self, parts):
             # through to the ordinary int repr.
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
-                owned = 'F'
+                owned = False
             elif fname in boxed and ftype in (
                     'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
-                owned = 'T'
+                owned = True
             elif ftype == 'char *':
                 val_expr = f'({fref} ? mojo_repr_str({fref}) : _mojo_repr_none())'
-                owned = 'T'
+                owned = True
             elif ftype == '_Bool':
                 val_expr = f'({fref} ? "True" : "False")'
-                owned = 'F'
+                owned = False
             elif ftype in ('double', 'float'):
                 val_expr = f'mojo_repr_float((double){fref})'
-                owned = 'T'
+                owned = True
             elif ftype == 'MojoList *':
                 if self._field_elem_types.get(sn, {}).get(fname) == 'double':
                     list_repr = f'mojo_repr_list_doubles({fref})'
@@ -1608,24 +1553,24 @@ def _emit_reflection_dispatch(self, parts):
                     list_repr = f'_mojo_repr_list({fref})'
                 if fname in nullable_containers:
                     val_expr = f'({fref} ? {list_repr} : _mojo_repr_none())'
-                    owned = 'T'
+                    owned = True
                 else:
                     val_expr = list_repr
                     # A null list renders as a LITERAL `"[]"`/`"()"` in every
                     # `mojo_repr_list_*` helper, so the dump owns this field's
                     # string only when the pointer is there to make it.
-                    owned = 'I' + fref
+                    owned = ('if', fref)
             elif ftype == 'MojoDict *':
                 if fname in nullable_containers:
                     val_expr = f'({fref} ? _mojo_repr_dict({fref}) : _mojo_repr_none())'
-                    owned = 'T'
+                    owned = True
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
-                    owned = 'I' + fref
+                    owned = ('if', fref)
             elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
-                owned = 'T'
+                owned = True
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
                 # reflected is rendered through that struct's ELEMENT REPR
@@ -1640,7 +1585,7 @@ def _emit_reflection_dispatch(self, parts):
                 if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
                                 f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
-                    owned = 'T'
+                    owned = True
                 else:
                     # `strdup` around the dispatch, and this is the same remedy
                     # `_mojo_repr_dict` applies to its two non-owned answers (and
@@ -1653,13 +1598,11 @@ def _emit_reflection_dispatch(self, parts):
                     # `repr()` site) also has no release point for.
                     val_expr = (f'({fref} ? strdup(_mojo_dispatch_repr((void *){fref}))'
                                 f' : _mojo_repr_none())')
-                    owned = 'T'
+                    owned = True
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
-                owned = 'T'
-            pe_names.append(f'"{fname}="')
-            pe_vals.append(val_expr)
-            pe_owns.append(owned)
+                owned = True
+            part_exprs.append((f'"{fname}="', val_expr, owned))
         # The body is STATEMENTS, not one nested `return`, whenever at least one
         # field's string is the dump's to release: GIMPLE has no comma operator,
         # so a per-field `free()` cannot live inside the expression that cats it,
@@ -1667,18 +1610,14 @@ def _emit_reflection_dispatch(self, parts):
         # `_mojo_repr_dict` and `_mojo_repr_list` already use for exactly this
         # reason. A struct with no owned field keeps the old single-expression
         # body, so nothing that cannot leak here is churned.
-        _any_owned = False
-        for _own_i in range(len(pe_owns)):
-            if _as_str(pe_owns[_own_i]) != 'F':
-                _any_owned = True
+        _any_owned = any(_o is not False for _n, _v, _o in part_exprs)
         if not _any_owned:
             cat_chain = f'strdup("{sn}(")'
-            for i in range(len(pe_names)):
+            for i, pe in enumerate(part_exprs):
                 sep = ', ' if i > 0 else ''
                 if sep:
                     cat_chain = f'mojo_str_cat_free({cat_chain}, ", ")'
-                name_lit = _as_str(pe_names[i])
-                val_e = _as_str(pe_vals[i])
+                name_lit, val_e, _own = pe
                 cat_chain = f'mojo_str_cat_free({cat_chain}, {name_lit})'
                 cat_chain = f'mojo_str_cat_free({cat_chain}, {val_e})'
             cat_chain = f'mojo_str_cat_free({cat_chain}, ")")'
@@ -1688,20 +1627,17 @@ def _emit_reflection_dispatch(self, parts):
             body_lines.append(f'  if (!obj) return strdup("None");')
             body_lines.append(f'  char *_buf = strdup("{sn}(");')
             body_lines.append('  char *_v;')
-            for i in range(len(pe_names)):
-                name_lit = _as_str(pe_names[i])
-                val_e = _as_str(pe_vals[i])
-                own = _as_str(pe_owns[i])
+            for i, (name_lit, val_e, own) in enumerate(part_exprs):
                 if i > 0:
                     body_lines.append(f'  _buf = mojo_str_cat_free(_buf, ", ");')
                 body_lines.append(f'  _buf = mojo_str_cat_free(_buf, {name_lit});')
                 body_lines.append(f'  _v = {val_e};')
                 body_lines.append('  _buf = mojo_str_cat_free(_buf, _v);')
-                if own == 'T':
+                if own is True:
                     body_lines.append('  free(_v);')
-                elif own.startswith('I'):
-                    body_lines.append(f'  if ({own[1:]}) free(_v);')
-                elif own == 'F':
+                elif isinstance(own, tuple) and own and own[0] == 'if':
+                    body_lines.append(f'  if ({own[1]}) free(_v);')
+                elif own is False:
                     # A LITERAL, and the only shape that is not ours to free.
                     # Its own answer, at the site that knows it.
                     body_lines.append('  /* a string literal: not ours to free */')
@@ -2819,7 +2755,8 @@ def gen_module_impl(self, stmts):
     # would emit its own copy -- which is the bug this fixes: a single-TU
     # closure carries ~160 modules, and 18 redefinitions of
     # `_mojo_gpu_kernel_count` failed `mojoc` and `selfhost` outright.
-    _mg_introspected = self._mg_introspection_emitted
+    _mg_introspected = self.__dict__.setdefault(
+        '_mg_introspection_emitted', set())
     _device_names = sorted(n for n, k in _device_kinds.items()
                            if k == _gmi_device_select.DEVICE)
     # The host-side marshalling signature of every device kernel, computed
@@ -4143,13 +4080,6 @@ def gen_module_impl(self, stmts):
         'param_defaults': 'MojoDict *',
         'kwonly': 'MojoList *',
         'comptime_params': 'MojoList *',
-        # The two bracket-parameter tables the dataclass grew AFTER this table
-        # was written. A field missing here is a field the compiled `repr` never
-        # prints (`comptime_param_defaults={}, comptime_param_annotations={}`),
-        # so every `.ast` the self-hosted binary wrote differed from the
-        # reference's at the first `FunctionDef`.
-        'comptime_param_defaults': 'MojoDict *',
-        'comptime_param_annotations': 'MojoDict *',
         'is_generator': '_Bool',
         'yield_bearing_node_ids': 'int64_t',
         'is_async': '_Bool',
@@ -5652,12 +5582,9 @@ def gen_module_impl(self, stmts):
             # make the answer depend on declaration order.
             if self.struct_bool_fields.get(s.name):
                 for _bm in s.methods:
-                    # `_bm_rets`, not `_rets`: this function also binds `_rets` to a DICT
-                    # further down (`_rets: dict = {}`), and first-declaration-wins would
-                    # have lowered this list comprehension's result as that dict.
-                    _bm_rets = [_rn for _rn in _walk_ast(_bm.body)
+                    _rets = [_rn for _rn in _walk_ast(_bm.body)
                              if isinstance(_rn, ReturnStmt)]
-                    if not _bm_rets:
+                    if not _rets:
                         continue
                     # Which bare receiver names in this method denote a
                     # struct: `self`, and any parameter annotated with a
@@ -5673,7 +5600,7 @@ def gen_module_impl(self, stmts):
                         if _pt2 and _as_str(_pt2).strip() in self.struct_field_types:
                             _recv_sn[_as_str(_mpj2[0])] = _as_str(_pt2).strip()
                     _all_bool_field = True
-                    for _rn2 in _bm_rets:
+                    for _rn2 in _rets:
                         _rv = _rn2.value
                         _rname = ''
                         if isinstance(_rv, MemberExpr) and isinstance(_rv.obj, IdentExpr):
@@ -6621,9 +6548,8 @@ def gen_module_impl(self, stmts):
             _k = id(body)
             _v = _mk_cache.get(_k)
             if _v is None:
-                _v = _infer_return_maybe_kinds(
+                _v = _mk_cache[_k] = _infer_return_maybe_kinds(
                     self, body, params, callee_kinds)
-                _mk_cache[_k] = _v
             _maybe, _slotkinds = _v
             if _maybe:
                 self._return_maybe_kinds.add(name)
@@ -7423,30 +7349,8 @@ def gen_module_impl(self, stmts):
     for name, body in _caller_bodies:
         _method_caller_bodies.append((name, None, body))
 
-    # The method-call scalar observations, FLATTENED. This used to be
-    # `{(struct, method): {param: {ctype, ...}}}` -- a tuple-keyed dict of dicts
-    # of sets, consumed by `for (rstruct, mname), pmap in obs.items()` -- and
-    # every part of that is a self-host trap: a tuple key hashes by its heap
-    # ADDRESS once compiled (`_pair_key`'s docstring), a nested-tuple `for`
-    # target over `.items()` binds the key's content-hash string where a list
-    # was expected (`mojo_list_get_int` on it was a SIGSEGV for any input with a
-    # method call), and the inner dict/set have no static type, so the
-    # `types not in ({'double'}, {'char *'})` set comparison was not a set
-    # comparison either. The evidence is only ever asked "was it unanimously
-    # double / unanimously char *", so each (struct, method, param) cell is a
-    # bitmask: 1 = a `double` was observed, 2 = a `char *`, 4 = anything else.
-    # Iteration order is preserved exactly (struct/method groups in first-seen
-    # order, params in first-seen order within a group), so the order
-    # `_inferred_param_types` is filled in -- and therefore the emitted C -- is
-    # what the nested form produced.
-    _msobs: dict = {}          # "<struct>\x1f<method>\x1f<param>" -> bitmask
-    _msobs_groups: list = []   # "<struct>\x1f<method>", first-seen order
-    _msobs_params: dict = {}   # group -> "\x1f<param>\x1f<param>...", first-seen order
-
     def _collect_method_scalar_obs():
-        _msobs.clear()
-        _msobs_groups.clear()
-        _msobs_params.clear()
+        obs: dict = {}
         for caller_name, caller_struct, cbody in _method_caller_bodies:
             calls = []
             self._calls_in_stmts(cbody, calls)
@@ -7499,27 +7403,13 @@ def gen_module_impl(self, stmts):
                     st = _arg_scalar_type(caller_name, a, deep_str=True,
                                           prefer_refined_param=True)
                     if st:
-                        _msg = _as_str(rstruct) + '\x1f' + _as_str(call.func.member)
-                        if _msg not in _msobs_params:
-                            _msobs_groups.append(_msg)
-                            _msobs_params[_msg] = ''
-                        _msk = _msg + '\x1f' + _as_str(pnames[i])
-                        if _msk not in _msobs:
-                            _msobs[_msk] = 0
-                            _msobs_params[_msg] = _as_str(_msobs_params[_msg]) + '\x1f' + _as_str(pnames[i])
-                        _msbit = 4
-                        if st == 'double':
-                            _msbit = 1
-                        elif st == 'char *':
-                            _msbit = 2
-                        _msobs[_msk] = int(_msobs[_msk]) | _msbit
+                        obs.setdefault((rstruct, call.func.member), {}) \
+                            .setdefault(pnames[i], set()).add(st)
+        return obs
 
-    def _apply_method_scalar_obs():
+    def _apply_method_scalar_obs(obs):
         changed = False
-        for _msg in _msobs_groups:
-            _msg_parts = _as_str(_msg).split('\x1f')
-            rstruct = _as_str(_msg_parts[0])
-            mname = _as_str(_msg_parts[1])
+        for (rstruct, mname), pmap in obs.items():
             meth = _method_scalar_ann.get(rstruct, {}).get(mname)
             if meth is None:
                 continue
@@ -7539,15 +7429,9 @@ def gen_module_impl(self, stmts):
             for _ap, _at in (meth.params or []):
                 ann[_ap] = _at
             defaults = getattr(meth, 'param_defaults', {}) or {}
-            _msps = _as_str(_msobs_params[_msg]).split('\x1f')
-            for _mspi in range(1, len(_msps)):
-                pname = _as_str(_msps[_mspi])
-                _msbits = int(_msobs[_msg + '\x1f' + pname])
-                # Unanimous double (1) or unanimous char * (2); a cell that also
-                # saw anything else (bit 4) or both scalars (3) is not.
-                if _msbits != 1 and _msbits != 2:
+            for pname, types in pmap.items():
+                if types not in ({'double'}, {'char *'}):
                     continue                 # not unanimous double / char *
-                types_is_double = (_msbits == 1)
                 if ann.get(pname) is not None:
                     continue                 # respect explicit annotation
                 if pname in defaults:
@@ -7574,15 +7458,14 @@ def gen_module_impl(self, stmts):
                 # compiler error: in build2, at tree.cc" (bugs/
                 # COMPILE_FAIL_Tools_gdb_libpython.md).
                 if cur in (None, 'int', 'int64_t') \
-                        or (cur == 'MojoList *' and not types_is_double):
+                        or (cur == 'MojoList *' and types == {'char *'}):
                     self._inferred_param_types.setdefault(key, {})[pname] = (
-                        'double' if types_is_double else 'char *')
+                        'double' if types == {'double'} else 'char *')
                     changed = True
         return changed
 
     for _mse_round in range(4):
-        _collect_method_scalar_obs()
-        if not _apply_method_scalar_obs():
+        if not _apply_method_scalar_obs(_collect_method_scalar_obs()):
             break
 
     # Refresh Pass 2b-bis's precomputed per-overload signature ctypes for
@@ -8814,12 +8697,7 @@ def gen_module_impl(self, stmts):
                 _mpm[_mpn] = (None, None)
 
     for callee in sorted(_scalar_obs):
-        # `_as_dict`: `_scalar_obs` is `dict[str, dict[str, set]]`, but the
-        # self-hosted path keeps no value type for the inner dict, so the bare
-        # read typed `pmap` from its own subscript below and indexed a
-        # `MojoDict` as a `MojoList` -- `mojo_list_get_int (pmap, pname)` with a
-        # string index, a SIGSEGV on every input that defines a function.
-        pmap = _as_dict(_scalar_obs[callee])
+        pmap = _scalar_obs[callee]
         fn = _fn_by_name.get(callee)
         if not fn:
             continue
@@ -10417,16 +10295,9 @@ def gen_module_impl(self, stmts):
     for _round in range(4):
         _changed = False
         for _cl_name, _cl_body in _caller_bodies:
-            # `_cl_calls`, not `_calls`: this function already binds `_calls`
-            # to a DICT (`_calls: dict = {}`, the closure-call table above),
-            # `_declare_var` is first-declaration-wins, and the self-hosted
-            # path therefore lowered this `[]` as `mojo_dict_new ()` -- a dict
-            # handed to `_calls_in_stmts`' `out.extend(...)`, which corrupted the
-            # heap and killed the compile with "pointer being freed was not
-            # allocated" for any input that defines a function.
-            _cl_calls = []
-            self._calls_in_stmts(_cl_body, _cl_calls)
-            for _call in _cl_calls:
+            _calls = []
+            self._calls_in_stmts(_cl_body, _calls)
+            for _call in _calls:
                 if not isinstance(_call.func, IdentExpr):
                     continue
                 _callee = _call.func.name
@@ -10586,8 +10457,6 @@ def gen_module_impl(self, stmts):
     # real producer is known. Bounded at four rounds for the same reason:
     # `self._multi_kind_return_funcs` only ever GROWS, so the bound is a
     # depth limit rather than a convergence guess.
-    _mkrf_callee_kinds: dict = {}
-
     def _mkrf_round(callee_set):
         _mkrf_cache: dict = {}
         # Each KNOWN function's single container return kind, filled as this
@@ -10604,14 +10473,11 @@ def gen_module_impl(self, stmts):
             # Memo key includes the sibling map's ID: the answer depends on
             # it, and two functions can share a body node identity while
             # their enclosing scopes give different maps.
-            # `_pair_key`, not the tuple `(id(body), id(sibling_lifted))`: a tuple key
-            # hashes by its heap address once self-hosted, so every lookup missed.
-            _k = _pair_key(str(id(body)), str(id(sibling_lifted)))
+            _k = (id(body), id(sibling_lifted))
             _kinds = _mkrf_cache.get(_k)
             if _kinds is None:
-                _kinds = _infer_multi_kind_return(
+                _kinds = _mkrf_cache[_k] = _infer_multi_kind_return(
                     self, body, params, callee_set, _cg, sibling_lifted)
-                _mkrf_cache[_k] = _kinds
             if len(_kinds) > 1:
                 self._multi_kind_return_funcs[name] = True
             elif len(_kinds) == 1:
@@ -10671,9 +10537,7 @@ def gen_module_impl(self, stmts):
 
     # Round 1 reads an empty set and an empty kind map -- it is the round that
     # finds the producers; rounds 2+ read what the earlier rounds filed.
-    # (`_mkrf_callee_kinds` itself is bound BEFORE `_mkrf_round` is defined,
-    # above: a nested function captures a name's value when its environment is
-    # built, so a binding that comes after the `def` was NULL inside it.)
+    _mkrf_callee_kinds: dict = {}
     _mkrf_round(set())
     for _mkrf_iter in range(3):
         _mkrf_before = len(self._multi_kind_return_funcs)
@@ -10764,16 +10628,6 @@ def gen_module_impl(self, stmts):
         return _out
 
     _pre_declared_globals = set()
-    # Names whose module-level initialiser is the literal `None`. `None` is a
-    # valid value of every pointer kind (it is the NULL pointer), so it carries
-    # no KIND of its own and must not fix the global's type the way a real
-    # scalar initialiser does. Without this, the standard lazy-initialised
-    # singleton (`x = None` at module scope, then `global x; x = "abc"` in a
-    # function) froze the field `int64_t` from the `None` (an integer-typed
-    # slot) and the later `char *` store was read back as the pointer's own
-    # decimal. The cross-function join below is where the recorded pointer kind
-    # then wins.
-    _none_init_globals = set()
     _phase17_mod = self.module_name if len(self.module_name) > 0 else "root"  # module name for _global_to_module mapping
     _phase17_own_stmts = _flatten_resolved_conditionals(stmts)
     _phase17_stmts = (_phase17_own_stmts
@@ -10956,8 +10810,6 @@ def gen_module_impl(self, stmts):
         CODEGEN_multi_assign_local_var_type_not_inferred
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
-        if _own and self._is_none_literal(_value):
-            _none_init_globals.add(_as_str(_gname))
         _phase17_set_gtype(_gname, _phase17_value_type(_value), _own)
         if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
             _elt = self._quick_type(_value.elements[0])
@@ -11435,30 +11287,6 @@ def gen_module_impl(self, stmts):
     for _rgname, _rgkinds in _phase17_scan_global_reassignments().items():
         _rgbase = self._global_var_types.get(_rgname, '')
         _rgall = set(_rgkinds)
-        if _rgname in _none_init_globals:
-            # The module-level initialiser is `None`, which is the NULL value
-            # of every pointer kind and therefore contributes no kind to the
-            # join. Use the function-store kind(s) as the whole answer — and
-            # declare the FIELD as that pointer type directly, not the
-            # `int64_t` box the multi-kind arm below uses: a boxed `char *`
-            # has no read-back path (`char *` is not in
-            # `_BOXED_CONTAINER_CTYPES`), so the box would make the read
-            # `char * t = <int64_t field>;` a `-Wint-conversion` error. A
-            # real pointer field takes the NULL initialiser fine (see
-            # `_safe_coerce_emit`'s `int -> <pointer>` arm for the runtime
-            # store, and the struct initialiser's `(<c_type>)0` for the
-            # static one).
-            if len(_rgall) == 1:
-                _rgsem = _rgkinds.pop()
-            elif len(_rgall) > 1:
-                _rgsem = 'int64_t'
-            else:
-                continue
-            self._global_var_types[_rgname] = _rgsem
-            self._own_global_var_types[_rgname] = _rgsem
-            self._global_c_decl_types[_rgname] = _rgsem
-            _mgk.add(_rgname)
-            continue
         if _rgbase.endswith('*'):
             _rgall.add(_rgbase)
         elif _rgbase:
@@ -13801,12 +13629,12 @@ def gen_module_impl(self, stmts):
             ret_type = sym_info.get('return_type', 'int64_t')
             ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
             if ret_type == 'void':
-                _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
+                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
             else:
-                _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
             _stub_only_guard = _stub_guard_name(cname)
             parts.append(f"#ifndef {_stub_only_guard}\n#define {_stub_only_guard}\n"
-                          f"{ret_type} {cname} () {_stub_body}  /* stub from {module} */\n#endif")
+                          f"{ret_type} {cname} () {body}  /* stub from {module} */\n#endif")
             continue
 
         safe = self._func_csym(_as_str(sym_name))
@@ -13877,12 +13705,12 @@ def gen_module_impl(self, stmts):
                     continue
                 self._emitted_unresolved_stub_syms.add(safe)
                 if ret_type == 'void':
-                    _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
+                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
                 else:
-                    _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
                 _unresolved_guard = _stub_guard_name(safe)
                 parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
-                              f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
+                              f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
             else:
                 parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
@@ -14824,12 +14652,7 @@ def gen_module_impl(self, stmts):
         # kernel-free module later in the closure emits EMPTY_SIDECAR and the
         # two collide. Measured: 2 definitions, `mojoc` and `selfhost` red.
         _mg_introspected.add('definitions')
-    elif len(_mg_introspected) == 0:
-        # `len(...) == 0`, not `not _mg_introspected`: the shared set arrives
-        # through an erased local on the self-hosted path, where a bare truth
-        # test is a pointer-nullity check -- true for an EMPTY set -- so the
-        # empty sidecar (the four weak `_mojo_gpu_*` introspection entry
-        # points) was never emitted and every stage2 `.ci` lost its tail.
+    elif not _mg_introspected:
         # No device code in this module -- an ordinary module, or one compiled
         # with `--no-gpu` and no marked kernels. Emit the introspection entry
         # points anyway, reporting 0. Without them a program that ASKS whether

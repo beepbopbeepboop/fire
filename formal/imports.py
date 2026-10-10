@@ -240,18 +240,6 @@ HOST_UNREACHABLE = frozenset((
     # same way (no spec): Windows' `os`, whose content is the registry, services
     # and the Windows path model rather than an API this target could answer.
     "msvcrt", "winreg", "winsound", "nt",
-    # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
-    # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
-    # next step, taken. `importlib.util.find_spec` on the interpreter that runs
-    # this tree returns NO SPEC for each, which is the rule at the top of this
-    # section applied: the object is missing from the target. `_gdbm` and
-    # `_tkinter` need a library outside libSystem (gdbm, Tcl/Tk); `_overlapped`,
-    # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
-    # leading underscore), so this moves the PUBLIC unclassified count by zero;
-    # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
-    "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -3326,18 +3314,13 @@ def check_library_free_calls(importer_path: str, stmts: list,
     """
     from formal import model as M                   # lazy — cycle
     exempt = {}
-    source_of = {}
-    for src, (bindings, _why) in (library_free or {}).items():
+    for bindings, _why in (library_free or {}).values():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
             # the call may be written as the alias or as the defining name and
-            # neither has a callee, so the refusal has to reach either.  The
-            # SOURCE is the defining module's, which is the key this table is
-            # built under — the refusal reads it to name the rule that applied.
+            # neither has a callee, so the refusal has to reach either.
             exempt.setdefault(bound, spelled)
             exempt.setdefault(defining, spelled)
-            source_of.setdefault(bound, src)
-            source_of.setdefault(defining, src)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -3351,12 +3334,8 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
-            rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
-                source=source_of.get(callee.name))
             raise ImportBuildError(
-                M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                M.imported_callee_refusal(callee.name, sym, scope))
 
 
 def _enclosing_scopes(stmts: list) -> list:

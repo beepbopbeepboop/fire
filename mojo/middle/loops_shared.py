@@ -27,11 +27,6 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
 # `import X` survives where `from X import NAME` cannot, is in
 # `mojo/middle/methods_shared.py`'s header comment.
-# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
-# re-export is invisible to the self-hosted call lowering while this module is
-# inside the compiler's own import cycle, and the call became a weak
-# "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -337,9 +332,9 @@ def _single_loop_target_name(target):
     consumer that reads one value per iteration cannot answer it, and the
     generator path's own answer to that is filed rather than guessed).
     """
-    if not for_target_is_tuple(target):
+    if not gimple_ctypes.for_target_is_tuple(target):
         return target
-    leaves = for_target_names(target)
+    leaves = gimple_ctypes.for_target_names(target)
     if len(leaves) == 1:
         return leaves[0]
     return None
