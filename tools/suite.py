@@ -2638,7 +2638,7 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='tiny', cwd='stage3',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
      desc='stage3: same binary again (idempotency of the closure)')
