@@ -117,9 +117,10 @@ files (`tools/formal_sweep.py -j 4 -t 120 --no-stdlib`, arm64,
 | **pass** | **0** | **0** |
 
 **0 passes, and that is the prediction every host-import row in this project has
-made** (`bugs/FORMAL_subprocess_row_measured_b7.md` §7 for `tempfile`,
-§"what it moved" for `textwrap`, and the `platform` row's thirty files, none of
-them a small program): none of these 50 files is a small program — they are
+made** (`formal/hostmods/tempfile.mojo` and `formal/hostmods/textwrap.mojo` both
+landed with their differential tests measuring the same 0-pass shape, and the
+`platform` row's thirty files, none of them a small program): none of these 50
+files is a small program — they are
 `cas.py`, `driver.py`, `module_loader.py`'s callers, the test suite. What moved
 is that they now report the truth about where they actually stop.
 
@@ -416,8 +417,10 @@ no lean invocation, no gate.
    honest — it asserts that `random.Random(3)` and `random.getrandbits(8)`
    are refused BY NAME rather than answering a silent zero.
 3. **`zlib`, 27 files.** A project, not a patch, and the entry in
-   `formal/imports.py` says so with the argument. Whoever takes it should read
-   `bugs/FORMAL_subprocess_row_measured_b7.md` §5 item 1 first.
+   `formal/imports.py` says so with the argument. Whoever takes it should first
+   re-measure the row over the current sweep: the `-5` ranking's `zlib` row
+   measured 15 files and 0 worth — a library outside libSystem, which the
+   linking premise forbids — and this queue's rate is not the tree's.
 4. **`collections`, 22 files.** **CLAIMED** — `module:platform+fnmatch+
    collections-rest`. Not this queue's.
 5. **The type factories** (`types`, `copy`, `datetime`, `resource`) — each has a
@@ -466,6 +469,7 @@ sweep over the same slice, so the delta is between two runs of one tool over one
 file list rather than between a log and a recollection.
 
 **The re-sweep is 50 builds and finishes in about a minute at `-j 4 -t 120`**
-against the committed sweep's own `~2.2 s of wall per build`
-(`FORMAL_subprocess_row_measured_b7.md` §9). It is not a whole-scope sweep and
-was run inside an 8 GB `memslot` reservation that peaked at 0.7 GB.
+against the committed sweep's own `~2.2 s of wall per build` over the same
+shape (`tools/formal_sweep.py -j 4 -t 60`, `--no-stdlib` slice). It is not a
+whole-scope sweep and was run inside an 8 GB `memslot` reservation that peaked
+at 0.7 GB.
