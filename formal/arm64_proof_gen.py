@@ -8349,6 +8349,52 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     _hcond_stmt = (f"({_condtxt}) ↔ ¬({_src})" if _hcond_neg
                                   else f"({_condtxt}) ↔ ({_src})")
                     A(f"{IND}have hcond_{bi} : {_hcond_stmt} := by")
+
+                    def _hcond_close(chain, spill):
+                        """The shared closer of a conditional branch's `hcond`.
+
+                        **The order is the whole of it, and it is why the flag
+                        lemma `_fls` below is emitted as an explicit `rw` rather
+                        than left to the closing `simp`.**  `simp only` is
+                        IRREVERSIBLE: the moment `arm64_subs_flags` /
+                        `arm64_matches_condition` are unfolded, the predicate is
+                        a raw bitvector order and the `arm64_flag_*` lemma whose
+                        LHS is `arm64_matches_condition cc (arm64_subs_flags a
+                        b)` can never match again — so a closer whose `simp` set
+                        names that lemma still hands `bv_decide` an opaque
+                        `arm64_reg`/`arm64_matches_condition` term, which is the
+                        "potentially spurious counterexample" of
+                        `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.
+                        The lemma has to fire FIRST, which is the order
+                        `_cond_flag_lines` already uses for a loop's exit test,
+                        and this is the same recipe for a branch.
+
+                        `try` and not `rw` is what makes it safe when the
+                        operands have not reduced: the rewrite is a no-op, the
+                        following `simp only` unfolds exactly as before, and the
+                        closing line is the one emitted without this step.  So a
+                        chain that closed on the old route closes on this one.
+                        """
+                        A(f"{IND}  simp only ["
+                          + ', '.join(list(chain) + ['arm64_reg',
+                                                     'arm64_set_reg'])
+                          + "]")
+                        spill()
+                        if _fls:
+                            A(f"{IND}  try rw [{', '.join(_fls)}]")
+                        # `try` because the `rw` above may have already
+                        # rewritten the predicate: on a path where the operands
+                        # HAD reduced, the flag lemma fires and this `simp only`
+                        # has nothing left to unfold, and Lean reports an
+                        # unperformed `simp only` on a goal it did not change as
+                        # "`simp` made no progress" rather than as a no-op.  The
+                        # two steps are alternatives, not a sequence.
+                        A(f"{IND}  try (simp only [arm64_subs_flags, "
+                          f"arm64_matches_condition])")
+                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
+                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
+                          + "] <;> bv_decide")
+
                     if _cset_bi != bi:
                         # The cset is in a PRIOR block on this path, so this
                         # block's own `qT` chain ends in that block's exit local
@@ -8371,13 +8417,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                     + list(ctx["flow_defs"]))
                         A(f"{IND}  rw [hsid_{bi}]")
                         A(f"{IND}  simp only [arm64_reg_pc]")
-                        A(f"{IND}  simp only [{', '.join(list(def_names) + _cs_defs + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        _rw_spills(True, _all_instrs,
-                                   blocks[bi]['instrs'] + blocks[_cset_bi]['instrs'],
-                                   _init)
-                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
-                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
-                          + "] <;> bv_decide")
+                        _hcond_close(
+                            list(def_names) + _cs_defs + _hpriors,
+                            lambda: _rw_spills(
+                                True, _all_instrs,
+                                blocks[bi]['instrs']
+                                + blocks[_cset_bi]['instrs'], _init))
                     elif _hpriors:
                         # The prior block is opaque here (`s_{pb}`), so the
                         # current block's spill addresses are relative to that
@@ -8385,22 +8430,20 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         _pb_state = f"s_{_prior_blocks[-1]}"
                         A(f"{IND}  rw [hsid_{bi}]")
                         A(f"{IND}  simp only [arm64_reg_pc]")
-                        A(f"{IND}  simp only [{', '.join(list(def_names) + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        _rw_spills(False, blocks[bi]['instrs'],
-                                   blocks[bi]['instrs'], _pb_state)
-                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
-                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
-                          + "] <;> bv_decide")
+                        _hcond_close(
+                            list(def_names) + _hpriors,
+                            lambda: _rw_spills(
+                                False, blocks[bi]['instrs'],
+                                blocks[bi]['instrs'], _pb_state))
                     else:
                         if _hsid:
                             A(f"{IND}  rw [{', '.join(_hsid)}]")
                             A(f"{IND}  simp only [arm64_reg_pc]")
-                        A(f"{IND}  simp only [{', '.join(list(_bdefs) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
-                        _rw_spills(False, _all_instrs, blocks[bi]['instrs'],
-                                   _init)
-                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
-                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
-                          + "] <;> bv_decide")
+                        _hcond_close(
+                            list(_bdefs),
+                            lambda: _rw_spills(
+                                False, _all_instrs, blocks[bi]['instrs'],
+                                _init))
             # Codegen-internal CBZ (no source-level condition): if the tested
             # register holds a compile-time non-zero constant at the CBZ, the
             # taken (div0/error) arm is statically dead — close it by
