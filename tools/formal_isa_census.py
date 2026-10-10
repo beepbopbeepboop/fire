@@ -246,18 +246,29 @@ def encoder_names(arch):
 
 
 def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only."""
+    """{encoder: [(file, count)]} over the emitter files only, by AST.
+
+    The walk is over the two `LEVER_ROOTS` files and counts `encode_*` NAMES
+    and ATTRIBUTES in code — not a regex over their text. The distinction is the
+    one this module states for the FUZZ column ("a docstring mentioning an
+    encoder is not coverage") and it has to hold here for the same reason: an
+    encoder an emitter only NAMES in prose is not an instruction any image can
+    contain. Measured 2026-10-05: the regex version counted x86-64's
+    `encode_cmov_r64_r64`, which `formal/x86_64_codegen.py` mentions only in the
+    `_emit_stack_floor_init` docstring recording *why it was not used*, and
+    reported the form as an emitted gap it never was.
+    """
+    out = {name: [] for name in encoder_names(arch)}
     for rel in LEVER_ROOTS[arch]:
-        blob = _read(os.path.join(ROOT, rel))
-    out = {}
-    for name in encoder_names(arch):
-        hits = []
-        for rel in LEVER_ROOTS[arch]:
-            n = len(re.findall(r"\b%s\b" % re.escape(name),
-                               _read(os.path.join(ROOT, rel))))
-            if n:
-                hits.append((os.path.basename(rel), n))
-        out[name] = hits
+        tree = ast.parse(_read(os.path.join(ROOT, rel)))
+        counts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in out:
+                counts[node.attr] = counts.get(node.attr, 0) + 1
+            elif isinstance(node, ast.Name) and node.id in out:
+                counts[node.id] = counts.get(node.id, 0) + 1
+        for name, n in counts.items():
+            out[name].append((os.path.basename(rel), n))
     return out
 
 

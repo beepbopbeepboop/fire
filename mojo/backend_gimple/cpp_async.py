@@ -32,6 +32,11 @@ from fire_compiler import (
 import fire_compiler as N
 import regex_compile
 import mlir
+# Direct imports of fire_compiler's target helpers (not `gimple_ctypes.X`): the
+# re-export is invisible to the self-hosted call lowering while this module is
+# inside the compiler's own import cycle, and the call became a weak
+# "unavailable in compiled mode" stub returning 0.
+from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1121,7 +1126,7 @@ def _hbn_add_target(bound: set, t) -> None:
     recursed on the paren branch only — could not tell `'(a)'` from a
     1-tuple `'(a,)'`."""
     if isinstance(t, str):
-        for name in gimple_ctypes.for_target_names(t):
+        for name in for_target_names(t):
             if name:
                 bound.add(name.lstrip('*').strip())
         return

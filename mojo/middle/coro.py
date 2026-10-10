@@ -35,6 +35,7 @@ import dataclasses
 import os
 
 import fire_compiler as N
+from fire_compiler import for_target_names, for_target_is_tuple, method_receiver_kind
 
 
 def _cm_as_str(x) -> str:
@@ -377,7 +378,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         # the previous code stored the whole target text `'(a, b)'` as the key,
         # which no lookup could ever match, so skipping is the same
         # observable behaviour without the junk entry.
-        tnames = N.for_target_names(n.target)
+        tnames = for_target_names(n.target)
         if len(tnames) != 1 or tnames[0] in env:
             continue
         tname = tnames[0]
@@ -1200,7 +1201,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         # first parameter is a real one and must NOT be stripped — the old
         # `params[0][0] != 'self'` test refused every staticmethod generator
         # method outright.
-        _rcv = N.method_receiver_kind(fn)
+        _rcv = method_receiver_kind(fn)
         _is_cm = (_rcv == 'cls')
         _is_static = (_rcv == '' and bool(_decos)
                       and 'staticmethod' in [d for d in _decos])
@@ -2053,7 +2054,7 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
             # refused here for the reason it is un-desugarable (one name, but
             # the item is unpacked) rather than accepted by a comma test that
             # the parser used to make unanswerable.
-            if not isinstance(n.target, str) or N.for_target_is_tuple(n.target):
+            if not isinstance(n.target, str) or for_target_is_tuple(n.target):
                 return False
             if _await_target_name(n.iterable) is None:
                 return False
@@ -2741,7 +2742,7 @@ def _mark_coro_callable_param_fns(body_fd, fn):
     called inside a generator body got the homogenized `int64_t` box back
     from `mojo_fnptr_call_N` for a `char *`, and every consumer of it (`len`, a
     `for` loop, `print`) had nothing to dispatch on — exit 0 and no output.
-    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    That shape is fixed (2026-10-02); this is the generator half of it.
     """
     _fns = _callable_param_function_defaults(fn)
     if _fns:
@@ -4852,7 +4853,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     # never passed AND dropped the method's first REAL parameter from
     # `real_params` -- every staticmethod generator method was miscompiled.
     # `N.method_receiver_kind` is the one rule (see fire_compiler).
-    _rcv_kind = N.method_receiver_kind(fn) if is_method else ''
+    _rcv_kind = method_receiver_kind(fn) if is_method else ''
     is_classmethod = is_method and _rcv_kind == 'cls'
     has_self = is_method and _rcv_kind == 'self'
     base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
@@ -4985,8 +4986,8 @@ def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
     the same treatment for the same reason: `def apply_to(items, _f=upper)`
     called inside a generator body got the homogenized `int64_t` box back
     from `mojo_fnptr_call_N` for a `char *`, and every consumer of it
-    (`len`, a `for` loop, `print`) then had nothing to dispatch on —
-    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    (`len`, a `for` loop, `print`) then had nothing to dispatch on — a shape
+    fixed 2026-10-02.
 
     A bare name only, for the reason
     `calls_shared._callable_param_ret_types` gives: the answer is then the

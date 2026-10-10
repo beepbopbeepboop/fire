@@ -1,6 +1,44 @@
 # The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm`
 # with `Rd ≠ 31` writes NO register
 
+**Status update 2026-10-07 (`work/formal125-docs`): FIXED IN SOURCE; the
+`lib/ProofLib.lean` build is still owed to the integrator.** The `0xab000000`
+arm now reads `Rd` and writes it
+(`arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s)`),
+`work_step_cmn` states BOTH facts, `_step_rhs`/`_step_rhs_generic` for index 66
+mirror it, and `_regs_written` for index 66 is `{rd}` when `rd ≠ 31` and `set()`
+for the `CMN` spelling (which also corrects the same staleness for index 6,
+whose `SUBS Xd` spelling the model already wrote). The CPU-vs-model row
+`adds x11, x1, x15`, pinned beside the existing `cmn`, is in
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`. **What this worker
+could not do is rebuild `lib/ProofLib.olean`** — measured here with
+`ensure_library`'s own invocation it breaches the 8 GB worker ceiling (the
+sibling doc has the measurement) — so the library build and the CPU-vs-model
+test are the integrator's. The model change itself was verified in ISOLATION,
+which is the part a bounded worker can do: a scratch file importing the served
+`ProofLib.olean` and carrying the modified `arm64_step` + `work_step_cmn`
+elaborates (rc=0, 1.4 GB) and `#eval`s `adds x11,x1,x15 → 7` and
+`cmn x1,x15 → x11 unchanged (0)`.
+
+**Status 2026-10-07 (`work/formal131-docs`): FIXED in source, and the one
+remaining step is the `lib/ProofLib.olean` rebuild, which is over this worker's
+8 GB ceiling.** `lib/ProofLib.lean`'s `0xab000000` arm now reads and writes
+`Rd`; `arm64_set_reg 31` is the identity, so the one body is right for both the
+`CMN` and the `adds` spelling.  `work_step_cmn` is restated to state the written
+`Rd`, and `formal/arm64_proof_gen.py`'s `_step_rhs`/`_step_rhs_generic` index 66
+and `_regs_written` for indices 6 and 66 mirror it (`{rd}` when `rd ≠ 31`, the
+empty set for the compare spelling).
+
+Verified WITHOUT rebuilding the library — the one step a bounded worker may not
+take.  A scratch `arm64_step` carrying this edit plus the restated `work_step_cmn`
+elaborates against the served `ProofLib.olean` at **rc=0 / 1.3 GB**, and `#eval`s
+`adds x11, x1, x15` to **7** and `cmn x1, x15` with the destination **untouched**
+(the sibling row of `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`,
+where the `adds` row is added beside the existing `cmn` row so the two spellings
+are pinned together).  The `lib/ProofLib.olean` rebuild itself measures
+`memcap: BREACH 8.0 GB > 8.0 GB ceiling`, so `prooflib` and the
+`TestUnsignedOffsetAccess` row are the integrator's to run.
+
 **Area:** FORMAL (the arm64 machine model's flag-setting-compare arm).
 **Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
 incompleteness — `arm64_step` returns a state that is not the machine's.** Not
@@ -13,6 +51,22 @@ over a bounded worker's 8 GB ceiling, under the tree's `LIBRARY_MEMORY_MB =
 `maxHeartbeats 0`, and a build under it fails with a `bv_decide` "unknown join
 point" cascade at 7.1 GB that looks exactly like an unbuildable library.
 `bugs/FORMAL_contract_ladder_reach.md` carries the full note.)
+
+**Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
+verification is what is still owed.** `arm64_step`'s `0xab000000` arm now reads
+`Rd` (`(insn &&& 0x1f).toNat`) and writes it through `arm64_set_reg`, so the
+class covers both `CMN` (`Rd = 31`, the identity) and `ADDS Xd, Xn, Xm` with
+`Rd ≠ 31`; `work_step_cmn` states the same result; `formal/arm64_proof_gen.py`'s
+`_step_rhs` and `_regs_written` rows for index 66 follow it; and
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` gained a CPU-vs-model
+row for `adds x11, x1, x15` beside the existing `cmn` row, so a model that fixed
+one spelling and left the other wrong fails the test. What is NOT done is the
+`lib/ProofLib.olean` rebuild that would show it green: measured on this tree
+2026-10-07 it still breaches a bounded worker's 8 GB ceiling (`memcap: BREACH
+8.0 GB`, at `-j 4` and `-j 1` alike), so `prooflib` and the
+`formal-call-proofgen` suite job are the integrator's to run. The doc is kept
+until that run rather than `git rm`'d: a fix whose proof has not typechecked is
+not yet a fix.
 
 ## 1. What I ran
 

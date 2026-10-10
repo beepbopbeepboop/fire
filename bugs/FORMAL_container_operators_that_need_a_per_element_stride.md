@@ -1,10 +1,41 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: NOT FIXED — four lowerings, one shared obstacle, and the refusals
-that stand in for them are landed.** `test_formal_container_methods.py` measures
-the whole surface against CPython on both architectures and is green; this doc
-is about the rows in it that are green *as refusals*, which is a different thing
-from green as answers.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
+(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
+unchanged.** `test_formal_container_methods.py` measures the whole surface
+against CPython on both architectures and is green; this doc is about the rows
+in it that are green *as refusals*, which is a different thing from green as
+answers. Three of those rows are answers now.
+
+**2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
+arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
+13 answers equal CPython on arm64 (up from 10 — `s_intersection_r`,
+`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r` moved), x86-64
+unchanged at 4 with the same 9 refusals. The five rows were observed through a
+SUM and a length rather than a length alone, so a result with the right count
+and the wrong element fails. The three emitters are
+`formal/arm64_codegen.py::_emit_set_op` and `_emit_set_filter_pass`, with the
+union's reservation and growth guard (an intersection or a difference reserves
+`nL`; a symmetric difference `nL + nR`); the augmented `-=`/`&=` desugar onto
+them through `_maybe_emit_set_binop`, which is asked by BOTH the binary and the
+augmented emitter — the augmented one used to reach the shared gate first, and
+`s -= {2}` and `s = s - {2}` are the same operator and must not get two answers.
+
+**The gate did NOT narrow the way §"What to do, in order" item 1 prescribed, and
+the reason is a correction worth keeping.** Item 1 said to drop `&`/`^`/`-` from
+`model.CONTAINER_GATED_OPS` and move the rows to probes. That table is SHARED by
+both backends, so dropping an operator there would have made x86-64 — which has
+no set emitter at all — fall through to the integer ALU on two addresses, which
+is exactly the wrong answer the gate was widened for. Instead arm64 intercepts
+the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
+`string_binary_refusal`, and the shared gate is untouched: it still refuses
+`[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
+is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
+The five rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
+group's duplicate `o_xor`/`o_and` rows were re-pointed at probes the same way
+(`o_sub`, a LIST difference, stays a refusal on both backends). The structural
+half is pinned by four new `_BLOB_GROWTH_PROBES` rows, so each new site has to
+keep emitting its capacity guard.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
@@ -79,14 +110,15 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3). arm64 only, then x86-64; both
-   already have `_set_vars` and `container_union_refusal` to gate on, so the
-   gate narrows from "refuse" to "lower" without new machinery. Each row in
-   `test_formal_container_methods.py`'s `set` group
-   (`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r`,
-   `s_andassign_r`) becomes an answer case, and `container_operator_refusal`
-   loses that operator from `CONTAINER_GATED_OPS` — the table is the only place
-   the operator set is written, which is why widening it was one line.
+1. **`&`, `^`, `-` between two sets** (item 3) — **DONE on arm64
+   (2026-10-06).** The rows moved to probes and the augmented forms desugar onto
+   the binary lowering; x86-64 still refuses all three, so the rows carry
+   `BACKEND_ONLY`. What did NOT happen is the prescribed removal from
+   `CONTAINER_GATED_OPS`: that table is shared, and dropping an operator there
+   would send x86-64 into the ALU on two addresses. The backend intercepts
+   first, the way `|` already splits `_emit_set_union` from
+   `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
+   not started. See the Status at the top for the measurements and the emitters.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and

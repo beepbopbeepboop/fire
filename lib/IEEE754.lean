@@ -315,7 +315,7 @@ theorem the_two_zeros_are_equal_and_neither_orders :
 theorem negative_values_order_by_value_not_by_magnitude :
     ltBits 0xdf501586dd43ebbf 0xa76a4b1fd2f36434 = true ∧
       ltBits 0xa76a4b1fd2f36434 0xdf501586dd43ebbf = false := by
-  native_decide
+  decide
 
 /-- An INFINITY is ordered, which is the half `comparable` used to exclude: a
     finite `1.0` is less than `+inf`, and `+inf` is less than nothing. -/
@@ -323,7 +323,7 @@ theorem an_infinity_is_ordered :
     comparable 0x7FF0000000000000 = true ∧
       ltBits 0x3FF0000000000000 0x7FF0000000000000 = true ∧
       ltBits 0xFFF0000000000000 0x3FF0000000000000 = true := by
-  native_decide
+  decide
 
 /-! **Three theorems are NOT here, and that is a measurement, not an omission.**
 

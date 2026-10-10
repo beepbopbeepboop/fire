@@ -215,7 +215,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         # if the enclosing body proves nothing can hold it past this scope.
         # A no-op otherwise, which is today's leak and never a double free.
         # See `ginf.register_nested_env_free`.
-        ginf.register_nested_env_free(gen, node.name, env_var, owner_body)
+        gen._register_nested_env_free(node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
 
@@ -2507,8 +2507,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             if _cpt_rt and _cpt_rt != 'void':
                 gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
-        gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
-        gen._callable_param_ret_types = ggc._callable_param_ret_types(gen, node)
+        gen._callable_param_gen_api = gen._callable_param_generator_apis_of(node)
+        gen._callable_param_ret_types = gen._callable_param_ret_types_of(node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is
@@ -2751,7 +2751,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # known BEFORE `param_strs` is built: such a parameter is declared
     # under a second C name so the heap box can carry the source-level
     # one. See _plan_mut_captured_params.
-    ginf._plan_mut_captured_params(gen, node, node.name)
+    gen._plan_mut_captured_params(node, node.name)
 
     param_strs = []
     has_varargs = gimple_ctypes._params_have_vararg(node.params)
@@ -2848,10 +2848,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
     # feature; this file only ever calls in at these two points.
-    ginf.begin_function(gen, node)
+    gen._begin_function(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
-    ginf.emit_fallthrough_frees(gen, node)
+    gen._emit_fallthrough_frees(node)
 
     # Add implicit return 0 for main if it returns int but has no explicit
     # return. Deliberately NOT `gen.body_lines[-1:]`/`gen.body_lines[-1]`
@@ -2978,7 +2978,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
     gen._reset_func(toplevel_stmts)
-    ginf.reset_no_candidates(gen)
+    gen._reset_no_candidates()
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Choose function name based on whether this is the root module or a library module
@@ -3768,7 +3768,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._reset_func(node.body, node.params)
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
-    ginf.reset_no_candidates(gen)
+    gen._reset_no_candidates()
     # Seed container element types for this method's params and locals —
     # gen_func does both of these (the cross-call `_param_elem_types`
     # contract at its `_pe` seeding, and `_scan_container_elems` for
@@ -3959,7 +3959,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # See the free-function path's identical call: a by-reference capture
     # target among this method's parameters must be declared under a second
     # C name, and that has to be decided before `param_strs` is built.
-    ginf._plan_mut_captured_params(gen, node, gen.current_func_name)
+    gen._plan_mut_captured_params(node, gen.current_func_name)
 
     method_full_name = f"{struct_name}_{node.name}"
     has_varargs = gimple_ctypes._params_have_vararg(node.params)
@@ -4077,10 +4077,10 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # candidate), and a store into `self.x` is an escape the analysis already
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
-    ginf.begin_function(gen, node)
+    gen._begin_function(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
-    ginf.emit_fallthrough_frees(gen, node)
+    gen._emit_fallthrough_frees(node)
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

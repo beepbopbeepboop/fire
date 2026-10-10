@@ -980,8 +980,8 @@ def test_over_provisioned_classes_are_reported_not_silently_kept():
           f'and the same numbers DO trip it with a lower floor')
     check('over-provisioned: the registry itself has no over-provisioned job',
           not suite.over_provisioned(),
-          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
-                    for n, _p, c, g in suite.over_provisioned()))
+          '; '.join(f'{n} {f:.0f}x in {c} ({p:g} GB peak)'
+                    for n, p, c, f in suite.over_provisioned()))
     check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
           len(suite.at_floor()) >= 3,
           f'{len(suite.at_floor())} at the floor class: a list that can only be '
@@ -1201,7 +1201,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
+                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -2060,7 +2060,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 2,
+    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 5,

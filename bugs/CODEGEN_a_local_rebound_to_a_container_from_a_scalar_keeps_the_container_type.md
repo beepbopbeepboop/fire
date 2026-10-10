@@ -1,5 +1,31 @@
 # A local rebound to a container from a SCALAR keeps the container's C type, and the scalar store becomes a pointer cast
 
+## Status (2026-10-07, `work/bugs-oct7-1`) — the MEASURED shapes are fixed; a non-literal int scalar is still open
+
+`_infer_local_var_types` now records a container/struct-pointer kind and a
+real scalar as a conflict (`_multi_kind_locals`), and a conflicting name's
+inferred type is the BOX (`int64_t`), not the pointer-wins lattice join. All
+seven rows in "The four shapes, measured" below build and print CPython's
+answer, including the two that used to refuse to build (`double` →
+container) and the `q = 5; if q > 1:` row that raised `TypeError` at run
+time. The one guarded discriminator: an `int64_t` in the pre-pass is ALSO
+the scan's unknown fallback (`site = site + slots[...]` quick-types `site`
+as int64_t), so an INT is only treated as a real scalar when the name was
+assigned a DIRECT numeric literal (`literal_scalars`); a `double` needs no
+such guard, and `None`/`char *` are pointer-compatible and deliberately not
+conflicts. That guard is what keeps the self-host closure green — the naive
+"container AND any non-container" widening boxed
+`_generator_tuple_yield_slot_ctypes`'s `site` and took the self-host build
+down.
+
+**Still open:** a scalar that is NOT a literal — `def k(n): q = n + 0; if q >
+1: q = [1, 2]; return q` — still joins to the container and the compare
+raises `TypeError`. Closing it needs the pre-pass to distinguish a confident
+scalar from its int64_t fallback generally (confidence tracking through
+`_quick_type`), not just for literals. Pinned by
+`test_gimple.py::a_local_rebound_from_a_scalar_to_a_container_is_the_box`
+(the seven measured rows) — add the `n + 0` row there when it is fixed.
+
 Found 2026-10-04 while closing
 `CODEGEN_lambda_call_boundary_loses_the_return_type.md`'s nested-`def` row.
 That doc named this shape as "a row that is NOT fixed and is not this fix's

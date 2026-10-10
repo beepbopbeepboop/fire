@@ -24,7 +24,7 @@ from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
     TryStmt, VarDecl,
-    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
+    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
@@ -32,7 +32,7 @@ from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
 from mojo.middle.solvers import ClosureInfo
 
 
-def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
+def _selfhost_fn_reassigns_method(_fn) -> bool:
     """True if `_fn`'s body monkey-patches a METHOD on the `gen`/`self` param
     (`gen._emit = intercepted_emit` — the `_gen_stmt_TryStmt` emit-
     interception idiom). Those functions must keep the param OPAQUE in the
@@ -48,6 +48,11 @@ def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
     closure pre-pass, so `_scan_for_closures`'s capture of `self` typed
     `int64_t` -> `self._mutated_free_names(...)` stubbed -> `mojo_set_union
     (self, ...)` -> SEGV compiling any program with a nested `def`."""
+    # The receiver names are a local, not a defaulted parameter: a default is
+    # padded at a cross-module call site, and the padding for a TUPLE default is
+    # the integer 0 once self-hosted -- `_n.target.obj.name in 0` was a SIGSEGV
+    # for every input that defines a function (no caller ever passed one).
+    _pnames = ('gen', 'self')
     _local_defs = {_d.name for _d in _walk_ast(getattr(_fn, 'body', []) or [])
                    if isinstance(_d, FunctionDef)}
     for _n in _walk_ast(getattr(_fn, 'body', []) or []):
@@ -556,7 +561,8 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                             _stack.append(_nb)
                 if len(_members) < 2:
                     continue
-                _member_cis = [ctx._all_closures[outer_name][_m] for _m in _members]
+                _member_map = _as_dict(ctx._all_closures[outer_name])
+                _member_cis = [_member_map[_m] for _m in _members]
                 _merged_caps: dict[str, str] = {}
                 _merged_mut: list = []
                 for _mci in _member_cis:
@@ -714,7 +720,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
         # in the generated .ci, a hard GCC parse failure). Mirrors the
         # closure-typedef-emission loops' identical fix.
         for _outer_name in list(ctx._all_closures):
-            _inner_map = ctx._all_closures[_outer_name]
+            # `_as_dict`: `ctx` is an untyped parameter, so `ctx._all_closures` has
+            # no recorded value type on the self-hosted path and its subscript
+            # was lowered as a LIST read (`mojo_list_get_int` with a string
+            # index -- a SIGSEGV for any input containing a nested `def`).
+            _inner_map = _as_dict(ctx._all_closures[_outer_name])
             for _inner_name in list(_inner_map):
                 _ci = _inner_map[_inner_name]
                 _sub_closures = ctx._all_closures.get(_ci.lifted_name, {})

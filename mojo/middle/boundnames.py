@@ -105,6 +105,18 @@ def _lbn_target_names(t) -> list:
     return [n[1:].strip() if n.startswith('*') else n for n in names]
 
 
+def _lbn_add_all(dest: set, names) -> None:
+    """`dest.update(names)` as an explicit loop of `.add`. `names` is a list
+    (a target's leaf names, a `global` statement's names) and `update` of a
+    list into a set lowered, self-hosted, to a set-from-set merge that walked
+    the LIST's header as slot storage and never finished -- the binary grew a
+    set without bound (40 GB, SIGKILL) inside the first `--dump-full` of a
+    function with an assignment. `dest` is any object with `.add` (a plain
+    `set`, or `_OrderedNames` for formal's register allocator)."""
+    for _n in names:
+        dest.add(_n)
+
+
 def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
     """Hoisted out of `_locally_bound_names` (module-level, not a nested,
     RECURSIVE closure mutating two captured sets) — a real --dump-full
@@ -134,22 +146,22 @@ def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
     a real `set`."""
     for node in nodes or []:
         if isinstance(node, GlobalStmt):
-            global_declared.update(node.names)
+            _lbn_add_all(global_declared, node.names)
         elif isinstance(node, AssignStmt):
-            bound.update(_lbn_target_names(node.target))
+            _lbn_add_all(bound, _lbn_target_names(node.target))
             _lbn_compr_targets(bound, node.value)
         elif isinstance(node, MultiAssignStmt):
             for t in node.targets:
-                bound.update(_lbn_target_names(t))
+                _lbn_add_all(bound, _lbn_target_names(t))
             _lbn_compr_targets(bound, node.value)
         elif isinstance(node, AugAssignStmt):
-            bound.update(_lbn_target_names(node.target))
+            _lbn_add_all(bound, _lbn_target_names(node.target))
             _lbn_compr_targets(bound, node.value)
         elif isinstance(node, VarDecl):
             bound.add(node.name)
             _lbn_compr_targets(bound, node.value)
         elif isinstance(node, ForStmt):
-            bound.update(_lbn_target_names(node.target))
+            _lbn_add_all(bound, _lbn_target_names(node.target))
             _lbn_compr_targets(bound, node.iterable)
             _lbn_walk(bound, global_declared, node.body)
             if node.else_body:
@@ -205,7 +217,7 @@ def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
             # The same gap one loop deeper, and the same shape as the `ForStmt`
             # arm: the loop's own target is a local, and a `VarDecl` in its body
             # is a local. Both were invisible here, for the same reason as above.
-            bound.update(_lbn_target_names(node.target))
+            _lbn_add_all(bound, _lbn_target_names(node.target))
             _lbn_compr_targets(bound, node.iterable)
             _lbn_walk(bound, global_declared, node.body)
         elif isinstance(node, TryStmt):
@@ -284,7 +296,7 @@ def _lbn_compr_targets(bound: set, expr) -> None:
         return
     if isinstance(expr, Comprehension):
         for g in expr.generators or []:
-            bound.update(_lbn_target_names(g.target))
+            _lbn_add_all(bound, _lbn_target_names(g.target))
             _lbn_compr_targets(bound, g.iterable)
             for c in g.conditions or []:
                 _lbn_compr_targets(bound, c)
@@ -329,3 +341,19 @@ def bound_names_in_order(body, params=None) -> list:
     for stmt in body or []:
         _lbn_compr_targets(bound, stmt)
     return list(bound)
+
+
+def bound_name_set(body) -> set:
+    """The names `body` binds, as a plain `set` -- for COMPILED callers.
+    `bound_names_in_order` threads an `_OrderedNames` (a duck-typed Python
+    class) through `_lbn_walk`, whose parameter is annotated `set`; compiled, the
+    walk then treated that object's header as a hash table and its first `add`
+    ran away (a set growing without bound, 40 GB, SIGKILL) inside the first
+    `--dump-full` of any function with an assignment. The order is not needed
+    by the one compiled caller (`infra_infer._returned_param_containers`
+    asks membership), so it gets a real set."""
+    bound: set = set()
+    _lbn_walk(bound, set(), body)
+    for stmt in body or []:
+        _lbn_compr_targets(bound, stmt)
+    return bound

@@ -691,12 +691,6 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
     "alu_rr:xor":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
-    # The shifts write ZF and SF and leave CF and OF alone, which is the
-    # difference from every row above and the reason this is not the same shape:
-    # the model's `x86_flags_logic` computes all four and the record update
-    # overrides only two, so a successor that also asserted `cf`/`of_` would be
-    # a claim about a field the instruction does not set.
-    #
     # `x86_shift_post`, the model's own named successor, and NOT a
     # re-derivation of it. The three rows here each spelled out the shift and
     # then took ZF and SF from `x86_flags_logic`, which was the model as it

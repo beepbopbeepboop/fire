@@ -6285,6 +6285,32 @@ def _ensure_libc_self_extern(gen, fname_raw: str) -> None:
                 _self_extern_sig[0], list(_self_extern_sig[1]))
 
 
+def _kwarg_param_names(gen, fname_raw: str, fname: str, n_expected: int, kwarg_dict: dict):
+    """The callee's parameter NAMES, positionally aligned with its C parameter
+    list, or None when that alignment cannot be trusted.
+
+    A keyword argument has to land in the slot of the parameter it NAMES. The
+    padding loops used to append the keyword values in the order the call site
+    wrote them, to whichever slot was next missing: `f(1, d=x)` against
+    `def f(a, b=None, c=None, d=None)` bound `x` to `b` and padded `d` with 0 --
+    and `coro.lower`'s `_eligible(s, prop_names=_prop_names)` therefore handed a
+    property table to `struct_name`, so every plain generator was refused as a
+    "generator method without a plain self first param" and the self-hosted
+    compiler could not lower a single generator. Both padding loops (the
+    expression form here and `_gen_stmt_ExprStmt`'s statement twin) ask this one
+    function.
+
+    Only trusted when the name list and the C list agree in length: anything
+    else -- a `*args` shift, an unregistered callee, a stale keyword -- keeps the
+    old by-order behaviour, which is what every existing caller relied on."""
+    if not kwarg_dict:
+        return None
+    names = gen._func_param_names.get(fname_raw) or gen._func_param_names.get(fname) or []
+    if len(names) == n_expected:
+        return names
+    return None
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -6705,13 +6731,19 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                 and node.args[-1].op == '**'
                 and 0 <= len(arg_pairs) - 1 < _kw_slot):
             _fwd_kw_pair = arg_pairs.pop()
+        _kwn_names = _kwarg_param_names(gen, fname_raw, fname, len(expected_params), kwarg_dict)
         while len(arg_pairs) < len(expected_params):
             if _kw_slot >= 0 and len(arg_pairs) == _kw_slot:
                 arg_pairs.append(_fwd_kw_pair if _fwd_kw_pair is not None
                                   else ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict)))
                 kwarg_values = []
                 continue
-            if kwarg_values:
+            if _kwn_names is not None:
+                _kwn_here = _ggc_as_str(_kwn_names[len(arg_pairs)])
+                if _kwn_here in kwarg_dict:
+                    arg_pairs.append(kwarg_dict[_kwn_here])
+                    continue
+            elif kwarg_values:
                 arg_pairs.append(kwarg_values.pop(0))
                 continue
             # Map the missing positional slot to its param name via the

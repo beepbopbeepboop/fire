@@ -2160,6 +2160,37 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "print() is asked to render the value of g(…)"),
+    # THE SAME POSITION AT THE OTHER SPELLING OF "RENDER THIS WORD", and it was
+    # unguarded: `print` builds its format from its operands and asks
+    # `_print_call` about each, while a `printf` the SOURCE wrote was only
+    # checked for a usable FORMAT — so `printf("%d", g(…))` for a `g` with no
+    # `return` built (both architectures) and printed the leftover word, exit 0,
+    # where `print(g(…))` was refused. The conversion consumes the word exactly
+    # as `print`'s does, so the same value this path cannot carry becomes the
+    # same TEXT; `model.returnless_printf_argument_refusal` is the one reader of
+    # which printf arguments those are, asked from `_emit_call`'s printf line in
+    # both emitters. The needle is the RENDERING spelling because it is the fact
+    # that distinguishes this refusal from the `print` ones above.
+    ("a_printf_argument_of_a_return_less_function_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\\n\", g(1, 2))\n"
+     "    return 0\n",
+     "printf() is asked to render the value of g(…)"),
+    # …and through a LOCAL, which needs the `no_value_callee_of` evidence on the
+    # name rather than a test on the operand — the same second shape `print`
+    # has, so a fix that only recognised the direct call would build this one.
+    ("a_printf_argument_named_by_a_return_less_local_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    v = g(1, 2)\n"
+     "    printf(\"%d\\n\", v)\n"
+     "    return 0\n",
+     "printf() is asked to render the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──
