@@ -421,6 +421,22 @@ MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jo
                 'their own comments say.')
 
 # `measured`: read off that run for this job.
+    # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
+    # unmeasured-by-omission, and the reason is worth stating where a reader
+    # looks for them: both `deps=['mojoc']`, and `mojoc` does not exist in a
+    # fresh worktree — it is `fire.py build fire.py`, a whole-closure
+    # self-compile, which is the integrator's to run and not a measurement
+    # session's. So their peaks cannot be taken without first doing the heavy
+    # thing they exist to measure, which is circular and expensive.
+    #
+    # What IS known about them is recorded where it belongs, on their own
+    # registrations: `selfhost-memory-fire` carries a 12.2 GB measurement from
+    # doc/MEMORY.html section 11, and the 2026-10-07 gate read 0.5 GB because
+    # `mojoc --dump-full` died early (TypeError, no .ci) and the test asserts the
+    # peak rather than the exit code. Neither number is in this table, because
+    # neither is a measurement of a run that finished — which is the only kind
+    # this table claims to hold. `MEM_DEBT_DOC` carries the debt.
+    #
 # `derived`:  the same command over the same inputs by the same engine, so the
 #             measurement is the same measurement — `stage3`'s fanout is
 #             `stage2`'s argv with a different path prefix, and a per-file
@@ -809,6 +825,12 @@ MEASURED_PEAK_GB = {
     # The spread is the finding; see
     # bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md.
     'stdlib-tests':                           (52.2, 'measured'),  # 321 items, of 34.9/52.2
+    # RED and recorded anyway, for the reason `formal`'s row gives: it ran all
+    # 102 s to completion and peaks at 2.2 GB, so that is what it needs and not
+    # how far it got. Two dylib PROOF obligations are open -- "the 3-export
+    # proof admits 1 hole(s)" and "a conditional value is not a branch" -- which
+    # is a proof lane, not a memory finding, so neither is filed here as one.
+    'formal-dylib':                           (2.2, 'measured'),   # 102 s, red on 2 proofs
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2766,17 +2788,25 @@ test('prooflib', [PY, '-c',
 #      (177 s CPU in 80 s wall before `RLIMIT_CPU` fired).
 #
 # What re-enabling them is NOT is a measurement of all eight by the change
-# author, and the honest split is worth keeping: `formal-dylib` is measured
-# (14 PASS / 0 FAIL, `python3 test_formal_dylib.py`, and it is the one test
-# the change can affect), `formal` and `formal-x86` are measured per example
-# by `FORMAL.md` §12 (8.6 s - 297.8 s each, 1.5-3.0 GB), and
-# `formal-call-proofgen`, `formal-imports`, `formal-sweep`,
-# `formal-x86-endtoend` and `formal-x86-model` were NOT re-measured -- a light
-# worker may not run `formal-sweep`, and `formal/x86_64_model_coverage_test.py`
-# and `formal/x86_64_endtoend_test.py` write outside this worktree.  Those five
-# run the same `run_lean` bounds as the 33 sibling tests in `proofs` that were
-# never disabled, which is the argument for expecting them green; it is not the
-# same as having seen them green.
+# author.  That was written when it was true and every job it named as
+# unmeasured has since been measured by the memory-measurement pass
+# (2026-10-09, one job at a time, every peak in MEASURED_PEAK_GB with the
+# instrument named in its row):
+#
+#   formal-dylib          2.2 GB  (RED here on 2 dylib proof obligations --
+#                                  the "14 PASS / 0 FAIL" above predates them)
+#   formal                46.2 GB  (was RESOURCE-capped at its `small` class)
+#   formal-x86            24.8 GB  (was RESOURCE-capped at its `small` class)
+#   formal-call-proofgen   2.5 GB  (RED on 9 of 175)
+#   formal-imports         0.2 GB  green
+#   formal-sweep           0.1 GB  green
+#   formal-x86-model       1.3 GB  green
+#
+# `formal-x86-endtoend` was already measured (6.1 GB, 2026-10-05).  So the
+# honest split this paragraph used to carry no longer exists: every job named
+# here has been run, and the three reds are in a proof lane rather than in the
+# `run_lean` bounds, so the "same bounds as the 33 siblings" argument below is
+# no longer what the evidence rests on.
 test('formal', [PY, 'test_formal.py'], j=True,
      deps=['preflight', 'prooflib'], mem='program',
      memwhy='measured 46.2 GB over 1129 s — the whole formal/examples corpus '
