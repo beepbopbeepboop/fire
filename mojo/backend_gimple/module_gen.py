@@ -210,7 +210,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     ipt = gen._inferred_param_types
     if not ipt:
         return
-    names = getattr(gen, '_func_param_names', {})
+    names = gen._func_param_names
     # "<func>\x1f<param>" -> "\x1f"-joined DISTINCT ctypes of the unambiguous
     # literal arguments seen for that parameter. FLAT, not a tuple-keyed dict of
     # sets: a tuple key hashes by its heap address once self-hosted (see
@@ -309,8 +309,12 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # entry written here reaches the forward declaration and not the
         # definition — see `_annotated_params`' own comment for the
         # "conflicting types" that produces.
-        _ann_for = (getattr(gen, '_annotated_params', {}) or {}).get(fname)
-        if cur is None and not (_ann_for and _ann_for.get(pname)):
+        _ann_for = _as_dict(gen._annotated_params.get(fname))
+        _ann_has = False
+        if _ann_for:
+            if pname in _ann_for:
+                _ann_has = True
+        if cur is None and not _ann_has:
             # ...but ONLY for the two shapes this pass exists to choose
             # between. A CONTAINER member is not one of them: `char *` and
             # `double` are the scalar resolutions and a container is a
@@ -407,7 +411,7 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
     ipt = gen._inferred_param_types
     if not ipt:
         return
-    names = getattr(gen, '_func_param_names', {}) or {}
+    names = gen._func_param_names
     containers = tuple(_GMI_PARAM_KIND_OF_CTYPE)
     # (func, param) -> the (callee, callee param) pairs it is forwarded to.
     # The CALLEE'S NAME and not its concluded kind, because the conclusion is
@@ -462,7 +466,7 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
                     _fhl.append(_fh)
     if not fwd:
         return
-    ann = getattr(gen, '_annotated_params', {}) or {}
+    ann = gen._annotated_params
     changed = True
     while changed:
         changed = False
@@ -495,7 +499,11 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
             if _cur is not None and _as_str(_cur) not in containers:
                 continue
             _fann = _as_dict(ann.get(_fname))
-            if _fann and _fann.get(_pname):
+            _fann_has = False
+            if _fann:
+                if _pname in _fann:
+                    _fann_has = True
+            if _fann_has:
                 continue
             if _cur is not None and _as_str(_cur) == _want:
                 continue
@@ -8675,7 +8683,7 @@ def gen_module_impl(self, stmts):
                 # `_gmi_apply_call_site_param_evidence` states for its own walk.
                 if len(_fk_args) != len(_fk_pnames):
                     continue
-                _fk_ann = (getattr(self, '_annotated_params', {}) or {}).get(_fk_callee) or {}
+                _fk_ann = (self._annotated_params).get(_fk_callee) or {}
                 _fk_callee_ipt = self._inferred_param_types.get(_fk_callee) or {}
                 for _fk_i, _fk_a in enumerate(_fk_args):
                     # Only a PARAMETER of the caller being handed on: the caller's
