@@ -6711,10 +6711,16 @@ def gen_module_impl(self, stmts):
                         if _as_str(_ppair[0]) == _as_str(_pv.name):
                             self._passthrough_param_idx[s.name] = _ppi
                             break
-            _ret_elem = self._infer_return_elem_type(
-                s.body, func_def=s, _base_var_types=_p2c_base_var_types)
+            # The return ANNOTATION is authoritative when it names a homogeneous
+            # tuple: body inference over a function that returns its own
+            # callees' tuple slots (`return _lt, _lv` after `_lt, _lv =
+            # lower_expr(...)`) answers `int64_t` once self-hosted, and an
+            # inferred answer used to WIN over the annotation, so every caller
+            # of `lower_expr` unpacked its two `str` slots as words.
+            _ret_elem = _homogeneous_tuple_ann_elem(self, s.return_type)
             if _ret_elem is None:
-                _ret_elem = _homogeneous_tuple_ann_elem(self, s.return_type)
+                _ret_elem = self._infer_return_elem_type(
+                    s.body, func_def=s, _base_var_types=_p2c_base_var_types)
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
@@ -6725,8 +6731,6 @@ def gen_module_impl(self, stmts):
                 for m in s.methods:
                     if m.name == '__init__':
                         continue
-                    _ret_elem = self._infer_return_elem_type(
-                        m.body, _base_var_types=_p2c_base_var_types)
                     _key = f"{s.name}_{m.name}"
                     # A homogeneous `tuple[T, T[, ...]]` return annotation is
                     # authoritative for the caller's unpacking accessor — body
@@ -6736,8 +6740,10 @@ def gen_module_impl(self, stmts):
                     # was unpacked via mojo_list_get_int → the boxed char* read
                     # back as 0 → empty string-pool entries for every user
                     # StringLiteral once self-hosted).
+                    _ret_elem = _homogeneous_tuple_ann_elem(self, m.return_type)
                     if _ret_elem is None:
-                        _ret_elem = _homogeneous_tuple_ann_elem(self, m.return_type)
+                        _ret_elem = self._infer_return_elem_type(
+                            m.body, _base_var_types=_p2c_base_var_types)
                     if _ret_elem is not None and self._return_elem_types.get(_key) != _ret_elem:
                         self._return_elem_types[_key] = _ret_elem
                         _c_changed = True

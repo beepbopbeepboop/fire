@@ -25,6 +25,79 @@ _C_KEYWORDS = frozenset({
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _ml_parse_var_global(text: str) -> list:
+    """`[name, annotation, rhs]` for a top-level `var NAME[: ANN][= RHS]` line
+    (already stripped), or `[]` when the line is not that shape.
+
+    Exactly what the regex it replaced accepted: `var`, whitespace, an
+    identifier, an optional `: ANN` (ANN non-empty, no `=` in it), an optional
+    `= RHS` (RHS non-empty), nothing else. Plain string scanning so the
+    self-hosted build can run it (see the call site)."""
+    n = len(text)
+    if not text.startswith('var'):
+        return []
+    i = 3
+    j = i
+    while j < n and (text[j] == ' ' or text[j] == '\t'):
+        j += 1
+    if j == i:
+        return []
+    k = j
+    if k < n and (text[k].isalpha() or text[k] == '_'):
+        k += 1
+        while k < n and (text[k].isalnum() or text[k] == '_'):
+            k += 1
+    else:
+        return []
+    name = text[j:k]
+    rest = text[k:].strip()
+    ann = ''
+    rhs = ''
+    if rest.startswith(':'):
+        body = rest[1:]
+        eq = body.find('=')
+        if eq < 0:
+            ann = body.strip()
+        else:
+            ann = body[:eq].strip()
+            rhs = body[eq + 1:].strip()
+            if not rhs:
+                return []
+        if not ann:
+            return []
+    elif rest.startswith('='):
+        rhs = rest[1:].strip()
+        if not rhs:
+            return []
+    elif rest != '':
+        return []
+    return [name, ann, rhs]
+
+
+def _ml_number_kind(s: str) -> int:
+    """2 when `s` STARTS with `-?DIGITS.DIGITS`, 1 when it is entirely
+    `-?DIGITS`, else 0 — the two `re.match` shapes the global scan used."""
+    n = len(s)
+    i = 0
+    if i < n and s[i] == '-':
+        i += 1
+    d0 = i
+    while i < n and s[i].isdigit():
+        i += 1
+    if i == d0:
+        return 0
+    if i == n:
+        return 1
+    if s[i] == '.':
+        j = i + 1
+        k = j
+        while k < n and s[k].isdigit():
+            k += 1
+        if k > j:
+            return 2
+    return 0
+
+
 def _ml_as_str(e: object) -> str:
     """Re-tag a value the self-hosted backend erased to int64_t back to `str`.
     Identity on CPython; the char* bits are intact, only the static type was lost.
@@ -804,7 +877,6 @@ class ModuleLoader:
             # mirrors here so both sides of the accessor call agree on the
             # return type without either side needing to know the other's
             # verdict in advance).
-            import re as _re
             # BUG-2026-029 cross-file follow-up: a DECLARATION-ONLY global
             # (`var g_world: World`, no `= EXPR` — the real box.3d/game
             # shape, assigned later inside `ffi_init()`) never matched this
@@ -819,21 +891,28 @@ class ModuleLoader:
             # `_local_sibling_module_exports` / `_emit_imported_global_
             # accessors`, not reflect.py's `collect_exports`/
             # `_register_link_imports`, which is `fire build`'s link-mode-
-            # only path). The `(?:=\s*(?P<rhs>.+?))?` group is now optional;
+            # only path). The `= EXPR` part is optional;
             # a bare `var NAME: Type` (or untyped `var NAME`, though Mojo
             # requires an annotation or initializer) still exports an entry.
-            _VAR_GLOBAL_RE = _re.compile(
-                r'^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(?P<ann>[^=]+?))?'
-                r'\s*(?:=\s*(?P<rhs>.+?))?\s*$')
+            # Parsed by `_ml_parse_var_global` (plain string scanning), NOT a
+            # regex: this file is compiled by the self-hosted compiler, where a
+            # FUNCTION-LOCAL `import re as _re` is not an importable module —
+            # `_re.compile(...)` raised "module 're' is not compiled into this
+            # binary", the surrounding `except Exception` swallowed it, and
+            # EVERY exports table this function built came back EMPTY, so no
+            # sibling-module import resolved to a signature and every call to
+            # one bound to a bare, unqualified, weak-stub symbol.
             for _line in content.split('\n'):
                 if not _line or _line[0] in ' \t#':
                     continue   # indented (not top-level) or a comment
-                _m = _VAR_GLOBAL_RE.match(_line.strip()) if _line.strip().startswith('var ') else None
-                if not _m:
+                _vparts = []
+                if _line.strip().startswith('var '):
+                    _vparts = _ml_parse_var_global(_line.strip())
+                if len(_vparts) == 0:
                     continue
-                _vname = _m.group(1)
-                _vrhs = (_m.group('rhs') or '').strip()
-                _vann = (_m.group('ann') or '').strip()
+                _vname = _vparts[0]
+                _vann = _vparts[1]
+                _vrhs = _vparts[2]
                 if _vname in exports or (_apply_c_stdlib_skip and _vname in _C_STDLIB_SKIP):
                     continue   # a same-named fn/def export always wins
                 _SCALAR_INT_ANNS = frozenset({
@@ -877,9 +956,9 @@ class ModuleLoader:
                     _vctype = 'char *'
                 elif _vrhs in ('True', 'False'):
                     _vctype = '_Bool'
-                elif _re.match(r'^-?\d+\.\d+', _vrhs):
+                elif _ml_number_kind(_vrhs) == 2:
                     _vctype = 'double'
-                elif _re.match(r'^-?\d+$', _vrhs):
+                elif _ml_number_kind(_vrhs) == 1:
                     _vctype = 'int64_t'
                 elif _vann.split('[', 1)[0].strip() in _SCALAR_INT_ANNS:
                     # An explicit scalar-int annotation overrides a
