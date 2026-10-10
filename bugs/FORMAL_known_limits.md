@@ -756,8 +756,8 @@ template; it stopped being true when `__mlir_op` was recognised as spelling a
 specific dialect operation and one sentence was kept for all of them.
 
 `formal/model.py`'s `mlir_dialect_op_refusal` now classifies the operation, and
-the measurement behind it is the operation-vs-operand-type census recorded in
-`formal/model.py`'s `mlir_dialect_op_refusal` docstring.
+the measurement behind it is in
+`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §Correction.
 In short, over the 259 sites / 104 operations in the stdlib: 14 operations / 76
 sites denote **no value at all** (an effect — a store, a trap, an ownership
 marker — where "no representation" remains a true statement), 12 operations /
@@ -808,8 +808,9 @@ missing value — the last of those because its bracket carries two values this 
 COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
 
 Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
-other three sit behind other modules' refusals (the round-1 `std-os-io` scope
-chain), so they move one refusal along rather than out — which is §2.0's "the next
+other three sit behind other modules' refusals
+(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
+so they move one refusal along rather than out — which is §2.0's "the next
 terminal is a different construct" again, and the reason the census above is
 corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
 halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that
@@ -860,8 +861,9 @@ the census doc:
     for a receiver whose DECLARED type says `Bool`
     (`build._lower_dialect_select`), and `std/utils/_select.mojo` swept
     `codegen -> pass` on 2026-10-03. It needed the DECLARATION rather than a
-    fifth kind, and the operation-vs-operand-type census records why the kind
-    would have been the wrong tool. It is also the natural
+    fifth kind, and
+    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`
+    records why the kind would have been the wrong tool. It is also the natural
     first target for the operand-type work, being reachable and mostly word-typed
     where `std/simd.mojo` is 22 sites of pure vector.
 
@@ -917,7 +919,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 697
+standing in for a shape, and the shape answers the same question for all 683
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -928,17 +930,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 697 |
-| every type crossing the boundary is one word | **284** |
-| a box in an argument or the return | 413 |
-| of the 284, refused only for want of a linked library | 284 |
+| entry points declared | 683 |
+| every type crossing the boundary is one word | **272** |
+| a box in an argument or the return | 411 |
+| of the 272, refused only for want of a linked library | 272 |
 
-**284 of 697 is what a link line converts into working code with no backend
+**272 of 683 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 697
-entry points, 284 word-shaped, 413 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 683
+entry points, 272 word-shaped, 411 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -954,12 +956,12 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 697 / 522 / 175 by return type alone, and 284
+1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
    and the brief's own headline rule ("callable iff every parameter type AND
-   the return type are word-shaped") is the 223 column, not the 411 one. The
+   the return type are word-shaped") is the 223 column, not the 406 one. The
    brief's own warning is the reason the larger number is the wrong one.
 2. **20 of 22, with `_query` and `_query_dict` the only two refused.** Not
    derivable from the header. `_query` returns `void *`; so do `_open` and
@@ -1000,10 +1002,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 284 are refused *for want of a
+library on its link line at all. So today the 272 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 284 and working code.
+registry; it is the only thing between the 272 and working code.
 
 ---
 

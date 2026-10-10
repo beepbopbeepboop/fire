@@ -59,6 +59,8 @@ class TestSuite:
                 print(f"{passed} passed, {failed} failed")
         return 0  # Return dummy value for C compilation
 
+from abc import abstractmethod
+
 # ── Mojo reflection shims ──────────────────────────────────────────
 def struct_field_count(T): return 0
 def struct_field_names(T): return []
@@ -826,37 +828,6 @@ class StructDef:
     # dispatch's fallback: `s._fieldwise_ctor_synthesized = True` on a
     # StructDef with no such field in struct_field_types).
     _fieldwise_ctor_synthesized: bool = False
-    # The names the struct's BRACKET declares (`struct Tagged[T, origin: Int]`).
-    # They are compile-time parameters, NOT instance storage — a value
-    # parameter's value is supplied at the application (`Tagged[Int, 7]`) and
-    # has no slot in an instance.  `_parse_struct_params_as_fields` still puts
-    # the annotated ones in `fields`, because this parser's other consumers
-    # (the interpreter's member read) spell a parameter through the receiver;
-    # this list is what tells a STORAGE reader which of those `fields` came from
-    # the head rather than from the body.  `formal/model.py::struct_field_names`
-    # is the reader that must not count them: counting one made the unapplied
-    # TEMPLATE one field wider than its instantiation, so a free function taking
-    # `Tagged[Int, 7]` read the parameter as a frame address and segfaulted.
-    bracket_params: list = field(default_factory=list)  # parameter names
-    # EVERY name in the struct's bracket block, INCLUDING the trait-bounded
-    # TYPE parameters (`T: Iterator`) that _parse_struct_params_as_fields
-    # deliberately keeps out of `fields`/`bracket_params` (a trait-bound name
-    # is not a comptime VALUE parameter, so it is not a field). `bracket_params`
-    # therefore reads EMPTY for exactly the structs a type-checker calls
-    # generic — which is why this second list exists. The definition-site
-    # method-emission loop (module_gen's StructDef arm) reads it only to scope
-    # the false-green guard in emit_resolve (gen._current_struct_type_params):
-    # a struct with UNBOUND type parameters is the one whose type-parameter-
-    # typed fields erase to int64_t at the definition site, so an argument
-    # read from such a field can only infer a placeholder type argument for a
-    # container-bounded callee — and a generic struct's individual method
-    # BODIES that refuse to lower (a `next(self._inner)` in one) take
-    # module_gen's transactional fallback to prototype-only rather than
-    # failing the whole module (the instantiating TU emits the mangled copy).
-    # Measured: std/itertools `_Product2` and std/collections/string
-    # `BytesIter[origin]` refused compilation on precisely these bodies
-    # (2026-10-21).
-    type_param_names: list = field(default_factory=list)  # all bracket names
 
 @dataclass
 class TraitDef:
@@ -1862,19 +1833,6 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
         j += 1
     return -1
 
-def _hex_run(s: str, start: int, count: int):
-    r"""`s[start:start+count]` when all `count` characters are hex digits, else
-    None. The one place the `\x`/`\u`/`\U` "a short or non-hex run is not an
-    escape" rule is spelled, so the three arms cannot drift apart."""
-    if start + count > len(s):
-        return None
-    k = start
-    while k < start + count:
-        if s[k] not in '0123456789abcdefABCDEF':
-            return None
-        k += 1
-    return s[start:start + count]
-
 def decode_c_escapes(s: str) -> str:
     r"""Decode C-style backslash escapes in a string literal's BODY.
 
@@ -1891,32 +1849,12 @@ def decode_c_escapes(s: str) -> str:
 
         The set: the C simple escapes, plus \xHH.
 
-    \n \t \r \\ \" \' \a \b \f \v, then \xHH (two hex digits), \uXXXX (four),
-    \UXXXXXXXX (eight), \N{NAME} (through `unicodedata.lookup`), and an octal
-    run of one to three digits. An UNKNOWN escape keeps its backslash (`"\d"`
-    is a backslash and a d, which is CPython's own behaviour and what
-    `gimple_codegen._c_escape` passes through), and a trailing lone backslash is
-    kept verbatim. That is deliberately permissive: a recognised escape it gets
-    WRONG is a wrong answer, while an unrecognised one it leaves alone is what
-    the source most likely meant.
-
-    `\u`, `\U`, `\N{...}` and a multi-digit octal run were the four escapes
-    MISSING from the table, and each was a silent wrong answer (a `"\u00e9"`
-    was six characters). The octal run is also why `\0` cannot stay a one-char
-    table entry: a bare `\0` and `\101` are the same two characters of input,
-    so the run has to be consumed whole. `\x` keeps its "refuse a short one"
-    rule (CPython's `"\x41"` is `A`, `"\x4"` is a literal backslash-x-4); the
-    named escapes likewise only fire on a complete, all-hex run.
-
-    A lone SURROGATE (`\ud800`, `\U0000D800`) and a `\U` above U+10FFFF fall to
-    the permissive arm instead of being decoded: CPython makes one character of
-    a surrogate, but that character has no UTF-8 encoding and every consumer
-    here writes the decoded text as UTF-8, so decoding it turns a doc comment
-    (`formal/hostmods/json.mojo` spells `\ud800` while explaining why it refuses
-    exactly that code point) into a `UnicodeEncodeError` from the intern. The
-    path cannot represent it, so keeping the backslash is the answer. An
-    unknown `\N{NAME}` is a `SyntaxError`, CPython's own refusal; an empty or
-    unclosed brace is the permissive arm.
+    \n \t \r \\ \" \' \0 \a \b \f \v, then \x followed by two hex digits. An
+    UNKNOWN escape keeps its backslash (`"\d"` is a backslash and a d, which is
+    CPython's own behaviour and what `gimple_codegen._c_escape` passes through),
+    and a trailing lone backslash is kept verbatim. That is deliberately
+    permissive: a recognised escape it gets WRONG is a wrong answer, while an
+    unrecognised one it leaves alone is what the source most likely meant.
 
     Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
     that no engine here preserves `r"..."`, so a literal's body arriving here has
@@ -1927,65 +1865,18 @@ def decode_c_escapes(s: str) -> str:
     if '\\' not in s:
         return s
     simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
-              "'": "'", 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+              "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
     out = []
     i, n = 0, len(s)
     while i < n:
         c = s[i]
         if c == '\\' and i + 1 < n:
             nxt = s[i + 1]
-            if nxt in '01234567':
-                # An octal run of one to three digits — and this arm MUST come
-                # before `simple`, because a bare `\0` is the same two source
-                # characters as the start of `\101` and only one of them is an
-                # escape. CPython: `"\0"` is NUL, `"\101"` is `A`, `"\08"` is
-                # NUL then `8` (the run stops at the non-octal digit).
-                j = i + 1
-                digits = ''
-                while j < n and len(digits) < 3 and s[j] in '01234567':
-                    digits += s[j]; j += 1
-                out.append(chr(int(digits, 8))); i = j; continue
             if nxt in simple:
                 out.append(simple[nxt]); i += 2; continue
-            if nxt == 'x':
-                h = _hex_run(s, i + 2, 2)
-                if h is not None:
-                    out.append(chr(int(h, 16))); i += 4; continue
-            if nxt == 'u':
-                h = _hex_run(s, i + 2, 4)
-                if h is not None:
-                    code = int(h, 16)
-                    # A lone surrogate has no UTF-8 encoding (see the
-                    # docstring): the permissive arm, not a decoded character.
-                    if not (0xD800 <= code <= 0xDFFF):
-                        out.append(chr(code)); i += 6; continue
-            if nxt == 'U':
-                h = _hex_run(s, i + 2, 8)
-                if h is not None:
-                    code = int(h, 16)
-                    # In range AND not a surrogate, for the same two reasons
-                    # the `\u` arm gives; out of range has no `chr` at all.
-                    if code <= 0x10FFFF and not (0xD800 <= code <= 0xDFFF):
-                        out.append(chr(code)); i += 10; continue
-            if nxt == 'N' and i + 2 < n and s[i + 2] == '{':
-                close = s.find('}', i + 3)
-                # `close > i + 3` is a NON-EMPTY name: `\N{}` and an unclosed
-                # brace (`close == -1`) fall to the permissive arm below.
-                if close > i + 3:
-                    # `unicodedata` through `_python_import`, not a top-level
-                    # `import`: a static import would add the module to the
-                    # self-host compile closure, while the dynamic one keeps it
-                    # a runtime lookup. An unknown name raises, exactly as
-                    # CPython's `unicodedata.lookup` does — a decoder that
-                    # invented a character would be a second wrong answer.
-                    _ud = _python_import('unicodedata')
-                    try:
-                        ch = _ud.lookup(s[i + 3:close])
-                    except KeyError:
-                        raise SyntaxError(
-                            f"unknown Unicode character name in \\N{{...}}: "
-                            f"{s[i + 3:close]!r}") from None
-                    out.append(ch); i = close + 1; continue
+            if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
+                    and s[i + 3] in '0123456789abcdefABCDEF':
+                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
             # Unknown escape — leave the backslash as-is (CPython's own
             # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
             # `\\` passthrough.
@@ -4183,14 +4074,8 @@ class Parser:
         name = self._ident()
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
-        bracket_params = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
-            bracket_params = [f.name for f in param_fields
-                              if isinstance(f, VarDecl)]
-            type_param_names = list(getattr(self, '_struct_param_names', []) or [])
-        else:
-            type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
         # base-class list. Capture the top-level names (skipping keyword
         # args like `metaclass=X` and trait-bound expressions we can't
@@ -4438,9 +4323,7 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         comptime_aliases=aliases, bases=bases,
-                         bracket_params=bracket_params,
-                         type_param_names=type_param_names)
+                         comptime_aliases=aliases, bases=bases)
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -6359,11 +6242,6 @@ class Parser:
         Handles //, * separators and nested brackets in type annotations and defaults."""
         self._expect("LBRACKET")
         fields = []
-        # Every parameter name, trait-bound type parameters included: the
-        # VarDecl list below drops the trait-bound ones on purpose (they are
-        # not comptime VALUE parameters), but the StructDef's type_param_names
-        # must still see them — see that field's comment.
-        self._struct_param_names = []
         while True:
             t = self._peek()
             if t.kind in ('RBRACKET', 'EOF'):
@@ -6381,7 +6259,6 @@ class Parser:
             # Try to parse: name: Type [= default]
             if t.kind == 'NAME':
                 name = t.value
-                self._struct_param_names.append(name)
                 self._advance()
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'

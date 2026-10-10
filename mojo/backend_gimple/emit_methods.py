@@ -501,18 +501,6 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     t = gen._call_expr(ret_type, mangled, all_pairs)
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
-    # The per-slot twin of the block above. A struct method that RETURNS a
-    # heterogeneous tuple (`_ListIter.bounds` -> `(iter_len, {iter_len})` —
-    # int slot + MojoSet* slot) records its per-slot ctypes at the return
-    # (emit_stmts.py's `_return_slot_types[current_func_name]`), but this
-    # method-call path re-keyed only the JOINED elem (`_return_elem_types`),
-    # whose join is a single pointer type: the caller's `a, b = m()` unpack
-    # then read slot 0 with the joined `MojoSet *` — `a + n` became pointer
-    # arithmetic over an incomplete type, a hard gcc error (an ICE under
-    # -fgimple). `_lower_named_call`'s own identical block covers bare-name
-    # calls; this is the method-call half of the same gap.
-    if mangled in gen._return_slot_types:
-        gen._tuple_slot_types[t] = gen._return_slot_types[mangled]
     return ret_type, t
 
 
@@ -3011,31 +2999,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         kwargs=list(getattr(node, 'kwargs', None) or []))
                     return gen._lower_call(_mgc_bare_node)
 
-    # PART 6 (2026-10-23, family S): `Codepoint.ord(<string>)` — a STATIC-
-    # style call whose receiver is the TYPE name. `Codepoint` is an
-    # imported scalar type this codegen never materializes (no struct in
-    # `struct_field_types`, no value for the generic receiver path), so the
-    # old route read the receiver as the `/* ct param or undeclared:
-    # Codepoint */` placeholder word 0 and stubbed `.ord()` to 0 — a
-    # compile-green, value-wrong 0. The real semantics (codepoint.mojo's
-    # `def ord(string: StringSlice[_]) -> Codepoint`, "similar to the ord()
-    # free function") is the first UTF-8 CODE POINT of the argument, and
-    # test_iterators pins it EQUAL to the codepoints iterator's decoded
-    # `__next__` (`assert_equal(s3_iter.__next__(), Codepoint.ord("߷"))` —
-    # 2295, which the byte-based `mojo_ord` would answer 224). Gated on the
-    # measured spelling + arity: a single-arg `ord` on the `Codepoint` type
-    # name; any other shape falls through to the receiver path unchanged.
-    if (func.member == 'ord'
-            and isinstance(func.obj, gimple_ctypes.IdentExpr)
-            and func.obj.name == 'Codepoint'
-            and len(node.args) == 1
-            and not (getattr(node, 'kwargs', None) or [])):
-        _ord_at, _ord_av = gen.lower_expr(node.args[0])
-        if _ord_at != 'char *':
-            _ord_av = gen._new_val('char *', f'(char *){_ord_av}')
-        return 'int64_t', gen._call_expr(
-            'int64_t', 'mojo_str_first_codepoint', [('char *', _ord_av)])
-
     ot, ov = gen.lower_expr(func.obj)
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
@@ -3595,170 +3558,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Must happen BEFORE the opaque-int→container coercion block, which
     # would cast int64_t to char* and route through _lower_str_method.
     if method == 'copy':
-        # A STRUCT-POINTER receiver is NOT an identity: `.copy()` is the
-        # Copyable protocol — alloc + copy constructor. The blanket
-        # identity was a measured aliasing bug (test_take_copy_
-        # independent_advance: `it2 = it1.copy()` lowered to `it2 = it1`,
-        # so two "independent" cursors advanced one object). Scoped to
-        # in-TU materialized structs (the only shapes with the lowering
-        # ingredients in this pass; every other receiver keeps the
-        # historical identity):
-        #   (a) a registered `__init__` overload set that resolves on the
-        #       `copy` kwarg (the explicit copy constructor spelling —
-        #       the take/drop wrappers) -> the constructor machinery
-        #       (alloc + that __init__), the same _lower_struct_
-        #       constructor the factory ctor calls use;
-        #   (b) no __init__ overload resolvable on the `copy` kwarg
-        #       (the fieldwise structs: _ListIterOwned, _CycleIterator)
-        #       -> a synthesized FIELDWISE copy: alloc + one copy per
-        #       source field (struct_field_types, the same table the ctor
-        #       fallback writes), deep for in-TU struct-pointer fields —
-        #       real Mojo's implicit copy for a fieldwise struct (the
-        #       `_list` buffer is shared, the `_index` cursor is
-        #       independent — exactly what the tests' independent-
-        #       advance asserts need).
-        # The gate ORs in `gen._intu_local_copy_structs` (part 6 family D
-        # piece 2): the LOCAL struct names an in-TU product's direct-ctor
-        # record received as inners — test_product's TestCopyIterator,
-        # which the spliced `_Product2.__init__` copies via `inner_b.copy()`.
-        # Local, deliberately NOT `_intu_prereg_structs`: that set carries
-        # the snapshot-exclusion semantics the read-field pass relies on.
-        if (len(node.args) == 0 and not (getattr(node, 'kwargs', None))
-                and isinstance(ot, str) and ot.endswith(' *')):
-            _csn = gimple_exprtypes._struct_name_of(ot)
-            if (_csn and (_csn in getattr(gen, '_intu_prereg_structs', ())
-                          or _csn in getattr(
-                              gen, '_intu_local_copy_structs', ()))):
-                _ccands = gen._struct_method_signatures.get(
-                    _gmm_sms_key(_csn, '__init__'))
-                _cch = None
-                if _ccands:
-                    _recv_local = gen._ensure_local(ot, ov)
-                    _recv_expr = gimple_ctypes.IdentExpr(name=_recv_local)
-                    _cch = gen._resolve_overload(
-                        _ccands, [], [('copy', _recv_expr)])
-                if _cch is not None:
-                    # Emit the ctor call DIRECTLY (both operands are
-                    # simple locals; the preamble's prototype for the
-                    # in-TU method type-checks them). NOT via
-                    # _lower_struct_constructor: its arg coercion reads
-                    # func_param_types[<ctor>], which at statement-loop
-                    # emission time still holds the erased int64_t for
-                    # the `copy: Self` param (the module-level refresh
-                    # that refines it runs AFTER the function bodies
-                    # are emitted) — measured: the receiver pointer was
-                    # boxed `_tN = (int64_t)(void *)recv` and gcc-15
-                    # rejected the call with "makes pointer from
-                    # integer without a cast".
-                    t = gen._new_temp(f'{_csn} *')
-                    gen._struct_allocs_needed.add(_csn)
-                    gen._emit(f"  {t} = _alloc_{_csn} ();")
-                    init_fname = gen._struct_method_csym(
-                        _csn, '__init__', _cch['overload_id'])
-                    gen._emit(
-                        f"  {init_fname} ({t}, {_recv_local});")
-                    return f'{_csn} *', t
-                # (b) no copy __init__ resolvable on the `copy` kwarg
-                # (the fieldwise structs: _ListIterOwned, and the
-                # _CycleIterator wrapper — note the latter DOES register
-                # a fieldwise __init__, so the gate is "resolvable on
-                # the copy kwarg", not "has any __init__"). Synthesize
-                # real Mojo's implicit fieldwise copy: alloc + one copy
-                # per source field (struct_field_types, the same table
-                # the ctor fallback writes), DEEP for fields that are
-                # pointers to other in-TU structs (a pointer alias
-                # shares the field's mutable state — measured: the
-                # cycle wrapper's aliased inner cursor, test_cycle_
-                # copyable). GIMPLE: a component_ref is not a valid
-                # store RHS (`invalid RHS for gimple memory store:
-                # 'component_ref'`, measured) — every field read and
-                # every deep-copied store goes through a local.
-                _cf = gen.struct_field_types.get(_csn)
-                if _cf:
-                    t = gen._new_temp(f'{_csn} *')
-                    gen._struct_allocs_needed.add(_csn)
-                    gen._emit(f"  {t} = _alloc_{_csn} ();")
-                    _recv_local = gen._ensure_local(ot, ov)
-
-                    def _emit_fw_copy(dst, src_local, sname, depth):
-                        for _fn in (gen.struct_field_types.get(sname)
-                                    or {}):
-                            _fnm = gimple_ctypes._safe_field(_as_str(_fn))
-                            _ft = _as_str((gen.struct_field_types
-                                            .get(sname) or {})[_fn])
-                            _fv = gen._new_temp(_ft)
-                            gen._emit(f"  {_fv} = {src_local}->{_fnm};")
-                            _fsn = (gimple_exprtypes._struct_name_of(_ft)
-                                    if _ft.endswith(' *') else None)
-                            if (_fsn and depth < 4
-                                    and _fsn in getattr(
-                                        gen, '_intu_prereg_structs', ())):
-                                _sub = gen._new_temp(_ft)
-                                gen._struct_allocs_needed.add(_fsn)
-                                gen._emit(
-                                    f"  {_sub} = _alloc_{_fsn} ();")
-                                # PART 6 (2026-10-23, family D piece 2): a
-                                # field whose struct type registers an
-                                # EXPLICIT copy constructor (an __init__
-                                # resolvable on the `copy` kwarg —
-                                # Observable's, CopyCounter's) is copied
-                                # THROUGH that constructor, not by raw
-                                # fieldwise recursion: real Mojo's implicit
-                                # field copy invokes the field type's copy
-                                # ctor, and that ctor is exactly where the
-                                # counting side effect lives (the Observable
-                                # copy ctor's `self._copies.value()[] += 1`
-                                # — the raw recursion would copy the pointer
-                                # word and skip the increment, leaving
-                                # copy_b at 0). The (a)-branch above does
-                                # the same for the RECEIVER; this is the
-                                # field-level twin. Structs with no copy
-                                # ctor (the _ListIterOwned family) keep the
-                                # raw recursion in the else.
-                                _fcands = gen._struct_method_signatures.get(
-                                    _gmm_sms_key(_fsn, '__init__'))
-                                _fch = None
-                                if _fcands:
-                                    _fch = gen._resolve_overload(
-                                        _fcands, [],
-                                        [('copy', gimple_ctypes.IdentExpr(
-                                            name=_fv))])
-                                if _fch is not None:
-                                    init_fname = gen._struct_method_csym(
-                                        _fsn, '__init__',
-                                        _fch['overload_id'])
-                                    gen._emit(
-                                        f"  {init_fname} ({_sub}, {_fv});")
-                                else:
-                                    _emit_fw_copy(
-                                        _sub, _fv, _fsn, depth + 1)
-                                _fv = _sub
-                            gen._emit(f"  {dst}->{_fnm} = {_fv};")
-                            # PART 6 (2026-10-22, family C): a TAGGED-
-                            # Optional field's is_some side-band is a
-                            # layout-only member (module_gen's typedef
-                            # renderer adds it; it is NOT in
-                            # struct_field_types), so this fieldwise loop
-                            # never copies it — the fresh object's tag
-                            # byte would be malloc garbage (its _alloc is
-                            # a plain malloc) and every tag reader
-                            # (`if self._f:` -> `f_is_some`) would act on
-                            # uninitialized state. Measured: test_once's
-                            # `it.copy()` copied the word, not the tag.
-                            # Propagate it with the same same-type
-                            # component-ref read + store the writers use.
-                            _tagged_f = gen._tagged_optional_fields.get(
-                                sname)
-                            if _tagged_f and _as_str(_fn) in _tagged_f:
-                                _sv = gen._new_temp('_Bool')
-                                gen._emit(
-                                    f"  {_sv} = {src_local}->{_fnm}"
-                                    f"_is_some;")
-                                gen._emit(
-                                    f"  {dst}->{_fnm}_is_some = {_sv};")
-
-                    _emit_fw_copy(t, _recv_local, _csn, 0)
-                    return f'{_csn} *', t
         return ot, ov
 
     # `.get(<float literal>)` on an opaque/unresolved int64_t receiver is
@@ -3989,30 +3788,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_bytes_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoMemoryView *':
         return gen._lower_memoryview_method(ov, method, node.args, node.kwargs)
-    # PART 6 (2026-10-23, family D piece 2): `.value()` on a NON-STRUCT
-    # pointer receiver is the IDENTITY — the pointer payload itself.
-    # Measured on test_utils' Observable copy ctor (`self._copies.value()[]
-    # += 1` where `_copies` is the in-TU `int64_t *` field — an
-    # Optional[Pointer[Int, origin]] unwrapped to a native pointer, None=
-    # NULL already the distinguishable word, no tag sideband): real Mojo's
-    # `Optional[Pointer[T]].value()` yields the POINTER, not a dereference
-    # of it, and the `[] += 1` that follows is the raw-pointer subscript
-    # (`*(_mojo_at_int64_t(p, 0)) = ...`, both directions natively
-    # supported). The old path fell to the generic fallback, which
-    # auto-stubbed the call as `int64_t_value(ptr)` — a declared-never-
-    # defined extern — and the `[]` subscript of the stub's int64_t result
-    # then routed to the LIST path (mojo_list_get_int on a garbage handle):
-    # the zeroed-count red signature of the copies tests. Struct pointer
-    # receivers are excluded: they have a real method dispatch above, and
-    # this branch must not steal a user struct's own `value` method.
-    if (ot.endswith(' *') and ot not in gen._RUNTIME_PTRS
-            and method == 'value'
-            and len(node.args or []) == 0
-            and not (getattr(node, 'kwargs', None) or [])
-            and gimple_exprtypes._struct_name_of(ot) not in (gen.struct_field_types or {})):
-        t = gen._new_temp(ot)
-        gen._emit(f'  {t} = {ov};')
-        return ot, t
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
         'destroy_pointee', 'take_pointee', 'initialize_pointee',
@@ -4215,115 +3990,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 fv_local = tmp
             t = gen._new_val(res_type, f"{ov_local} ? {tv_local} : {fv_local}")
             return res_type, t
-        # `x.unsafe_take()` — the Optional's CONSUMING read (real fire:
-        # `Optional.unsafe_take` takes the value out and leaves the
-        # Optional `None`). The single construction path that needs it is
-        # `_PeekableIterator.__next__` (std/iter/__init__.mojo):
-        # `if self._next: return self._next.unsafe_take()` — without the
-        # consume, the cached word is never cleared, `next()` returns the
-        # FIRST element forever, the iterator never exhausts, and every
-        # `with assert_raises(): next(iter)` expects a StopIteration that
-        # never comes (measured on test/iter/test_peek: 4 identical
-        # `wrap_next: _next=1` returns on a 3-element list). In this
-        # runtime's word model `None == 0`, so the consume is read-then-
-        # zero-store. Only the one receiver shape with a writable lvalue
-        # in hand is lowered — a single field on a plain struct-pointer
-        # local/param (`self._next`); any other receiver falls through to
-        # the echo stub below, unchanged.
-        if (method == 'unsafe_take'
-                and not node.args
-                and not getattr(node, 'kwargs', None)
-                and isinstance(func.obj, gimple_ctypes.MemberExpr)
-                and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)):
-            _ut_base = func.obj.obj.name
-            _ut_field = _as_str(func.obj.member)
-            _ut_var = gen._c_names.get(_ut_base, _ut_base)
-            if re.match(r'^[A-Za-z_]\w*$', _as_str(_ut_var)):
-                _ut_lv = f'{_ut_var}->{gimple_ctypes._c_id(_ut_field)}'
-                t = gen._new_temp(ot)
-                gen._emit(f'  {t} = {_ut_lv};')
-                # GIMPLE wants the zero in a register first (a bare `0` is
-                # "non-trivial conversion in 'integer_cst'" and an inline
-                # cast store is "non-register as LHS of unary operation" —
-                # the same two-step temp pattern the loop emitters use).
-                z = gen._new_temp(ot)
-                gen._emit(f'  {z} = ({ot})0;')
-                gen._emit(f'  {_ut_lv} = {z};')
-                # PART 6 (2026-10-22, family C): the consume clears the
-                # field, so a TAGGED-Optional field's side-band must clear
-                # with it — the plain-AssignStmt writer hook in
-                # emit_stmts does not see this store (it is emitted here,
-                # not from a `self._x = None` statement). Measured miss:
-                # `_PeekableIterator.__next__`'s `bb_3` zeroed the word
-                # without the tag, so the next `if self._next:` (tag
-                # reader) re-served the stale cached value — test_peek's
-                # `test_peekable_with_peeking` got word 0 where the
-                # consume+refetch sequence expected a fresh element.
-                # `ot` is the FIELD's value type here (the temp holds the
-                # consumed word), so the struct name comes from the
-                # RECEIVER's lowered type (the `self` IdentExpr — no
-                # emission, just a name lookup).
-                _ut_rtype, _ut_rval = gen.lower_expr(func.obj.obj)
-                _ut_struct = gimple_exprtypes._struct_name_of(_ut_rtype)
-                if (_ut_struct in gen._tagged_optional_fields
-                        and _ut_field in gen._tagged_optional_fields[_ut_struct]):
-                    _zb = gen._new_val('_Bool', '0')
-                    gen._emit(
-                        f'  {_ut_var}->{gimple_ctypes._safe_field(_ut_field)}'
-                        f'_is_some = {_zb};')
-                return ot, t
-        # `.__bool__()` on an integer-scalar receiver — the boxed
-        # PythonObject truthiness (2026-10-21 part 4, further,
-        # test_python_object): the receiver is an int64 box whose word is
-        # a number (truthy when non-zero), a char * (truthy only when
-        # NON-EMPTY — the identity echo below would answer a non-NULL
-        # pointer true, but Python's `bool("")` is False: measured,
-        # test_boolean_operations' `assert_false(PythonObject("").
-        # __bool__())` died on a heap word), or a container pointer
-        # (truthy only when its length is non-zero). The runtime answers
-        # from the box. Only the no-argument dunder on an integer-scalar
-        # receiver — any other shape keeps the echo exactly as before.
-        if (method == '__bool__' and ot in ('int64_t', 'int')
-                and not node.args and not getattr(node, 'kwargs', None)):
-            # mojo_pyobject_truthy returns `int`; raw GIMPLE requires the
-            # result in a same-type temp, and the box word materializes
-            # first (a cast expression is not a valid call argument).
-            # Measured 2026-10-21 part 4 integration: the int64_t-slot
-            # shape broke std/collections/dict's `__bool__` under the
-            # sweep's -fgimple gate.
-            _boxv = gen._new_val('int64_t', ov_local)
-            _tr = gen._call_expr('int', 'mojo_pyobject_truthy',
-                                 [('int64_t', _boxv)])
-            return ot, gen._new_val(ot, f'({ot}){_tr}')
-        # `.__hash__()` on the same boxed receiver (part 4, further,
-        # test_python_object): a registered container is unhashable —
-        # real Python raises `TypeError: unhashable type: 'list'`
-        # (measured: test_hash's `with assert_raises(contains="unhashable
-        # type")`); a number hashes to itself (CPython's hash(n) == n);
-        # a string/pointer box answers from the pointer so same-object
-        # calls agree within a run while differing from any small int
-        # hash (test_hash asserts 42's hash != "hello"'s, not values).
-        if (method == '__hash__' and ot in ('int64_t', 'int')
-                and not node.args and not getattr(node, 'kwargs', None)):
-            # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE
-            # same-type-target / plain-var-argument rules as `__bool__`.
-            _boxv = gen._new_val('int64_t', ov_local)
-            _hv = gen._call_expr('int64_t', 'mojo_pyobject_hash',
-                                 [('int64_t', _boxv)])
-            return ot, gen._new_val(ot, f'({ot}){_hv}')
-        # PART 6 (2026-10-23, family S): the Codepoint word-model accessors
-        # — in this char*/word model a Codepoint IS its ordinal word
-        # (`Codepoint.ord("a")` reaches mojo_ord → the word 97, measured in
-        # test_codepoint's green C), so the two accessors
-        # test/collections/string/test_iterators pins are identities on the
-        # word receiver: `iter.__next__().to_u32()` must answer 97 and
-        # `s1_iter.next().value()` the ordinal. The pre-branch stub here
-        # answered 0 to both — the latent value error those asserts would
-        # have made live. Only the no-argument word-receiver accessors
-        # change; every other scalar stub keeps its pre-branch behaviour.
-        if method in ('to_u32', 'value') and ot in ('int64_t', 'int') \
-                and not node.args:
-            return ot, ov_local
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
@@ -5217,41 +4883,6 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # 0-stub with no dedicated case — e.g. `l.__len__() - 1` always
         # computed `-1` regardless of the list's real length.
         return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({ov})')
-    if method == '__bool__' and not args:
-        # Boxed PythonObject list / list local (2026-10-21 part 4, further,
-        # test_python_object): `list_obj.__bool__()` and
-        # `empty_list.__bool__()` — truthy only when NON-EMPTY. The box is
-        # the MojoList * itself (a PythonObject list local unboxes to it
-        # before dispatch; `empty_list: PythonObject = []` lowers to an
-        # owned MojoList * local directly), so the runtime's registered-
-        # list branch reads the length. The 0-stub below would answer
-        # EVERY list falsy — measured: test_boolean_operations'
-        # `assert_true(list_obj.__bool__())` died on the stub.
-        # Two-step box materialization: the pointer word goes through a
-        # `MojoList *` temp first (a cast may only be the WHOLE RHS in
-        # raw GIMPLE, never a call argument or a nested cast), then a
-        # plain int64 temp carries it into the call. mojo_pyobject_truthy
-        # returns `int` — the result lands in an `int` temp and bridges
-        # to the int64_t slot. Measured 2026-10-21 part 4 integration.
-        _ovp = gen._new_val('MojoList *', ov)
-        _boxv = gen._new_val('int64_t', f'(int64_t){_ovp}')
-        _tr = gen._call_expr('int', 'mojo_pyobject_truthy',
-                             [('int64_t', _boxv)])
-        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_tr}')
-    if method == '__hash__' and not args:
-        # Boxed-list receiver (2026-10-21 part 4, further, test_python_
-        # object's test_hash): `list_obj.__hash__()` on a PythonObject
-        # list local — the receiver unboxes to MojoList * before dispatch
-        # (the same shape as __bool__ above), so the scalar-branch arm
-        # never sees it. Registered containers are UNHASHABLE — the
-        # runtime raises `TypeError: unhashable type: 'list'` (real
-        # Python; the driver's assert_raises only needs the raise).
-        # Same two-step box materialization as `__bool__` above; the hash
-        # call returns `int64_t`, matching the slot.
-        _ovp = gen._new_val('MojoList *', ov)
-        _boxv = gen._new_val('int64_t', f'(int64_t){_ovp}')
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_pyobject_hash',
-                                         [('int64_t', _boxv)])
     return 'int', gen._new_val('int', '0')
 
 
@@ -5431,9 +5062,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     else:
         cstr_ov = ov
     if method == '__len__':
-        # Code-point count, not strlen: the same UTF-8 model as the len()
-        # builtin (mojo_str_codepoint_len) — CPython's "é".__len__() is 1.
-        return 'int64_t', gen._new_val('int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
+        return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
     if method == 'hex':
         # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
         # This compiler had a `mojo_hex` for it (an INTEGER formatter, used
@@ -5670,57 +5299,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # where real Python returns an absolute one.
         return 'char *', gen._call_expr('char *', 'int64_t_realpath',
                                         [('char *', cstr_ov)])
-    if method == '__fspath__' and not arg_vals:
-        # String.__fspath__ (stdlib string.mojo) returns the receiver
-        # UNCHANGED — in this codegen's model a String IS its char* buffer,
-        # so the call is the identity: no stub, no runtime hop. This is the
-        # os.fspath-shaped call site the stdlib `getsize`/`stat` family
-        # spells (`stat(path.__fspath__())` in std/os/path/path.mojo), and
-        # the generic 'int' 0-stub below made it a dangling `stat(0)` — the
-        # wrong value where the real answer is the path itself. (Non-String
-        # receivers — Path objects — never reach this char*-receiver
-        # handler, so this cannot mask a real fspath on them.)
-        return 'char *', cstr_ov
-    # PART 6 (2026-10-23, family S): the StringSlice / StaticString method
-    # subset test/collections/string/test_iterators.mojo pins — the measured
-    # char*-intrinsic set. `byte_length` / `count_codepoints` are real
-    # runtime reads of the char* buffer (`mojo_strlen` / the existing
-    # `mojo_str_codepoint_len` UTF-8 scan the `__len__` branch above already
-    # uses — no new runtime helper). `as_bytes` boxes the char* into a WORD
-    # with the pre-branch static type (the zero stub was int64): a real
-    # MojoBytes* here broke a MEASURED consumer — test/collections/
-    # string/test_utf8's comptime list `List("a".as_bytes())` element joins
-    # its static type into the `materialize[...]() ` unroll's loop variable
-    # (the first-decl-wins `_declare_var` in emit_loops), and the sibling
-    # list-literal elements then refused (`cannot coerce MojoList * to
-    # MojoBytes *` — the C->E the first full sweep of this piece surfaced).
-    # The pinned `s.as_bytes()[i]` byte value does NOT come from this return
-    # type: _lower_subscript special-cases the subscript-on-as_bytes() shape
-    # (mojo_bytes_from_cstr + mojo_bytes_get_checked — the existing MojoBytes
-    # subscript arm's own runtime pair) without changing what `as_bytes()`
-    # returns to any other consumer. `bytes` / `codepoints` /
-    # `codepoint_slices_reversed` construct the hand-built in-TU iterator
-    # struct the elab factory seed registered for this compile; the
-    # `in gen.struct_field_types` gate keeps a call in a compile the seed
-    # did not register on the pre-branch zero stub (byte-identical old
-    # behaviour) rather than emitting a call to an undefined `_alloc_`.
-    if method == 'byte_length' and not arg_vals:
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen',
-                                         [('char *', cstr_ov)])
-    if method == 'count_codepoints' and not arg_vals:
-        return 'int64_t', gen._new_val(
-            'int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
-    if method == 'as_bytes' and not arg_vals:
-        _wp = gen._new_val('void *', f"(void *){cstr_ov}")
-        t = gen._new_val('int64_t', f"(int64_t){_wp}")
-        return 'int64_t', t
-    if method in ('bytes', 'codepoints', 'codepoint_slices_reversed') \
-            and not arg_vals:
-        _sn = {'bytes': '_SIterBytes', 'codepoints': '_SIterCodepoints',
-               'codepoint_slices_reversed': '_SIterCodepointSlices'}[method]
-        if _sn in (gen.struct_field_types or {}):
-            t = gen._new_val(f'{_sn} *', f'_alloc_{_sn} ({cstr_ov})')
-            return f'{_sn} *', t
     if method in ('encode', 'decode', 'format', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
@@ -6799,19 +6377,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                       f'"{struct_name}.{method}: unavailable in compiled mode '
                       f'(inherited from an unmodeled base class)"); return (int64_t)0; }}\n#endif')
         else:
-            if mangled == 'int64_t_as_unsafe_any_origin':
-                # fire_runtime DEFINES this as `int64_t
-                # int64_t_as_unsafe_any_origin (int64_t v)` — a plain
-                # single-param word identity, no variadic. The declaration
-                # must match: with a zero-named `(...)` decl the AArch64
-                # caller puts the word on the stack while the definition
-                # reads its named register param — the pointer args of the
-                # ladder's test_dict PyDict_Next came back garbage
-                # (measured 2026-10-22). See fire_runtime.c.
-                _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
-                          f'int64_t {mangled} (int64_t);\n#endif')
-            else:
-                _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
+            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
         if _stub not in gen._elaborated_externs:
             gen._elaborated_externs.append(_stub)
         gen._auto_stubbed.add(mangled)
@@ -6820,29 +6386,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # `int64_t cls` (a class-tag placeholder, not a real struct pointer) —
     # prepend it as `int64_t` so call-site parameter inference doesn't
     # decide the callee's `cls` param is a `Struct *`.
-    # Explicit cast, not a type change: the receiver's `_elem_types`/
-    # `_actual_types` entries (if any) key on `ov`, and the caller's own
-    # use of the receiver var is untouched.
-    if (mangled == 'int64_t_as_unsafe_any_origin' and ot
-            and '*' in ot and not _is_cls_receiver):
-        # fire_runtime DEFINES this as `int64_t
-        # int64_t_as_unsafe_any_origin (int64_t v)` — a single int64_t
-        # param. A pointer receiver (`Pointer(to=x)`) hands over its
-        # address; the explicit cast keeps the TYPED declaration
-        # gcc-clean (measured 2026-10-22: `passing argument 1 of
-        # 'int64_t_as_unsafe_any_origin' makes integer from pointer
-        # without a cast`). Word receivers already arrive as int64_t.
-        # The cast goes through `_new_val` (a GIMPLE temp), NOT inline
-        # in the argument: a `__GIMPLE`-tagged function's body must be
-        # RAW GIMPLE (one op per statement) and a cast directly inside
-        # a call argument is rejected there (measured 2026-10-22:
-        # "expected expression before '(' token" in
-        # std/python/bindings.mojo's `PyType_FromSpec` call site —
-        # same strict-parser family _new_val's negative-literal note
-        # documents). See the decl branch above + fire_runtime.c.
-        _recv_pair = ('int64_t', gen._new_val('int64_t', f'(int64_t){ov}'))
-    else:
-        _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
+    _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
     _prepend_recv = (not is_class_ref) or _is_cls_receiver
     # Explicit accumulation, NOT `([_recv_pair] + arg_pairs) if _prepend_recv
     # else arg_pairs`: a list-literal `+` concat is the established
@@ -6862,16 +6406,4 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         gen._elem_types[t] = gen._return_elem_types[mangled]
         if ret_type in ('int', 'int64_t'):
             gen._actual_types[t] = 'MojoList *'
-    # The per-slot twin of the block above. A struct method that RETURNS a
-    # heterogeneous tuple (`_ListIter.bounds` -> `(iter_len, {iter_len})` —
-    # an int slot + a MojoSet* slot) records its per-slot ctypes at the
-    # return (emit_stmts.py's `_return_slot_types[current_func_name]`), but
-    # this struct-method-call path re-keyed only the JOINED elem, whose join
-    # is a single pointer type: the caller's `a, b = m()` unpack then read
-    # slot 0 with the joined `MojoSet *`, and `a + n` became pointer
-    # arithmetic over an incomplete type — a hard gcc error (an ICE under
-    # -fgimple, tree.cc:5208). `_lower_named_call`'s own block covers
-    # bare-name calls; this is the struct-method half of the same gap.
-    if mangled in gen._return_slot_types:
-        gen._tuple_slot_types[t] = gen._return_slot_types[mangled]
     return ret_type, t

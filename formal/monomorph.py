@@ -201,135 +201,6 @@ def template_names(src: str) -> list:
         if why == reflect.EXCL_GENERIC))))
 
 
-def template_struct_names(src: str) -> list:
-    """The names in `template_names(src)` that are STRUCT templates.
-
-    The subset that matters to `formal/model.py::subscript_index_is_a_comptime_
-    parameter_list`: a bracket on a struct template's name is an explicit
-    parameter list, a bracket on a function template's name is a comptime
-    specialization both backends answer locally. `template_kind` is the one
-    reader of the distinction (`without_template_bodies` asks it the same way),
-    and it may raise `MonomorphError` for the export rule's one known
-    imprecision — a nested `def name[…]` inside a function body — so a name no
-    extractor can pull out is skipped rather than propagated: this is a
-    DIAGNOSIS aid, and a name that is not really a template must not turn a
-    build into a crash.
-
-    Both halves it composes are already memoized on the source text
-    (`template_names` and `template_kind`), so a build asks each of them once
-    however many front ends call this.
-    """
-    out = []
-    for name in template_names(src):
-        try:
-            kind = template_kind(src, name)
-        except MonomorphError:
-            continue
-        if kind == KIND_STRUCT:
-            out.append(name)
-    return out
-
-
-def _template_call_shapes(src: str) -> tuple:
-    """`(bare, bracketed)` template names in `src`, from ONE parse of it.
-
-    `bare` is a name a `Name(...)` construction CALLS; `bracketed` is a name a
-    `Name[...]` SUBSCRIPT applies to. The two decide whether an unused-parameter
-    struct template may be kept (see `_layout_independent_struct`), and the
-    distinction is not cosmetic: an explicitly instantiated template must still
-    be DROPPED so the instantiation and the bracketed-callee refusal keep their
-    meanings. Measured — keeping `struct Triple[A: AnyType, B: AnyType,
-    C: AnyType]` because its parameters are unused made
-    `type_argument_list_on_a_struct_this_unit_declares` refuse with a different
-    sentence, because `Triple[Int, s, False]` is then a recognized struct
-    instead of an unclassifiable bracket.
-
-    The walk is over the WHOLE statement list, so a construction inside a
-    function body counts, and it reads the AST rather than the text, so a
-    bracket in a comment or a docstring does not. A name used BOTH ways is
-    `bracketed` and is dropped: the explicit path owns it, and mixing the two is
-    the inference feature the `FORMAL generic local binding has no home` bug
-    records.
-    """
-    import fire_compiler as F                      # lazy — the AST classes
-    from formal import model as M                  # lazy — cycle
-    bare: set = set()
-    bracketed: set = set()
-    for st in _consumer_statements(src):
-        for node in M.iter_nodes(st):
-            if not isinstance(node, F.CallExpr):
-                continue
-            fn = node.func
-            if isinstance(fn, F.IdentExpr):
-                bare.add(fn.name)
-            elif isinstance(fn, F.SubscriptExpr) \
-                    and isinstance(fn.obj, F.IdentExpr):
-                bracketed.add(fn.obj.name)
-    return bare, bracketed
-
-
-def _layout_independent_struct(src: str, name: str) -> bool:
-    """Whether struct template `name`'s layout is independent of its type args.
-
-    A generic struct whose type parameters occur NOWHERE in its body — no field
-    and no method mentions them — has a layout that does not depend on the
-    arguments, so its own declaration IS a valid layout and a BARE construction
-    of it (`Marker(b.a)`, no bracket) is well defined. `without_template_bodies`
-    drops every struct template because a body that READS a bracket parameter has
-    no value behind it; this is the case that reads none.
-
-    `struct Marker[T: AnyType]: var v: Int` is the shape: `T` is in the head and
-    nowhere else. Measured on both architectures — a bare `Marker(b.a)` was
-    refused (`'m.v' is a field access through 'm'`, the binding never classified
-    because the template had been dropped) while the same program with
-    `Marker[Int]` built and answered 7. With the template kept,
-    `structs_by_name` has it and `_one_word_constructor_bindings` classifies the
-    local, which is the whole of what was missing. The interpreter and the gimple
-    path already answer the bare form, so this is the formal path catching up
-    rather than a new construct.
-
-    Conservative on two axes, and both are load-bearing:
-
-      * every bracket parameter must be a TYPE parameter (`T: AnyType`). A
-        COMPTIME parameter (`struct Box[T: AnyType, keys: List[T]]`) supplies a
-        value the body may read, so its instantiation is not optional and the
-        template must still be dropped — measured: keeping `Box` made
-        `comptime_binding_with_a_literal_value_still_builds` refuse on a method
-        call, because the instantiation and the template then disagree about the
-        struct. A parameter with any other annotation — a comptime type, a trait
-        bound — returns False and is dropped as before.
-      * a type parameter that occurs in the body AT ALL — even in a position the
-        layout discards, like a pointer's origin (`elaborate.erased_only_params`)
-        — returns False, so only the templates whose body cannot mention a
-        parameter, and therefore cannot fail on one, are kept.
-
-    A type parameter that IS used (`struct Pair[T]: var a: T` built bare) is a
-    real inference, still refused, and is the remainder the
-    `FORMAL generic local binding has no home` bug records.
-    """
-    import re
-    import elaborate
-    tmpl = _template_source(src, name, KIND_STRUCT)
-    if tmpl is None:
-        return False
-    head = elaborate.mm.head_match(tmpl)
-    if not head:
-        return False
-    params = []
-    for p in elaborate.split_top_level_commas(head.params):
-        p = p.strip()
-        if not p or elaborate._is_param_marker(p):
-            continue
-        name_part, sep, ann = p.partition(":")
-        if not sep or ann.strip() != "AnyType":
-            return False
-        params.append(name_part.strip())
-    if not params:
-        return False
-    code = elaborate._code_only(tmpl)
-    return not any(re.search(rf"\b{re.escape(p)}\b", code) for p in params)
-
-
 def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     """`stmts` with this source's GENERIC TEMPLATE declarations removed.
 
@@ -370,78 +241,15 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     gives about the memoised parse: these nodes are shared with every other reader
     in the process, and a template removed from one build's view of them would be
     gone from the next build's too.
-
-    **A struct template whose type parameters are all PHANTOM need not be
-    dropped, and an executable keeps it** — via `keep=concrete_struct_templates(
-    src)`. Its body mentions none of the parameters, so dropping the `[…]` from
-    the source yields a declaration that is already concrete: no bracket read
-    behind any name and nothing for `instantiate` to substitute. Keeping it is
-    what lets an un-bracketed construction of it (`Marker(b.a)`, the type
-    argument inferred or annotated rather than spelled in the call) bind a home —
-    the defect `FORMAL generic local binding has no home` records. The
-    LIBRARY path deliberately does not pass it: a kept declaration becomes part
-    of `_method_exports`' source set, so it would publish the template's methods
-    under the template's own name, and changing a dylib's export surface is not
-    a decision to make from this row.
     """
     import fire_compiler as F                        # lazy — the AST classes
-    bare, bracketed = _template_call_shapes(src)
     drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT
-            and not (n in bare and n not in bracketed
-                     and _layout_independent_struct(src, n))} - set(keep or ())
+            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
     if not drop:
         return stmts
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
-
-
-def concrete_struct_templates(src: str) -> set:
-    """The STRUCT templates whose type parameters are ALL phantom.
-
-    A phantom parameter (`elaborate.phantom_type_params`) occurs nowhere outside
-    the generic head, so the declaration is what it would be for any argument:
-    dropping the `[…]` yields a valid concrete `struct`, with no bracket
-    parameter for the body to read and nothing for `instantiate` to substitute.
-    Such a template therefore needs no instantiation at all to be compiled, and
-    the names are exactly the ones a caller of `without_template_bodies` should
-    pass as `keep` (the executable path does; see that function's docstring for
-    why the library path does not).
-
-    Read from the SOURCE for the same reason `template_names` is: the question
-    is a property of the declaration text and the extractors
-    (`_template_source`) are the one reader of it. A name `template_kind` filed
-    as a struct but neither extractor can pull out is skipped rather than
-    refused here: it is the nested-`def` imprecision `template_kind`'s own
-    docstring names, and this function is asking whether to KEEP a declaration,
-    not whether the source is well formed.
-
-    **A name the source applies with BRACKETS is excluded**, even when phantom,
-    and `_bracketed_callee_bases`'s own docstring carries the measurement: a
-    bracketed application is answered by the instantiation machinery or by the
-    refusal the bracket earns, and keeping the declaration as well moves the
-    answer. The case this function exists for is the UN-bracketed one —
-    `Marker(b.a)` — where no other mechanism names the type.
-    """
-    import elaborate                                # lazy — see module docstring
-    structs = [n for n in template_names(src)
-               if template_kind(src, n) == KIND_STRUCT]
-    if not structs:
-        return set()                 # no bracket walk for a module with none
-    bracketed = _bracketed_callee_bases(src)
-    out = set()
-    for name in structs:
-        if name in bracketed:
-            continue
-        try:
-            tmpl = _template_source(src, name, KIND_STRUCT)
-        except MonomorphError:
-            continue
-        params = elaborate.type_param_names(tmpl)
-        if params and len(elaborate.phantom_type_params(tmpl, params)) == len(params):
-            out.add(name)
-    return out
 
 
 def template_kind(src: str, name: str) -> str:
@@ -586,23 +394,6 @@ def _variadic_binding(name, args):
     return "(" + ", ".join(args) + (",)" if len(args) == 1 else ")")
 
 
-#: A bracket-argument spelling that is a bare compile-time VALUE literal rather
-#: than a type: an integer/float/string/bool/None literal, optionally signed.
-#: Matches what `_display_element_text` produces for a literal, and NOTHING a
-#: type spelling (`Int`, `simd.float32`, `List_Int`) or a display (`[1, 2, 3]`,
-#: `(4, 5)`) produces — so a display keeps the type-argument reading it has
-#: always had and only a BARE literal turns on `type_param_kinds`.
-_BARE_VALUE_RE = re.compile(
-    r"""(?:[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf|nan)
-        |True|False|None
-        |'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")""", re.VERBOSE)
-
-
-def _arg_is_bare_value(text: str) -> bool:
-    """True when `text` is a bare compile-time value literal, not a type."""
-    return bool(text) and _BARE_VALUE_RE.fullmatch(text) is not None
-
-
 def instantiate(src: str, name: str, args) -> tuple:
     """`(mangled_name, concrete_source)` for `name[args]` inside `src`.
 
@@ -650,46 +441,6 @@ def instantiate(src: str, name: str, args) -> tuple:
                f" — a `*` parameter would take the extra one"
                f"{'s' if len(args) - len(fixed) != 1 else ''} and this "
                f"declaration has none"))
-    # A BARE LITERAL is a compile-time VALUE, and only a VALUE parameter can
-    # take one.  This is the check that lets the demand walk carry a literal
-    # without turning `Pair[2]` (a value in a TYPE's position) or `tile[2, 3]`
-    # (a FUNCTION's value specialization, which the local machinery already
-    # answers) into a boundary symbol — see `value_demands_for` below, which
-    # offers exactly this instantiation as the admission test.
-    #
-    # Only the FIXED parameters are asked: a `*values: T` declaration collects
-    # any number of arguments and `_variadic_binding` already binds them as a
-    # tuple display, so a literal in the variadic TAIL is the existing
-    # behaviour (`Pair[T: AnyType, *values: T]` at `Pair[Int, 1, 2, 3]`) and
-    # not this check's business.
-    bare = [i for i, a in enumerate(args) if i < len(fixed)
-            and _arg_is_bare_value(a)]
-    if bare:
-        if kind == KIND_FN:
-            raise MonomorphError(
-                f"{name}[{', '.join(args)}] is a comptime specialization of a "
-                f"FUNCTION template, and a value specialization of a function "
-                f"is a call site binding, not a boundary symbol: both backends "
-                f"already lower it through "
-                f"`mojo/middle/comptime.specialization_args`, so demanding an "
-                f"instantiation here would publish a second copy of a body the "
-                f"build already emits under its own name.  This is not a "
-                f"refusal of the program — the call keeps its brackets and the "
-                f"local machinery answers them")
-        kinds = elaborate.type_param_kinds(template_src)
-        for i in bare:
-            if i < len(kinds) and kinds[i] != "value":
-                raise MonomorphError(
-                    f"{name}[{', '.join(args)}] binds the literal `{args[i]}` "
-                    f"to `{params[i] if i < len(params) else '?'}`, which its "
-                    f"declaration annotates as a TYPE parameter.  A value in a "
-                    f"type's position is not an instantiation of this template: "
-                    f"substituting `{args[i]}` for a type would produce a "
-                    f"definition built from an argument the source cannot mean, "
-                    f"and a boundary symbol for it would let a later call bind "
-                    f"that body.  Use a type here, or declare the parameter "
-                    f"with a value type (`{args[i]}`'s own kind) if a comptime "
-                    f"value is what it names")
     targs = dict(zip(fixed, args[:len(fixed)]))
     if variadic is not None:
         targs[variadic[1]] = _variadic_binding(variadic[1],
@@ -794,8 +545,9 @@ def type_arg_text(expr, values=()) -> str:
     `formal/model.py::is_type_name` is the existing "spells a TYPE on this
     path" predicate and it is the wrong one to ask: its own docstring says it
     must never be used to answer "can this name be read", and it is INCOMPLETE
-    for this purpose by construction — `Float32` is in none of its four tables,
-    so asking it would refuse `Pair2[Float32]()`, which is correct Mojo.  A name that nothing
+    for this purpose by construction — `Float64` and `Float32` are in none of
+    its four tables (`POINTEE_WIDTHS` has `Int` and no float), so asking it
+    would refuse `Pair2[Float64]()`, which is correct Mojo.  A name that nothing
     binds is a type; a name something binds is a value unless a type is
     declared with that spelling, and the second half of that sentence is the
     documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type
@@ -806,18 +558,6 @@ def type_arg_text(expr, values=()) -> str:
     items are VALUES — from being read as a demand for `tile_2_3`; inside a
     display a literal is a value the argument NAMES, which is the whole
     difference between the two.
-
-    **A bare literal is nevertheless read as a VALUE argument when the same
-    bracket also names a TYPE, and `_bracket_type_args` is where that rule
-    lives.** `Tagged[Int, 0]()` on `struct Tagged[T, origin: Int]` is
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4:
-    the second element is a comptime VALUE and every other element is a type, so
-    the bracket is a cross-module instantiation rather than the all-values
-    comptime specialization `tile[2, 3]` is. The substitution itself already
-    works (`monomorphize_source` is a whole-word textual substitution and does
-    not read a parameter's kind); what was missing was this reader keeping the
-    literal, and the asymmetry is deliberate: a bracket that is ENTIRELY values
-    stays the local machinery's, and only a mixed one becomes a demand.
     """
     if isinstance(expr, F.IdentExpr):
         return "" if expr.name in (values or ()) else (expr.name or "")
@@ -894,61 +634,6 @@ def _display_text(expr, values) -> str:
     return f"({body}{',' if len(items) == 1 else ''})"
 
 
-def _bracketed_calls_pair(consumer_src: str) -> tuple:
-    """`(type-arg map, permissive map)` for `consumer_src`, derived once.
-
-    The ONE walk behind `all_instantiation_calls` and `all_bracketed_calls`:
-    they read the SAME top-level statements with the SAME scope bindings and
-    differ only in whether a bare literal is a spelling, so computing them
-    separately would parse the consumer twice for one demand set.  `derive`
-    therefore fills both maps in one pass, and the two public readers take a
-    fresh copy of their half (`_derived_from_source` hands back one cached
-    object, and `all_instantiation_calls` has always promised fresh lists).
-
-    The walk is per top-level statement rather than one flat walk, because
-    "is this identifier a value binding" is a question about the SCOPE the call
-    is written in and `iter_nodes` has no parent: `Pair[t]()` is a demand when
-    `t` is a type and not one when `t` is the local `var t = Float64` two lines
-    above it, and nothing below the callee can tell those apart. So each
-    function is walked with its own bindings
-    (`formal/build.py::_names_bound_in`) and each module-level statement with
-    the module's own table (`formal/model.py::collect_module_symbols`).
-
-    **Once per source text, not once per imported module.**  The parse is still
-    made once per call, and the call is still made once per imported module
-    (`formal/imports.py::instantiation_demands`) over one unchanged consumer —
-    7 extra full parses of a 271 KB `myinterpreter.py` and 22 each of
-    `std/simd.mojo`, measured.  The answer is a function of the text alone, so
-    it is derived once per distinct text (`_derived_from_source`, whose key and
-    bound are documented above `_DERIVED`).
-    """
-    def derive():
-        from formal import model as M                  # lazy — cycle
-        from formal.build import _names_bound_in       # lazy — cycle
-        stmts = _consumer_statements(consumer_src)
-        module_level = set(M.collect_module_symbols(stmts) or {})
-        typed: dict = {}
-        permissive: dict = {}
-        for st in stmts:
-            values = _names_bound_in(st) \
-                if isinstance(st, F.FunctionDef) else module_level
-            for node in M.iter_nodes(st):
-                if not isinstance(node, F.CallExpr):
-                    continue
-                base = _callee_base(node)
-                if base is None:
-                    continue
-                loose = _bracket_all_args(node.func, values)
-                if loose:
-                    permissive.setdefault(base, set()).add(tuple(loose))
-                args = _bracket_type_args(node.func, values)
-                if args:
-                    typed.setdefault(base, set()).add(tuple(args))
-        return ({k: tuple(sorted(v)) for k, v in typed.items()},
-                {k: tuple(sorted(v)) for k, v in permissive.items()})
-    return _derived_from_source("all_instantiation_calls", consumer_src, derive)
-
-
 def all_instantiation_calls(consumer_src: str) -> dict:
     """`{base name: sorted([(type arg, …), …])}` — every bracketed callee in
     `consumer_src` whose bracket spells concrete TYPE arguments.
@@ -960,139 +645,46 @@ def all_instantiation_calls(consumer_src: str) -> dict:
     filtering per module by re-parsing the consumer made the cost of a demand
     set a product where it only needed to be a sum.
 
-    A bare literal is deliberately NOT here — that is
-    `all_bracketed_calls`'s half — and the asymmetry is the documented one: a
-    value at the top level of a bracket is `tile[2, 3]`'s shape, a comptime
-    specialization the local machinery answers, and it becomes a boundary
-    symbol only when a declaration has a position of a value KIND for it
-    (`value_demands_for`).
+    The walk is per top-level statement rather than one flat walk, because
+    "is this identifier a value binding" is a question about the SCOPE the call
+    is written in and `iter_nodes` has no parent: `Pair[t]()` is a demand when
+    `t` is a type and not one when `t` is the local `var t = Float64` two lines
+    above it, and nothing below the callee can tell those apart. So each
+    function is walked with its own bindings
+    (`formal/build.py::_names_bound_in`) and each module-level statement with
+    the module's own table (`formal/model.py::collect_module_symbols`).
+
+    **Once per source text, not once per imported module.**  The paragraph above
+    removed the re-parse PER MODULE FILTER and left the parse itself once per
+    call, and the call is still made once per imported module
+    (`formal/imports.py::instantiation_demands`) over one unchanged consumer —
+    7 extra full parses of a 271 KB `myinterpreter.py` and 22 each of
+    `std/simd.mojo`, measured.  The answer is a function of the text alone, so
+    it is derived once per distinct text (`_derived_from_source`, whose key and
+    bound are documented above `_DERIVED`) and handed back as a fresh dict of
+    fresh lists on every call.
     """
-    return {k: list(v) for k, v in _bracketed_calls_pair(consumer_src)[0].items()}
-
-
-def all_bracketed_calls(consumer_src: str) -> dict:
-    """Like `all_instantiation_calls` but a bare literal IS a spelling.
-
-    A SUPERSET: every entry `all_instantiation_calls` returns is here, plus the
-    brackets whose items all have some spelling once a bare literal counts.
-    This is the candidate set for a comptime-VALUE argument, and it is not a
-    demand set by itself — `Pair[2]` (a value in a TYPE parameter's position)
-    and `tile[2, 3]` (a function's value specialization) are both here, and
-    `value_demands_for` is what refuses them, by asking `instantiate` whether
-    the declaration a module OWNS admits the arguments (`instantiate`'s bare-
-    value kind check is the admission test).  Splitting the literal out of the
-    strict reader is what keeps the two pinned non-demands above non-demands
-    without giving up the `Tagged[Int, 0]` case.
-    """
-    return {k: list(v) for k, v in _bracketed_calls_pair(consumer_src)[1].items()}
-
-
-#: A type-argument spelling an ANNOTATION reader will carry into a demand: a
-#: bare or dotted identifier and nothing else.  An annotation is a STRING by the
-#: time this module sees it (`VarDecl.type_ann`), so the nested-application
-#: spelling `List[Int]` — which `type_arg_text` mangles to `List_Int` for a CALL
-#: bracket — cannot be converted here without a second copy of that mangling.
-#: The conservative direction is to leave it OUT: no demand is invented for a
-#: spelling this reader cannot name exactly, and the construction keeps the
-#: refusal it has today rather than binding a body under a name nobody computed.
-_ANNOTATION_TYPE_ARG_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
-
-
-def annotated_construction_demands(stmts, templates=None, skip=()) -> list:
-    """`[(base, (type arg, …), call), …]` for `x: Base[…] = Base(…)`.
-
-    A type argument WRITTEN IN A NON-CALL POSITION is not a demand to
-    `all_instantiation_calls`, which walks CALL sites: `VarDecl.type_ann` is a
-    STRING by the time an AST carries it (`x: Base[Int]`), not a subscript node,
-    so the bracket in it is invisible to every reader built on the parsed tree.
-    The construction on the right is a bare `Base(...)`, and because the
-    template's own body was dropped by `without_template_bodies` it names no
-    struct and no function — the binding loses its home and the field read is
-    refused, or the image carries a call nothing provides.  This is the reader
-    that turns the ANNOTATION into a demand, so the machinery that already
-    handles an explicit-bracket call (`instantiate_all` +
-    `rewrite_instantiation_calls`) handles this spelling too.
-
-    `templates`, when given, is the set of names this is allowed to speak for
-    (a module's own STRUCT templates); `None` asks about every annotation and
-    lets the caller's `demap` decide, which is what the rewrite pass wants.
-
-    `skip` is the module's own GENERIC TEMPLATE names, and it is load-bearing
-    rather than tidy: a demand reader runs before `without_template_bodies`
-    drops the template declarations, and an annotated construction inside one
-    (`struct Outer[T]: … var x: Inner[T] = Inner()`) would otherwise demand
-    `Inner` at the outer template's PARAMETER, publishing `Inner_T` with `T`
-    undeclared.  A template's own body is in no image, so it states no demand.
-
-    The argument spellings are checked twice and both are the safe direction:
-    each must be a bare or dotted identifier (a nested application is left out
-    rather than mangled by a second rule), and it must not be a name the reading
-    SCOPE binds as a value — the same "a name nothing binds is a type" rule
-    `type_arg_text` states, because an annotation that names a local is not a
-    type no matter where the parser put it.
-    """
-    from formal import model as M                  # lazy — cycle
-    from formal.build import _names_bound_in       # lazy — cycle
-
-    skip = set(skip or ())
-    out = []
-    module_values = set(M.collect_module_symbols(stmts) or {})
-    for st in stmts:
-        if getattr(st, "name", None) in skip:
-            continue
-        values = _names_bound_in(st) if isinstance(st, F.FunctionDef) \
-            else module_values
-        for node in M.iter_nodes(st):
-            if not isinstance(node, F.VarDecl):
-                continue
-            ann = node.type_ann
-            value = node.value
-            if not isinstance(ann, str) or not isinstance(value, F.CallExpr):
-                continue
-            if not isinstance(value.func, F.IdentExpr):
-                continue
-            base = M.annotation_base_name(ann)
-            if base is None or value.func.name != base:
-                continue
-            if templates is not None and base not in templates:
-                continue
-            texts = M._split_type_args(ann)
-            if not texts:
-                continue
-            if any(t in values or not _ANNOTATION_TYPE_ARG_RE.match(t)
-                   for t in texts):
-                continue
-            out.append((base, tuple(texts), value))
-    return out
-
-
-def own_annotation_demands(src: str, stmts) -> dict:
-    """`{template: [(type arg, …), …]}` — the annotated constructions of `src`'s
-    OWN struct templates.
-
-    The own-template half of `annotated_construction_demands`, and a function
-    rather than a clause in each of its two callers because both the executable
-    path (`formal/imports.py::_own_instantiations`) and the library path
-    (`build_module_dylib`, whose own demand set feeds BOTH the artifact's
-    identity and the call-site rewrite) need the same table from the same rule.
-    A name the export rule filed as a template that neither extractor can pull
-    out is skipped rather than fatal — `template_names`' own documented
-    imprecision — because this is a demand and not the place to report it.
-    """
-    structs = set()
-    for name in template_names(src):
-        try:
-            if template_kind(src, name) == KIND_STRUCT:
-                structs.add(name)
-        except MonomorphError:
-            continue
-    out: dict = {}
-    for base, args, _call in annotated_construction_demands(
-            stmts, structs, skip=template_names(src)):
-        entries = out.setdefault(base, [])
-        if args not in entries:
-            entries.append(args)
-    return out
+    def derive():
+        from formal import model as M                  # lazy — cycle
+        from formal.build import _names_bound_in       # lazy — cycle
+        stmts = _consumer_statements(consumer_src)
+        module_level = set(M.collect_module_symbols(stmts) or {})
+        found: dict = {}
+        for st in stmts:
+            values = _names_bound_in(st) \
+                if isinstance(st, F.FunctionDef) else module_level
+            for node in M.iter_nodes(st):
+                if not isinstance(node, F.CallExpr):
+                    continue
+                base = _callee_base(node)
+                if base is None:
+                    continue
+                args = _bracket_type_args(node.func, values)
+                if args:
+                    found.setdefault(base, set()).add(tuple(args))
+        return {k: tuple(sorted(v)) for k, v in found.items()}
+    return {k: list(v) for k, v in _derived_from_source(
+        "all_instantiation_calls", consumer_src, derive).items()}
 
 
 def demands_from_calls(found: dict, templates, own=()) -> dict:
@@ -1136,51 +728,6 @@ def demands(consumer_src: str, templates, own=()) -> dict:
                               templates, own)
 
 
-def value_demands_for(consumer_src: str, module_src: str, templates,
-                      own=()) -> dict:
-    """`{template: [(arg, …), …]}` — the brackets `demands` DROPPED that a
-    declaration in `module_src` admits as a comptime-VALUE instantiation.
-
-    `all_bracketed_calls`'s permissive set minus what `demands` already found,
-    filtered by asking the declaration itself: `instantiate(module_src, name,
-    args)` is called and a `MonomorphError` means the arguments are not an
-    instantiation of the template `module_src` declares, so nothing is added.
-    That admission test is where the two pinned non-demands stay non-demands:
-
-      * `Pair[2]` — `Pair[T]`'s `T` is a TYPE parameter, and a bare value in a
-        type's position is refused by `instantiate`'s kind check;
-      * `tile[2, 3]` — `tile` is a FUNCTION template, whose value specialization
-        the local machinery already answers, so `instantiate` refuses to
-        publish a second boundary symbol for it.
-
-    and where `Tagged[Int, 0]` (a STRUCT with `origin: Int`) is admitted.  The
-    check lives here rather than in the walk because only the DECLARATION knows
-    a parameter's kind, and this function is the one place a consumer's
-    permissive set meets the module that owns the template.
-
-    `module_src` is the DECLARING module's source, so a caller that already has
-    it (the own-template path) passes it and one that does not reads it once
-    (`formal/imports.py::instantiation_demands`, only when a candidate exists).
-    """
-    wanted = {n for n in (templates or ()) if n} - {n for n in (own or ()) if n}
-    if not wanted:
-        return {}
-    strict = all_instantiation_calls(consumer_src)
-    loose = all_bracketed_calls(consumer_src)
-    out: dict = {}
-    for name in sorted(wanted):
-        already = set(strict.get(name, ()))
-        for args in loose.get(name, ()):
-            if args in already:
-                continue
-            try:
-                instantiate(module_src, name, args)
-            except MonomorphError:
-                continue
-            out.setdefault(name, []).append(args)
-    return out
-
-
 def own_demands(module_src: str) -> dict:
     """`{template: [(type arg, …), …]}` — what `module_src` asks of the
     templates `module_src` ITSELF declares.
@@ -1196,11 +743,6 @@ def own_demands(module_src: str) -> dict:
     (`formal/imports.py::_own_instantiations` for an executable,
     `build_module_dylib` for a library), and there is one definition of the set
     rather than a rule in each.
-
-    The COMPTIME-VALUE half is `value_demands_for`'s, and it is merged here
-    rather than left to the caller because this is the module's OWN source: the
-    declaration `Tagged[T, origin: Int]` and the call `Tagged[Int, 0]()` are in
-    one text, so the admission test needs no source read and no attribution.
 
     Measured, one file, both architectures, a struct template applied beside its
     own declaration:
@@ -1221,14 +763,7 @@ def own_demands(module_src: str) -> dict:
     rewrite of this module's own call sites — which is why it is a function and
     not a line in one of them.
     """
-    names = template_names(module_src)
-    want = demands(module_src, names, own=())
-    for name, args in value_demands_for(module_src, module_src, names).items():
-        want.setdefault(name, [])
-        for a in args:
-            if a not in want[name]:
-                want[name].append(a)
-    return want
+    return demands(module_src, template_names(module_src), own=())
 
 
 def demap_from(made) -> dict:
@@ -1324,33 +859,12 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
     return made, failed
 
 
-def instantiations_by_base(demap: dict) -> dict:
-    """`{base name: {mangled name, …}}` — the instantiations `demap` holds for
-    each template, which is what "how many instantiations does this unit apply
-    of THAT template" is.
-
-    One reader for both arms of the class-attribute rule
-    (`rewrite_instantiation_uses`): a read named `Template.<attr>` carries no
-    bracket and so names no instantiation of its own, which makes the COUNT the
-    whole of the answer — one instantiation and the read has exactly one
-    instantiation it could mean, two or more and it names none of them in
-    particular. Keyed by the demap rather than recomputed from the source,
-    because the demap is the table the declarations came out of and a count taken
-    anywhere else is a second answer to "what was instantiated" that can disagree
-    with the ones on the link line."""
-    out: dict = {}
-    for (base, _args), mangled in demap.items():
-        out.setdefault(base, set()).add(mangled)
-    return out
-
-
-def rewrite_instantiation_uses(stmts, demap: dict) -> int:
-    """Rewrite every USE of a generic template to the mangled instantiation, in
-    place: `Base[Args](…)` and `Base.<attr>` alike.
+def rewrite_instantiation_calls(stmts, demap: dict) -> int:
+    """Rewrite `Base[Args](…)` call sites to the mangled `Base_Args`, in place.
 
     `demap` is `{(base, (arg, …)): mangled name}` — the same key
     `all_instantiation_calls` produces, and the same table the exporting side
-    compiled from, so a use rewritten here names a definition the library
+    compiled from, so a call site rewritten here names a definition the library
     on the link line actually has.  Returns the number of call sites rewritten,
     which is what the caller asserts on: a demand that produced a declaration and
     no rewrite (or the reverse) is a bug in the table, and the count is how that
@@ -1377,16 +891,13 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
     (measured — the whole expression is positioned by its `obj`), so copying
     the subscript's own position would report every rewritten call at line 0.
 
-    The bracket is read through the scope-aware `_bracket_all_args`, which is
-    `all_bracketed_calls`'s reader: a `demap` built by `value_demands_for`
-    carries a VALUE argument (`(base, ("Int", "0"))`), so the rewrite has to
-    spell a bare literal the same way the permissive walk did or the entry it
-    is looking for is never found.  A call site whose bracket names something
-    with no spelling at all (`Pair[t]()` with `var t = Float64`) has no entry
-    in `demap`, so it is left alone and keeps its brackets to be refused with
-    the sentence that is true of it.  Reading the bracket differently here than
-    in `all_bracketed_calls` would be the one way a rewrite could name a
-    definition the library was never asked for.
+    The bracket is read through the same scope-aware `_bracket_type_args` the
+    demand walk uses, for the same reason and with the same consequence: a call
+    site whose bracket names a VALUE (`Pair[t]()` with `var t = Float64`) has no
+    entry in `demap`, so it is left alone and keeps its brackets to be refused
+    with the sentence that is true of it.  Reading the bracket differently here
+    than in `all_instantiation_calls` would be the one way a rewrite could name
+    a definition the library was never asked for.
 
     **A `Base.<member>` READ is rewritten too, and it is the same rewrite
     because it is the same fact.**  `TypeDict.length` names a class attribute of
@@ -1422,21 +933,6 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
     n = 0
-    # The ANNOTATION half, and it is a separate pass because its call site has
-    # no bracket: `var x: Base[Int] = Base(…)` writes the type argument in the
-    # declaration and the call is bare, so the bracket-reading loop below cannot
-    # see it.  `annotated_construction_demands` reads the same annotation the
-    # demand side read, so the two cannot disagree about the arguments; the
-    # `demap` lookup is what makes this a rewrite of a demand that was actually
-    # built rather than of every annotation that happens to name a template.
-    for base, args, call in annotated_construction_demands(stmts):
-        mangled = demap.get((base, args))
-        if mangled is None:
-            continue
-        call.func = F.IdentExpr(name=mangled,
-                                line=getattr(call.func, "line", 0),
-                                col=getattr(call.func, "col", 0))
-        n += 1
     for st in stmts:
         if isinstance(st, F.FunctionDef):
             values = _names_bound_in(st)
@@ -1460,7 +956,7 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
             base = _callee_base(node)
             if base is None:
                 continue
-            args = tuple(_bracket_all_args(node.func, values))
+            args = tuple(_bracket_type_args(node.func, values))
             mangled = demap.get((base, args))
             if mangled is None:
                 continue
@@ -1513,21 +1009,9 @@ def _consumer_statements(consumer_src: str) -> list:
     consumer whose own parse failed has a more fundamental problem than a demand
     for an instantiation, and swallowing that here would turn a parse error into
     an empty demand set and then into "that module exports nothing".
-
-    **Once per source text**, because there are now two readers of it —
-    `all_instantiation_calls` and `_bracketed_callee_bases` — and both are
-    questions about the same bytes.  Each answers a different question about the
-    SAME walk, and re-parsing a whole file for the second one is exactly the
-    cost this module's docstring measures (`py_tokenize_named` was 51 % of a
-    stdlib build before its parses were deduplicated).  The stored value is the
-    parsed list, which callers only read; the top-level `list()` copy below
-    keeps a caller from mutating the shared list's own structure, and the nodes
-    are shared exactly as `without_template_bodies`'s docstring says they are.
     """
     from formal.build import parse_module          # lazy — cycle
-    return list(_derived_from_source(
-        "_consumer_statements", consumer_src,
-        lambda: parse_module(consumer_src)))
+    return parse_module(consumer_src)
 
 
 def _callee_base(call):
@@ -1564,93 +1048,9 @@ def _bracket_type_args(sub, values=()) -> list:
     docstring warns against, and an unrecognised item here would be mangled into
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
-
-    **A bare literal survives only in a MIXED bracket.**  `type_arg_text` refuses
-    a top-level literal because a bracket of values alone is the comptime
-    specialization (`tile[2, 3]`) the local machinery already answers, and
-    demanding `tile_2_3` for it would publish a second symbol for a body the
-    build already emits.  But a bracket that writes a TYPE as well is not that
-    shape: `Tagged[Int, 0]` on `struct Tagged[T, origin: Int]` is a boundary
-    instantiation whose second element is a value, and before this rule it was
-    dropped here and then refused downstream as a "compile-time
-    explicit-parameter list" the model cannot bind.  So a literal (`0`, `-3`,
-    `"x"`, `True`, `None`) is read through `_value_literal_arg_text` only when at
-    least one OTHER item spelled a type; an all-values bracket is returned `[]`
-    exactly as before.  The substitution end needs no kind table:
-    `monomorphize_source` replaces the parameter's name whole-word whether the
-    parameter was declared a type or a value.
     """
-    items = bracket_items(sub)
-    spelled = [type_arg_text(i, values) for i in items]
-    if not spelled or all(spelled):
-        return spelled
-    if not any(spelled):
-        return []
-    mixed = []
-    for item, sp in zip(items, spelled):
-        if sp:
-            mixed.append(sp)
-            continue
-        value = _value_literal_arg_text(item)
-        if not value:
-            return []
-        mixed.append(value)
-    return mixed
-
-
-def _value_literal_arg_text(expr) -> str:
-    """The spelling of a bracket item that is a bare VALUE LITERAL, or "".
-
-    One reader for the mixed-bracket rule `_bracket_type_args` applies, and it
-    renders a literal the same way `_display_element_text` does — `repr` for a
-    string, the signed text for a `UnaryOp` — because the rendering is both the
-    mangled symbol fragment and the text substituted into the body, and the two
-    must be the same value the source wrote.  A name, a call, an arithmetic
-    expression and a display are all `""` here: a name is already read by
-    `type_arg_text`, a display has its own reader, and the rest have no closed
-    form to substitute.
-    """
-    if isinstance(expr, F.IntLiteral):
-        return str(expr.value)
-    if isinstance(expr, F.FloatLiteral):
-        return repr(expr.value)
-    if isinstance(expr, F.StringLiteral):
-        return repr(expr.value)
-    if isinstance(expr, F.BoolLiteral):
-        return "True" if expr.value else "False"
-    if isinstance(expr, F.NoneLiteral):
-        return "None"
-    if isinstance(expr, F.UnaryOp) and expr.op in ("-", "+"):
-        inner = _value_literal_arg_text(expr.operand)
-        return f"{expr.op}{inner}" if inner else ""
-    return ""
-
-
-def _bracket_all_args(sub, values=()) -> list:
-    """Like `_bracket_type_args`, but a bare literal is a spelling too.
-
-    The permissive twin `all_bracketed_calls`'s walk reads.  Each item is a
-    type spelling when `type_arg_text` gives one (`Int`, `simd.float32`,
-    `List_Int`, and a display — whose own text IS its spelling) and otherwise a
-    literal via `_display_element_text` (`0`, `-3`, `True`, `"x"`).  A
-    computed argument, and a bare identifier the reading scope binds as a
-    value, still spell nothing and make the whole bracket a non-candidate —
-    that is the property `type_arg_text`'s docstring is built around, and it
-    is kept here so the permissive reader differs from the strict one in
-    exactly one way.
-
-    It returns the SPELLINGS only, not which of them are values: the value/type
-    distinction is a question about the DECLARATION
-    (`elaborate.type_param_kinds`), asked by `instantiate`, so the walk that
-    cannot see a declaration does not pretend to answer it.
-    """
-    out = []
-    for item in bracket_items(sub):
-        text = type_arg_text(item, values) or _display_element_text(item, values)
-        if not text:
-            return []
-        out.append(text)
-    return out
+    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    return spelled if spelled and all(spelled) else []
 
 
 def bracket_items(sub) -> list:
@@ -1680,40 +1080,6 @@ def bracket_items(sub) -> list:
     index = sub.index
     return list(index.elements) if isinstance(
         index, (F.TupleExpr, F.ListExpr)) else [index]
-
-
-def _bracketed_callee_bases(consumer_src: str) -> set:
-    """Every bare name used as a BRACKETED callee in `consumer_src`.
-
-    `f[a, b](…)` for ANY bracket items — a type list, a value list, a mixed one
-    — and dotted bases excluded, because `_callee_base` is the one recogniser
-    and it answers None for those.  `all_instantiation_calls` is this same walk
-    with the concrete-TYPE-argument filter on top; this is the unfiltered
-    question, and `concrete_struct_templates` asks it because a template a call
-    site applies with BRACKETS is already answered by the instantiation
-    machinery (type items) or by the refusal those brackets earn (value items),
-    so keeping the declaration as well would move which code path answers that
-    call — measured: `Triple[Int, s, False](5)` on a phantom-parameter template
-    stopped producing "a S receiver is stored in a container" and produced the
-    tuple-index refusal instead.
-
-    **Read from the SOURCE, not from a build's statement list.** By the time
-    `without_template_bodies` runs, `_imported_structs` has already REWRITTEN
-    this file's own bracketed instantiation calls to their mangled names, so a
-    statement-list walk no longer sees the bracket that earned each demand —
-    measured: `Box[Int, [1, 2, 3]]()` was rewritten, its phantom template was
-    then kept, and the build refused. The parse is `_consumer_statements`, which
-    is memoised and already made for `all_instantiation_calls`.
-    """
-    from formal import model as M                  # lazy — cycle
-    found = set()
-    for st in _consumer_statements(consumer_src):
-        for node in M.iter_nodes(st):
-            if isinstance(node, F.CallExpr):
-                base = _callee_base(node)
-                if base:
-                    found.add(base)
-    return found
 
 
 def supplied_bracket_args(call) -> list:

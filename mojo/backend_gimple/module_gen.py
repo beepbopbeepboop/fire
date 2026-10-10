@@ -62,7 +62,7 @@ import mojo.middle.coro as gimple_gen_coro
 # in the wrong direction. Same rule and same precedent as
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
-from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.exprtypes import _walk_ast, expr_provably_str as _gmi_expr_provably_str
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
@@ -70,10 +70,9 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
-import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
-from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
+from mojo.middle.types import _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -87,7 +86,7 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 # reading it from there would close the cycle
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
-from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype, _body_builds_struct_tuple
+from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -174,6 +173,18 @@ def _gmi_iter_calls(stmts, _seen=None):
                     stack.extend(sub)
                 else:
                     stack.append(sub)
+
+
+def _param_default_pairs(d) -> list:
+    """`[(name, default_node), ...]` of a `param_defaults` dict, in order, as an
+    explicit loop over the keys: a comprehension target-unpack over `.items()`
+    boxes both slots on the self-hosted path (the entries became integers and
+    `lower_struct_method_call` indexed `[1]` of one)."""
+    pairs = []
+    dd = _as_dict(d)
+    for k in dd:
+        pairs.append((_as_str(k), dd[k]))
+    return pairs
 
 
 def _gmi_apply_call_site_param_evidence(gen, stmts):
@@ -1116,7 +1127,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name, fields, optional_tags=None):
+def _render_struct_typedef_body(struct_name, fields):
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1156,14 +1167,6 @@ def _render_struct_typedef_body(struct_name, fields, optional_tags=None):
                 lines.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
             else:
                 lines.append(f"  {ft} {safe_fn};")
-                # PART 6 (2026-10-22, family C): the tagged Optional
-                # side-band — an adjacent _Bool the spliced-body writes
-                # store and the boolean-context reads consult (Some(0) vs
-                # None for non-pointer scalar payloads). In-TU materialized
-                # structs only (optional_tags comes from
-                # gen._tagged_optional_fields, gated on _intu_structs).
-                if optional_tags and field_name in optional_tags:
-                    lines.append(f"  _Bool {safe_fn}_is_some;")
     else:
         lines.append(f"  int _dummy;")
     lines.append(f"}} {struct_name};")
@@ -1463,147 +1466,6 @@ def _emit_reflection_fwd_decls(self, parts):
     return elem_repr_fwd_decls
 
 
-def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
-    """One prototype per struct method's mangled C symbol, and the record of
-    which METHOD names its generated `_mojo_getattr_<Struct>` may answer as a
-    bound-method value (`self._getattr_method_arms`).
-
-    Emitted BEFORE `_emit_reflection_dispatch` (which it did not used to be —
-    this block lived just below the function-body emission, i.e. after the
-    reflection definitions that now reference these symbols) for exactly one
-    reason: C has no two-pass declarations, and a `_mojo_getattr_<Struct>` arm
-    takes the ADDRESS of a method symbol, which needs the prototype in front of
-    it. Same rule, same consequence as `_emit_reflection_fwd_decls`'s own
-    docstring: a declaration emitted after its use is an implicit one.
-
-    The arm table is built HERE, beside the prototypes, rather than derived a
-    second time from the same `struct_defs`, so an arm can only ever name a
-    symbol this block declared (and Phase 2a defined): one walk, one symbol per
-    method name, no second lookup to drift.
-
-    A generator method is skipped — as it is for the prototype — because it has
-    no ordinary C symbol at all (its callable surface is the `<base>_start/
-    _resume/_value/_destroy` coroutine API; see `_lower_bound_method_value`'s
-    refusal, which is the same decision from the value side).
-    """
-    self._getattr_method_arms: dict = {}
-    for sd in struct_defs:
-        if not isinstance(sd, StructDef):
-            continue
-        _moids = self._struct_method_overload_ids(sd)
-        # Index loop, NOT `{id(m): oid for m, oid in zip(...)}`: neither
-        # `zip()` nor a dict comprehension over it lowers in the self-hosted
-        # backend, and `id()` is unreliable there — walk `sd.methods` by
-        # position so `_moids` (same length) stays aligned.
-        _z8_meths = sd.methods
-        for _z8k in range(len(_z8_meths)):
-            m = _z8_meths[_z8k]
-            if (sd.name, m.name) in self._supported_generator_methods:
-                continue
-            if (sd.name, m.name) in self._generator_method_api:
-                continue
-            if (m.name == '__new__'
-                    and sd.name in getattr(self, '_bytes_subclass_structs', ())):
-                # A builtin-`bytes` subclass's `__new__` is handled inline at
-                # the construction site (payload synthesis; see
-                # _lower_struct_constructor), so the function-body loop emits
-                # no C symbol for it: no prototype, and no `_mojo_getattr_<S>`
-                # arm to take its address — the arm dangles and the link fails
-                # (measured: `Undefined symbols: _Extra___new__` in
-                # gimple_bytes_subclass_shape, and in the selfhost binary).
-                continue
-            overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
-            mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
-            ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
-                   or self.func_return_types.get(f"{sd.name}_{m.name}")
-                   or self._resolve_type(m.return_type))
-            method_full_name = f"{sd.name}_{m.name}"
-            per_overload_params = self.func_param_types.get(mangled_name)
-            if per_overload_params is not None:
-                param_ctypes = per_overload_params
-            elif gimple_ctypes._params_have_vararg(m.params):
-                param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
-                self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
-            else:
-                param_ctypes = []
-                for i, (pname, ptype) in enumerate(m.params):
-                    if pname.startswith('**'):
-                        continue  # skip **kwargs
-                    if pname.startswith('*'):
-                        # *args slot: the packing convention (see
-                        # _signature_ctypes) — the caller passes the packed
-                        # MojoList. This fallback was DEAD until 2026-10-21:
-                        # a definition-site method whose body REFUSES the
-                        # lowering (gen_module_impl's transactional fallback —
-                        # a type-param-typed field erases, the instantiating
-                        # TU emits the mangled copy) never writes the
-                        # per-overload func_param_types entry, so the prototype
-                        # lands here with the bare pre-pass shape, and this
-                        # branch must stand on its own.
-                        param_ctypes.append('MojoList *')
-                        continue
-                    if pname == 'self':
-                        ct = f"{sd.name} *"
-                    elif ptype is None and hasattr(self, '_inferred_param_types'):
-                        if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
-                            ct = self._inferred_param_types[method_full_name][pname]
-                        else:
-                            ct = 'int64_t'
-                    else:
-                        ct = self._resolve_type(ptype)
-                    param_ctypes.append(ct)
-            # A `...` in a DECLARATION must be the LAST parameter; a packed
-            # varargs slot that has typed trailing params (`*args` + a named
-            # parameter, e.g. `_format_entry(self, writer, *args, auto_idx)`)
-            # is spelled `MojoList *` on the definition side (the param loop's
-            # own ctype for `*`). The per-overload entry can arrive with the
-            # bare `...` when it was seeded from the pre-pass's BARE key
-            # (whose `_signature_ctypes` default sentinel is `...`) instead of
-            # from the definition's end-of-emission write-back — which is now
-            # the NORMAL case for any method whose body did not emit (measured
-            # 2026-10-21: a generic-struct method whose body refuses the
-            # lowering takes the transactional fallback and never writes the
-            # per-overload entry, so the mirror made `_format_entry`'s
-            # prototype `(_FormatCurlyEntry *, int64_t, ..., int64_t)` — a
-            # typed param after `...` — and gcc refused format.mojo:432 /
-            # logger.mojo:406 / test_list:647).
-            if '...' in param_ctypes:
-                _ell = param_ctypes.index('...')
-                if _ell < len(param_ctypes) - 1:
-                    param_ctypes = ['MojoList *' if c == '...' else c
-                                    for c in param_ctypes]
-            ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
-            parts.append(f"{ret} {mangled_name} ({ptypes});")
-            # Record the method arm for `_mojo_getattr_{sd.name}`. FIRST
-            # occurrence of a source name wins: an overloaded method is two
-            # (or more) symbols and one `attr` string, and this is the same
-            # symbol whose prototype is directly above. `_lower_bound_method_
-            # value`'s own overload rule falls back to the UNSUFFIXED symbol
-            # when a name is overloaded, which no overload defines (measured:
-            # `f = c.m` with two `def m` overloads links `Undefined symbols:
-            # _C_m`) — the arm deliberately does not follow it there, because a
-            # bound method to the first overload is a value and a link error is
-            # not.
-            _arms_sn = _as_str(sd.name)
-            if _arms_sn not in self._getattr_method_arms:
-                self._getattr_method_arms[_arms_sn] = {}
-            _arms_mn = _as_str(m.name)
-            if _arms_mn not in self._getattr_method_arms[_arms_sn]:
-                self._getattr_method_arms[_arms_sn][_arms_mn] = _as_str(mangled_name)
-
-        _emitted_base: set[str] = set()
-        _z9_meths = sd.methods
-        for _z9k in range(len(_z9_meths)):
-            m = _z9_meths[_z9k]
-            if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
-                base_cname = self._struct_method_csym(sd.name, m.name, '')
-                if base_cname not in _emitted_base:
-                    base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
-                                or self._resolve_type(m.return_type))
-                    parts.append(f"{base_ret} {base_cname} (...);")
-                    _emitted_base.add(base_cname)
-
-
 def _emit_reflection_dispatch(self, parts):
     """Emit the generic reflection dispatch (getattr/setattr/repr/
     dataclasses.fields/asdict). Extracted from gen_module_impl so its
@@ -1647,22 +1509,6 @@ def _emit_reflection_dispatch(self, parts):
                     f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
-            elif ftype in self.struct_field_types:
-                # A BY-VALUE struct field (part 4: the chain/zip
-                # out-parameter wrapper's `_iterators`/`_values`
-                # tuple-of-inners — the synthesized `MojoTuple_*`): an
-                # aggregate is not an int64_t word (gcc: `aggregate value
-                # used where an integer was expected`), so the dispatch
-                # hands out a POINTER TO the field's storage — whose first
-                # word is the struct's `__mojo_type_id` tag, exactly the
-                # shape the runtime tag readers expect of a struct
-                # pointer — and setattr copies the struct back by value.
-                get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)&obj->{safe_f};')
-                set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; return; }}')
-                asdict_lines.append(
-                    f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)&obj->{safe_f});')
             else:
                 get_lines.append(
                     f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
@@ -1671,34 +1517,6 @@ def _emit_reflection_dispatch(self, parts):
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
-        # A METHOD name is answered with the SAME value a typed receiver's
-        # `c.add` already builds — `mojo_bound_method_new(<the method's own
-        # mangled C symbol>, obj)`, the `MojoBoundMethod *`
-        # `_lower_bound_method_value` emits. A receiver the codegen ERASED to
-        # int64_t (an unannotated parameter, here `c` in
-        # `H.__init__(self, c): self.cb = c.add`) has no static type at all,
-        # so `_lower_MemberExpr` cannot see that `add` names a method and
-        # `c.add` lowers to the runtime getattr dispatch, which lands HERE on
-        # the object's own type tag; the fields-only answer then fell through
-        # to `mojo_obj_getattr`, which raises `AttributeError: add` and the
-        # stored `cb` is never a callable. Fields stay FIRST (a field and a
-        # method may share a name, and the field wins, as in every other
-        # getattr) and a miss keeps falling through to `mojo_obj_getattr`
-        # unchanged, so this adds answers and takes none away.
-        #
-        # The CALL side needs nothing new for this: a call through the stored
-        # word is `mojo_fnptr_call_N`, which already dispatches on
-        # `mojo_is_bound_method` — the same runtime registry
-        # `mojo_maybe_bound_call_N` consults for a tainted local — so the
-        # bound value reaches `mojo_bound_method_call_N`, which re-supplies
-        # the bound receiver as the method's implicit first argument.
-        _mm_arms = self._getattr_method_arms.get(_as_str(sn))
-        if _mm_arms:
-            for _mm_attr in _mm_arms:
-                get_lines.append(
-                    f'  if (strcmp(attr, "{_as_str(_mm_attr)}") == 0) '
-                    f'return (int64_t)(intptr_t)mojo_bound_method_new ('
-                    f'(void *){_as_str(_mm_arms[_mm_attr])}, (void *)obj);')
         # Inlined `_fieldnames_append_lines` (was a separate function
         # taking `name_lits: list`, called once, at the single call site
         # below) — self-hosted codegen has no mechanism that carries a
@@ -1848,20 +1666,6 @@ def _emit_reflection_dispatch(self, parts):
                     val_expr = (f'({fref} ? strdup(_mojo_dispatch_repr((void *){fref}))'
                                 f' : _mojo_repr_none())')
                     owned = 'T'
-            elif ftype in self.struct_field_types:
-                # A BY-VALUE struct field (part 4: the chain/zip wrapper's
-                # `_iterators`/`_values` tuple-of-inners): an aggregate is
-                # not an int64_t word, so the old fallback below would have
-                # cast it one (gcc: `aggregate value used where an integer
-                # was expected`). Hand the field's ADDRESS to the tag
-                # dispatch the way a pointer field does — the struct's
-                # `__mojo_type_id` tag is its first word, so the dispatch
-                # resolves the field's own dumper. A by-value field is
-                # never NULL, so no `_mojo_repr_none` branch; the `strdup`
-                # keeps the dispatch's shared-buffer answers releasable,
-                # the same ownership story as the pointer branch above.
-                val_expr = (f'strdup(_mojo_dispatch_repr((void *)&{fref}))')
-                owned = 'T'
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
@@ -2343,27 +2147,12 @@ def _class_field_decl(field):
     bare AssignStmt. A `var FIELD = struct.Struct('<HH')` therefore got a
     struct FIELD with the right ctype and NO initializer anywhere, leaving
     it NULL: the first `self.FIELD.size` was a live segfault, not a wrong
-    value. Both spellings now reach both passes.
-
-    A no-INITIALIZER container field (`var xs: List[Int]`, a VarDecl whose
-    value is None and whose annotation resolves to one of the three owned
-    container kinds) returns `(name, None)`: its default is a fresh empty
-    container of the declared kind — the value the compiled path has always
-    printed (a NULL field reprs as `[]`/`{}`/`set()`) — but the NULL itself
-    was not a valid owned container, so the first mutation through the
-    field (`q.xs.append(1)`) segfaulted. Both passes now see it, with the
-    value None because there is no literal: the KIND is the annotation's,
-    and each caller resolves it with `_mojo_type` (the same function the
-    field-typing pass uses, so their answers agree by construction). Every
-    OTHER no-value field returns None, as before."""
+    value. Both spellings now reach both passes. Returns None for a bare
+    `var x` with no value, which neither pass can initialize."""
     if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr):
         return field.target.name, field.value
     if isinstance(field, VarDecl) and field.name and field.value is not None:
         return field.name, field.value
-    if isinstance(field, VarDecl) and field.name and field.value is None:
-        _ft = _mojo_type(getattr(field, 'type_ann', None))
-        if _ft in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-            return field.name, None
     return None
 
 
@@ -3146,8 +2935,6 @@ def gen_module_impl(self, stmts):
             _found = {}
             _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
             if 'v' in _found:
-                if isinstance(_found['v'], str):
-                    self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
     self._import_scope_stack.append({})
     _generator_fns: dict[int, FunctionDef] = {}
@@ -4093,20 +3880,6 @@ def gen_module_impl(self, stmts):
                     imported_stmts.append(s)
                     already_in_stmts.add(id(s))
 
-    # No epoch bump here, and the absence is worth stating because it looks
-    # like the omission a reader would expect to correct. Every nested
-    # `_compile_imported_module` above ran a whole `gen_module_impl` of its
-    # own and mutated its OWN nodes — nodes this level has not walked and, at
-    # the point the recursion returns, cannot have walked, because
-    # `imported_stmts` is built here (line ~3340) and first walked after this
-    # block. A memo entry for a node is only reachable through the object it
-    # was keyed on, so a nested compile cannot make an entry of THIS level's
-    # stale. Bumping here instead was measured: it costs the entire win. The
-    # entries worth keeping are the per-function-body ones, and a function of
-    # module k is walked again at every ancestor level above k — so flushing
-    # at each module boundary puts the O(N^2) straight back (160-module chain:
-    # 194,684 node visits with no boundary bump, 5,405,540 with one).
-
     self.struct_field_types['Span'] = {
         '_data': 'char *',
         '_len': 'int64_t',
@@ -4817,80 +4590,9 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[_ca_m] = 'int64_t'
                 _gg_ft1.setdefault(_ca_n, 'int64_t')
 
-    # `_intu_prereg_structs`: the in-TU mangled names elab_intu.run() registered
-    # (empty field map) BEFORE this snapshot was taken, so the pre-statement
-    # signature passes can resolve them. They are NOT selfhost-hardcoded
-    # structs — their field tables are still filled by this module's own
-    # statement loop — and including them here made the read-field pass
-    # (line ~5903) and the local-annotation pass (line ~6023) skip the in-TU
-    # iterator structs entirely. Measured 2026-10-20 on test_empty/test_once/
-    # test_repeat: the `int64_t copy` field and the reflection dispatch
-    # (`_known[]` type-tag table, getattr/fieldnames/repr shims) were dropped
-    # from the generated C, and the C stopped matching the clean master's
-    # byte-for-byte. Excluding the pre-registered names keeps the snapshot at
-    # exactly what it was before that pass existed.
-    self._selfhost_hardcoded_struct_names = frozenset(
-        _k for _k in self.struct_field_types
-        if _k not in getattr(self, '_intu_prereg_structs', ()))
+    self._selfhost_hardcoded_struct_names = frozenset(self.struct_field_types.keys())
 
-    # The struct passes that run over `all_struct_defs` below (field types,
-    # inheritance, identity/cname, class attrs, alloc-seed, struct emission)
-    # must see the SAME statement view the Phase-1.7 scan and the emission
-    # loop use: resolvable top-level conditionals inlined, unresolved ones
-    # kept. Before this, `all_struct_defs` was the RAW `stmts`, so a class
-    # defined inside a resolved top-level `if` (the `if sys.platform == ...:`
-    # / `if sys.byteorder == ...:` idiom — ctypes/_endian's whole class pair
-    # is one branch of the latter) registered NO fields, NO class attributes,
-    # and emitted as a `_dummy`-only stub: `BE.v` fell to the runtime
-    # `_mojo_dispatch_getattr` and died `AttributeError: v` on the fixed
-    # tree while the identical class at unconditional top level read back its
-    # real value (probe_intattr/probe_slots). The flatten is defined at its
-    # FIRST use — this line — and the later Phase-1.7/emit sites call the
-    # same local (the definition that used to live beside them moved up; it
-    # only closes over `self._eval_const_bool`, so the earlier position
-    # resolves identically — every site runs before the emission loop's
-    # module-level comptime registrations, the one write that could change
-    # a resolution verdict mid-function).
-    def _flatten_resolved_conditionals(_root_list):
-        _out = []
-        _stack = [(_root_list, 0)]
-        while _stack:
-            _frame_body, _frame_idx = _stack[-1]
-            if _frame_idx >= len(_frame_body):
-                _stack.pop()
-                continue
-            _frame_stmt = _frame_body[_frame_idx]
-            _stack[-1] = (_frame_body, _frame_idx + 1)
-            if isinstance(_frame_stmt, IfStmt):
-                _resolved = False
-                _resolved_body = []
-                _cond_val = self._eval_const_bool(_frame_stmt.condition)
-                if _cond_val is True:
-                    _resolved = True
-                    _resolved_body = _frame_stmt.then_body or []
-                elif _cond_val is False:
-                    _resolved = True
-                    for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
-                        _elif_val = self._eval_const_bool(_cond2)
-                        if _elif_val is True:
-                            _resolved_body = _elif_body2 or []
-                            break
-                        if _elif_val is None:
-                            _resolved = False
-                            break
-                    else:
-                        _resolved_body = _frame_stmt.else_body or []
-                if _resolved:
-                    _stack.append((_resolved_body, 0))
-                else:
-                    _out.append(_frame_stmt)
-            else:
-                _out.append(_frame_stmt)
-        return _out
-
-    all_struct_defs = (_flatten_resolved_conditionals(stmts)
-                       + (_flatten_resolved_conditionals(imported_stmts)
-                          if (self.do_imports or self.link_imports) else []))
+    all_struct_defs = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
                            for s in all_struct_defs if isinstance(s, StructDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
@@ -5010,7 +4712,6 @@ def gen_module_impl(self, stmts):
                 break
         if not _dsc_has:
             _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
-            _walk_ast_invalidate(_s)
 
     # --- builtin `bytes` subclassing: `class _Extra(bytes)` (zipfile) ---
     # A user struct whose transitive base list bottoms out at the builtin
@@ -5067,7 +4768,6 @@ def gen_module_impl(self, stmts):
                 break
         if not _bsc_has:
             _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
-            _walk_ast_invalidate(_s)
         _bsc_new = None
         for _m in _s.methods:
             if _as_str(getattr(_m, 'name', '')) == '__new__':
@@ -5542,21 +5242,6 @@ def gen_module_impl(self, stmts):
                         continue
                     aname = field.name
                     v = field.value
-                elif (isinstance(field, VarDecl) and field.name
-                        and field.value is None and _class_field_decl(field) is not None):
-                    # A no-initializer CONTAINER field (`var xs: List[Int]`):
-                    # its default is an empty container of the declared kind,
-                    # so register it exactly like an explicit `= []` field —
-                    # one per-class global the allocator seeds into every
-                    # instance — instead of letting it stay NULL (a NULL
-                    # field PRINTS as an empty container but SEGFAULTS on
-                    # the first mutation, `q.xs.append(1)`). `_class_field_
-                    # decl` is the one definition of this shape: it returns
-                    # (name, None) precisely for the no-init container kinds
-                    # and None for every other no-value field, so a no-init
-                    # SCALAR field keeps its old (no class attribute) path.
-                    aname = field.name
-                    v = None
                 else:
                     continue
                 mangled = f"_classattr_{s.name}__{aname}"
@@ -5601,16 +5286,6 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
-                    elif v is None:
-                        # A no-initializer container field: there is no
-                        # literal to read the kind from, so the ANNOTATION
-                        # is the ground truth. `_mojo_type` is the same
-                        # function the field-typing pass resolves the field
-                        # with (the `_p->f = _classattr_...` per-instance
-                        # init below is gated on the two agreeing), so the
-                        # container global and the struct field it seeds can
-                        # never mismatch by construction.
-                        ctype = _mojo_type(_as_str(getattr(field, 'type_ann', None)))
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
@@ -5706,34 +5381,8 @@ def gen_module_impl(self, stmts):
                             _non_none_s = [p for p in _parts_s if p and p != 'None']
                             if len(_non_none_s) == 1:
                                 _fann_s = _non_none_s[0]
-                        # PART 6 (2026-10-22, family C): mark the tagged
-                        # Optional field (is_some side-band) — in-TU
-                        # materialized structs only (the layout change is
-                        # gated on `_intu_structs`; the old `.o` route keeps
-                        # the raw-word Optional), non-pointer scalar payloads
-                        # only (a pointer payload's None=NULL is already a
-                        # distinguishable raw word).
-                        if (ft == 'int64_t' and _opt_m
-                                and _as_str(s.name) in getattr(self, '_intu_structs', {})):
-                            _payload_base = _fann_s.split('[')[0].strip()
-                            if (_payload_base not in ('Pointer', 'UnsafePointer',
-                                                      'OwnedPointer', 'ArcPointer',
-                                                      'ImmPointer', 'MutPointer',
-                                                      'Reference')
-                                    and '*' not in _fann_s):
-                                self._tagged_optional_fields.setdefault(
-                                    _as_str(s.name), set()).add(f_name)
                         if ft == 'int64_t' and _fann_s and _fann_s != _as_str(field.type_ann).strip():
                             ft = _mojo_type(_fann_s)
-                        if isinstance(ft, str) and ft.startswith('MojoTuple_'):
-                            # `var _iterators: Tuple[...]` — the chain/zip
-                            # out-parameter wrapper's tuple-of-inners field
-                            # (part 4): register the synthesized tuple
-                            # struct HERE so the dependency-ordered typedef
-                            # pass emits it BEFORE this struct's own
-                            # typedef (the wrapper references it by name in
-                            # its field declaration).
-                            self._ensure_tuple_struct(_as_str(field.type_ann))
                         if (_fann_s and _fann_s[0].isupper() and '[' not in _fann_s
                                 and '.' not in _fann_s and '*' not in _fann_s
                                 and _fann_s not in self._IMPORTED_STRUCT_SKIP_BASENAMES
@@ -5757,24 +5406,6 @@ def gen_module_impl(self, stmts):
                                     else:
                                         continue
                                     break
-                        # A bare annotation that is a registered struct name
-                        # under a NON-capitalized spelling — a mangled generic-
-                        # struct instantiation of a private base (`_ListIter_1_
-                        # T_3_Int_...`): the capitalized test above never fires
-                        # for a `_`-leading name, so the field stayed at
-                        # `_mojo_type`'s int64_t erasure — one word where the
-                        # layout is three, and every method the owning struct
-                        # calls on it (`next(self._inner)`) fell into the next-
-                        # on-unresolvable-receiver refusal. Exact lookup in
-                        # struct_field_types, so no false positive; pointer
-                        # spelling per this codegen's universal struct-as-
-                        # pointer convention (the same convention the
-                        # capitalized branch and `_resolve_type` apply).
-                        if (ft == 'int64_t' and _fann_s
-                                and '[' not in _fann_s and '.' not in _fann_s
-                                and '*' not in _fann_s
-                                and _fann_s in self.struct_field_types):
-                            ft = f"{_fann_s} *"
                         _arr_m = (_FIXED_ARRAY_ANN_RE.match(_as_str(field.type_ann).strip())
                                   if field.type_ann else None)
                         if _arr_m:
@@ -6018,7 +5649,6 @@ def gen_module_impl(self, stmts):
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
-                            _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
             # `int`, because that is what the field's ctype is, so
             # `print(b.get())` printed `1` where CPython prints `True`. Its
@@ -6109,7 +5739,6 @@ def gen_module_impl(self, stmts):
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
-                            _walk_ast_invalidate(s)
 
     _struct_by_name = {st.name: st for st in all_struct_defs
                         if isinstance(st, StructDef)
@@ -6305,7 +5934,6 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                    _walk_ast_invalidate(target_def)
 
     _scan_body_for_local_field_access(stmts, None)
     if self.do_imports or self.link_imports:
@@ -6601,25 +6229,7 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
-            _fn_ret_ct = self._resolve_type(s.return_type)
-            if isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith(
-                    'MojoTuple_'):
-                # The SAME body-sensitive decision the struct-method loop
-                # below makes (see there for the full reasoning): part 4's
-                # `_mojo_type` Tuple branch resolves a `-> Tuple[...]`
-                # return to the synthesized by-value struct, but a plain
-                # fn whose body builds the tuple as a RUNTIME (list-backed)
-                # literal — `split`'s `return String(head), String(tail)` —
-                # must keep the `MojoList *` return or the definition casts
-                # a list pointer into the struct and the typedef is never
-                # emitted (`unknown type name 'MojoTuple_...'`, measured
-                # 2026-10-21 part 4 integration: test_split/test_modf/
-                # test_location/test_tempfile's monomorphized instances).
-                if _body_builds_struct_tuple(getattr(s, 'body', None)):
-                    self._ensure_tuple_struct(s.return_type)
-                else:
-                    _fn_ret_ct = 'MojoList *'
-            self.func_return_types[s.name] = _fn_ret_ct
+            self.func_return_types[s.name] = self._resolve_type(s.return_type)
             _ggf_dup._record_home_def_return_type(
                 self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
@@ -6680,8 +6290,7 @@ def gen_module_impl(self, stmts):
                 except Exception:
                     _mangled = None
                 if _mangled:
-                    self._func_param_defaults[_mangled] = [
-                        (pn, _dv) for pn, _dv in _dflts.items()]
+                    self._func_param_defaults[_mangled] = _param_default_pairs(_dflts)
         if isinstance(s, FunctionDef):
             _kw_i = -1
             _ci = 0
@@ -6840,24 +6449,7 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
                 if m.return_type is not None:
-                    _ret_ct = self._resolve_type(m.return_type)
-                    if isinstance(_ret_ct, str) and _ret_ct.startswith(
-                            'MojoTuple_'):
-                        # A `Tuple[...]` return resolves to the synthesized
-                        # by-value struct — UNLESS the body builds the tuple
-                        # as a runtime (list-backed) tuple literal, in which
-                        # case the value is a `MojoList *` and the struct
-                        # return cast is invalid C: keep the list-backed
-                        # return (see `_body_builds_struct_tuple`). The
-                        # struct-tuple case registers HERE, at signature
-                        # time: the typedef emission pass runs before the
-                        # bodies, so a registration that waited for the
-                        # body's own `var res: ...` local would be too late.
-                        if _body_builds_struct_tuple(getattr(m, 'body', None)):
-                            self._ensure_tuple_struct(m.return_type)
-                        else:
-                            _ret_ct = 'MojoList *'
-                    self.func_return_types[mangled] = _ret_ct
+                    self.func_return_types[mangled] = self._resolve_type(m.return_type)
                 if hasattr(m, 'decorators') and 'staticmethod' in (m.decorators or []):
                     self._static_methods.add(mangled)
                 if ((hasattr(m, 'decorators') and 'classmethod' in (m.decorators or []))
@@ -6867,25 +6459,6 @@ def gen_module_impl(self, stmts):
                     ctypes = []
                     for i, (pn, pt) in enumerate(m.params):
                         if i == 0 and pn == 'self':
-                            ctypes.append(f"{s.name} *")
-                        elif (isinstance(pt, str) and pt.strip() in ('Self', 'self')):
-                            # part 4 (measured 2026-10-22, std/simd.mojo): a
-                            # `Self`-annotated param (`def eq(self, rhs: Self)`)
-                            # is another instance of this struct — a pointer to
-                            # it. `_param_ctype` below has no struct context, so
-                            # it erases `Self` to the p3-era int64_t word; that
-                            # stale word then lands in func_param_types and the
-                            # module-qualified mirror (emit_funcs's
-                            # _effective_param_types tier-3 read), so _emit_call
-                            # skips the cast and gcc flags the raw word arg
-                            # against the real `SIMD *` prototype. Resolve it to
-                            # the struct pointer HERE, where `s.name` is known —
-                            # the same answer _signature_ctypes's Self branch
-                            # gives the Pass 2b-bis table. No
-                            # struct_field_types guard: this pass runs before
-                            # the struct is registered there (measured: a
-                            # guarded branch no-ops at registration time and
-                            # leaves this slot stale).
                             ctypes.append(f"{s.name} *")
                         else:
                             ctypes.append(self._param_ctype(pn, pt, m))
@@ -7272,28 +6845,18 @@ def gen_module_impl(self, stmts):
                     _all_ctypes = list(_fz_params)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
                     max_arity = len(param_ctypes)
-                # The parameter CONVENTIONS, aligned to `_rp_names` (part 6
-                # family D piece 2): the call side's ref-scalar address-of
-                # rule (calls_shared) needs the callee param's conv at ARG
-                # construction time — the FunctionDef node is not reachable
-                # from a candidate, so the conv rides the candidate.
-                _pconv = getattr(m, 'param_convs', None) or {}
                 key = _sms_key(s.name, m.name)
                 # Plain unpack loop, NOT a comprehension.
                 _rp_names = []
-                _rp_convs = []
                 for _rpn3, _rpt3 in real_params:
                     _rp_names.append(_rpn3)
-                    _rp_convs.append(_pconv.get(_rpn3.lstrip('*')))
                 self._struct_method_signatures.setdefault(key, []).append({
                     'overload_id': _oid,
                     'param_names': _rp_names,
                     'param_ctypes': param_ctypes,
-                    'param_convs': _rp_convs,
                     'min_arity': min_arity,
                     'max_arity': max_arity,
                     'ret_type': _ret_type,
-                    'ret_ann': m.return_type,
                     'has_varargs': _star_idx >= 0,
                     'pre_star_count': _star_idx if _star_idx >= 0 else None,
                 })
@@ -7317,41 +6880,12 @@ def gen_module_impl(self, stmts):
             if param_ctypes is None:
                 continue
             ret_type = None
-            _ret_ann = None
             for _cand in self._struct_method_signatures.get(_sms_key(s.name, m.name), []):
                 if _cand.get('overload_id') == _oid:
                     ret_type = _cand.get('ret_type')
-                    _ret_ann = _cand.get('ret_ann')
                     break
             if ret_type is None:
                 ret_type = self.func_return_types.get(f"{s.name}_{m.name}", 'void' if m.name == '__init__' else 'int64_t')
-            if isinstance(ret_type, str) and ret_type.startswith('MojoTuple_'):
-                # The stateless annotation re-resolution answers the
-                # synthesized by-value struct, but the DEFINING unit made
-                # the body-sensitive decision (a body that builds the tuple
-                # as a RUNTIME list-backed literal answers `MojoList *`)
-                # and published that answer — it must win, or this
-                # prototype disagrees with the definition's own prototype
-                # and with every call-site temp. Measured 2026-10-21 part 4
-                # integration: std/collections/list calling std/builtin/
-                # slice's `indices -> Tuple[Int, Int, Int]` — the
-                # definition and the callsite both carry `MojoList *`, the
-                # prototype alone said `MojoTuple_0c847752ae34` →
-                # `invalid conversion in gimple call`.
-                _home_ret = self._func_return_type_for_call(bare_mangled, None)
-                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
-                    ret_type = _home_ret if _home_ret else 'MojoList *'
-            if (isinstance(ret_type, str)
-                    and ret_type.startswith('MojoTuple_')
-                    and isinstance(_ret_ann, str)
-                    and _ret_ann.strip().split('[', 1)[0].strip()
-                    in ('Tuple', 'tuple')):
-                # By-value struct return this TU's prototype really uses:
-                # register the synthesized struct so the typedef emission
-                # further down carries it (a prototype naming a struct with
-                # no typedef is an `unknown type name` — measured 2026-10-21
-                # part 4 integration on the same `indices` shape).
-                self._ensure_tuple_struct(_ret_ann)
             if any('...' in p for p in param_ctypes):
                 params_str = '...'
             else:
@@ -8087,26 +7621,6 @@ def gen_module_impl(self, stmts):
             _new_ct = self._signature_ctypes(m.params, m, s.name)
             if _new_ct != _old_ct:
                 self._mangled_signature_ctypes[_sigkey] = _new_ct
-            # The per-overload slot the DEFINITION's param loop prefers
-            # (`_gen_struct_method`'s `func_param_types[f"{method_full_name}
-            # {overload_id}"]` read) otherwise exists ONLY as the definition's
-            # own end-of-emission write-back — so at emission time the read
-            # misses and falls back to the BARE key, which for an overloaded
-            # method holds whichever overload the loop below wrote LAST
-            # (last-overload-wins), not the one being emitted. For a wrapper
-            # whose own `__init__` is overloaded (`_TakeIterator(inner,
-            # count)` + the `copy: Self` ctor) the emitted overload then
-            # borrows the sibling's param list and the `inner` param lands
-            # at the sibling's int64_t while the call site passes the inner
-            # struct pointer — the "makes integer from pointer without a
-            # cast" the pre-registration above was written to stop. Write
-            # the refined per-overload signature here, where inference is
-            # final, for the structs THIS compile materialized in-TU
-            # (gen._intu_structs — the elab factory closure and the generic
-            # seed); every other struct keeps the bare-key fallback exactly
-            # as it always did.
-            if s.name in getattr(self, '_intu_structs', {}):
-                self.func_param_types[_sigkey] = _new_ct
 
     for s in all_functions:
         if _is_foreign_main(s):
@@ -8133,23 +7647,6 @@ def gen_module_impl(self, stmts):
                         if pname.startswith('**'):
                             continue  # skip **kwargs
                         if pname == 'self':
-                            param_ctypes.append(f"{s.name} *")
-                        elif isinstance(ptype, str) and ptype.strip() in ('Self', 'self'):
-                            # part 4 (measured 2026-10-22, std/simd.mojo): a
-                            # `Self`-annotated param is another instance of
-                            # this struct — a pointer, like the `self` param
-                            # above. This loop runs AFTER the earlier
-                            # registration (the 6808 loop) and overwrites its
-                            # slot, so it needs the same Self handling;
-                            # without it the bare key flips back to the
-                            # p3-era int64_t word erasure, and
-                            # _struct_method_csym's bare->qualified setdefault
-                            # mirror then poisons the module-qualified key
-                            # every pre-definition call site reads through
-                            # _emit_call (measured: simd's __divmod__ calls
-                            # `denominator.eq(0)` before the eq definition is
-                            # emitted, so it saw the stale word and skipped
-                            # the cast).
                             param_ctypes.append(f"{s.name} *")
                         else:
                             # Usage/call-site inference for struct methods is
@@ -8223,7 +7720,7 @@ def gen_module_impl(self, stmts):
                     _m_dflts = getattr(m, 'param_defaults', None) or {}
                     if _m_dflts:
                         self._func_param_defaults.setdefault(method_full_name,
-                                                             [(pn, dv) for pn, dv in _m_dflts.items()])
+                                                             _param_default_pairs(_m_dflts))
 
     for s in all_structs_for_methods:
         if not isinstance(s, StructDef):
@@ -10456,7 +9953,6 @@ def gen_module_impl(self, stmts):
                 and id(s) not in _generator_fns):
             continue
         s.body = self._inline_single_use_task_composition(s.body)
-        _walk_ast_invalidate(s)
         # Hoist any `await` still nested inside a call's argument list
         # into statement position. The A3 stack-switch backend normalizes
         # the same shape from its own shared eligibility chokepoint
@@ -10509,7 +10005,6 @@ def gen_module_impl(self, stmts):
             if _gm_id in _nested_in_fn_ids:
                 continue  # nested-in-function — Step I/closure pass's job
             s.body = self._inline_single_use_task_composition(s.body)
-            _walk_ast_invalidate(s)
             gimple_gen_coro.hoist_awaits_from_call_args(s)
             self._normalize_await_kwargs(s.body)
             if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
@@ -10605,8 +10100,7 @@ def gen_module_impl(self, stmts):
             self.func_param_types[f"{base}_start"] = param_ctypes
             _gen_dflts = getattr(m, 'param_defaults', None) or {}
             if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = [
-                    (pn, dv) for pn, dv in _gen_dflts.items()]
+                self._func_param_defaults[f"{base}_start"] = _param_default_pairs(_gen_dflts)
             self._generator_cpp_units.append(cpp_text)
     # The ids come out only here, after EVERY struct has had its turn. Popping
     # inside the loop is precisely what stopped a subclass from being reached.
@@ -11241,6 +10735,43 @@ def gen_module_impl(self, stmts):
             self.func_return_types[_p3b_s.name] = inferred
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
+
+    def _flatten_resolved_conditionals(_root_list):
+        _out = []
+        _stack = [(_root_list, 0)]
+        while _stack:
+            _frame_body, _frame_idx = _stack[-1]
+            if _frame_idx >= len(_frame_body):
+                _stack.pop()
+                continue
+            _frame_stmt = _frame_body[_frame_idx]
+            _stack[-1] = (_frame_body, _frame_idx + 1)
+            if isinstance(_frame_stmt, IfStmt):
+                _resolved = False
+                _resolved_body = []
+                _cond_val = self._eval_const_bool(_frame_stmt.condition)
+                if _cond_val is True:
+                    _resolved = True
+                    _resolved_body = _frame_stmt.then_body or []
+                elif _cond_val is False:
+                    _resolved = True
+                    for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                        _elif_val = self._eval_const_bool(_cond2)
+                        if _elif_val is True:
+                            _resolved_body = _elif_body2 or []
+                            break
+                        if _elif_val is None:
+                            _resolved = False
+                            break
+                    else:
+                        _resolved_body = _frame_stmt.else_body or []
+                if _resolved:
+                    _stack.append((_resolved_body, 0))
+                else:
+                    _out.append(_frame_stmt)
+            else:
+                _out.append(_frame_stmt)
+        return _out
 
     _pre_declared_globals = set()
     # Names whose module-level initialiser is the literal `None`. `None` is a
@@ -12080,25 +11611,7 @@ def gen_module_impl(self, stmts):
     # gen_func. Cheap when there are no device functions (the overwhelmingly
     # common case), and it only walks the AST for functions, never bodies.
 
-    # The EMISSION walk runs over the SAME resolution the Phase-1.7 scan used
-    # above (`_flatten_resolved_conditionals(stmts)`, the call that seeded
-    # `_phase17_own_stmts`): a top-level `if` whose condition is statically
-    # known (the `sys.platform` fold, and after comptime.py's `sys.byteorder`
-    # fold: ctypes/_endian's `if sys.byteorder == "little":`) is inlined here
-    # — its taken branch's statements are dispatched exactly as top-level
-    # statements, the other branch never emits. Before this the scan resolved
-    # the condition (registering the taken branch's names as globals) while
-    # this loop emitted the IfStmt as a RUNTIME branch: the condition
-    # re-evaluated at run time (`_mojo_dispatch_getattr(sys, "byteorder")` —
-    # an AttributeError, the compiled stdlib's sys has no byteorder), class
-    # refs as values degraded to `(int64_t)0` zero stubs, class defs dropped
-    # as `/* TODO: StructDef */`, and assignments to names the scan did not
-    # register became locals — the same shape that died pre-fold as a hard
-    # gcc error (`struct _ctypes__endian_toplev has no member named
-    # 'BigEndianStructure'`) and would have been a silent miscompile after
-    # it. An UNRESOLVABLE condition falls through unchanged (the flatten
-    # keeps the IfStmt and the runtime-branch path below emits it as before).
-    for stmt in _flatten_resolved_conditionals(stmts):
+    for stmt in stmts:
         if isinstance(stmt, FunctionDef):
             if (stmt.name in self._supported_generators or stmt.name in self._supported_async
                     or stmt.name in self._supported_async_gen):
@@ -12155,9 +11668,6 @@ def gen_module_impl(self, stmts):
                 if isinstance(_cvs, ComptimeVarStmt):
                     _cv = self._eval_const(_cvs.value)
                     if _cv is not None:
-                        if isinstance(_cv, str):
-                            self._comptime_str_names.add(
-                                _as_str(_cvs.target))
                         self._comptime_vals.setdefault(_cvs.target, _cv)
             _func_outer_scope = self._push_import_scope()
             self._collect_body_import_bindings(stmt.body, _func_outer_scope)
@@ -12209,68 +11719,8 @@ def gen_module_impl(self, stmts):
                 if _imh_src:
                     self._line_src_file = (self._module_source_paths.get(_imh_src)
                                            or self._current_filename)
-                # TRANSACTIONAL body emission (2026-10-21, measured): a
-                # definition-site method body of a struct with unbound type
-                # parameters may be UNLOWERABLE — a field typed by a type
-                # parameter erases to a plain scalar in this TU, so a
-                # `next(self._inner)` in it hits the emit_calls hard refusal
-                # (measured: std/itertools `_Product2___next__` and
-                # std/collections/string `BytesIter___next__` refused the WHOLE
-                # module before this; the instantiating TU emits the same
-                # methods under the mangled name with real field types, so the
-                # bare body is what cannot exist). The FIRST cut of the fix
-                # skipped the bodies of EVERY struct with type parameters —
-                # and that was a regression, measured against the de890235 A/B:
-                # 1,768 definitions dropped, 133 of them referenced from other
-                # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
-                # but its bodies were lowerable and were genuinely CALLED from
-                # _unicode/_utf8/test_span — undefined symbols at link). So:
-                # attempt every body exactly as master did, and fall back to
-                # prototype-ONLY for the individual methods that REFUSE — the
-                # codegen's own honest `cannot compile module:` RuntimeError
-                # is the boundary. Rollback is the emit_loops regex-fallback
-                # transactional pattern: func_parts from the mark, the scope
-                # stack down to its pre-call depth (the method's own frame is
-                # popped with it), body_lines/decls (cleared at the method's
-                # own `_reset_func`, so they hold nothing but this method's
-                # partial output), the annotation-seeded container maps (the
-                # only shared dicts `_gen_struct_method` setdefault-seeds per
-                # LOCAL name — a rejected method's partial seeds must not
-                # reach the next method), and the line-source override.
-                # Anything that is not a codegen refusal propagates, exactly
-                # as master would have.
-                _parts_mark = len(func_parts)
-                _scope_depth = len(self._import_scope_stack)
-                _elem_snap = dict(self._elem_types)
-                _nested_snap = dict(self._nested_elem_types)
-                _dval_snap = dict(self._dict_val_types)
-                _prev_tp = getattr(self, '_current_struct_type_params', None)
-                self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
-                try:
-                    func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
-                    func_parts.append('')
-                except RuntimeError as _me_err:
-                    if not str(_me_err).startswith('cannot compile module'):
-                        raise
-                    del func_parts[_parts_mark:]
-                    while len(self._import_scope_stack) > _scope_depth:
-                        self._import_scope_stack.pop()
-                    self.body_lines.clear()
-                    self.decls.clear()
-                    self._lambda_parts = []
-                    self._elem_types.clear(); self._elem_types.update(_elem_snap)
-                    self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
-                    self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
-                    self._line_src_file = _prev_line_src
-                    self._pop_import_scope()
-                    func_parts.append(
-                        f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
-                        f"body not lowerable in this TU — {_me_err} — prototype "
-                        f"only; the instantiating TU emits the mangled copy */")
-                    func_parts.append('')
-                    continue
-                finally:
-                    self._current_struct_type_params = _prev_tp
+                func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
+                func_parts.append('')
                 self._line_src_file = _prev_line_src
                 self._pop_import_scope()
                 if self._lambda_parts:
@@ -12314,32 +11764,6 @@ def gen_module_impl(self, stmts):
                                BreakStmt, ContinueStmt, ReturnStmt,
                                RaiseStmt, AssertStmt, VarDecl)):
             toplevel_stmts.append(stmt)
-        elif isinstance(stmt, ComptimeVarStmt):
-            # PART 6 (2026-10-23, family S): a module-level comptime
-            # constant with a FOLDABLE value (int / bool / str, and after
-            # comptime.py's family-S fold: the string-wrapping constructors
-            # `StringSlice("...")` & co). The old `else` below DROPPED every
-            # non-list top-level ComptimeVarStmt with a TODO comment, so the
-            # name reached no function: a read inside a function fell to the
-            # `(int64_t)0  /* ct param or undeclared: <name> */` placeholder
-            # — a compile-green, run-wrong 0 (measured 2026-10-23: the green
-            # test_string_span C's `_t7 = (int64_t)0;  /* ct param or
-            # undeclared: EVERY_CODEPOINT_LENGTH_STR */`). Recording the
-            # folded value in `self._comptime_vals` (the same table the
-            # per-function scan below at the ComptimeVarStmt-in-body site
-            # feeds) lets the IdentExpr read path answer the real value.
-            # Only FOLDABLE values are recorded; an un-fodable initializer
-            # keeps the pre-branch TODO drop exactly (honest refusal).
-            _cv_val = self._eval_const(stmt.value)
-            if _cv_val is not None:
-                if isinstance(_cv_val, str):
-                    self._comptime_str_names.add(_as_str(stmt.target))
-                self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
-            else:
-                _debug_note('top-level statement dropped',
-                            type(stmt).__name__)
-                func_parts.append(
-                    f"/* TODO: top-level {type(stmt).__name__} */")
         else:
             _debug_note('top-level statement dropped', type(stmt).__name__)
             func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
@@ -12886,48 +12310,6 @@ def gen_module_impl(self, stmts):
     if self._current_filename:
         parts.append(f'#line 1 "{self._current_filename}"')
 
-    # part 4 integration safety net (measured 2026-10-22): a `MojoTuple_*`
-    # name reaches the C through paths that compute it via `_mojo_type` /
-    # `_tuple_cname` but never call `_ensure_tuple_struct`, so its struct is
-    # never registered and the dependency-ordered typedef emission below
-    # skips it — gcc then fails the TU with `unknown type name 'MojoTuple_
-    # ...'` / `expected specifier-qualifier-list`. The measured sites: a
-    # by-value struct METHOD PARAM (std/builtin/tuple `concat`'s `other`),
-    # a TRAIT-VTABLE function-pointer FIELD return (std/iter `bounds`,
-    # std/math `__divmod__`), an in-TU MONOMORPHIZED-EXTERN return
-    # (test/builtin/test_rebind `MyMemStruct_4_size_1_4_sizes`), and a
-    # COMPTIME-FN return (test/atomic). Register any name that is referenced
-    # in the already-generated C (func_parts is complete at this point; the
-    # function C is appended to parts later, at `parts.extend(func_parts)`)
-    # but not yet in struct_field_types. The name->element-text map is
-    # recorded by types._tuple_cname on every call, so `Tuple[{inner}]`
-    # reconstructs the exact annotation that produced the name and
-    # `_ensure_tuple_struct` re-derives the identical name (same extraction:
-    # `ann.split('[', 1)[1].rstrip(']').strip()`). Runs BEFORE
-    # `max_iterations` is computed so the newly-registered structs are
-    # counted in the dependency-ordered emission bound.
-    if self.emit_struct_defs and hasattr(self, 'struct_field_types'):
-        # Scan the three sources that carry `MojoTuple_*` references at this
-        # point: `parts` (so far), `func_parts` (complete — the function/vtable
-        # C is appended to parts later), and `self._elaborated_externs` (the
-        # in-TU mono-method extern decls, consumed further down at
-        # `parts.extend` AFTER this typedef loop — so their return types are
-        # not yet in parts; measured 2026-10-22: test/builtin/test_rebind's
-        # `MyMemStruct_4_size_1_4_sizes -> MojoTuple_e6ba54bc8385`).
-        _ref_names = set()
-        for _seg in (parts, func_parts, getattr(self, '_elaborated_externs', [])):
-            for _ln in _seg:
-                if 'MojoTuple_' in _ln:
-                    for _mm in re.finditer(r'MojoTuple_[0-9a-f]+', _ln):
-                        _ref_names.add(_mm.group(0))
-        for _nm in sorted(_ref_names):
-            if _nm in self.struct_field_types:
-                continue
-            _inner = _TUPLE_ANN_BY_NAME.get(_nm)
-            if _inner is None:
-                continue
-            self._ensure_tuple_struct(f"Tuple[{_inner}]")
-
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
@@ -12953,34 +12335,12 @@ def gen_module_impl(self, stmts):
                 if struct_name == 'Pointer':
                     parts.append('#define _MOJO_POINTER_STRUCT_DEF')
                     _td_start = len(parts)
-                parts.extend(_render_struct_typedef_body(
-                    struct_name, fields,
-                    optional_tags=self._tagged_optional_fields.get(struct_name)))
+                parts.extend(_render_struct_typedef_body(struct_name, fields))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
                 self._emitted_structs.add(struct_name)  # track for dedup in Section 2
         parts.append('')
-
-    # PART 6 (2026-10-23, family S): the hand-built in-TU string-iterator
-    # METHOD bodies. Their typedefs just came out of the dependency-ordered
-    # loop above (they are ordinary `struct_field_types` entries); their
-    # methods have no parsed FunctionDef to emit through the statement loop,
-    # so the C is appended here — BEFORE func_parts joins parts below, so
-    # the call sites in the test function bodies see complete definitions
-    # (no forward decl needed). Emission order is sorted by struct name,
-    # which also orders the ONE cross-struct call in this set: the pair's
-    # `___next__` calls `_SIterBytes___next__`, and `_SIterBytes` sorts
-    # first, so its definition precedes the use. The emit-side lookups that
-    # key off these symbols (the `next()` struct branch, the struct-iter
-    # loop) already answered from `func_return_types`, seeded at
-    # registration in the elab phase — before any function body emitted.
-    _siter_c = getattr(self, '_siter_method_c', None)
-    if _siter_c:
-        for _sn in sorted(_siter_c):
-            parts.append('')
-            for _ln in _siter_c[_sn]:
-                parts.append(_ln)
 
     if self._needs_type_name_table and 'type_name_table' not in self._emitted_singletons:
         self._emitted_singletons.add('type_name_table')
@@ -13160,21 +12520,6 @@ def gen_module_impl(self, stmts):
             )
         _new_alloc_n_count += 1
     if _new_alloc_n_count > 0:
-        parts.append('')
-
-    # PART 6 (2026-10-23, closing piece): the C-ABI-FFI stat block for a
-    # monomorphized getsize[PathLike] TU — see emit_calls.py's
-    # _CABI_STAT_BLOCK comment for the measured chain and validation.
-    # `_needs_cabi_stat` is set during body lowering (the branch owns the
-    # call-site rewrite and the struct_field_types registration); this
-    # TU-scope block carries the C-ABI struct spelling, the REAL 2-arg
-    # system-stat prototype, and the static materialized
-    # stat_8_PathLike_6_String the call site binds to. Emitted BEFORE the
-    # function bodies (below), which is what its call site needs; the
-    # static definition means at most one per translation unit even if
-    # several call sites ever fire the branch.
-    if self._needs_cabi_stat:
-        parts.append(_gmi_emit_calls._CABI_STAT_BLOCK)
         parts.append('')
 
     global_decls = []  # kept for compatibility, but won't be emitted
@@ -14024,60 +13369,12 @@ def gen_module_impl(self, stmts):
                 # index, not "up to it": a range ending at it still `break`s
                 # on the inherited declaration earlier in the list.
                 _own_idx = _own_class_field_index(s.fields, aname)
-                if _own_idx < 0:
-                    # `aname` is NOT declared in this struct object's own
-                    # `.fields` (e.g. the list is empty): the registration
-                    # under this struct's name was made by a DIFFERENT
-                    # same-named StructDef in `all_struct_defs` —
-                    # `_class_attrs` is keyed by struct name only, so a
-                    # closure carrying two classes of one name (a same-home
-                    # redefinition, or same-named classes accumulated in
-                    # the import mirror) conflates them. This object
-                    # declares no `aname`, so it must emit nothing for it.
-                    # The non-empty-`fields` spelling of the same case was
-                    # already an implicit no-op here (`range(-1, 0)` reads
-                    # `fields[-1]`, whose name cannot match `aname`, and
-                    # the body did nothing); only the empty-`fields`
-                    # spelling was live, and it crashed: `[][-1]` is an
-                    # IndexError.
-                    #
-                    # Measured on BOTH `566ba1c9` (master) and `8c48013c`
-                    # (the row-16 failed-import rollback): a single module
-                    # defining `class Box: tag = 1` and later redefining
-                    # `class Box:` bare died in THIS loop — the redefined
-                    # copy is a same-home redefinition (no `_struct_cname_
-                    # by_id` rename), walks here with the owner's
-                    # non-empty `_class_attrs['Box']`, and `[][-1]` killed
-                    # the build before any binary. The row-16 fix did not
-                    # cause it; it EXPOSED it at scale: the rollback un-
-                    # poisoned the self-import guard, whole-program
-                    # closures (measured, `Lib/importlib/resources/
-                    # readers.py`: 77+ tracebacks, every one this line,
-                    # across `io`/`stat`/`genericpath`/`operator`/
-                    # `keyword`/`types`/... while the pre-fix master probe
-                    # of the identical build finished in minutes with zero
-                    # crashes) carried same-named class pairs into this
-                    # loop. Regression: `test_link_mode.py`'
-                    # `test_class_redefinition_does_not_crash_class_attr_
-                    # emission` (fails before on both trees, prints `1` ==
-                    # CPython after).
-                    continue
                 for _pick in range(_own_idx, _own_idx + 1):
                     field = _as_list(s.fields)[_pick]
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]
                         ctype = _class_attr_ctype(v)
-                        if ctype is None and v is None:
-                            # A no-initializer container field (`var xs:
-                            # List[Int]`): no literal to read the kind from,
-                            # so the annotation is the ground truth,
-                            # resolved with `_mojo_type` exactly as the
-                            # registration pass and the field-typing pass
-                            # resolve it. The population branches below emit
-                            # exactly their empty-literal line for it (no
-                            # elements to add), which is the whole default.
-                            ctype = _mojo_type(_as_str(getattr(field, 'type_ann', None)))
                         # `_X = frozenset({...})` / `set([...])` / `list((...))`:
                         # the container-constructor call wraps the literal whose
                         # elements we enumerate. Unwrap a single collection-literal
@@ -14394,16 +13691,6 @@ def gen_module_impl(self, stmts):
         )
         parts.append('')
 
-    # The StructDefs whose METHODS get a C prototype, and — the same walk —
-    # `_getattr_method_arms`, the per-struct method table the reflection
-    # dispatch's `_mojo_getattr_<Struct>` reads. Computed and emitted HERE,
-    # ahead of both the reflection definitions (which call the arms' symbols)
-    # and the function bodies.
-    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
-    if not self.do_imports:
-        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
-    _emit_struct_method_prototypes(self, parts, struct_defs)
-
     if self.emit_struct_defs:
         _emit_reflection_dispatch(self, parts)
 
@@ -14591,65 +13878,10 @@ def gen_module_impl(self, stmts):
                         else:
                             _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
-                if signature.startswith('MojoTuple_'):
-                    # Part 4 (measured 2026-10-21 integration, `split`'s
-                    # `-> Tuple[String, String]`): the scanned/resolved
-                    # `Tuple[...]` RETURN annotation answers the synthesized
-                    # by-value struct, but the defining unit made the
-                    # body-sensitive decision (a body that builds the tuple as
-                    # a RUNTIME list-backed literal returns `MojoList *`) and
-                    # published that answer for its own definition — it must
-                    # win, or this extern disagrees with the definition's own
-                    # prototype. A defining unit that never compiled in this
-                    # closure publishes nothing; `MojoList *` is the only
-                    # shape a runtime tuple literal has, so it is the honest
-                    # fallback.
-                    _home_ret = self._func_return_type_for_call(
-                        _as_str(orig_name), None)
-                    if not (_home_ret and _home_ret.startswith('MojoTuple_')):
-                        _tail = signature.split(None, 1)
-                        _sub = _home_ret if _home_ret else 'MojoList *'
-                        if len(_tail) == 2:
-                            signature = _sub + ' ' + _tail[1]
-                        else:
-                            signature = _sub
-                if (signature.startswith('MojoTuple_')
-                        and '[' in _as_str(sym_info.get('return_type', ''))
-                        and _as_str(sym_info.get('return_type', ''))
-                        .strip().split('[', 1)[0].strip() in ('Tuple', 'tuple')):
-                    # By-value struct return this TU will use: register its
-                    # typedef (see the struct-method-extern site above —
-                    # measured 2026-10-21 part 4 integration).
-                    self._ensure_tuple_struct(_as_str(sym_info.get('return_type')))
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
-            _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))
-            ret_type = self._resolve_type(_raw_ret) if _raw_ret != 'unknown' else 'int'
-            if isinstance(ret_type, str) and ret_type.startswith('MojoTuple_'):
-                # The stateless re-resolution of a `Tuple[...]` RETURN
-                # annotation answers the synthesized by-value struct, but the
-                # defining unit made the body-sensitive decision (a body that
-                # builds the tuple as a RUNTIME list-backed literal returns
-                # `MojoList *`) and published its answer for its own
-                # definition — that answer must win, or this extern and every
-                # call-site temp disagree with the definition's prototype
-                # (measured 2026-10-21 part 4 integration on `split`'s
-                # `-> Tuple[String, String]`). A defining unit that never
-                # compiled in this closure publishes nothing; `MojoList *` is
-                # the only shape a runtime tuple literal has, so it is the
-                # honest fallback.
-                _home_ret = self._func_return_type_for_call(
-                    _as_str(sym_info.get('original_name', _sn)), None)
-                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
-                    ret_type = _home_ret if _home_ret else 'MojoList *'
-            if (isinstance(ret_type, str) and ret_type.startswith('MojoTuple_')
-                    and '[' in _raw_ret
-                    and _raw_ret.strip().split('[', 1)[0].strip()
-                    in ('Tuple', 'tuple')):
-                # By-value struct return this TU will use: register its
-                # typedef (see the struct-method-extern site above —
-                # measured 2026-10-21 part 4 integration).
-                self._ensure_tuple_struct(_raw_ret)
+            ret_type = _as_str(sym_info.get('return_type', 'int64_t'))
+            ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
             if self.do_imports or self.link_imports:
                 if safe in self._emitted_unresolved_stub_syms:
                     continue
@@ -14659,41 +13891,10 @@ def gen_module_impl(self, stmts):
                 else:
                     _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
                 _unresolved_guard = _stub_guard_name(safe)
-                if safe == 'PythonObject':
-                    # Named-dummy signature = fire_runtime's definition, so
-                    # the call sites generated from THIS declaration pass
-                    # dummy + box per the standard ABI (see the decl branch
-                    # below). The weak body only matters when fire_runtime
-                    # is not linked (no strong definition to win).
-                    _stub_body = (f'{{ mojo_print ((char *)"{_sn}: unavailable '
-                                  f'in compiled mode"); return ({ret_type})0; }}')
-                    parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
-                                  f"__attribute__((weak)) int64_t PythonObject (int64_t, ...) {_stub_body}  /* stub from {module} */\n#endif")
-                else:
-                    parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
-                                  f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
+                parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
+                              f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
             else:
-                if safe == 'PythonObject':
-                    # The declaration must match fire_runtime's DEFINITION
-                    # `int64_t PythonObject (int64_t _first, ...)`: with a
-                    # zero-named `(...)` decl the AArch64 caller spills BOTH
-                    # varargs (the spelled `0` dummy + the box) to the stack
-                    # while the definition reads its named param from the
-                    # register and its vararg from a different stack offset
-                    # — the box came back non-deterministic garbage
-                    # (measured 2026-10-22: the ladder's
-                    # test_conversion_to_simd box read 0x200000000 /
-                    # 0x0000000000 across builds instead of
-                    # 0x3fbf9add37bea984). With the named dummy in the decl
-                    # the caller passes dummy + box per the standard ABI
-                    # (x0/x1), which the definition's va_arg then answers.
-                    # See emit_calls' PythonObject arm + fire_runtime.c.
-                    parts.append(
-                        "#ifndef PythonObject\n"
-                        "extern int64_t PythonObject (int64_t, ...);  /* from std.python: named dummy = fire_runtime's definition */\n"
-                        "#endif")
-                else:
-                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
     if self.imported_symbols:
         parts.append('')
@@ -14896,12 +14097,61 @@ def gen_module_impl(self, stmts):
         parts.append(f"{ret} {_c_fn_name} ({ptypes});")
         parts.append('#endif')
 
-    # `struct_defs` (and the method prototypes + `_getattr_method_arms` table
-    # that walk produces) moved UP, to just before `_emit_reflection_dispatch`:
-    # a `_mojo_getattr_<Struct>` method arm takes the address of one of these
-    # symbols, so the prototype has to be emitted first — see
-    # `_emit_struct_method_prototypes`'s own docstring. Same list, same loop,
-    # same emissions, one place earlier in `parts`.
+    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+    if not self.do_imports:
+        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
+    for sd in struct_defs:
+        _moids = self._struct_method_overload_ids(sd)
+        # Index loop, NOT `{id(m): oid for m, oid in zip(...)}`: neither
+        # `zip()` nor a dict comprehension over it lowers in the self-hosted
+        # backend, and `id()` is unreliable there — walk `sd.methods` by
+        # position so `_moids` (same length) stays aligned.
+        _z8_meths = sd.methods
+        for _z8k in range(len(_z8_meths)):
+            m = _z8_meths[_z8k]
+            if (sd.name, m.name) in self._supported_generator_methods:
+                continue
+            overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
+            mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
+            ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
+                   or self.func_return_types.get(f"{sd.name}_{m.name}")
+                   or self._resolve_type(m.return_type))
+            method_full_name = f"{sd.name}_{m.name}"
+            per_overload_params = self.func_param_types.get(mangled_name)
+            if per_overload_params is not None:
+                param_ctypes = per_overload_params
+            elif gimple_ctypes._params_have_vararg(m.params):
+                param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
+                self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
+            else:
+                param_ctypes = []
+                for i, (pname, ptype) in enumerate(m.params):
+                    if pname.startswith('**'):
+                        continue  # skip **kwargs
+                    if pname == 'self':
+                        ct = f"{sd.name} *"
+                    elif ptype is None and hasattr(self, '_inferred_param_types'):
+                        if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
+                            ct = self._inferred_param_types[method_full_name][pname]
+                        else:
+                            ct = 'int64_t'
+                    else:
+                        ct = self._resolve_type(ptype)
+                    param_ctypes.append(ct)
+            ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
+            parts.append(f"{ret} {mangled_name} ({ptypes});")
+
+        _emitted_base: set[str] = set()
+        _z9_meths = sd.methods
+        for _z9k in range(len(_z9_meths)):
+            m = _z9_meths[_z9k]
+            if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
+                base_cname = self._struct_method_csym(sd.name, m.name, '')
+                if base_cname not in _emitted_base:
+                    base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
+                                or self._resolve_type(m.return_type))
+                    parts.append(f"{base_ret} {base_cname} (...);")
+                    _emitted_base.add(base_cname)
 
     if func_defs or struct_defs:
         parts.append('')
@@ -15130,31 +14380,6 @@ def gen_module_impl(self, stmts):
             self._regex_progs_defined.add(pattern)
         parts.append('')
     parts.extend(func_parts)
-    if hasattr(self, '_str_pool') and self._str_pool and self.emit_str_pool:
-        # Register every literal the sound `mojo_boxed_is_str` predicate must
-        # tell apart from a bare int64_t. Emitted AFTER the function bodies
-        # (not in the string-pool block above) so this constructor's closing
-        # `}` is never the first `}` after a forward declaration: a generated-C
-        # consumer that walks from a prototype to the next `}` would otherwise
-        # stop at this constructor and miss the real definition. A __rodata
-        # literal is `static char * _slit_N = "...";`, so `malloc_size` is 0
-        # and a shape test cannot separate it from an integer in [2^31, 2^47);
-        # the only sound answer is a positive membership, fed here at startup.
-        # Without this, `lambda k: d[k]` called with "a" would key by the
-        # decimal of the literal's own address. See `_reg_str` in
-        # fire_runtime.c. `static` keeps each link-mode TU's copy local, so
-        # every module registers its own pool at process start.
-        parts.append(
-            '/* Register the string-literal pool with the runtime '
-            '(mojo_boxed_is_str); runs at startup, before main. */')
-        parts.append(
-            'static void __attribute__((constructor)) '
-            '_mojo_register_str_pool(void) {')
-        for _escaped, _sname in sorted(self._str_pool.items(),
-                                      key=lambda kv: kv[1]):
-            parts.append(f'    mojo_str_register({_sname});')
-        parts.append('}')
-        parts.append('')
 
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
@@ -15320,9 +14545,7 @@ def gen_module_impl(self, stmts):
                 _flds = self.struct_field_types.get(_sn)
                 if _flds is None:
                     return None
-                return '\n'.join(_render_struct_typedef_body(
-                    _sn, _flds,
-                    optional_tags=self._tagged_optional_fields.get(_sn)))
+                return '\n'.join(_render_struct_typedef_body(_sn, _flds))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
                 if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
@@ -15418,10 +14641,7 @@ def gen_module_impl(self, stmts):
                     for _me_sn in sorted(_mirror_extra_structs):
                         _me_flds = self.struct_field_types.get(_me_sn, {})
                         _me_td = '\n'.join(
-                            _render_struct_typedef_body(
-                                _me_sn, _me_flds,
-                                optional_tags=self._tagged_optional_fields
-                                .get(_me_sn)))
+                            _render_struct_typedef_body(_me_sn, _me_flds))
                         cpp_parts.append(_me_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)

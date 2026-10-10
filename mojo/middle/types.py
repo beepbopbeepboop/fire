@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -986,97 +986,6 @@ def _is_dataclasses_module_ref(obj) -> bool:
         return obj.member == 'dataclasses'
     return False
 
-# name -> bracketed element text, recorded on every `_tuple_cname` call.
-# The part-4 integration safety net in `module_gen.gen_module_impl` consults
-# this to register a `MojoTuple_*` struct that reached the C through a path
-# that computed the name here but never called `_ensure_tuple_struct`
-# (trait-vtable function-pointer fields, by-value struct method params,
-# in-TU monomorphized-extern returns, comptime-fn returns). The stored text
-# is exactly what this function received, so `Tuple[{stored}]` reconstructs
-# the annotation that produced the name (same extraction:
-# `ann.split('[', 1)[1].rstrip(']').strip()`), guaranteeing the recomputed
-# name matches. A name is a pure function of its element text, so the same
-# name always maps to the same text across modules in a process.
-_TUPLE_ANN_BY_NAME: dict = {}
-
-
-def _tuple_cname(ann: str) -> str:
-    """The C name of the SYNTHESIZED by-value struct representing a
-    `Tuple[...]` value (measured 2026-10-21, part 4: the `chain`/`zip`
-    out-parameter wrappers' `_iterators`/`_values` tuple-of-inners fields,
-    and the value tuples zip's `__next__` hands back).
-
-    `ann` is the annotation's bracketed element text (`a, b, ...`, as the
-    caller got it from `ann.split('[', 1)`). The name is derived from the
-    element MENTIONS — single-spaced, top-level-comma split, order and
-    count both part of the key — so the same annotation resolves to the
-    same name at every site (the struct-field pass, the local-var pass,
-    the method-return pass, the subscript) and two element lists that
-    differ in any way get distinct structs. `module_gen._ensure_tuple_
-    struct` registers the struct (one field `_0`..`_N-1` per element) in
-    `struct_field_types`, which both feeds the dependency-ordered
-    typedef emission and gives `_lower_subscript` the per-element ctypes."""
-    elems = [' '.join(e.split()) for e in _split_top_level_commas(ann)]
-    key = '|'.join(elems)
-    name = 'MojoTuple_' + hashlib.blake2b(key.encode('utf-8'),
-                                          digest_size=8).hexdigest()[:12]
-    _TUPLE_ANN_BY_NAME.setdefault(name, ann)
-    return name
-
-
-def _body_builds_struct_tuple(body) -> bool:
-    """True when a method body declares a `var <x>: Tuple[...]` local —
-    the part-4 struct-tuple construction (zip's `__next__`:
-    `var res: Tuple[Int, String]` ... field writes ... `return res^`).
-
-    Every OTHER `Tuple[...]`-returning method in the measured std/iter
-    wrappers builds its tuple as a RUNTIME (list-backed) tuple literal —
-    the `bounds()` family (`return final_lb, final_ub`), whose value is a
-    `MojoList *` (mark_as_tuple'd). Such a method CANNOT return the
-    synthesized by-value struct: the return lowering would emit a
-    struct-cast of a list pointer, which is invalid C (measured 2026-10-21
-    part 4, gcc -fgimple on `_ListIterOwned_..._bounds`:
-    `_t9 = (MojoTuple_3c5b7a34fbfa)_t5;`). Those methods keep the
-    list-backed `MojoList *` return — the multi-assign unpack of their
-    result already reads it that way (`(MojoList *)_t8` +
-    `mojo_list_get_int`, see `_gen_stmt_MultiAssignStmt`'s tuple arm), so
-    only the declared return ctype had to move.
-
-    Consulted by BOTH the signature pass (module_gen's method loop) and
-    the body-definition pass (`emit_funcs._gen_struct_method`, which
-    re-derives `ret_type` from the annotation and would otherwise
-    overwrite the signature pass's answer into `func_return_types`):
-    decided from the parsed body, deterministic per (struct, method), so
-    every reader of `func_return_types` — prototype, definition, call
-    sites — agrees."""
-    stack = list(body or [])
-    while stack:
-        n = stack.pop()
-        if n is None or isinstance(n, (str, int, float, bool)):
-            continue
-        if isinstance(n, (list, tuple)):
-            stack.extend(n)
-            continue
-        if isinstance(n, VarDecl):
-            ann = getattr(n, 'type_ann', None)
-            if isinstance(ann, str) and ann.strip().split('[', 1)[0].strip() \
-                    in ('Tuple', 'tuple'):
-                return True
-        # `vars(n)` in a guard, NOT bare: some node classes carry no
-        # `__dict__` at all (slot-based / boxed), and `vars()` raises
-        # `TypeError` on them (measured 2026-10-21 part 4 integration:
-        # std/sys/_amdgpu's import body crashed the whole generation
-        # through this walker). `vars` still handles dict-valued nodes
-        # the way the bare call did.
-        try:
-            _nd = vars(n)
-        except TypeError:
-            _nd = None
-        if _nd:
-            stack.extend(_nd.values())
-    return False
-
-
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -1129,28 +1038,6 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'MojoDict *'
         if base in ('Set', 'set'):
             return 'MojoSet *'
-        if base in ('Tuple', 'tuple'):
-            # `Tuple[a, b, ...]` — the SYNTHESIZED by-value struct, one
-            # field per element (`_tuple_cname` + module_gen's
-            # `_ensure_tuple_struct`, measured 2026-10-21 part 4: the
-            # chain/zip out-parameter wrappers). Pre-subpath this branch
-            # did not exist and the annotation erased to `int64_t` — the
-            # wrapper's `_iterators` field read back garbage.
-            #
-            # EXCEPT when an element names a GENERIC type parameter
-            # (`Tuple[Self.T, Self.T]`): at every instantiation of the
-            # generic the value is a RUNTIME word (a MojoList * tuple
-            # box), and no single synthesized struct can be its type —
-            # the pre-part-4 erasure to `int64_t` was the honest shape.
-            # Measured 2026-10-21 part 4 integration: interval's
-            # `insert(mut self, interval: Tuple[Self.T, Self.T], ...)`
-            # refined the param to `MojoTuple_9ff8579fc1d0` while the
-            # definition's body consumes the word — the callsite cast a
-            # constructor slot to the struct and gcc rejected the TU
-            # (`unknown type name 'MojoTuple_9ff8579fc1d0'`).
-            if 'Self.' not in inner:
-                return _tuple_cname(inner)
-            return 'int64_t'
         if base in ('Span', 'StringSlice'):
             return 'Span *'
         if base == 'Optional':
@@ -1692,15 +1579,7 @@ def _c_escape(s: str) -> str:
     passed through unchanged rather than having their backslash doubled — the old
     code did `replace('\\\\','\\\\\\\\')` first, turning `\\n` into a literal
     backslash-n in the output. Lone backslashes, quotes, and raw control chars are
-    escaped. Non-ASCII bytes pass through untouched.
-
-    `\\uXXXX`, `\\UXXXXXXXX` and an octal run are passed through too, because C
-    decodes all three natively (a `char[]` literal gets the UTF-8 bytes of the
-    universal character name) — without this they fell to the lone-backslash arm
-    and became a literal `\\u00e9`, six characters where CPython makes one.
-    `\\N{NAME}` has NO C spelling, so it is decoded here through
-    `fire_compiler.decode_c_escapes` (the tree's one decoder) and its bytes are
-    emitted directly; an unknown name raises, as CPython's own lookup does."""
+    escaped. Non-ASCII bytes pass through untouched."""
     known = set('ntr"\\\'0abfv')
     out = []
     i, n = (0, len(s))
@@ -1721,52 +1600,6 @@ def _c_escape(s: str) -> str:
                 out.append('\\\\x')
                 i += 2
                 continue
-        if ch == '\\' and i + 1 < n and s[i + 1] in '1234567':
-            # An octal run. A leading `0` is in `known` and passes through; C
-            # continues an octal run across it the same way (`\01` and `\0`+`1`
-            # are the same two characters). C decodes the run itself, so the
-            # backslash and its first digit pass through and the remaining
-            # digits flow as ordinary text.
-            out.append(ch)
-            out.append(s[i + 1])
-            i += 2
-            continue
-        if ch == '\\' and i + 1 < n and s[i + 1] in ('u', 'U'):
-            digits = 4 if s[i + 1] == 'u' else 8
-            ok = i + 1 + digits <= n
-            if ok:
-                k = i + 2
-                while k < i + 2 + digits:
-                    if s[k] not in '0123456789abcdefABCDEF':
-                        ok = False
-                        break
-                    k += 1
-            if ok:
-                out.append(ch)
-                out.append(s[i + 1])
-                i += 2
-                continue
-            # A short/non-hex run is not an escape: keep the backslash literal.
-            out.append('\\\\')
-            i += 1
-            continue
-        if ch == '\\' and i + 1 < n and s[i + 1] == 'N' \
-                and i + 2 < n and s[i + 2] == '{':
-            close = s.find('}', i + 3)
-            if close != -1:
-                decoded = decode_c_escapes(s[i:close + 1])
-                for dc in decoded:
-                    if dc == '"':
-                        out.append('\\"')
-                    elif dc == '\\':
-                        out.append('\\\\')
-                    else:
-                        out.append(dc)
-                i = close + 1
-                continue
-            out.append('\\\\')
-            i += 1
-            continue
         if ch == '\\':
             out.append('\\\\')
             i += 1

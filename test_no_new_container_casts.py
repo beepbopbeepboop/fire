@@ -312,41 +312,7 @@ def strip_prose(src: str) -> str:
 # Nothing was re-spelled to escape the scanner: the count is read out of the
 # source with `strip_comments`, and a cast that moved to another line would move
 # to another line in this number too.
-#
-# 17 -> 19 (2026-10-22, the part-4 shape-mismatch lifts). Both are deliberate
-# measured unboxes of a word that IS a container pointer, in the seed/slot paths
-# the chokepoint does not serve, and both mirror a cast shape already in the
-# baseline rather than inventing a new coercion:
-#
-#   * `emit_calls.py`'s pyobj-list arm of the iterator-seed lowering
-#     (`enumerate(list_obj.__iter__())`, test_python_object lift, 2026-10-21
-#     part 4): the PythonObject local's box is unboxed with
-#     `gen._new_val('MojoList *', f"(MojoList *){_box_v}")` because the runtime
-#     method dispatch unboxes the same box the same way (measured in the
-#     dispatch C: `(MojoList *)(int64_t)<box>`) — the box IS the MojoList *
-#     pointer, and the borrowed inner construction then runs on the public
-#     representation. `_coerce_to_type` cannot serve this site: it routes a
-#     value whose STATIC type is wrong through the R2 refusal, and this value's
-#     static type is `int64_t` with no container-kind question at all — the
-#     kind is proven by the measured dispatch, exactly the "no static proof"
-#     class this ledger's 2026-09-26 entry records as counted-but-not-ad-hoc.
-#   * `emit_loops.py`'s multi-target for-loop slot reads (the spliced
-#     product-`__next__` shape): the REGISTERED return type of that `__next__`
-#     is int64_t (its `-> Self.Element` annotation is a comptime alias
-#     `_resolve_type` cannot resolve) while the body builds a list-backed
-#     `MojoList *`, so the slot read unboxes the word with
-#     `(MojoList *){nxt}` — the IDENTICAL bridge the `elem[0]` subscript
-#     lowering already spells (measured in the product2 ladder C), copied so
-#     the slot reads compile in both type states. A swap to `_coerce_to_type`
-#     would route a registered-return-type word through the R2 container-kind
-#     refusal that exists to catch a DIFFERENT defect (a value whose static
-#     type says one container and the runtime says another); here the static
-#     and runtime kinds are the same list, one of them just unresolvable.
-#
-# Measured: f7a073a0 (the 17 baseline) scans 17 under the same strip_prose +
-# CAST_RE; the current tree scans 19, and the two deltas above are the only
-# added non-prose matches (verified against the diff's added lines).
-BASELINE_COUNT = 19
+BASELINE_COUNT = 17
 
 
 def count_casts() -> int:

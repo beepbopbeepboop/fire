@@ -324,47 +324,8 @@ CASES = [
      "    for i in []:\n        pass\n    return i\n", "refuse"),
     ("empty_string_target_is_not_a_definition",
      "    for c in \"\":\n        pass\n    return c\n", "refuse"),
-    # A `range()` call has no arguments to read, and `_range_is_nonempty`'s old
-    # `> 3` guard fell through to the three-way unpack, so this row used to raise
-    # `ValueError: not enough values to unpack` OUT of the model and into the
-    # build (a backend crash, not a refusal).  The answer is `'maybe'` — the
-    # argument count is CPython's own `TypeError` and this build cannot state it
-    # — so the reader must not crash on it.
-    ("zero_arg_range_does_not_crash_the_reader",
-     "    for i in range():\n        pass\n    return i\n", "ok"),
     ("nonempty_literal_list_target_is_still_a_definition",
      "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
-    # ── …and the same emptiness through a NAME the preheader decides is such a
-    # literal, which is the gap `_preheader_facts`' second table closes ──
-    #
-    # `_preheader_literals` gave the preheader ONE table, "definitely this
-    # integer", so the sequence half of `_for_emptiness` read only a literal
-    # written at the `for`. `xs = []` then `for i in xs` was therefore
-    # `'maybe'`: the header's definition survived and the read after the loop
-    # returned whatever the caller left in the register, where CPython raises
-    # `UnboundLocalError` — measured on both architectures as `6159200192`
-    # before this table existed. The preheader is one region, so the two facts
-    # are one walk (`_preheader_facts`) with two tables.
-    ("preheader_empty_list_target_is_not_a_definition",
-     "    xs = []\n    for i in xs:\n        pass\n    return i\n", "refuse"),
-    ("preheader_nonempty_list_target_is_still_a_definition",
-     "    xs = [4, 5]\n    for i in xs:\n        pass\n    return i\n", "ok"),
-    ("preheader_empty_tuple_target_is_not_a_definition",
-     "    xs = ()\n    for i in xs:\n        pass\n    return i\n", "refuse"),
-    # The body's store, decided the other way round by the same table: a
-    # non-empty named literal binds and runs, an empty one does neither.
-    ("preheader_nonempty_list_body_store_ok",
-     "    xs = [1, 2]\n    for i in xs:\n        t = i\n    return t\n", "ok"),
-    ("preheader_empty_list_body_store_refused",
-     "    xs = []\n    for i in xs:\n        t = i\n    return t\n", "refuse"),
-    # THE SOUNDNESS ROW: the name must be such a literal on EVERY path, so a
-    # later binding that is not a literal removes it and the target stays
-    # defined — the `preheader_range_bound_from_a_parameter_keeps_the_target`
-    # rule, applied to the sequence table. Without the removal a program whose
-    # `xs` may be non-empty would be refused.
-    ("a_named_literal_reassigned_off_a_literal_keeps_the_target",
-     "    xs = []\n    xs = n\n    for i in xs:\n        pass\n    return i\n", "ok",
-     "the sequence table must not survive a rebinding it cannot see"),
     # THE RESIDUAL, pinned as a case so it cannot rot: the preheader has to
     # STATE the value, and a parameter is not a literal it can state — which is
     # the same limit `while_body_store_from_a_parameter_refused` records for the
@@ -1868,96 +1829,6 @@ def check_corpus_cost(verbose: bool = False) -> list:
     return bad
 
 
-def check_module_entry_facts() -> list:
-    """Failures in the MODULE-level entry facts, as strings.
-
-    Two halves of `model.module_entry_literal_facts` and the seed it feeds.
-
-    The READER half runs the real pipeline over a small module and asserts which
-    names qualify: a folded int constant with no slot, a container-literal slot
-    NOTHING writes and nothing uses in a mutating position, and NOT a container
-    an in-place call touches (`ZS.append(1)`) — the position `mutable` and
-    `filled_by_body` cannot see because neither is a store.
-
-    The SEED half is `read_before_store`'s `entry_facts`, the parameter the fix
-    added and the whole of the second residual of
-    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`: a
-    module-level literal sequence must decide the loop's emptiness the same way
-    a function-local one does, and a LOCAL binding of the same name must still
-    override the module's value.
-    """
-    bad = []
-    saved_symbols = M.module_symbols()
-    saved_slots = M.module_slots()
-    try:
-        src = ("XS = []\n"
-               "YS = [1, 2]\n"
-               "ZS = []\n"
-               "ZS.append(1)\n"
-               "K = 0\n"
-               "def main():\n"
-               "    for q in XS:\n"
-               "        x = 1\n"
-               "    return 0\n")
-        stmts = parse_module(src, filename="entryfacts.mojo")
-        functions = [n for n in M.iter_nodes(stmts)
-                     if isinstance(n, F.FunctionDef)]
-        M.publish_module_symbols(M.collect_module_symbols(
-            stmts, "entryfacts.mojo"))
-        M.publish_global_slots(M.collect_global_slots(stmts, functions))
-        facts = M.module_entry_literal_facts()
-        missing = {"XS", "YS", "K"} - set(facts)
-        if missing:
-            bad.append(f"module_entry_literal_facts missed {sorted(missing)}: "
-                       f"the two untouched container literals and the folded "
-                       f"int constant must all be seeded")
-        if "ZS" in facts:
-            bad.append("module_entry_literal_facts seeded `ZS`, which "
-                       "`ZS.append(1)` can mutate in place — no STORE writes "
-                       "it, so this is the position `mutable` cannot see")
-    finally:
-        M.publish_module_symbols(saved_symbols)
-        M.publish_global_slots(saved_slots)
-
-    own = {"q", "x"}
-    body = "    for q in XS:\n        x = 1\n    return q\n"
-    fn = the_function(parse_module("def probe(n):\n" + body,
-                                   filename="entryfacts2.mojo"))
-    if M.read_before_store(fn, {"n"}, own) is not None:
-        bad.append("a loop over a name with no known value must keep the "
-                   "target defined, which is the parameter residual")
-    hit = M.read_before_store(fn, {"n"}, own,
-                              entry_facts={"XS": F.ListExpr(elements=[])})
-    if not hit or hit[0] != "q":
-        bad.append(f"an empty module-level sequence must leave the target "
-                   f"unbound; got {hit!r}")
-    if M.read_before_store(fn, {"n"}, own,
-                           entry_facts={"XS": F.ListExpr(
-                               elements=[F.IntLiteral(value=4, line=0, col=0,
-                                                      raw="4")])}
-                           ) is not None:
-        bad.append("a non-empty module-level sequence must bind the target")
-
-    local_value = "    XS = [1]\n    for q in XS:\n        x = 1\n    return q\n"
-    fn_local = the_function(parse_module("def probe(n):\n" + local_value,
-                                         filename="entryfacts3.mojo"))
-    if M.read_before_store(fn_local, {"n"}, own,
-                           entry_facts={"XS": F.ListExpr(elements=[])}
-                           ) is not None:
-        bad.append("a local `XS = [1]` must override an empty module fact — "
-                   "the seed is the function's ENTRY state, not a licence")
-    local_empty = "    XS = []\n    for q in XS:\n        x = 1\n    return q\n"
-    fn_empty = the_function(parse_module("def probe(n):\n" + local_empty,
-                                         filename="entryfacts4.mojo"))
-    if M.read_before_store(fn_empty, {"n"}, own,
-                           entry_facts={"XS": F.ListExpr(
-                               elements=[F.IntLiteral(value=4, line=0, col=0,
-                                                      raw="4")])}
-                           ) is None:
-        bad.append("a local `XS = []` must override a non-empty module fact")
-    return bad
-
-
 def check_oracle() -> list:
     """The ORACLE, checked against bodies whose answer is known — including the
     one that does not answer.
@@ -2099,9 +1970,6 @@ def main():
     for problem in check_corpus_cost(args.verbose):
         failed += 1
         print(f"  FAIL  corpus-cost: {problem}")
-    for problem in check_module_entry_facts():
-        failed += 1
-        print(f"  FAIL  module-entry-facts: {problem}")
     for problem in check_oracle():
         failed += 1
         print(f"  FAIL  {problem}")

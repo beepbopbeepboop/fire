@@ -55,64 +55,9 @@ of that name (`match(p="/x.py", pat="*.py")` builds today), so the fix is here
 rather than in the ABI.  `FORMAL_host_import_row_5_measured` §`subprocess`
 measured this row at 0 files and gave the keyword refusal as the mechanism; the
 mechanism was wrong (it was a NAME mismatch in a probe, not a refusal of keyword
-arguments), while the 0 was right for a different reason: re-measured over all
-143 importing files, the row is worth 0 builds, because `formal/imports.py`
-refuses an unresolvable import before the build ever lowers a `subprocess` call,
-so most of the files stop at the import and never reach it.
-
-WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
-----------------------------------------------------
-`run` returns the child's status word and not a `CompletedProcess`, and that is
-a DECISION recorded here because its caller-side consequence is visible in the
-source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
-`stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`),
-so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
-all 547 sites in this tree is the status, so that is the word it returns, and
-`CompletedProcess(args, returncode)` below returns the same word so the
-constructor and the operation agree.
-
-**A caller that reads `r.returncode` is therefore refused, by name, and that is
-the intended answer rather than an accident**: the field read is on a word, and
-`r` IS the returncode.  The spellings that work are `rc = r` and
-`rc = completed_process_returncode(r)`; the second is the shim a corpus file
-should use, because `completed_process_returncode` is the model's accessor here
-and a caller gives the same name an identical CPython definition
-(`lambda r: r.returncode`) when the same text must also run on CPython.  That is
-option 3 of the three costed in
-`bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
-is the option taken here.  Option 1 — "make the model return a struct" — is not
-available, and the reason is not the one-word ABI alone: the second field a
-caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
-target does not model at all, so a one-field `CompletedProcess` would only move
-such a caller to the next field.
-
-WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
-----------------------------------------------------
-`run` returns the child's status word and not a `CompletedProcess`, and that is
-a DECISION recorded here because its caller-side consequence is visible in the
-source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
-`stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`),
-so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
-all 547 sites in this tree is the status, so that is the word it returns, and
-`CompletedProcess(args, returncode)` below returns the same word so the
-constructor and the operation agree.
-
-**A caller that reads `r.returncode` is therefore refused, by name, and that is
-the intended answer rather than an accident**: the field read is on a word, and
-`r` IS the returncode.  The spellings that work are `rc = r` and
-`rc = completed_process_returncode(r)`; the second is the shim a corpus file
-should use, because `completed_process_returncode` is the model's accessor here
-and a caller gives the same name an identical CPython definition
-(`lambda r: r.returncode`) when the same text must also run on CPython.  That is
-option 3 of the three costed in
-`bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
-is the option taken here.  Option 1 — "make the model return a struct" — is not
-available, and the reason is not the one-word ABI alone: the second field a
-caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
-target does not model at all, so a one-field `CompletedProcess` would only move
-such a caller to the next field.
+arguments), while the 0 was right for a different reason, which
+`bugs/FORMAL_subprocess_row_measured_b7.md` re-measures over all 143 importing
+files.
 
 WHAT A CALL ACTUALLY DOES AT RUN TIME
 -------------------------------------

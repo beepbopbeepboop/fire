@@ -5,15 +5,6 @@ be the same change that fixes a float key and a bool key, which were measured
 while working on `CODEGEN_dict_comprehension_repr_is_separately_broken.md`,
 and one more repr defect was located here — it is item 2's runtime half.**
 
-**Then read the LAST Status section (2026-10-19, `work/mimo-cgen3b-1`):
-item 1 is measured FIXED** — a content key and a plain str key of the same
-characters are two entries, matching CPython and this repo's own interpreter —
-**and what is left on this path is that `print(d)` shows a container key as its
-`T<len><hex>` STORAGE encoding rather than as a tuple.** That is a different
-defect from the one this doc opened with, and closing it needs element kinds to
-reach the key walker, i.e. this doc's item 2. Also measured there: the
-2026-10-02 note about `'(None, None)'` is stale.
-
 Found 2026-10-01 while fixing
 `CODEGEN_tuple_dict_key_hashed_by_address` (deleted with that fix).
 **NOT the address bug** — a container key is now keyed by its VALUE, which is
@@ -203,64 +194,3 @@ repr (the codegen knows the pattern statically there, from
 4. (4) `keys()`/`items()` returning the key VALUE is still the largest and is
    unchanged: it means the dict has to STORE the original key, not only its
    text, which is a different data model from everything above.
-
-## Status (2026-10-19, `work/mimo-cgen3b-1`) — item 1 is FIXED; a container key's REPLICA is the defect that is left, and it was not in any doc
-
-Measured on this tree, one program, three engines (`fire.py --jit`,
-`fire.py run`, CPython):
-
-    d = {(1, 2): "v"}
-    d["(1, 2)"] = "s"
-    print(d); print(len(d))
-    print({k: 1 for k in [(0, 0), (0, 1)]})
-
-| | CPython | interpreter | compiled |
-|---|---|---|---|
-| `d` | `{(1, 2): 'v', '(1, 2)': 's'}` | same | `{'T1100032100031100032': 'v', '(1, 2)': 's'}` |
-| `len(d)` | 2 | 2 | 2 |
-| comprehension | `{(0, 0): 1, (0, 1): 1}` | same | `{'T1100032100030100030': 1, 'T1100032100030100031': 1}` |
-
-### Item 1 is closed
-
-The content key and the plain str key are TWO entries in the compiled path, in
-both directions, matching CPython and this repo's own interpreter — which is
-what `MOJO_KEY_TUPLE 3` and the length-delimited hex encoding were built to do.
-This doc's item 1 can be struck.
-
-### And the `0 -> None` half of item 2 is gone from this path too
-
-The 2026-10-02 Status measured the comprehension printing `'(None, None)'` and
-`'(None, 1)'` — `_key_slot_str` reading every inner slot as an integer and
-applying the `0 -> None` heuristic. It does not print that now. What it prints
-is the encoding itself.
-
-### The defect that is left, and which no doc states: a container key is REPR'd as its STORAGE FORM
-
-`_mojo_repr_dict` renders a slot's key with `mojo_repr_str(mojo_dict_slot_key
-(d, _i))` and that is right for keykind 0 (str) and keykind 2 (an integer
-slot, whose `_slot_key` answers the DECIMAL). For `keykind == 3`
-(`MOJO_KEY_TUPLE`) the slot's key IS the `T<elem-count><len><hex>...`
-encoding, so printing it verbatim gives `'T1100032100031100032'` where every
-engine prints `(1, 2)`. The dict is CORRECT — it holds one entry per distinct
-key and answers lookups right — it is only what `print(d)` shows.
-
-This is the same missing arm in `_mojo_repr_dict` that its own comment
-declines, seen from the container side instead of the integer side, and the
-sibling doc's last section records the integer side's design in full (built,
-measured, reverted; the revert's reasons are there).
-
-**It is NOT a one-line decode.** The encoding is injective but not
-self-describing: it records each element's BYTE LENGTH and its hex bytes, not
-its KIND, so a decoder cannot tell `('1', '2')` from `(1, 2)` (or a `None`
-from a `0`) — the very ambiguity that `_key_slot_str`'s integer-read was
-papering over, and that `mojo_repr_slot_kind` solves for the PAIR walkers by
-taking a `kinds` argument the codegen supplies. Closing this therefore needs
-the element `kinds` string to reach the key walker as it already reaches
-`mojo_repr_list_slotkinds`, which is item 2's runtime half from the 2026-10-02
-Status — so this doc's items 1 and 2 have swapped which one is the live work.
-
-### Items 2, 3 and 4 are unchanged and were not exercised here
-
-`1` vs `1.0` in a tuple position, a struct instance in a tuple keying by
-address, and `keys()`/`items()` returning the key TEXT rather than the key,
-were not measured in this session and are still open as written.

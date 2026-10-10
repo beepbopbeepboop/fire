@@ -674,41 +674,6 @@ REFUSALS = [
      "def main(n):\n"
      "    return take(0)\n",
      "declared type of parameter `z` of `take`"),
-    # **THE `bool()` SPELLING, and it is the one row here that never built.**
-    # Every other row in this group is a program that USED to build and compute
-    # the wrong answer; this one has never lowered, and it is here because a
-    # published table said it did. `bugs/FORMAL_optional_needs_a_niche.md`'s
-    # list of the niche lowerings carried a row reading
-    #
-    #     bool(x)            x != niche
-    #
-    # and `bool(x)` is REFUSED — measured on this tree, both architectures,
-    # byte-identical, and NOT because of the niche: `bool(5)` on a plain `Int`
-    # is refused with the same words, because `bool` is one of the 38 names in
-    # `FRAME_VALUE_ONLY_CALLS` and lowering any of them is a deliberate deferral
-    # about a CALL SPELLING. The doc's row is corrected; this case is what keeps
-    # the correction true, and its failure direction is the group's: if `bool()`
-    # ever lowers, this row goes RED and the doc's row comes back.
-    #
-    # What lowers is the CONDITIONAL form, and it lowers niche-aware — which is
-    # `bool_truthiness_is_has_a_value` in `FIXED_CASES`, and that is where the
-    # semantics this row's docstring quotes (`Optional.__bool__` asks whether the
-    # Optional HAS A VALUE) is pinned.
-    ("the_bool_spelling_is_not_lowered_and_is_not_a_niche_question",
-     "def main(n):\n"
-     "    var a: Optional[Bool] = None\n"
-     "    printf(\"%d\\n\", bool(a))\n"
-     "    return 0\n",
-     "`bool(...)` is not lowered on this path"),
-    # …and the control that says the refusal is about the SPELLING and not about
-    # the payload: the same call on an `Int`, where there is no niche question at
-    # all, is refused with the same sentence. Without this row the row above
-    # would be indistinguishable from a niche refusal.
-    ("the_bool_spelling_is_refused_for_an_int_receiver_too",
-     "def main(n):\n"
-     "    printf(\"%d\\n\", bool(5))\n"
-     "    return 0\n",
-     "`bool(...)` is not lowered on this path"),
 ]
 
 

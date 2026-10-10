@@ -448,15 +448,6 @@ def test_struct_param_trait_bounds():
     check("value_parameter_is_still_a_field",
           [f.name for f in val.fields] == ['level', '_fd'],
           repr([f.name for f in val.fields]))
-    # …and the same parameter is RECORDED as coming from the head, which is
-    # what a STORAGE reader subtracts: a bracket parameter is compile-time and
-    # has no slot in an instance, so `formal/model.py::struct_field_names` must
-    # not count it.  Keeping it in `fields` is the interpreter's member-read
-    # shape; `bracket_params` is the fact that separates the two.
-    check("value_parameter_is_recorded_as_a_bracket_param",
-          val.bracket_params == ['level'], repr(val.bracket_params))
-    check("a_trait_bound_is_not_a_bracket_param",
-          bare.bracket_params == [], repr(bare.bracket_params))
     enum = _parse('struct S[origin: Origin]:\n    var _it: Int\n')[0]
     check("unknown_single_name_is_still_a_field",
           [f.name for f in enum.fields] == ['origin', '_it'],
