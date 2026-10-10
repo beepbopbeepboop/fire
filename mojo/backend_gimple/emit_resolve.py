@@ -3635,6 +3635,20 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
             if ev in gen._tuple_slot_types:
                 gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        elif et == 'int64_t' and ev in gen._elem_types and gen._elem_types[ev] != 'int64_t':
+            # A BOXED tuple element: a call annotated `-> tuple[str, str]`
+            # returns its pair as an `int64_t` handle (see `_mojo_type`) and
+            # records the slots' type on the result value (`_return_elem_types`).
+            # The list of such pairs -- `[gen.lower_expr(a) for a in args]` --
+            # is a list of lists whose inner element type is that answer, and
+            # recording it is what makes `at, av = pairs[0]` read both slots as
+            # `char *`. Without it the unpack boxed them to `int64_t` and every
+            # f-string over them printed an ADDRESS (`_t39 = (int64_t)5190...;`
+            # where the reference prints `(int64_t)tokens;`).
+            gen._elem_types[res] = 'MojoList *'
+            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
         # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
         # unpack boxes `et` on the self-hosted path, so `et == 'char *'`

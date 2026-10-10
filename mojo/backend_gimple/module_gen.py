@@ -28,7 +28,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _as_vardecl_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
@@ -13538,21 +13538,38 @@ def gen_module_impl(self, stmts):
                 parts.append(f"typedef struct {sd.name} {{")
                 parts.append(f"  int64_t __mojo_type_id;")
                 emitted_fields = set()
-                for field in sd.fields:
-                    if isinstance(field, VarDecl):
-                        if sd.name in self.struct_field_types and field.name in self.struct_field_types[sd.name]:
-                            ft = self.struct_field_types[sd.name][field.name]
+                for _field_any in sd.fields:
+                    if isinstance(_field_any, VarDecl):
+                        # A typed view of the loop element: `field.name` read off
+                        # the boxed loop variable came back as the integer 0 once
+                        # self-hosted, so every such struct's typedef printed
+                        # `int 0;` in place of its fields.
+                        field = _as_vardecl_node(_field_any)
+                        _fname = _as_str(field.name)
+                        ft: str = ''
+                        if sd.name in self.struct_field_types and _fname in self.struct_field_types[sd.name]:
+                            ft = _as_str(self.struct_field_types[sd.name][_fname])
+                        elif field.type_ann:
+                            ft = self._resolve_type(field.type_ann)
                         else:
-                            ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
-                        safe_fn = _safe_field(field.name)
+                            ft = 'int'
+                        safe_fn = _safe_field(_fname)
                         _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
                         if _arr_dm:
                             parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
                         else:
                             parts.append(f"  {ft} {safe_fn};")
-                        emitted_fields.add(field.name)
+                        emitted_fields.add(_fname)
                 if sd.name in self.struct_field_types:
-                    for field_name, field_type in self.struct_field_types[sd.name].items():
+                    # Keys and values read through `_as_str`, not unpacked from
+                    # `.items()`: the pair unpack boxes both slots once
+                    # self-hosted, so the typedef came out `int 0;` (the field's
+                    # NAME and TYPE printed as their own addresses) for every
+                    # struct whose fields are only known from the registry.
+                    _sd_fields = _as_dict(self.struct_field_types[sd.name])
+                    for _fkey in _sd_fields:
+                        field_name = _as_str(_fkey)
+                        field_type = _as_str(_sd_fields[field_name])
                         if field_name not in emitted_fields:
                             safe_fn = _safe_field(field_name)
                             _arr_dm2 = re.match(r'^(.+)\[(\d+)\]$', field_type)

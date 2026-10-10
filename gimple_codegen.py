@@ -825,7 +825,6 @@ class GimpleGen:
         # name fell through `_safe_name` to a `mojo_<name>` stub nothing
         # defines. See that table for the exact scope and for what is
         # deliberately excluded.
-        **{_k: _k for _k in _LIBM_FN_RETVALS},
         'print': 'mojo_print',
         'len': 'mojo_len',
         'range': 'mojo_range',
@@ -3029,8 +3028,20 @@ class GimpleGen:
         # the same process. See bugs/hard/CODEGEN_coro_detached_async_
         # take_handle.md and gimple_gen_coro.py's own resume_fn/destroy_fn
         # docstring.
+        # The instance table: the class literal above plus the libm entries
+        # (`sqrt`, `exp`, ... — the KEYS of `_LIBM_FN_RETVALS`, mapped to
+        # themselves), added HERE rather than spliced into the literal as a
+        # `**{k: k for k in ...}` entry. The self-hosted class-attribute
+        # emitter only understands a literal whose every entry is a plain
+        # pair, so a splat made it leave the WHOLE table empty -- no builtin
+        # (`print` -> `mojo_print`, `len` -> `mojo_len`, ...) mapped to its
+        # runtime symbol in the compiled binary.
+        self.BUILTIN_VALUE_MAP = {}
+        for _bvk in GimpleGen.BUILTIN_VALUE_MAP:
+            self.BUILTIN_VALUE_MAP[_bvk] = GimpleGen.BUILTIN_VALUE_MAP[_bvk]
+        for _lk in _LIBM_FN_RETVALS:
+            self.BUILTIN_VALUE_MAP[_lk] = _lk
         if gimple_gen_coro.enabled():
-            self.BUILTIN_VALUE_MAP = dict(GimpleGen.BUILTIN_VALUE_MAP)
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
         self._reset_func()
@@ -3080,10 +3091,10 @@ class GimpleGen:
         # pre-widen, and it is the one family a reader comparing this dict
         # with fire_runtime.h would find short. Pinned by
         # test_runtime_header_scan.py's arity-family completeness check.
-        'mojo_bound_method_call_5': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 5),
-        'mojo_bound_method_call_6': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 6),
-        'mojo_bound_method_call_7': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 7),
-        'mojo_bound_method_call_8': ('int64_t', ['MojoBoundMethod *'] + ['int64_t'] * 8),
+        'mojo_bound_method_call_5': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_bound_method_call_6': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_bound_method_call_7': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_bound_method_call_8': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         # Variadic callables (see runtime/fire_runtime.h's "Variadic
         # callables" comment): a value whose real callee wants its
         # arguments packed into a MojoList/MojoDict rather than passed
@@ -3443,6 +3454,7 @@ class GimpleGen:
         '_scan_for_escaping':    ('void',      ['MojoList *', 'MojoSet *', 'MojoSet *']),
         'int_analyze':           ('int',       ['int', 'int', 'MojoDict *']),
         'int_abspath':           ('int64_t',   ['int64_t', 'int64_t']),
+        'int_normpath':          ('int64_t',   ['int64_t', 'int64_t']),
         'int_dirname':           ('int64_t',   ['int64_t', 'int64_t']),
         'int_join':              ('int64_t',   ['int64_t', 'int64_t', 'int64_t']),
         'int_join_list':         ('int64_t',   ['int64_t', 'int64_t']),

@@ -10004,20 +10004,74 @@ int int_isdir(int64_t marker, int64_t path) {
     return (stat(p, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
+/* posixpath.normpath: collapse `//`, `.` and `..` components lexically. A leading
+ * `//` (exactly two) is preserved, three or more collapse to one `/`; an empty
+ * result is `.`. Always returns a fresh malloc'd string. */
+static char *mojo_normpath_dup(const char *p) {
+    size_t n = strlen(p);
+    if (n == 0) return strdup(".");
+    int initial_slashes = (p[0] == '/') ? ((n > 1 && p[1] == '/' && !(n > 2 && p[2] == '/')) ? 2 : 1) : 0;
+    char *out = malloc(n + 4);
+    size_t *starts = malloc(sizeof(size_t) * (n + 1));
+    size_t *lens = malloc(sizeof(size_t) * (n + 1));
+    if (!out || !starts || !lens) { free(out); free(starts); free(lens); return strdup(p); }
+    size_t nc = 0;
+    size_t i = 0;
+    while (i < n) {
+        while (i < n && p[i] == '/') i++;
+        size_t st = i;
+        while (i < n && p[i] != '/') i++;
+        size_t len = i - st;
+        if (len == 0) continue;
+        if (len == 1 && p[st] == '.') continue;
+        if (len == 2 && p[st] == '.' && p[st + 1] == '.') {
+            if (nc > 0 && !(lens[nc - 1] == 2 && p[starts[nc - 1]] == '.' && p[starts[nc - 1] + 1] == '.')) {
+                nc--;
+                continue;
+            }
+            if (initial_slashes) continue;   /* `/..` is `/` */
+        }
+        starts[nc] = st;
+        lens[nc] = len;
+        nc++;
+    }
+    size_t o = 0;
+    for (int k = 0; k < initial_slashes; k++) out[o++] = '/';
+    for (size_t c = 0; c < nc; c++) {
+        if (c > 0) out[o++] = '/';
+        memcpy(out + o, p + starts[c], lens[c]);
+        o += lens[c];
+    }
+    out[o] = 0;
+    free(starts);
+    free(lens);
+    if (o == 0) { free(out); return strdup("."); }
+    return out;
+}
+
+int64_t int_normpath(int64_t marker, int64_t path) {
+    (void)marker;
+    char *p = (char *)path;
+    if (!p) return (int64_t)"";
+    return (int64_t)mojo_normpath_dup(p);
+}
+
 int64_t int_abspath(int64_t marker, int64_t path) {
     (void)marker;
     char *p = (char *)path;
     if (!p) return (int64_t)"";
-    static char buf[4096];
-    if (*p == '/') return (int64_t)p;
-    if (!getcwd(buf, sizeof(buf))) return (int64_t)p;
+    if (*p == '/') return (int64_t)mojo_normpath_dup(p);
+    char buf[4096];
+    if (!getcwd(buf, sizeof(buf))) return (int64_t)mojo_normpath_dup(p);
     size_t plen = strlen(p);
     size_t dlen = strlen(buf);
-    char *result = malloc(dlen + 1 + plen + 1);
-    if (!result) return (int64_t)p;
-    memcpy(result, buf, dlen);
-    result[dlen] = '/';
-    memcpy(result + dlen + 1, p, plen + 1);
+    char *joined = malloc(dlen + 1 + plen + 1);
+    if (!joined) return (int64_t)p;
+    memcpy(joined, buf, dlen);
+    joined[dlen] = '/';
+    memcpy(joined + dlen + 1, p, plen + 1);
+    char *result = mojo_normpath_dup(joined);
+    free(joined);
     return (int64_t)result;
 }
 
