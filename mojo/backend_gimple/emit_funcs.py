@@ -607,7 +607,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                         break
                 _pd = getattr(_fi_fn, 'param_defaults', None) or {} if _fi_fn else {}
                 if _pd:
-                    _dl = list(_pd.items())
+                    _dl = param_default_pairs(_pd)
                     gen._func_param_defaults.setdefault(symbol_name, _dl)
                     try:
                         gen._func_param_defaults.setdefault(
@@ -1548,10 +1548,7 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
         # boxes both slots of each pair on the self-hosted path, so the frozen
         # table's default entries were not `(name, node)` pairs at all and
         # `lower_struct_method_call`'s `_method_dflts[k][1]` read the integer 2.
-        _dflts = []
-        _pdm = _as_dict(getattr(_m, 'param_defaults', None) or {})
-        for _pdk in _pdm:
-            _dflts.append((_as_str(_pdk), _pdm[_pdk]))
+        _dflts = param_default_pairs(getattr(_m, 'param_defaults', None) or {})
         _out[f'GimpleGen_{_m.name}'] = (_rc, _pcs, _dflts)
     return _out
 

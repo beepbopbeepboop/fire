@@ -72,6 +72,7 @@ import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
@@ -173,18 +174,6 @@ def _gmi_iter_calls(stmts, _seen=None):
                     stack.extend(sub)
                 else:
                     stack.append(sub)
-
-
-def _param_default_pairs(d) -> list:
-    """`[(name, default_node), ...]` of a `param_defaults` dict, in order, as an
-    explicit loop over the keys: a comprehension target-unpack over `.items()`
-    boxes both slots on the self-hosted path (the entries became integers and
-    `lower_struct_method_call` indexed `[1]` of one)."""
-    pairs = []
-    dd = _as_dict(d)
-    for k in dd:
-        pairs.append((_as_str(k), dd[k]))
-    return pairs
 
 
 def _gmi_apply_call_site_param_evidence(gen, stmts):
@@ -4527,7 +4516,7 @@ def gen_module_impl(self, stmts):
             self.func_return_types[_mangled] = _rc
             self._mangled_signature_ctypes[_mangled] = list(_pcs)
             if _dflts:
-                self._func_param_defaults[_mangled] = list(_dflts)
+                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
             self._selfhost_locked_param_types.add(_mangled)
         # Recover the `_annotation_dict_val_type` seeding of
         # `_field_dict_val_types` / `_field_dict_nested_val_types` that
@@ -6290,7 +6279,7 @@ def gen_module_impl(self, stmts):
                 except Exception:
                     _mangled = None
                 if _mangled:
-                    self._func_param_defaults[_mangled] = _param_default_pairs(_dflts)
+                    self._func_param_defaults[_mangled] = param_default_pairs(_dflts)
         if isinstance(s, FunctionDef):
             _kw_i = -1
             _ci = 0
@@ -7720,7 +7709,7 @@ def gen_module_impl(self, stmts):
                     _m_dflts = getattr(m, 'param_defaults', None) or {}
                     if _m_dflts:
                         self._func_param_defaults.setdefault(method_full_name,
-                                                             _param_default_pairs(_m_dflts))
+                                                             param_default_pairs(_m_dflts))
 
     for s in all_structs_for_methods:
         if not isinstance(s, StructDef):
@@ -7754,7 +7743,7 @@ def gen_module_impl(self, stmts):
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             if _dflts:
-                self._func_param_defaults[_mangled] = list(_dflts)
+                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
@@ -10100,7 +10089,7 @@ def gen_module_impl(self, stmts):
             self.func_param_types[f"{base}_start"] = param_ctypes
             _gen_dflts = getattr(m, 'param_defaults', None) or {}
             if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = _param_default_pairs(_gen_dflts)
+                self._func_param_defaults[f"{base}_start"] = param_default_pairs(_gen_dflts)
             self._generator_cpp_units.append(cpp_text)
     # The ids come out only here, after EVERY struct has had its turn. Popping
     # inside the loop is precisely what stopped a subclass from being reached.
