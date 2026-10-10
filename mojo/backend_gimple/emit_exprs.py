@@ -6270,6 +6270,20 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._compr_set_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoGenerator *':
         gen._compr_generator_loop(node, gen0, res, res_type, it_val)
+    elif it_type == 'int64_t' or it_type == 'int' or it_type == 'void *':
+        # An OPAQUE handle: the iterable's kind is not statically knowable
+        # (a dict VALUE, a `self.<field>` or a call result whose container type
+        # the self-hosted compiler erased to a word). This arm used to emit
+        # only a `/* TODO: comprehension over int64_t */` marker and produce
+        # an EMPTY comprehension -- silently, with exit 0 -- which is how
+        # `[t for t in inferred[name] if ...]` returned `[]` for every local
+        # in the compiled binary and declared `x = True` as `int64_t`. Resolve
+        # it through the same chokepoint `list(x)`/`all(x)`/`enumerate(x)` use
+        # (DESIGN.html R1/R5), which asks the runtime kind registries instead
+        # of guessing, and walk the resulting list.
+        _opaque_list = gen._materialize_as_list(it_type, it_val)
+        gen.var_types[_opaque_list] = 'MojoList *'
+        gen._compr_list_loop(node, gen0, res, res_type, _opaque_list)
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 

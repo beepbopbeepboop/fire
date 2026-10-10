@@ -2374,7 +2374,11 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
-        return gen._call_expr('char *', *gen._list_repr_call(rav))
+        # Unpacked into named locals, not splatted into the call: a `*call()`
+        # of a returned tuple becomes ONE positional argument once
+        # self-hosted (the whole `(fn, args)` pair printed as the callee).
+        _lfn, _largs = gen._list_repr_call(rav)
+        return gen._call_expr('char *', _lfn, _largs)
     if rat == 'MojoSet *':
         return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
     if rat == 'MojoDict *':
