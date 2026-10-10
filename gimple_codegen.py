@@ -4406,6 +4406,21 @@ class GimpleGen:
     @staticmethod
     def overload_suffix_for(c_param_types) -> str:
         return gfn.overload_suffix_for(c_param_types)
+    def _selfhost_func_return_type(self, fname: str) -> str:
+        """`_SELFHOST_FUNC_RETURN_TYPES.get(fname, 'int64_t')`. A method here
+        because the emit modules cannot read this module-level table
+        themselves in the self-hosted binary (a cross-module global across the
+        import cycle lowers to NULL there)."""
+        if fname in _SELFHOST_FUNC_RETURN_TYPES:
+            return _as_str(_SELFHOST_FUNC_RETURN_TYPES[fname])
+        return 'int64_t'
+    def _scalar_ctype_size(self, ctype: str, dflt: int) -> int:
+        """`_SCALAR_CTYPE_SIZE.get(ctype, dflt)` -- same reason as above."""
+        if ctype in _SCALAR_CTYPE_SIZE:
+            return _as_int(_SCALAR_CTYPE_SIZE[ctype])
+        return dflt
+    def _has_scalar_ctype_size(self, ctype: str) -> bool:
+        return ctype in _SCALAR_CTYPE_SIZE
     def _overload_suffix(self, bare_name: str) -> str:
         return gfn._overload_suffix(self, bare_name)
     def _note_own_func_home(self, bare_name: str, module_name: str, record_scope: bool=True) -> None:

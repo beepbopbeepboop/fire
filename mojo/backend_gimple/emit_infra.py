@@ -3197,7 +3197,7 @@ def _emit_mut_local_box_allocs(gen):
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
-        vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
+        vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
         _box_param_c = gen._mut_boxed_param_c.get(mn)
         if _box_param_c:

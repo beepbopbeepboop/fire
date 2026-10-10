@@ -1894,12 +1894,12 @@ def _gen_stmt_AssignStmt(gen, node):
                                         else:
                                             _am = gimple_ctypes.re.match(r'^(.+)\[(\d+)\]$', ftype)
                                             _ect, _acnt = (_am.group(1), int(_am.group(2))) if _am else ('int64_t', 1)
-                                        if _ect in gimple_codegen._SCALAR_CTYPE_SIZE:
+                                        if gen._has_scalar_ctype_size(_ect):
                                             # Scalar element type: `sizeof(int64_t)` itself
                                             # is rejected by GIMPLE's sizeof grammar (see
                                             # above), so use a literal byte count computed
                                             # in Python instead.
-                                            _nbytes = gimple_codegen._SCALAR_CTYPE_SIZE[_ect] * _acnt
+                                            _nbytes = gen._scalar_ctype_size(_ect, 8) * _acnt
                                         else:
                                             # Struct element type: unlike a scalar typedef,
                                             # `sizeof(StructName)` (a bare aggregate type

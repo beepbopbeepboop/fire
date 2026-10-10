@@ -313,6 +313,22 @@ class TypeLattice:
             return '%u'
         return '%d'
 _TYPE_MAP: dict[str | None, str] = {'Int': 'int64_t', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'uint64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'float': 'double', 'Bool': '_Bool', 'bool': 'int', 'String': 'char *', 'str': 'char *', 'List': 'MojoList *', 'list': 'MojoList *', 'Dict': 'MojoDict *', 'dict': 'MojoDict *', 'Set': 'MojoSet *', 'set': 'MojoSet *', 'Str': 'MojoStr *', 'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *', 'memoryview': 'MojoMemoryView *', 'None': 'void', 'object': 'int64_t'}
+
+
+def type_map_has(name: str) -> bool:
+    """`name in _TYPE_MAP`, as a function. Other modules reach this table
+    through here instead of `gimple_ctypes._TYPE_MAP`: a module-global DICT read
+    across the compiler's own import cycle lowers to a NULL `(int64_t)0`
+    ("ct param or undeclared") in the self-hosted binary, so every
+    `_TYPE_MAP.get(x)` / `x in _TYPE_MAP` there answered "absent"."""
+    return name in _TYPE_MAP
+
+
+def type_map_get(name: str) -> str:
+    """`_TYPE_MAP[name]`, or '' when absent (see `type_map_has`)."""
+    if name in _TYPE_MAP:
+        return _as_str(_TYPE_MAP[name])
+    return ''
 # Python builtin name -> the C type it evaluates to. ONE table, because
 # two consumers need it and they were two lists: `_quick_type` (which
 # types the enclosing function's PROTOTYPE and every local) and
@@ -1053,6 +1069,17 @@ def _mojo_type(ann: str | type | None) -> str:
 def _result_type(t1: str, t2: str) -> str:
     return TypeLattice.join(t1, t2)
 _PTR_OUT_PARAM_SCALAR_ELEMS = frozenset({'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'int', 'unsigned', 'long', 'size_t', 'float', 'double', '_Bool'})
+
+
+def is_scalar_annotation(ann: str) -> bool:
+    """True when the annotation text `ann` resolves (through `_TYPE_MAP`) to a
+    plain scalar C type (`_PTR_OUT_PARAM_SCALAR_ELEMS` or `char`). A function,
+    because other modules read these two module globals across the import
+    cycle, where the self-hosted binary sees NULL (see `type_map_has`)."""
+    if ann not in _TYPE_MAP:
+        return False
+    _ct = _as_str(_TYPE_MAP[ann])
+    return _ct in _PTR_OUT_PARAM_SCALAR_ELEMS or _ct == 'char'
 
 def _elem_type(ptr_type: str) -> str:
     """Strip one level of pointer to get element type."""

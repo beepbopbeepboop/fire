@@ -2525,13 +2525,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._scalar_annotated_locals = set()
     for _dn in gimple_exprtypes._walk_ast(node.body):
         if isinstance(_dn, gimple_ctypes.VarDecl) and getattr(_dn, 'type_ann', None):
-            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
-                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+            if gimple_ctypes.is_scalar_annotation(str(_dn.type_ann).strip()):
                 gen._scalar_annotated_locals.add(_dn.name)
         elif (isinstance(_dn, gimple_ctypes.AssignStmt) and isinstance(_dn.target, gimple_ctypes.IdentExpr)
                 and getattr(_dn, 'type_ann', None)):
-            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
-                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+            if gimple_ctypes.is_scalar_annotation(str(_dn.type_ann).strip()):
                 gen._scalar_annotated_locals.add(_dn.target.name)
     # Per-lexical-scope import tracking: this function body is its own
     # scope — push a fresh frame and pre-record every `from X import ...`
@@ -3265,7 +3263,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
         if (_fann and _fann[0].isupper() and '[' not in _fann
                 and '.' not in _fann and _fann not in gen.struct_field_types
                 and _fann not in gen._IMPORTED_STRUCT_SKIP_BASENAMES
-                and gimple_ctypes._TYPE_MAP.get(_fann) is None):
+                and not gimple_ctypes.type_map_has(_fann)):
             gen._materialize_imported_struct(module, _fann, _fann)
         fields[f.name] = gen._imported_field_ctype(f.type_ann)
     # Carry the struct's real methods along so the signature-registration
@@ -3419,7 +3417,7 @@ def _resolve_sibling_param_ctype(gen, module: str, raw_ptype) -> str | None:
         return None
     if base in gen.struct_field_types:
         return f"{base} *"
-    if gimple_ctypes._TYPE_MAP.get(base) is not None:
+    if gimple_ctypes.type_map_has(base):
         return None  # a real scalar/builtin Mojo type, not a struct
     if gen._materialize_imported_struct(module, base, base):
         return f"{base} *"

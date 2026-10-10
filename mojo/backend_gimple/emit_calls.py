@@ -3256,7 +3256,7 @@ def _struct_ptr_name(gen, ctype) -> str:
     if not isinstance(ctype, str) or not ctype.endswith(' *'):
         return ''
     name = gimple_exprtypes._struct_name_of(ctype)
-    if not name or name in gimple_ctypes._TYPE_MAP:
+    if not name or gimple_ctypes.type_map_has(name):
         return ''
     return name if name in gen.struct_field_types else ''
 
@@ -6434,7 +6434,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # to the known-correct type from _SELFHOST_FUNC_RETURN_TYPES to avoid
     # the `int64_t` default truncating pointer return values.
     if fname in gimple_codegen._SELFHOST_HARDCODED_FUNCS:
-        ret_type = gimple_codegen._SELFHOST_FUNC_RETURN_TYPES.get(fname, 'int64_t')
+        ret_type = gen._selfhost_func_return_type(fname)
 
     # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
     # that the parser skips). Without a declaration GCC gives "implicit function declaration".

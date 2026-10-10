@@ -1124,7 +1124,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name, fields):
+def _render_struct_typedef_body(struct_name: str, fields: dict) -> list:
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1153,9 +1153,15 @@ def _render_struct_typedef_body(struct_name, fields):
         # `dict(x)` copy replaced by an indexed loop + _as_str a few
         # hundred lines below, in gen_module_impl) — this loop shape was
         # never actually the bug.
-        for field_name, field_type in fields.items():
-            field_name = _as_str(field_name)
-            ft = '' + _as_str(field_type)
+        # Keys read by iterating the (now ANNOTATED `dict`) parameter and the
+        # value looked up by key. The `for name, ty in fields.items()` pair
+        # unpack this replaced boxed both slots once self-hosted -- the first
+        # iteration produced `int 0;` -- and the annotation is what tells the
+        # self-hosted backend `fields` is a dict (the thing `.items()` used to
+        # be the only signal for; see the reverted attempt above).
+        for _fk in fields:
+            field_name = _as_str(_fk)
+            ft = '' + _as_str(fields[field_name])
             if ft == f"{struct_name} *":
                 ft = f"struct {struct_name} *"
             safe_fn = _safe_field(field_name)
@@ -7375,7 +7381,7 @@ def gen_module_impl(self, stmts):
                     # convention must win or `Int64(n)` would be observed as a
                     # boxed struct. Same exclusion `_resolve_type` and
                     # `_quick_type`'s `_SCALAR_CTORS` row apply.
-                    and _cname not in gimple_ctypes._TYPE_MAP):
+                    and not gimple_ctypes.type_map_has(_cname)):
                 return f'{_cname} *'
             return None
         return None
