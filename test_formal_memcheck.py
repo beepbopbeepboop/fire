@@ -507,26 +507,33 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
-    # A SET comparison of the keys the writer writes, not a length against a
-    # length. The keys are `basename|backend` (`formal_memcheck.ledger_key`),
-    # and comparing counts was both blind to WHICH programs were covered (a
-    # ledger could omit one and duplicate another and the counts would agree)
-    # and unable to name what was missing, which is the only form of this
-    # assertion a reader can act on: "which programs have no row" is exactly the
-    # question that notices a `--write-ledger` that stopped being run.
+    # The check is a SET comparison in the SAME namespace the writer uses.  It
+    # used to compare `len(rows)` against `len(memcheck_sources() +
+    # example_sources()) * 2`, which is a count of full-path entries against a
+    # count of `basename|backend` keys: the two can only ever agree by accident,
+    # and a count cannot tell a program that lost its row from one that gained a
+    # duplicate.  The writer keys on `basename|backend` (`ledger_key`), so this
+    # builds the expected key set the same way and names what is missing.
     expected = {"%s|%s" % (os.path.basename(p), b)
                 for p in M.memcheck_sources() + M.example_sources()
-                for b in M.BACKENDS}
+                for b in BACKENDS}
     missing = sorted(expected - set(rows))
+    extra = sorted(set(rows) - expected)
     check("the ledger covers every corpus row on both backends",
           not missing,
-          "%d of %d (program, backend) rows have no ledger entry: %s"
-          % (len(missing), len(expected), ", ".join(missing[:8])))
-    extra = sorted(set(rows) - expected)
+          "no ledger row for: %s" % ", ".join(missing))
     check("the ledger has no row for a program the corpus no longer has",
           not extra,
-          "%d ledger row(s) name a program or backend not in the corpus: %s"
-          % (len(extra), ", ".join(extra[:8])))
+          "ledger rows with no corpus program: %s" % ", ".join(extra))
+    # Non-vacuous: dropping one row must be reported BY NAME.  This is the half a
+    # length comparison cannot do, and it is what makes the check above a
+    # coverage statement rather than a coincidence of two counts.
+    if rows:
+        sample = sorted(rows)[0]
+        dropped = sorted(expected - (set(rows) - {sample}))
+        check("the coverage check names a program whose ledger row is missing",
+              dropped == [sample],
+              "dropping %r reported %r" % (sample, dropped))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
