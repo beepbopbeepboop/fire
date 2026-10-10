@@ -151,12 +151,7 @@ over 71 forms, **all steppable** (was 185/67).  Its successor comparison is now
 that set only ZF and SF where `x86_shift_post` sets four were corrected to
 quote `x86_shift_post` itself, and the rows added here are what found the drift
 (its own doc was deleted with the fix, and `SUCCESSOR_FORMS` is the pin).  The
-same three rows' `_SIMP_FORMS` fold sets still spelled the PRE-correction
-wrappers (`x86_set_reg`, `UInt64.ofNat`, `x86_trunc32`, `x86_sign_extend32`),
-so a fold that had to project through them unfolded nothing; those are now
-`x86_get_reg` / `x86_rex_b` / `x86_shift_post`, pinned by the same
-`test_formal_sweep_truth.py` successor guard's fold-set half.  The other four
-checks are green.
+other four checks are green.
 `formal/x86_64_model_fuzz.py --census --per-form 3 --seed 11`: 206 AGREE,
 11 HARNESS, 1 FAULT, 1 NORUN, **0 WRONG**.  `-n 16 --ninstr 6 --seed 5`:
 11 AGREE, 5 HARNESS, 0 WRONG.  `test_x86_64_decode.py`,

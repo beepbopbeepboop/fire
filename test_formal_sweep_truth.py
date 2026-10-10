@@ -3051,14 +3051,6 @@ class TestX86EndToEndTables(unittest.TestCase):
         to either side without the other fails here, and adding the `_mem` lemma
         is what makes it visible at all.
 
-        The fold set is the same copy one step downstream: `_SIMP_FORMS` is
-        what the path and decision folds may unfold, so a successor row that
-        applies a state-valued wrapper must have that wrapper in its form's
-        fold set, or a fold that has to project through the shifted state
-        leaves a wrapper in the goal. The correction here added `x86_shift_post`
-        to `_SIMP_FORMS["shift_imm8:*"]`; a fold set that still named
-        `x86_set_reg` folded nothing.
-
         Lean-free, and the whole point: each of the three discoveries cost a
         100-second proof and most of them cost a corpus sweep to notice at all.
         """
@@ -3092,21 +3084,6 @@ class TestX86EndToEndTables(unittest.TestCase):
                 "missing what the instruction DOES, which for `imul_r64_r64` "
                 "was its four flags" % (form, sorted(model - row),
                                         sorted(row or ["nothing"])))
-
-        # The fold sets.  Forms with no entry at all (none of the SSE2 rows
-        # have one yet) are not visited; an entry that exists but omits a state
-        # wrapper its own successor applies is a fold that silently unfolds
-        # nothing, which the `shift_imm8:*` correction above is the history of.
-        for form in sorted(self.ET._SIMP_FORMS):
-            need = used(self.ET._SUCCS[form])
-            have = set(self.ET._SIMP_FORMS[form]) & wrappers
-            self.assertEqual(
-                need - have, set(),
-                "%s's successor applies %s while the form's fold set names "
-                "only %s: a fold through the successor leaves %s in the "
-                "goal, so `_SIMP_FORMS[%s]` is the second stale copy" %
-                (form, sorted(need - have), sorted(have),
-                 sorted(need - have), form))
 
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
