@@ -428,8 +428,8 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 262,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 262')
+    check(len(word) == 272,
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
