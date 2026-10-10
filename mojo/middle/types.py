@@ -1415,7 +1415,7 @@ def _c_field_name(name: str) -> str:
         return f'_{safe}'
     return safe
 
-def _env_field_ctype(ci, vname: str) -> str:
+def _env_field_ctype(ci: ClosureInfo, vname: str) -> str:
     """The C type of closure `ci`'s ENV FIELD for `vname`.
 
     A capture the closure (or, for a shared sibling env, any member of the
@@ -1440,15 +1440,16 @@ def _env_field_ctype(ci, vname: str) -> str:
     wrong, which gcc reports as a bare pointer/integer mismatch at
     `fused = fusable(st)`, thousands of lines from either half.
     """
-    for _cap in (getattr(ci, 'captures', None) or []):
+    _mut = ci.mut_names
+    for _cap in ci.captures:
         if _as_str(_cap[0]) == vname:
             _ct = _as_str(_cap[1])
-            if vname in (getattr(ci, 'mut_names', None) or ()):
+            if vname in _mut:
                 return f'{_ct} *'
             return _ct
     # Not a declared capture: the only question left is whether the name is
     # a by-reference one the capture list never spelled out.
-    if vname in (getattr(ci, 'mut_names', None) or ()):
+    if vname in _mut:
         return 'int64_t *'
     return 'int64_t'
 
