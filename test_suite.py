@@ -980,8 +980,8 @@ def test_over_provisioned_classes_are_reported_not_silently_kept():
           f'and the same numbers DO trip it with a lower floor')
     check('over-provisioned: the registry itself has no over-provisioned job',
           not suite.over_provisioned(),
-          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
-                    for n, _p, c, g in suite.over_provisioned()))
+          '; '.join(f'{n} {f:.0f}x in {c} ({p:g} GB peak)'
+                    for n, p, c, f in suite.over_provisioned()))
     check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
           len(suite.at_floor()) >= 3,
           f'{len(suite.at_floor())} at the floor class: a list that can only be '
