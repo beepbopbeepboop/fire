@@ -797,6 +797,18 @@ MEASURED_PEAK_GB = {
     # the shift and multiply against their definitions — it is a MODEL check in
     # pure python and does no Lean, so it is fast rather than empty.
     'formal-x86-model':                       (1.3, 'measured'),   # 223 samples, 80 forms
+    # The 321-file stdlib corpus through interpreter and JIT, 2163 s. RED (15
+    # pass / 306 fail, mostly unimportable stdlib modules) and recorded anyway:
+    # all 321 items ran to completion, so this is what the job needs and not how
+    # far it got.
+    #
+    # The WORST of two runs, because they disagree by half: 34.9 GB at
+    # MEMLIMIT_GB=96 and 52.2 GB at `program` — the same 321 items, the same
+    # inputs, 2163 s each. `trusted_peaks` keeps the worst for exactly this
+    # reason, and a class sized to the smaller of them would be a coin flip.
+    # The spread is the finding; see
+    # bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md.
+    'stdlib-tests':                           (52.2, 'measured'),  # 321 items, of 34.9/52.2
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1067,6 +1079,11 @@ CLASS_ABOVE_PEAK = {
     # check exists to catch. `program` (55 GB) still covers the measurement at
     # 1.19x. Settling it properly means measuring unique pages instead of the
     # sum; that is bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md.
+    'stdlib-tests': 'the peak is UNSTABLE across runs (34.9 and 52.2 GB for '
+                    'the same 321 items) and 52.2 is the worst; `program` (55) '
+                    'covers it at 1.05x where class_for_peak wants `stage` '
+                    '(96), which would reserve the whole machine-wide ledger '
+                    'for one job and make it unadmittable on a smaller budget',
     'formal': '46.2 GB is summed tree RSS over 32 Lean processes and reads '
               'HIGH (see procrun.tree_usage); `program` (55 GB) covers the '
               'measurement at 1.19x, where `stage` (96 GB) would reserve the '
@@ -2440,7 +2457,21 @@ test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='me
      desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
-test('stdlib-tests', [PY, 'test_stdlib.py'],
+test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
+     memwhy='measured 52.2 GB over 2163 s — the 321-file stdlib corpus, '
+            'interpreter and JIT — against a `small` (8 GB) class it carried, '
+            'which RESOURCE-capped it in 9 s. This is the one job in this batch '
+            'whose class goes UP: it was a guess, and the guess was low. It is '
+            'also the one whose peak is UNSTABLE — the same 321 items measured '
+            '34.9 GB and 52.2 GB on two runs — so `program` (55 GB) covers the '
+            'worst at 1.05x rather than the 1.5x the ratchet asks for. '
+            '`class_for_peak(52.2)` is `stage` (96 GB), which would reserve the '
+            'entire machine-wide ledger for one job and make it unadmittable on '
+            'any budget under 96 GB; that is a worse failure than a thin margin '
+            'and it is why this is a CLASS_ABOVE_PEAK entry. Over the 4 GB '
+            'line and therefore a debt, not a fact; the spread is '
+            'bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md. See ' +
+            MEM_DEBT_DOC,
      desc='every stdlib test/benchmark through interpreter and JIT')
 # Fresh by design: reusing the built dylib would make "did this module fall
 # back to source" unanswerable, and that skip count is the signal CLAUDE.md's
