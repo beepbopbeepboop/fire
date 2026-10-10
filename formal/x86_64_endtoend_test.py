@@ -691,6 +691,12 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
     "alu_rr:xor":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # The shifts write ZF and SF and leave CF and OF alone, which is the
+    # difference from every row above and the reason this is not the same shape:
+    # the model's `x86_flags_logic` computes all four and the record update
+    # overrides only two, so a successor that also asserted `cf`/`of_` would be
+    # a claim about a field the instruction does not set.
+    #
     # `x86_shift_post`, the model's own named successor, and NOT a
     # re-derivation of it. The three rows here each spelled out the shift and
     # then took ZF and SF from `x86_flags_logic`, which was the model as it
@@ -2211,10 +2217,15 @@ _SIMP_FORMS = {
                    "x86_flags_logic"),
     "alu_rr:cmp": ("x86_get_reg", "x86_rex_b", "x86_rex_r", "x86_flags_sub"),
     "alu_rr:test": ("x86_get_reg", "x86_rex_b", "x86_rex_r", "x86_flags_logic"),
-    "shift_imm8:shl": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "UInt64.ofNat"),
-    "shift_imm8:shr": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "UInt64.ofNat"),
-    "shift_imm8:sar": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
-                       "x86_trunc32", "x86_sign_extend32"),
+    # The shift's successor is `x86_shift_post`, not `x86_set_reg` plus a
+    # `x86_flags_logic` — the model was corrected and these three rows have to
+    # name the definition its successor actually applies, or a fold that has to
+    # project through a shift leaves the goal open. `x86_set_reg`, `UInt64.ofNat`,
+    # `x86_trunc32` and `x86_sign_extend32` were the pre-correction spelling and
+    # are not in the term any more.
+    "shift_imm8:shl": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
+    "shift_imm8:shr": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
+    "shift_imm8:sar": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
     "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
                      "x86_set_flag4", "x86_imul_ovf"),
     "cqo": ("x86_cqo",),

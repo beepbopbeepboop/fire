@@ -9,8 +9,7 @@ nothing in the pair knows the callee returns nothing.
 **Status: PARTIAL, and the half that is OBSERVABLE is FIXED (2026-10-04,
 `formal/model.py` + both emitters).** `print` of a call to a function of this
 module that returns nothing — and of a local every one of whose bindings is such
-a call, and, since 2026-10-07 (§0d), the same value as a `printf` vararg — is
-now REFUSED on both architectures, with a message that names the
+a call — is now REFUSED on both architectures, with a message that names the
 callee, says what CPython answers (`None`) and says what this path would have
 printed instead. §0b is what landed and §0b's measurement is the one §4 step 1
 was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
@@ -20,66 +19,6 @@ the rule is asked at is.
 **What is left is §0b's "What is still not fixed": the positions where nothing
 OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
 read local), which need either a liveness pass or direction (b) below.**
-
-## 0d. The other spelling of "render this word" was unguarded and is now fixed
-## (2026-10-07, `work/formal142-docs`)
-
-**§0b's one reader was asked at `_print_call` only, so `printf` — the second
-place a value this path cannot carry becomes TEXT — was never checked.** `print`
-builds its format from its operands and refuses each; a `printf` the source
-wrote was checked for a usable FORMAT and for the callee's declared parameter
-kinds, and nothing asked whether a vararg was a return-less call. Measured,
-both architectures, before the fix:
-
-```console
-$ cat .tmp/rn2/p2.mojo
-def g(a, b):
-    w = 1
-
-def main() -> Int32:
-    printf("%d\n", g(1, 2))
-    return 0
-$ python3 tools/memslot.py --gb 8 --label rn -- python3 fire.py build --formal \
-      --no-prove -o .tmp/rn2/y .tmp/rn2/p2.mojo     # and --backend=x86_64
-Built: .tmp/rn2/y  [arm64/macho]      # exit 0
-$ .tmp/rn2/y
-0                                    # where print(g(1, 2)) was already refused
-```
-
-`0` is the word `g`'s epilogue left behind — the same divergence §0b refuses,
-at the other spelling of the same position. The conversion consumes the word
-exactly as `print`'s does, so there is no reading on which this is a different
-question.
-
-**What landed.** `formal/model.py::returnless_printf_argument_refusal` is the one
-reader of which arguments of a printf-style call become text: the varargs after
-`printf_format_arg_index`'s format, each asked through the SAME
-`ValueKinds.no_value_callee_of` hook `_print_call` uses, so the two positions
-cannot answer "is this a return-less result" differently. `returnless_value_refusal`
-grew a `rendering` parameter so the message names the call that renders
-(`printf()` here, `print()` by default), and the taxonomy row's two clauses are
-unchanged. Both emitters ask it at the same line they ask
-`_refuse_unusable_printf_format`, so the two architectures cannot disagree.
-
-**The measurement, and it is the one §0b's table claimed and did not take.**
-`grep -n 'printf([^)]*([^)]*)'` over this repository and
-`../new-modular/Mojo/stdlib/std` finds six lines, every one of them either prose
-in a docstring (`formal/hostmods/math.mojo:79,146`), a callee that returns a
-value (`snprintf(b, 24, "%d", get_int(out, name) + 1)` — the `+ 1` is the
-proof), or a memcheck fixture, so the refusal reaches **0 build sites** — as
-§0b said of `print`. The real builds behind it stay green:
-`test_formal_hostmods_census.py` 74/74 rows, `test_formal_argparse.py` PASS=10,
-`test_formal_external_call.py` 51 (its one red, `env_round_trip`, is a
-`str(n)`-conversion refusal that reproduces with this change reverted).
-
-Rows: `test_formal_value_model.py`'s `REFUSALS` —
-`a_printf_argument_of_a_return_less_function_is_refused` and
-`a_printf_argument_named_by_a_return_less_local_is_refused`, each a build on
-BOTH architectures that must refuse naming `printf() is asked to render the
-value of g(…)`. PASS=124 FAIL=0.
-
-**What is still not fixed is unchanged** — the positions where nothing OBSERVES
-the value are §0c's, and direction (b) is still the only answer for them.
 
 ## 0c. What is left, measured per POSITION (2026-10-04, `work/formal28-1`) —
 ## and the one bucket that decides nothing is 62 sites in one file the gate

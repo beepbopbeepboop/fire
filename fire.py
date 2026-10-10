@@ -1612,10 +1612,11 @@ def main():
 
             if tokens is not None:
                 try:
-                    # Format tokens for consistent output (fire_compiler.format_token:
-                    # a typed top-level function, so the self-hosted binary reads
-                    # `tok.kind` as the string it is).
-                    from fire_compiler import format_token
+                    # Format tokens for consistent output
+                    def format_token(tok):
+                        kind_str = tok.kind
+                        val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
+                        return f"Token(kind={kind_str}, value={val_repr}, line={tok.line}, col={tok.col})"
                     formatted = [format_token(t) for t in tokens]
                     with open(f"{basename}.tok", "w") as f:
                         f.write("[" + ", ".join(formatted) + "]")

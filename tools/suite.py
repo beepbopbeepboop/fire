@@ -2145,10 +2145,20 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # defect "really" belongs to a sibling job. A RED job with no marker is a hole
 # in the gate: nothing reports it, and `expect=` costs 4 s here.
 SELFHOST_STAGE2_EMPTY_DUMP = (
-    'the compiled binary dumps every single-module input (46 of 46, `.tok` '
-    'byte-identical) but cannot yet compile its own closure: '
-    '`bootstrap-stage2-transitive` is disabled (it does not finish), so the '
-    'stage3 trees these compare do not exist. See '
+    'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
+    'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) and no longer '
+    'emits `mojo_unsupported_iter` (re-measured 2026-10-03: the per-item '
+    'fanout rejects none), but `--dump` on the compiled binary writes a correct '
+    '`.pyi` and a `.tok`/`.ast` BYTE-IDENTICAL to stage1\'s and then fails: 43 '
+    'of its 46 inputs exit non-zero — 41 of them die on SIGSEGV/SIGBUS with no '
+    'output at all, and the two `.py` closure inputs are refused with '
+    '`Unexpected SEMICOLON(\';\')` — so no `.ci` is written. (Re-measured '
+    '2026-10-04: this text said the `.tok`/`.ast` were ABSENT and the `.ci` '
+    'EMPTY, which was the shape before the tokenizer and parser fixes landed, '
+    'and 45 of 46 before `mojo_id` closed the `TypeError` class.) stage2 and '
+    'stage3 agree with each other exactly '
+    '(0 diffs), so it is the binary computing something other than the '
+    'reference, deterministically. See '
     'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
@@ -2422,19 +2432,37 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # tokenizer and the parser made `.tok`/`.ast` byte-identical and moved the
 # failure into the compiled codegen, where it is loud.
 #
+# `expect=` IS here, and it is COUNT-CHECKED, because this fanout is RED:
+# measured 2026-10-04, 43 of the 46 items exit non-zero (45 of them before
+# `mojo_id` closed the `TypeError` class) and only `mojo_failures.mojo`,
+# `t1.mojo` and `bootstrap_test_single_expr.mojo` pass. See the 2026-10-04 entry in the history block
+# above for why the "this fanout cannot see the class" reasoning that retired
+# the marker on 2026-10-03 stopped being true: the compiled binary no longer
+# writes a silent empty `.ci`, it fails. The count is what makes the marker a
+# claim rather than a category — as items go green this has to be updated (or
+# dropped, which the runner says out loud), and a NEW failure inside the
+# already-marked sweep is a FAILURE rather than an absorbed EXPECTED.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
+       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
+              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — all 40 '
+              'die on SIGSEGV/SIGABRT/SIGBUS with no diagnostic, which is the '
+              'whole of what is left (the loud classes are gone: no more '
+              '`TypeError: unhashable type: \'list\'`, no more `Unexpected '
+              'SEMICOLON`). Re-measured 2026-10-04: 45 of 46 before `mojo_id` '
+              'closed the TypeError class, 43 before the struct-tag read was '
+              'validated. See '
+              'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      driver='mem', mem='tiny', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'],
@@ -2446,14 +2474,12 @@ fanout('bootstrap-stage3-dumps',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`

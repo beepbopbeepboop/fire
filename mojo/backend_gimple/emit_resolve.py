@@ -2359,24 +2359,10 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._new_val('int', f'(int){rav}'))])
-    # A BOXED CONTAINER — a module-global list/dict/set read back as an
-    # `int64_t`, or a call result whose static type is the box but whose real
-    # value, per `_get_actual_type`, is a container. `_stringify_value` (the
-    # `str()` / `%s` / f-string route) already does exactly this re-typing,
-    # and its absence here is why `repr(x)` and `'%r' % x` printed the box's
-    # decimal address while `str(x)`, `print(x)` and `'%s' % x` were right.
-    # The container arms below are the same ones `_stringify_value` uses.
-    if rat in ('int', 'int64_t', 'void *'):
-        _real = gen._get_actual_type(rat, rav)
-        if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
-            rat = _real
-            rav = gen._new_val(_real, f'({_real}){rav}')
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
         return gen._call_expr('char *', *gen._list_repr_call(rav))
-    if rat == 'MojoSet *':
-        return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
     if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
     if rat == 'MojoBytes *':

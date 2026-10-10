@@ -215,8 +215,8 @@ def _callable_param_ret_types(gen, fn_node) -> dict:
 
     `r` is a `char *` and every consumer that needs to know that — `len`, a
     `for` loop, `print` — has nothing to dispatch on, so the program iterates
-    nothing and exits 0. That shape is fixed (2026-10-02) by this table; this
-    is its reader.
+    nothing and exits 0. See
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
 
     Deliberately NARROW, and the narrowing is the doc's own: a bare-name
     default only, so the answer is the DEFINING function's own inferred

@@ -246,23 +246,6 @@ def _range_args(iterable):
     return None
 
 
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
-
-
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
 
@@ -4389,20 +4372,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             arg, self._vkinds,
             is_float=lambda e: self._expr_str_kind(e) == M.FLOAT_KIND)
 
-    def _printf_arg_container_kind(self, arg):
-        """The operand's own KIND, or None — the evidence `printf_container_
-        conversion_refusal` reads.
-
-        The fourth hook of `model.printf_format_refusal`, and the one fact it
-        needs that the model cannot derive: this function's `ValueKinds`. A
-        container's kind is what says its one word is a blob's ADDRESS, so the
-        decision about which conversions may not read it as a number is the
-        model's, and this method is the same two lines arm64 and x86-64 both
-        write. None when there is no `ValueKinds` to ask, which is the
-        permissive direction the other hooks take and never refuses.
-        """
-        return None if self._vkinds is None else self._vkinds.kind_of(arg)
-
     def _refuse_word_position_kind_mismatch(self, name, e) -> None:
         """Raise when an argument's kind contradicts the callee's OWN annotation.
 
@@ -4453,7 +4422,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _refuse_unusable_printf_format(self, name, e) -> None:
-        """Raise when `e`'s FORMAT cannot be used, for any of its reasons.
+        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
         Delegation, and nothing else: the callee sets, the format-argument
         index, the conversion scan, the three-way narrowing and the messages are
@@ -4470,8 +4439,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else None,
             args[idx + 1:] if idx is not None else args[1:],
             self._printf_arg_is_text, self._printf_arg_text,
-            self._printf_arg_conversion_class,
-            self._printf_arg_container_kind)
+            self._printf_arg_conversion_class)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -6676,40 +6644,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # answer. arm64 reads the same tree through the same `M` reader.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
-            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
             leaves = _for_tree_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The target as a TREE, not the flattened leaf list: a nested
-            # group is a second unpack against the element at that position,
-            # and comparing the outer blob's count against the number of
-            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
-            # and exit 1 with nothing printed, where arm64 and CPython answer
-            # 21. `M.for_target_tree` is the one builder both backends ask.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The TARGET AS A TREE, not the flattened name list: a nested group
-            # `a, (b, c)` must stay a nested group so the arity check counts 2
-            # against the element's blob and recurses, exactly as arm64's
-            # `_emit_for_unpack` does.  Flattening it (the old
-            # `_emit_for_unpack(tnames, …)` here) compared the blob's count of
-            # 2 against a target count of 3 and exited 1 with nothing printed,
-            # where arm64 and CPython both answer.  `M.for_target_tree` is the
-            # one parser both backends now use, so the two cannot disagree
-            # about what a target's shape is.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -7533,21 +7469,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 right_is_dict=self._is_dict_subscript(e.right))
             if reason is not None:
                 raise CodegenError(reason)
-        # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
-        # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
-        # both the two-set case (which arm64 lowers) and the not-two-sets case
-        # (a CPython `TypeError`).  Without this the deferral would let the
-        # operands reach the integer ALU as two blob ADDRESSES, which is the
-        # measured bug the gate exists for (`s & {2}` answered 2 on arm64 and
-        # 163061056 here; `s - {2}` SIGSEGVed on both).
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(e.left))
-                or M.container_operand_is_blob(self._expr_str_kind(e.right))):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(e.left), M.spelled(e.right),
-                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                backend_has_emitter=False))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -8569,26 +8490,7 @@ preference.
             # on this one.
             raise CodegenError(reason)
         target = stmt.target
-        # `&`/`-`/`^` between two BLOBS are set algebra and the shared gate now
-        # DEFERS them, but a subscript TARGET is an element, not a whole set
-        # variable, and this backend has no fresh-blob lowering to store back
-        # here either: without this the deferral would let `a[0] &= b` reach the
-        # ALU as two blob addresses.
-        if op in M.SET_ALGEBRA_OPS and (
-                M.container_operand_is_blob(self._expr_str_kind(target))
-                or M.container_operand_is_blob(self._expr_str_kind(stmt.value))):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(target), M.spelled(stmt.value),
-                self._expr_is_set_like(target),
-                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
         self._emit_subscript_addr(target)             # RAX = address
-        # The element's width belongs to the TARGET, and the RHS below can
-        # itself be a subscript (`q[0] += r[1]`) whose address computation
-        # overwrites `_sub_width`. The store at the end would then write at the
-        # RHS's width — eight bytes into a `Pointer[Int32]` — so it is captured
-        # here, after the target's address is decided and before anything else
-        # can run, and restored before the store.
-        width = self._sub_width
         self._push_slot(Reg.RAX)                      # [rsp] = address
         self._emit_subscript_load(Reg.RAX)            # old element, at its width
         self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
@@ -8624,7 +8526,6 @@ preference.
         # happens, the function returns, and the damage only shows up as a
         # number that is a pointer. arm64's twin uses X9 for the same reason.
         self._pop_slot(Reg.R10)                       # R10 = address
-        self._sub_width = width                       # the TARGET's, not the RHS's
         self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
@@ -9404,7 +9305,6 @@ preference.
             # `M.for_target_tree`.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
             leaves = _for_tree_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
@@ -9540,8 +9440,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
-            deref_kind=lambda e: M.pointer_deref_kind(
-                fn, e, self._structs, self._functions),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
@@ -10220,11 +10118,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are.
-            return (self._expr_is_set_like(e.left)
-                    and self._expr_is_set_like(e.right))
         return False
 
 
@@ -10565,16 +10458,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `is_extern_call`, so `external_call["printf", Int32](fmt, n)` is asked
         # the same question.
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, each of which the format's conversions
-        # turn into TEXT.  A return-less call here is the same value this path
-        # cannot carry that `_print_call` refuses for `print`, at the other
-        # spelling of "render this word" — see
-        # `model.returnless_printf_argument_refusal` for why it is one reader and
-        # not a second copy of `_print_call`'s loop.
-        reason = M.returnless_printf_argument_refusal(
-            name, list(e.args or []), self._vkinds.no_value_callee_of)
-        if reason is not None:
-            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —

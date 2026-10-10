@@ -1,20 +1,5 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
-**Status (2026-10-07, `work/formal135-docs`): the FIVE names §0.5 said the
-`find_spec` oracle decides are LANDED.** `_gdbm`, `_tkinter`, `_overlapped`,
-`_winapi` and `_wmi` join `HOST_UNREACHABLE` — the rule at the top of
-`formal/imports.py` applied rather than a new category: `_gdbm` needs libgdbm and
-`_tkinter` needs Tk (libraries outside libSystem), and the other three are
-Windows-only. All five are private, so the PUBLIC unclassified count moves by
-zero, exactly as §0.5 said. The census is now `unclassified 200` (was 205),
-`unreachable 27` (was 22); the file's other counts (223/216/217 in the older
-sections) are the historical readings §0.5 already corrected. Pinned by
-`test_formal_imports.py::test_the_five_gdbm_style_names_are_unreachable` and by
-`test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`, which names each with
-its tier and reason. **The remaining 200 per-name judgements are still NOT
-done, and §0.1's reason still stands: nothing imports them, so there is no
-measurement to tell a right entry from a plausible one.**
-
 **Area:** FORMAL (module classification — `formal/imports.py`'s
 `HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED` / `HOST_NOT_A_MODULE`,
 and the wording of `unresolvable_import_error`). **Status: the FALSE SENTENCE is
@@ -24,19 +9,6 @@ judgements are still to do — with the coverage question answered, and the answ
 is ZERO. §0.4 closes the LAST of §0.3's list: `not-code` is an eighth VERDICT, so
 the tier's fourth answer no longer shares a string with the typo answer, and the
 two RED tests on master that measured the consequence are green (2026-10-05).**
-
-**Status 2026-10-07 (`work/formal114-docs`): §0.5's named next step is TAKEN
-for the five names `find_spec` decides.** `_gdbm`, `_overlapped`, `_tkinter`,
-`_winapi` and `_wmi` are now in `HOST_UNREACHABLE` — `importlib.util.find_spec`
-returns NO SPEC for each on this host, so the object (the gdbm library, Tcl/Tk,
-and the Windows overlapped-I/O, Win32 API and WMI objects) is missing from the
-target, which is the rule at the top of `formal/imports.py` applied. They are
-carried in `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS` with their
-tier, and pinned by
-`test_formal_imports.py::test_the_find_spec_decided_names_are_unreachable`.
-All five are private, so the PUBLIC unclassified count is unchanged; the
-`unclassified` count falls 205 → **200**. The other 200 are still §0.1's
-per-name judgements with no corpus exposure, and this does not change that.
 
 **Status 2026-10-05 (`work/formal54-docs`): §0.1's measurement RE-CONFIRMED on a
 corpus 20% larger, the per-verdict census REFRESHED (this document's stated

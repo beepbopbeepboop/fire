@@ -1394,13 +1394,7 @@ AXIOM_CLOSURE = {
     # `test_the_axiom_names_are_classified_not_guessed`; `library_theorems` had
     # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
     # prefix, so 98 attributed declarations were never asked about at all.
-    # 2026-10-08: 26 declarations, not 24.  `negative_values_order_by_value_not_by_magnitude`
-    # and `an_infinity_is_ordered` (f4e905eb) are pure `UInt64`/`Bool` comparison
-    # facts, so they are proved with `decide` and are KERNEL-CHECKED: `reaches`
-    # stays 19 and `clean` rises 5 -> 7.  They first landed as `native_decide`,
-    # which silently moved this row to (26, 21, 5) and made
-    # `formal-sweep-truth` red on any tree with the Lean library built.
-    "IEEE754": (26, 19, 7, 0, 0, 0),
+    "IEEE754": (24, 19, 5, 0, 0, 0),
     # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
     # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
     # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the

@@ -232,9 +232,7 @@ the frame receiver), `globals` (module-level `__DATA` slots, read through a
 local and written by a helper through its own `global`), `generics` (`def
 f[T](x: T, …)` called at more than one type, which is what monomorphisation
 acts on), `environ` (`os.getenv` against a FIXED process environment,
-`FIXED_ENV`, drawn through the operations the foreign bytes support — `print`,
-`==`/`!=` and `is None`; `len` of them is the byte-vs-character refusal, so it
-is deliberately not drawn).
+`FIXED_ENV`).
 
 The value-model half: `strings` (binding, `len`, comparison, the byte
 subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
@@ -1382,7 +1380,7 @@ MIXES = {
     "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
                  ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
     # The process environment, against a FIXED one (`FIXED_ENV`).
-    "environ": (("environ_get", 4), ("environ_none", 3), ("environ_cmp", 3),
+    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
                 ("if", 2), ("assign", 2), ("augassign", 2)),
 # The REFUSAL half of the corpus: constructs OUTSIDE the modelled subset,
     # emitted on purpose, because nothing else here can reach a refusal. Every
@@ -2011,7 +2009,7 @@ class Gen:
             "str_endswith", "str_lstrip", "str_meth_len",
             "global_build", "global_read", "global_write", "global_bump",
             "global_container", "generic_define", "generic_call",
-"environ_get", "environ_none", "environ_cmp",
+"environ_get", "environ_len", "environ_cmp",
             "str_concat", "str_new_method", "slice_print", "dict_method",
             "try_handler", "unknown_callee", "big_blob",
             "loop_else", "loop_nested", "closure_def", "closure_call",
@@ -2118,7 +2116,7 @@ class Gen:
             self.global_stmt(indent, kind)
         elif kind in ("generic_define", "generic_call"):
             self.generic_stmt(indent, kind)
-        elif kind in ("environ_get", "environ_none", "environ_cmp"):
+        elif kind in ("environ_get", "environ_len", "environ_cmp"):
             self.environ_stmt(indent, kind)
         elif kind in ("str_concat", "str_new_method", "slice_print",
                       "dict_method", "try_handler", "unknown_callee",
@@ -3052,22 +3050,10 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
-    #
-    # **`environ_len` was `len(os.getenv(k))` and is gone: the backend refuses
-    # that spelling, so every program this mix drew was refused and the harness
-    # (`test_formal_fuzz.py::check_mix_builds`) correctly reported a family that
-    # measured nothing.** `len` of a kernel-supplied `char *` is an honest
-    # refusal with a repair — `formal/model.py`'s `len(...)is len() of bytes the
-    # KERNEL supplied`, pinned by `test_formal_unicode.py` — because a byte count
-    # and a character count differ for every non-ASCII value and nothing in the
-    # source says which the kernel gave. What the optional CAN carry is the
-    # comparison the doc's own "what is expected" names, so the family draws
-    # `os.getenv(k) is None` instead: valid CPython, lowered on both backends,
-    # and it exercises the `Optional[String]` the environ model actually returns.
     def environ_stmt(self, indent, kind):
         key = self.rng.choice(sorted(FIXED_ENV))
-        if kind == "environ_none":
-            self.emit(indent, f"print(1 if os.getenv({key!r}) is None else 0)")
+        if kind == "environ_len":
+            self.emit(indent, f"print(len(os.getenv({key!r})))")
             return
         if kind == "environ_cmp":
             self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
@@ -5455,14 +5441,6 @@ def classify(results, want_exit, want_out, args):
     if any(r.get("verdict") == "timeout" for r in results.values()):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
-        # Counted apart from the mismatches on purpose: `trapped` is the
-        # stack-floor guard refusing, and the guard bounds a BYTE budget
-        # (`formal/model.py::STACK_FLOOR_BUDGET_BYTES`) against frames that are
-        # 128 KiB on arm64 and 16 KiB on x86-64 — so the same program runs 8x
-        # deeper on x86-64 (`model.stack_floor_depth`: 60 vs 480), and a pair
-        # where one machine answers and the other traps is that budget, not two
-        # backends disagreeing about the language. Reporting it as an ordinary
-        # parity finding would file the frame size on every sweep.
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend

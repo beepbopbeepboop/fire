@@ -38,7 +38,6 @@ Run:  python3 test_struct_formal.py [-v]
 import argparse
 import os
 import re
-import resource
 import shutil
 import signal
 import struct
@@ -136,49 +135,6 @@ def _how_it_died(run):
     return child_exit_reason(run.returncode, run.stderr)
 
 
-def _child_cpu_seconds():
-    """CPU (user+system) seconds this process's REAPED children have used.
-
-    `RUSAGE_CHILDREN` accumulates the CPU of every child this process has
-    waited for, and of their waited-for descendants, so a snapshot taken
-    immediately BEFORE the image is run and one taken after it has been reaped
-    differ by exactly the image's own CPU.  That is what turns a hang's two-way
-    branch — "never got SCHEDULED (the machine)" vs "SPINNING inside the image"
-    — from a question a reader answers by inspection into a number the message
-    carries, which is what `bugs/FORMAL_a_calcsize_image_hangs_once_in_several.md`
-    §"What is left" asks for.
-
-    A process that never ran uses ~0 s; a process that is looping burns CPU at
-    wall speed.  Neither is a proof by itself — a process BLOCKED in a syscall
-    also uses ~0 s, which is why the message reports the number rather than
-    calling a small one starvation — but it rules the spinning reading in or
-    out, and that is the half no other evidence in a timeout covers.
-    """
-    r = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return r.ru_utime + r.ru_stime
-
-
-#: CPU seconds below which a hung child is NOT attributed to a loop in the
-#: image.  Far above scheduling jitter (a real spin uses the whole timeout) and
-#: far below any real timeout, so neither a loaded machine nor startup moves it.
-_HANG_SPIN_CPU_S = 0.5
-
-
-def _hang_reading(used):
-    """The one sentence that decides a hang's two-way branch from `used` CPU.
-
-    Split out of `build_and_run` so both readings can be pinned by a DIRECT
-    call with a number, rather than by hoping the machine schedules a probe
-    into one branch or the other.  `used` is the child's own CPU seconds.
-    """
-    if used >= _HANG_SPIN_CPU_S:
-        return (f"it used {used:.1f}s of CPU, so it was SPINNING inside "
-                f"the image — a fact about the IMAGE")
-    return (f"it used {used:.2f}s of CPU, so it was not spinning: it was "
-            f"never SCHEDULED or it is BLOCKED, and either way that is a fact "
-            f"about the MACHINE")
-
-
 def _preserve_a_hung_image(name, out, path):
     """Copy the image and the source that produced it somewhere they survive.
 
@@ -255,12 +211,10 @@ def build_and_run(tmpdir, name, source):
     if result.returncode != 0:
         raise AssertionError(
             f"build failed: {(result.stderr or result.stdout).strip()[-600:]}")
-    cpu_before = _child_cpu_seconds()
     try:
         run = subprocess.run([out], capture_output=True, text=True,
                              timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
-        used = _child_cpu_seconds() - cpu_before
         kept = _preserve_a_hung_image(name, out, path)
         where = (f"the image and its source are kept in {kept}: `file "
                  f"{os.path.join(kept, os.path.basename(out))}`, and "
@@ -268,11 +222,6 @@ def build_and_run(tmpdir, name, source):
                  f"whether it is looping" if kept else
                  f"the image COULD NOT be copied out of {tmpdir}, so it is "
                  f"gone and the only evidence is this message")
-        # The measurement that DECIDES the two readings, rather than offering
-        # them: a looping image burns CPU for the whole timeout, a process that
-        # never got scheduled uses none (`_hang_reading` is the one place the
-        # threshold and the sentence live).
-        verdict = _hang_reading(used)
         raise AssertionError(
             f"the image was built and then did not finish within "
             f"{RUN_TIMEOUT}s — it is hung, not slow, and the cases after this "
@@ -280,8 +229,7 @@ def build_and_run(tmpdir, name, source):
             f"to propagate.  Two readings, and they are not the same fault: a "
             f"process that never got SCHEDULED is the machine (look at "
             f"`build/suite.log`'s measured peak and at how many jobs ran at "
-            f"once), while a process SPINNING is the image.  Measured rather "
-            f"than offered: {verdict}.  And {where}."
+            f"once), while a process SPINNING is the image — and {where}."
         ) from None
     return ([ln for ln in run.stdout.split("\n") if ln.strip() != ""],
             _how_it_died(run))
@@ -1368,32 +1316,6 @@ def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
         f'{detail!r}: a starved process and a spinning one are different '
         f'faults in different places, and a message that offers only one sends '
         f'the reader to the wrong one.'))
-    # …and the measurement that DECIDES between them.  The real hang above is
-    # a `while True` image, so its message must carry a CPU figure and one of
-    # the two attributions — that is the production path.  Whether the machine
-    # scheduled the probe well enough to land in the HIGH branch is not
-    # something a shared box can be asked to guarantee, so the two branches
-    # themselves are pinned by DIRECT calls with a number.
-    verdicts.append((
-        'CPU' in detail and ('SPINNING inside the image' in detail
-                             or 'not spinning' in detail),
-        'harness: a hang message carries the child\'s CPU and decides the '
-        'reading, not merely offering two',
-        f'{detail!r}: a message that offers the two readings without measuring '
-        f'sends the next reader to `gdbtool.py` for a question the CPU time '
-        f'already answered (`bugs/FORMAL_a_calcsize_image_hangs_once_in_'
-        f'several.md` §"What is left").'))
-    verdicts.append((
-        'SPINNING inside the image' in _hang_reading(3.0)
-        and '3.0s' in _hang_reading(3.0),
-        'harness: a child that burned CPU is attributed to the IMAGE',
-        f'{_hang_reading(3.0)!r}: a looping image burns CPU at wall speed, so '
-        f'a real spin must be named as the image\'s fault.'))
-    verdicts.append((
-        'not spinning' in _hang_reading(0.0) and 'MACHINE' in _hang_reading(0.0),
-        'harness: a child that used no CPU is attributed to the MACHINE',
-        f'{_hang_reading(0.0)!r}: a process that never ran, or is blocked, used '
-        f'no CPU, so it must not be blamed on a loop in the image.'))
 
     for ok, what, detail in verdicts:
         RESULTS.append((ok, what, detail))

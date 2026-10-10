@@ -257,66 +257,6 @@ class TestLibraryCensus(unittest.TestCase):
             f"these, and Lean does not warn about a hole in an imported .olean")
 
 
-class TestABreachIsNotAVerdict(unittest.TestCase):
-    """A bound breach is a fact about the MACHINE, so it is never CACHED.
-
-    `proof_census` reads the verdict cache BEFORE it runs Lean, so a `fail`
-    written there for a wall-clock timeout is replayed by every later run on
-    every worktree and can never be cleared by a re-run — exactly the
-    `checked_run.py` rule about a cached red, re-introduced one layer down.
-    The launcher reports a breach as its own `exceeded` field and
-    `proof_census` must publish nothing for one. This pins that from both
-    sides: a breach publishes nothing, and a real Lean failure still does, so
-    the guard is a distinction rather than a publish-nothing switch.
-
-    No Lean runs here: the launcher, the library, the cache and the publisher
-    are all stubbed, which is the point — the decision is made before Lean is
-    ever asked.
-    """
-
-    def setUp(self):
-        self.published = []
-        self.saved = {name: getattr(L, name) for name in (
-            "find_lean", "ensure_library", "proof_verdict_key",
-            "library_census", "cas_lookup_verdict", "_run_lean",
-            "_publish_verdict")}
-        L.find_lean = lambda root=None: "lean"
-        L.ensure_library = lambda lean, lib_dir: None
-        L.proof_verdict_key = lambda *a, **kw: "test-key"
-        L.library_census = lambda *a, **kw: {}
-        L.cas_lookup_verdict = lambda key: None
-        L._publish_verdict = lambda *a, **kw: self.published.append(a)
-
-    def tearDown(self):
-        for name, value in self.saved.items():
-            setattr(L, name, value)
-
-    def _run_census(self, run_result):
-        L._run_lean = lambda *a, **kw: run_result
-        return L.proof_census("no-such-proof.lean", repo_root=HERE)
-
-    def test_a_breach_is_reported_and_never_stored(self):
-        detail = "lean exceeded 1200s wall (limit 1200s)"
-        c = self._run_census((False, detail, None, detail))
-        self.assertEqual(self.published, [],
-                         "a machine-property breach must not be written to the "
-                         "content-addressed verdict cache — a cached timeout is "
-                         "a permanent red no re-run can clear")
-        self.assertFalse(c.ok)
-        self.assertFalse(c.cached)
-        self.assertIsNone(c.n_sorries,
-                          "a killed elaborator printed a prefix of its "
-                          "warnings; None is the fact and 0 is a lie")
-
-    def test_a_real_failure_is_still_stored(self):
-        c = self._run_census(
-            (False, "sum_proof.lean:1:1: error: unsolved goals", 0, None))
-        self.assertEqual(len(self.published), 1,
-                         "a genuine Lean rejection is a pure function of the "
-                         "proof and must still be cached")
-        self.assertFalse(c.cached)
-
-
 class TestLeanOutput(unittest.TestCase):
     """Two traps that each made this census report zero holes, measured.
 
@@ -3051,6 +2991,14 @@ class TestX86EndToEndTables(unittest.TestCase):
         to either side without the other fails here, and adding the `_mem` lemma
         is what makes it visible at all.
 
+        The fold set is the same copy one step downstream: `_SIMP_FORMS` is
+        what the path and decision folds may unfold, so a successor row that
+        applies a state-valued wrapper must have that wrapper in its form's
+        fold set, or a fold that has to project through the shifted state
+        leaves a wrapper in the goal. The correction here added `x86_shift_post`
+        to `_SIMP_FORMS["shift_imm8:*"]`; a fold set that still named
+        `x86_set_reg` folded nothing.
+
         Lean-free, and the whole point: each of the three discoveries cost a
         100-second proof and most of them cost a corpus sweep to notice at all.
         """
@@ -3084,6 +3032,21 @@ class TestX86EndToEndTables(unittest.TestCase):
                 "missing what the instruction DOES, which for `imul_r64_r64` "
                 "was its four flags" % (form, sorted(model - row),
                                         sorted(row or ["nothing"])))
+
+        # The fold sets.  Forms with no entry at all (none of the SSE2 rows
+        # have one yet) are not visited; an entry that exists but omits a state
+        # wrapper its own successor applies is a fold that silently unfolds
+        # nothing, which the `shift_imm8:*` correction above is the history of.
+        for form in sorted(self.ET._SIMP_FORMS):
+            need = used(self.ET._SUCCS[form])
+            have = set(self.ET._SIMP_FORMS[form]) & wrappers
+            self.assertEqual(
+                need - have, set(),
+                "%s's successor applies %s while the form's fold set names "
+                "only %s: a fold through the successor leaves %s in the "
+                "goal, so `_SIMP_FORMS[%s]` is the second stale copy" %
+                (form, sorted(need - have), sorted(have),
+                 sorted(need - have), form))
 
     def test_the_guards_two_own_the_rows_they_needed(self):
         """The two forms this change added, by NAME, so a later edit that drops
