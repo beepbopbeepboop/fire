@@ -1189,10 +1189,9 @@ def _method_overload_id(param_types: tuple, struct_name: str='', method_name: st
     _i = 0
     _n = len(sig)
     while _i < _n:
-        _c = sig[_i]
-        if isinstance(_c, str):
-            _c = ord(_c)
-        _h = (_h * 31 + _c) & 0x7FFFFFFF
+        _ch = sig[_i]
+        _code = ord(_ch)
+        _h = (_h * 31 + _code) & 0x7FFFFFFF
         _i = _i + 1
     _h = _h & 0xFFFFFF
     _out = ''

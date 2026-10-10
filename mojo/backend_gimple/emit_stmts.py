@@ -1334,6 +1334,16 @@ def _gen_stmt_AssignStmt(gen, node):
                     or (isinstance(node.value, gimple_ctypes.IdentExpr)
                         and node.value.name == 'None')):
                 ctype = 'int64_t'
+            # `ptype: str = None` ANNOTATES the variable as a string-or-None,
+            # so its slot is a `char *` whatever the pre-pass hinted for the
+            # name, and a tuple built from it records a str kind (whose null
+            # word reprs as None) instead of an int kind (which reprs the same
+            # word as `0`).
+            if (_as_str(getattr(node, 'type_ann', None)) in ('str', 'String')
+                    and (isinstance(node.value, gimple_ctypes.NoneLiteral)
+                         or (isinstance(node.value, gimple_ctypes.IdentExpr)
+                             and node.value.name == 'None'))):
+                ctype = 'char *'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an

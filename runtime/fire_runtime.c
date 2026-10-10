@@ -7786,6 +7786,11 @@ char *mojo_repr_slot_kind(char kind, int64_t v)
         return mojo_repr_float(x);
     }
     case MOJO_KIND_STR:
+        /* A str slot holding the null word is None (`('x', None)` for an
+         * un-annotated parameter): the slot kind says "a pointer-typed str
+         * variable", and its NULL is how this runtime spells Optional[str]'s
+         * None. repr of a NULL char * would otherwise be read as a string. */
+        if (!v) return strdup("None");
         return mojo_repr_str((char *)(intptr_t)v);
     case MOJO_KIND_BYTES:
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);

@@ -1978,6 +1978,45 @@ def _unterminated_quote_pos(line: str) -> int:
     return open_at if delim is not None else -1
 
 
+def _drop_line_continuations(literal: str) -> str:
+    r"""`literal` with every backslash-newline pair deleted, as CPython does
+    inside a NON-raw string literal (a triple-quoted body that opens with a backslash and a line
+    break is `abc`, not a backslash, a newline and `abc`). The caller decides rawness; a raw literal keeps the
+    pair as content and never comes here.
+
+    A backslash consumes the NEXT character, so `\\<nl>` (an escaped backslash
+    followed by a real line break) is left alone: only a backslash that is not
+    itself escaped can join the lines. Every line end is `_LINE_TERMINATORS`'s
+    (`\r\n`, `\r`, `\n`). The line COUNT the pad is paid back from is taken from
+    the ORIGINAL literal by the caller, so deleting the pair here shifts no
+    later line number.
+    """
+    if '\\' not in literal:
+        return literal
+    out = []
+    i = 0
+    n = len(literal)
+    while i < n:
+        c = literal[i]
+        if c == '\\' and i + 1 < n:
+            nxt = literal[i + 1]
+            if nxt == '\n':
+                i += 2
+                continue
+            if nxt == '\r':
+                i += 2
+                if i < n and literal[i] == '\n':
+                    i += 1
+                continue
+            out.append(c)
+            out.append(nxt)
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
 def _is_raw_literal_at(line: str, quote_pos: int) -> bool:
     r"""True when the literal whose opening quote is at `quote_pos` in `line` is
     raw — i.e. its prefix carries `r`/`R`, so nothing in it is an escape.
@@ -2244,7 +2283,10 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     pending_pad = _flush_line_pad(out, seg, pending_pad)
                     literal = src[start:end]
                     placeholder = f"__MOJO_STR_{string_idx[0]}__"
-                    string_cache[placeholder] = literal
+                    if _is_raw_literal_at(src, i):
+                        string_cache[placeholder] = literal
+                    else:
+                        string_cache[placeholder] = _drop_line_continuations(literal)
                     string_idx[0] += 1
                     # Preserve the original newline count: collapsing a
                     # multi-line triple-quoted string (a docstring is the
@@ -3783,7 +3825,7 @@ class Parser:
                 t = self._peek()
                 if t.kind in ("NAME", "KW"):
                     pname = self._advance().value
-                    ptype = None
+                    ptype: str = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     params.append(("**" + pname, ptype))
@@ -3825,7 +3867,7 @@ class Parser:
                 t = self._peek()
                 if t.kind in ("NAME", "KW"):
                     pname = self._advance().value
-                    ptype = None
+                    ptype: str = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     if conv is None:
@@ -3867,7 +3909,7 @@ class Parser:
             if t.kind == "NAME": pname = self._advance().value
             elif t.kind == "KW": pname = self._advance().value
             else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
-            ptype = None
+            ptype: str = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
             # Default value =expr: parsed and stored for the interpreter to use
@@ -7900,7 +7942,7 @@ class Parser:
         while self._peek().kind == "DOT":
             self._advance()
             module += "." + self._ident()
-        alias = None
+        alias: str = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         return (module, alias)
@@ -7945,7 +7987,7 @@ class Parser:
         # `_ident()` (not `_expect("NAME")`): an imported name may collide with
         # a Mojo keyword, e.g. `from weakref import ref` — `ref` lexes as KW.
         name = self._ident()
-        alias = None
+        alias: str = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         names.append((name, alias))
@@ -7966,7 +8008,7 @@ class Parser:
                 self._advance()
                 break
             name = self._ident()  # keyword-named imports (e.g. `ref`) allowed
-            alias = None
+            alias: str = None
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
             names.append((name, alias))

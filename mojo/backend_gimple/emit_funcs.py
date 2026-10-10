@@ -1623,10 +1623,9 @@ def overload_suffix_for(c_param_types) -> str:
     _i = 0
     _sn = len(_s)
     while _i < _sn:
-        _c = _s[_i]
-        if isinstance(_c, str):
-            _c = ord(_c)
-        _h = (_h * 31 + _c) & 0x7FFFFFFF
+        _ch = _s[_i]
+        _code = ord(_ch)
+        _h = (_h * 31 + _code) & 0x7FFFFFFF
         _i = _i + 1
     _h = _h & 0xFFFFFF
     _out = ''

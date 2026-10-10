@@ -538,18 +538,15 @@ CONTINUATIONS = [
     ("raw_closes_on_the_next_line", 'a = r"ab\\\n"', "ab\\\n", "ab\\\n"),
     ("raw_two_continuations", 'a = r"a\\\nb\\\nc"', "a\\\nb\\\nc",
      "a\\\nb\\\nc"),
-    # ── the one row where this path's answer is NOT CPython's ──
-    #
     # The same rule on a TRIPLE-quoted span, which is placeholdered as a whole
-    # before the join runs and so does keep the pair — and CPython deletes it
-    # there, because a triple-quoted literal is not raw either. Pre-existing,
-    # unchanged by the join, and part of the same no-escape-processing contract
-    # as `"\n"` being four characters rather than one: fixing it means editing
-    # the VALUE a triple-quoted literal collapses to, which would change the
-    # text of every docstring in the compiler and the stdlib that holds such a
-    # pair — a different change, and one nothing here depends on.
-    ("triple_keeps_the_pair_here_too", 'a = """ab\\\ncd"""',
-     "ab\\\ncd", None),
+    # before the join runs: `replace_multiline_strings` deletes the pair itself
+    # (`_drop_line_continuations`) for a non-raw span, because a triple-quoted
+    # literal is not raw either. This was the one row where this path's answer
+    # was NOT CPython's, and it mattered for real: `EMPTY_SIDECAR = """\`
+    # compiled by the self-hosted binary kept a stray backslash line in the
+    # emitted C that the Python reference (which has CPython's own answer) did
+    # not, so the stage trees differed by it.
+    ("triple_drops_the_pair", 'a = """ab\\\ncd"""', "abcd", "abcd"),
     # The control for the row above, and for `raw_keeps_the_pair`: the same
     # source spelled raw, where both sides agree. A fix that taught the join to
     # keep every pair would go red here.
