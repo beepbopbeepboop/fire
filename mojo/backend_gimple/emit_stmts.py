@@ -2421,6 +2421,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         else:
             gen._emit(gimple_codegen._RETURN)
     else:
+        # Declared `str` BEFORE the unpack: `lower_expr`'s tuple result comes
+        # back as an untyped pair once self-hosted, so an undeclared `v` was an
+        # `int64_t`, and the `f"  return {v};"` below formatted the temp's
+        # ADDRESS as a decimal (`return 515548663312;`) for every function that
+        # returns a non-literal.
+        vtype: str = ''
+        v: str = ''
         vtype, v = gen.lower_expr(node.value)
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately

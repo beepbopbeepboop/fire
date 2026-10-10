@@ -7356,6 +7356,8 @@ class Parser:
         either without each caller having to know which it got.
         """
         produced = self._parse_stmt()
+        if produced is None:
+            return
         if isinstance(produced, list):
             stmts.extend(produced)
         else:
@@ -7365,8 +7367,15 @@ class Parser:
         # Support inline single-statement body: "def foo(): return x" on one line
         if self._peek().kind != "NEWLINE":
             start_line = self._peek().line
-            stmt = self._parse_stmt()
-            stmts = [stmt] if stmt is not None else []
+            # Collected through `_parse_stmt_into`, like the indented path
+            # below: `[stmt]` over `_parse_stmt()`'s result gave the list the
+            # static element type of ONE of that function's return shapes once
+            # self-hosted, so an inline `if c: n += 1` body printed an
+            # AugAssignStmt as an ExprStmt (its fields read through the wrong
+            # layout), and a multi-target `comptime a, b = ...` result (a
+            # list) was never flattened here at all.
+            stmts = []
+            self._parse_stmt_into(stmts)
             # Same-line multi-statement inline body: "if x: a = 1; continue" —
             # the tokenizer (see py_tokenize's `_split_on_separators` loop)
             # splits each ';'-separated piece of a physical line into its own
@@ -7385,9 +7394,7 @@ class Parser:
                    and self._peek(1).kind not in ("DEDENT", "EOF")):
                 self._advance()  # consume the semicolon-split NEWLINE
                 start_line = self._peek().line
-                nxt = self._parse_stmt()
-                if nxt is not None:
-                    stmts.append(nxt)
+                self._parse_stmt_into(stmts)
             return stmts
         self._expect("NEWLINE")
         self._skip_newlines()
