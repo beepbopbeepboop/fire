@@ -3449,6 +3449,15 @@ def _as_vardecl_node(e: object) -> VarDecl:
     return e
 
 
+def _as_slice_node(e: object) -> SliceExpr:
+    """See _as_ident_node: static SliceExpr view of a boxed handle, so the
+    `.obj is None` test in the postfix-subscript parser is a DIRECT field load.
+    Through the boxed handle it was a dynamic getattr whose answer never
+    compared equal to None, so every `x[a:b]` stayed a `SubscriptExpr` whose
+    index was a SliceExpr instead of becoming the slice itself."""
+    return e
+
+
 def _as_callexpr_node(e: object) -> CallExpr:
     """See _as_ident_node: static CallExpr view of a boxed handle, so a
     following `.func` / `.args` / `.kwargs` read compiles to a DIRECT struct
@@ -5292,8 +5301,8 @@ class Parser:
                             # with the wrong bounds and object. `obj is None`
                             # distinguishes "still needs attaching" from
                             # "already a complete nested expression".
-                            if isinstance(only, SliceExpr) and only.obj is None:
-                                only.obj = expr  # attach object to the bare slice
+                            if isinstance(only, SliceExpr) and _as_slice_node(only).obj is None:
+                                _as_slice_node(only).obj = expr  # attach object to the bare slice
                                 expr = only
                             else:
                                 expr = SubscriptExpr(obj=expr, index=only)

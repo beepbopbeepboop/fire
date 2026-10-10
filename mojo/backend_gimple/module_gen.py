@@ -2812,7 +2812,16 @@ def gen_module_impl(self, stmts):
     # BOTH halves: the synthesised kernels AND the host rewrite that calls
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
-    if getattr(self, 'auto_gpu', True):
+    # The self-hosted binary has no auto-offload: `mojo/middle/offload.py` is
+    # not part of the closure `stage2/mojo` is built from (see
+    # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md), so
+    # `offload_module` there is a weak "unavailable in compiled mode" stub that
+    # returns a bare 0 -- and the tuple-unpack below then walked that 0 and
+    # raised "object is not iterable". `__file__` is the uniform `<bootstrap>`
+    # placeholder in every compiled module and the real path under CPython, so
+    # this skips the synthesis exactly where it cannot run and leaves the
+    # reference path untouched.
+    if getattr(self, 'auto_gpu', True) and __file__ != '<bootstrap>':
         # The synthesiser needs somewhere to record per-buffer element counts
         # (a GEMM's A is M*K, B is K*N, C is M*N, and one count cannot say
         # that). Created HERE, before the synthesis, and read by the
@@ -4295,10 +4304,15 @@ def gen_module_impl(self, stmts):
         'stop': 'int64_t',
         'step': 'int64_t',
     }
+    # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
+    # value, generators, line, col) and this seed fixes the field ORDER of the
+    # typedef and of the generated `__repr__` that prints the `.ast`. A stale
+    # `key` made the compiled dump print `key=None` where CPython prints
+    # `value=None`, and put `value` after `generators`.
     self.struct_field_types['Comprehension'] = {
         'kind': 'char *',
         'element': 'int64_t',
-        'key': 'int64_t',
+        'value': 'int64_t',
         'generators': 'MojoList *',
     }
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
@@ -4422,7 +4436,7 @@ def gen_module_impl(self, stmts):
     self.struct_boxed_fields['MatchStmt'] = {'subject'}
     self.struct_boxed_fields['LambdaExpr'] = {'body'}
     self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
-    self.struct_boxed_fields['Comprehension'] = {'element', 'key'}
+    self.struct_boxed_fields['Comprehension'] = {'element', 'value'}
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
     # node. Its `iterable` is `object` (any AST node), so it must be marked
     # boxed like Comprehension's `element`/`key`: the generated
