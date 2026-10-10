@@ -507,10 +507,26 @@ def test_ledger():
     payload = json.load(open(path))
     check("the ledger has a rows table", isinstance(payload.get("rows"), dict))
     rows = payload["rows"]
+    # A SET comparison of the keys the writer writes, not a length against a
+    # length. The keys are `basename|backend` (`formal_memcheck.ledger_key`),
+    # and comparing counts was both blind to WHICH programs were covered (a
+    # ledger could omit one and duplicate another and the counts would agree)
+    # and unable to name what was missing, which is the only form of this
+    # assertion a reader can act on: "which programs have no row" is exactly the
+    # question that notices a `--write-ledger` that stopped being run.
+    expected = {"%s|%s" % (os.path.basename(p), b)
+                for p in M.memcheck_sources() + M.example_sources()
+                for b in M.BACKENDS}
+    missing = sorted(expected - set(rows))
     check("the ledger covers every corpus row on both backends",
-          len(rows) == len(M.memcheck_sources() + M.example_sources()) * 2,
-          "%d rows for %d programs"
-          % (len(rows), len(M.memcheck_sources() + M.example_sources())))
+          not missing,
+          "%d of %d (program, backend) rows have no ledger entry: %s"
+          % (len(missing), len(expected), ", ".join(missing[:8])))
+    extra = sorted(set(rows) - expected)
+    check("the ledger has no row for a program the corpus no longer has",
+          not extra,
+          "%d ledger row(s) name a program or backend not in the corpus: %s"
+          % (len(extra), ", ".join(extra[:8])))
     check("every ledger row names a verdict",
           all(r.get("verdict") for r in rows.values()))
     # Every row whose name is one of the corpus's DOCUMENTED findings must say
