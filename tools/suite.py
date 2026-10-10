@@ -413,12 +413,8 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jobs, "
-                'one at a time (2026-10-09, arm64, python 3.14.7), merged from the '
-                'per-run logs .tmp/logs/*.log and applied with --apply-peaks; only '
-                'jobs that PASSED and ran >= 2 s are trusted, and the rows added '
-                'before this run keep the 2026-10-07 `gate` they were read from, as '
-                'their own comments say.')
+MEASURED_RUN = ('a full `gate`, 2026-10-09, master ba586e44, per-job peaks from the '
+                'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -450,7 +446,7 @@ MEASURED_PEAK_GB = {
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2, 'measured'),
-    'bootstrap-stage1-transitive': (1.4, 'measured'),
+    'bootstrap-stage1-transitive': (1.6, 'measured'),
     'bootstrap-stage2-cc':         (1.9, 'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
@@ -460,7 +456,7 @@ MEASURED_PEAK_GB = {
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
-    'bootstrap-stage2-transitive': (1.4, 'derived'),    # from stage1-transitive
+    'bootstrap-stage2-transitive': (30, 'measured'),    # from stage1-transitive
     'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
     'bootstrap-stage3-transitive': (1.4, 'derived'),    # from stage1-transitive
     # The eight formal host-module suites, measured one at a time under
@@ -2628,8 +2624,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
-     driver='mem', mem='tiny', cwd='stage2',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'],
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2640,14 +2635,12 @@ fanout('bootstrap-stage3-dumps',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
