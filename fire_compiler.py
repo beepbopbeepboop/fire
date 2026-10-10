@@ -7444,7 +7444,7 @@ class Parser:
             val = TupleExpr(elements=elements, line=val.line, col=val.col)
         return YieldExpr(value=val, line=line, col=col)
 
-    def _parse_expr_or_yield(self):
+    def _parse_expr_or_yield(self) -> object:
         """Like `_parse_expr(0)` but also recognizes a leading `yield`/
         `yield from` — for use ONLY at the specific grammar positions real
         Python allows a bare (unparenthesized) yield expression: the whole

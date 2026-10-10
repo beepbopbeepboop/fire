@@ -859,9 +859,15 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # the owner's FIELD is still `K`, so the local name is not an answer
         # for either. `name` remains the answer for every other route, which
         # is every route that loads THIS module's own struct.
-        _field_name = gimple_ctypes._c_field_name(_imp_field) \
-            if (_imp_fields is not None or _imp_pending) \
-            else gimple_ctypes._c_field_name(name)
+        # An if/else over a `str`-declared local, not a ternary: the ternary's
+        # result is an untyped word once self-hosted, and the f-string below
+        # then formatted its ADDRESS (`_root_globals.4387891680`) for every
+        # read of a module global.
+        _field_name: str = ''
+        if _imp_fields is not None or _imp_pending:
+            _field_name = gimple_ctypes._c_field_name(_imp_field)
+        else:
+            _field_name = gimple_ctypes._c_field_name(name)
         field_ref = f"_{safe_module}_globals.{_field_name}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
