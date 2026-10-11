@@ -990,6 +990,64 @@ def test_every_argument_count_and_a_variadic_agree_with_cpython(tmpdir, _):
                         "prog.aout", expect_exit=0)
 
 
+DROPPED_SIDE_EFFECT_PROG = """\
+from varlib import variadic
+
+def local_var(head, *rest):
+    return head * 3
+
+def kw_shed(head, **kw):
+    return head
+
+def g():
+    printf("g@")
+    return 9
+
+def main(k):
+    printf("local=%d@", local_var(2, g()))
+    printf("cross=%d@", variadic(4, g()))
+    printf("kw=%d@@", kw_shed(5, gone=g()))
+    return 0
+"""
+
+
+def test_a_dropped_variadic_argument_is_still_evaluated(tmpdir, _):
+    """A variadic tail's SIDE EFFECT runs, same-module and cross-module.
+
+    CPython evaluates EVERY argument expression before a call, so a `*rest`
+    argument the callee never reads, and a keyword a `**kwargs` swallows, are
+    still evaluated. `bind_call_arguments` used to drop them WITHOUT evaluating
+    them, so `variadic(4, g())` — where `g` prints — built an image that never
+    ran `g`: a wrong answer with exit 0 (`1` where CPython prints `g` then
+    `1`). The whole stdout is compared with CPython, so the ORDER (each `g`
+    before its own call's `printf`) is asserted too. `local_var` is the
+    same-module binder beside `variadic`'s cross-module one, because the two
+    paths reach `_bind_call_args` separately, and `kw_shed` is the `**kwargs`
+    swallow (`dropped` collects it by the same rule as the positional tail).
+    Every architecture is built and run, because the drop used to be silently
+    wrong on BOTH and an arm64-only harness would have called a one-sided fix
+    done.
+    """
+    fresh_cas()
+    for arch in ("arm64", "x86_64"):
+        suffix = "arm64" if arch == "arm64" else "x86_64"
+        root = os.path.join(tmpdir, f"dropped_side_effect_{suffix}")
+        os.makedirs(root)
+        write_tree(root, {"varlib.mojo": VAR_LIB, "prog.mojo":
+                          DROPPED_SIDE_EFFECT_PROG})
+        _result, out = build(root, "prog.aout", arch=arch)
+        rc, text = run(out)
+        want_rc, want_out = cpython(root, "prog.aout")
+        check(text == want_out,
+              f"{arch}: the image printed\n  {text!r}\nCPython printed\n"
+              f"  {want_out!r}")
+        check(rc == want_rc and rc == 0,
+              f"{arch}: the image exited {rc}, CPython exited {want_rc}")
+        check(text == "g@local=6@g@cross=8@g@kw=5@@",
+              f"{arch}: the dropped arguments did not run in source order: "
+              f"{text!r}")
+
+
 def test_a_local_default_and_a_cross_module_default_agree(tmpdir, _):
     """The two answers side by side, in one program.
 
@@ -2005,6 +2063,8 @@ TESTS = [
      test_too_few_arguments_to_a_re_exported_callee_is_refused),
     ("every argument count and a variadic agree with CPython",
      test_every_argument_count_and_a_variadic_agree_with_cpython),
+    ("a dropped variadic argument is still evaluated",
+     test_a_dropped_variadic_argument_is_still_evaluated),
     ("a local default and a cross-module default agree",
      test_a_local_default_and_a_cross_module_default_agree),
     ("a linked dylib's struct is usable with no import",

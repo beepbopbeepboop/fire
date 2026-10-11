@@ -10694,11 +10694,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `formal/monomorph.py::supplied_bracket_args`, so there is one answer
         # to "what does `f[a, b](x)` pass" rather than one per backend and one
         # per callee kind.
-        args = (monomorph.supplied_bracket_args(e) + list(e.args)
-                if through_value
-                else (list(e.args)
-                      if is_extern and self._callee_decl(name) is None
-                      else self._bind_call_args(name, e)))
+        dropped: list = []
+        if through_value:
+            args = monomorph.supplied_bracket_args(e) + list(e.args)
+        elif is_extern and self._callee_decl(name) is None:
+            # Unknown signature: SysV has no slot for Python kwargs on a raw
+            # call and they are dropped (they are almost always literals like
+            # flush=True) — but their VALUES are still evaluated, the same rule
+            # `bind_call_arguments` applies to a variadic tail.
+            args = list(e.args)
+            dropped = [v for _k, v in (e.kwargs or [])]
+        else:
+            args, dropped = self._bind_call_args(name, e)
         if is_extern and self._callee_decl(name) is None:
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
@@ -10934,6 +10941,23 @@ ctor_field_value=self._ctor_field_value_for(name),
                                  + sret_site[1], Reg.RAX)
             _spill()
             reg_plan.append((len(args), "sret", len(reg_plan)))
+        # Arguments with NO register home — a variadic callee's positional tail
+        # and any keyword a `**kwargs` swallowed — are evaluated HERE, after
+        # every fixed argument (which is the source's own order) and before the
+        # registers are loaded, because CPython evaluates EVERY argument
+        # expression and their side effects are observable even though the
+        # callee cannot read the values (a body that reads the variadic
+        # parameter is refused earlier). Dropping them silently built
+        # `def f(x, *rest): return x` called as `f(1, g())` into an image that
+        # never ran `g`: a wrong answer with exit 0 (`1` where CPython prints
+        # `g` then `1`). Every fixed argument is already spilled here, so a
+        # dropped expression that itself calls cannot disturb one. `*`/`**`
+        # markers are unwrapped exactly as the arm64 twin does.
+        for _d in dropped:
+            if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                self._emit_expr(_d.operand)
+            else:
+                self._emit_expr(_d)
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
         # caller-saved register, including the ones argument i belongs in.
@@ -11184,8 +11208,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     self._import_aliases, self._extern_decls,
                                     name)
 
-    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """`e`'s arguments in positional form, for a known callee.
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> tuple:
+        """`(slots, dropped)` for `e`, for a known callee.
+
+        `slots` is `e`'s arguments in positional form; `dropped` is the ones
+        with no register home — a variadic callee's positional tail, and any
+        keyword a `**kwargs` swallowed — which the caller MUST still evaluate
+        for their side effects (`M.bind_call_arguments`'s own docstring states
+        why).
 
         A THIN CALL into `M.bind_call_arguments` — the same one arm64 calls,
         and the reason the two backends cannot disagree about which argument
@@ -11210,11 +11240,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"keyword arguments are not supported "
                     f"({[k for k, _ in e.kwargs]})")
-            return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+            return list(e.args or []), []
+        slots, dropped, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
-        return slots
+        return slots, dropped
 
     # ── types and immediates ─────────────────────────────────────────
 
