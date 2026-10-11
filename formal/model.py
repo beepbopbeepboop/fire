@@ -14047,7 +14047,7 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
 #: backend decides, because whether the pair is a set algebra this path lowers
 #: is a fact about the backend and not about the operator.  arm64 lowers the
-#: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
+#: three for two sets (see `_emit_set_op`); x86-64 has no emitter and
 #: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
@@ -14117,7 +14117,7 @@ def container_operator_refusal(op: str, left_kind, right_kind,
         # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
         # question for the backend (see `SET_ALGEBRA_OPS`), and
         # `set_algebra_refusal` is where the two answers are worded.  Defer
-        # rather than refuse, so arm64 can reach `_emit_set_algebra` and x86-64
+        # rather than refuse, so arm64 can reach `_emit_set_op` and x86-64
         # can reach its own named refusal.  `aug_assign_operands_are_blobs`
         # then routes the augmented spelling through `_emit_binop`, which is
         # the second emitter the desugaring exists for.
@@ -14246,7 +14246,7 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     container operator except `+`, `|` and — on two blobs — the set-algebra
     three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
     `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
-    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
+    blobs, which is what routes them to `_emit_set_op` on arm64 and to
     `set_algebra_refusal` on x86-64 rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
@@ -21593,7 +21593,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 684 entry
+# a list that rots, and the shape answers the same question for all 683 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -21763,7 +21763,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 684 entry points for that reason looks
+    scalar — and a rule that refuses all 683 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:

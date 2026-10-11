@@ -5,15 +5,19 @@
 unchanged.** `test_formal_container_methods.py` measures the whole surface
 against CPython on both architectures and is green; this doc is about the rows
 in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+answers. The set-algebra rows are answers on arm64 now (six of them — five
+moved, one added); x86-64 still refuses each by name.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
-13 answers equal CPython on arm64 (up from 10 — `s_intersection_r`,
-`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r` moved), x86-64
-unchanged at 4 with the same 9 refusals. The five rows were observed through a
+`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
+`s_andassign_r` moved from refusal to answer on arm64, and a new
+`s_intersection_str` (string elements) joined them — six rows in all, and the
+x86-64 backend refuses each by name. The rows were observed through a
 SUM and a length rather than a length alone, so a result with the right count
-and the wrong element fails. The three emitters are
+and the wrong element fails, and `s_symdiff_r`'s operands give both operands an
+element the other lacks so BOTH passes of the symmetric difference run. The
+three emitters are
 `formal/arm64_codegen.py::_emit_set_op` and `_emit_set_filter_pass`, with the
 union's reservation and growth guard (an intersection or a difference reserves
 `nL`; a symmetric difference `nL + nR`); the augmented `-=`/`&=` desugar onto
@@ -31,11 +35,13 @@ the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
 `[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
 is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
-The five rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
-group's duplicate `o_xor`/`o_and` rows were re-pointed at probes the same way
-(`o_sub`, a LIST difference, stays a refusal on both backends). The structural
-half is pinned by four new `_BLOB_GROWTH_PROBES` rows, so each new site has to
-keep emitting its capacity guard.
+The six rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
+group's `o_xor`/`o_and` rows moved to LIST operands, where they stay refusals on
+both backends the way `o_sub` already was — the `set` group now holds the answer
+coverage and the operator group keeps the gate's coverage of a NON-set blob. The
+structural half is pinned by three new `_BLOB_GROWTH_PROBES` rows (`sin`, `sdf`,
+`ssd`), one for each set-algebra site, so each new site has to keep emitting its
+capacity guard.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
