@@ -10,6 +10,16 @@ question in somebody else's area (a one-word struct whose only field is a nested
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
 
+**Status 2026-10-10 (`work/formal266-docs`): "NOT FIXED" above is a 2026-10-01
+statement about the value-model decision, not the state of the tree — a
+representation for `Optional[T]` has since landed.** The live doc for that
+subject is `bugs/FORMAL_optional_needs_a_niche.md` (`formal267-docs`), whose
+`apply_optional_none_representation` is the mechanism and whose remaining
+payload family is the open half; this doc's own row is the Optional-FIELD
+unwrap (`self.step.or_else()` → `UNWRAP_METHODS`), which is not the same
+surface, so the headline's "NOT FIXED" now means "this row", not "the value
+model".
+
 This doc exists to say what the frame-holder document — deleted 2026-10-05,
 consolidated, because every arm of it was closed and the row it measured had
 moved three refusals deeper — left open, with the measurement that settles the

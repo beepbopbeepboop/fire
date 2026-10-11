@@ -10,6 +10,24 @@ reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
 class: 3 failures before, 3 failures after, identical messages.**
 
+**Re-measured 2026-10-10 (`work/formal266-docs`), generation only, no Lean:
+the fixture GENERATES again, so the "REFUSES" entries below are stale.** The
+class's own `setUpClass` call `_symbolic_divisor_proof(tmp)` — this file's
+helper, `compile_formal(..., arch="arm64", prove=True, check=False)` — RETURNS
+instead of raising `FormalBuildError`. What it builds carries a
+`theorem q_reaches_call_at_0x100000504` and NO
+`theorem q_compiles_correctly_universal` and no `all_goals (first | done |
+sorry)` admission: the universal theorem has been REPLACED by a reachability
+statement, which is precisely the silent half the FLUSH doc names. So option 1
+("subtract `compiler_traps` in `_unfollowable_calls`") did not move this, and
+the live owner of what this class now measures is
+`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`
+(`formal267-docs`) — the three red rows that doc lists are these three. Step 1
+LANDED: `test_the_measurement_class_can_still_see_what_it_measures` is the
+blind-guard (present in the file) that reports this by NAME on a tree WITH
+`lib/ProofLib.olean`; on a tree without it the whole class still SKIPs, so the
+outcome is unobservable from this worktree.
+
 **Re-measured 2026-10-07 (`work/formal115-docs`), and the SYMPTOM has moved
 again — the class no longer fails its assertions, it cannot even build its
 fixture.** `_symbolic_divisor_proof` calls `compile_formal(..., prove=True,

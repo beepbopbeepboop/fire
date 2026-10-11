@@ -10,6 +10,19 @@ of the four signatures now carrying the obligation that fails, named from the
 generated file rather than from a truncated tail. Filed 2026-10-03 on
 `work/formal16-2`, refreshed 2026-10-04.
 
+**Status 2026-10-10 (`work/formal266-docs`): the PIN is GREEN again, and the
+2026-10-07 entry below is the record of a red that has since been fixed.**
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is
+**Ran 3 tests in 0.337 s / OK** on this tree (measured generation-only, no Lean
+— the class needs no olean): `_reached_without_a_condition` now asks about the
+HALT's own path rather than "any reachable conditional" (`caa3d1a7`), which is
+the code half of the fix
+`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`
+asked for. So the census this doc pins — "all twelve generate" — is true of the
+ten recursive examples and false only of `sum_range`, whose refusal is this
+doc's own expected `REFUSED` row. What REMAINS is §4.1's eleven Lean runs,
+which is not work this tree can do.
+
 **Update 2026-10-06 (`work/formal42-4`): the PIN class below went red again for
 a reason that is not the audit, and half of it is fixed.** The generator's
 `_reached_without_a_condition` returned False on meeting ANY reachable source
