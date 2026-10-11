@@ -2,7 +2,9 @@
 
 **Area:** `formal/model.py::interpolated_literal_refusal` (asked over the module
 by `refuse_interpolated_literals`), both backends. **Status: OPEN — the refusal
-itself is still the right answer and still stands. Filed by `work/formal23-1`
+itself is still the right answer and still stands for the f-strings this doc's
+file holds; the ONE case that needs no buffer was landed by `work/formal265`
+2026-10-10 (see "What landed 2026-10-10"). Filed by `work/formal23-1`
 2026-10-04; NOT fixed here (the fix is a value-model decision and the file that
 exposes it belongs to another doc's reproduction). PARTIAL WORK 2026-10-05 on
 `work/formal27-2`, in "What landed" at the end: the refusal's ADVICE was false
@@ -131,3 +133,34 @@ $ grep -c 'f"' formal/x86_64_decode.py
 $ python3 -c 'exec("f\"n={7}\"")'   # what CPython answers
 n=7
 ```
+
+## What landed 2026-10-10 (`work/formal265-docs`): the constant half
+
+**An f-string with no replacement field is a CONSTANT, and the refusal was over
+a buffer it does not need.** The refusal's own sentence already said so —
+`_interpolated_shape_sentence`'s "This one has NO field at all … so its value is
+a CONSTANT and this refusal is over a missing buffer rather than a run-time
+value" — and CPython prints `abc` for `print(f"abc")` where this path refused
+the program. `formal/model.py::fold_constant_interpolated_literals` now rewrites
+such a literal IN PLACE into the ordinary string literal it denotes (`value`
+becomes the composed text, `is_interpolated` becomes `False`, `is_raw` carries
+the `r` of an `rf"…"`), and `formal/build.py::_prepare_functions` asks it
+immediately before `refuse_interpolated_literals`, so the refusal never sees the
+foldable ones.
+
+**This is the one case, and it is not the buffer.** A `t`-string is NOT folded —
+its value is a `Template`, not a `str` — and neither is any literal with a field:
+those still reach the refusal, and the buffer is still what would lift them. The
+fold moves **0 files** in the corpus, which the interpolated-literal census
+already measures and says in its own row: **0 files have EVERY interpolated
+literal interpolating nothing** (375 literals do, and each sits in a file that
+also holds one with a field). So this is a correctness fix for a program the
+corpus does not write yet, not a coverage win. The t-string refusal
+(`tstring_literal_refused`) is unchanged, including for a no-field `t"abc"`.
+
+Pinned by `test_formal_run.py`'s five CPython pairs:
+`interpolated_with_no_field_folds_to_its_text`, `…_can_be_empty`,
+`…_unescapes_braces`, `…_decodes_escapes` and
+`raw_interpolated_with_no_field_stays_raw` — each built on BOTH architectures
+and required to print CPython's own answer, so the escape and `is_raw` halves
+are measured against the language rather than stated.
