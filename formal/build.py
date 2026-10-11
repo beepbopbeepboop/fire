@@ -18300,12 +18300,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # of thing a reader has to go looking for, and binding it costs
         # nothing.
         st = method_owners.get(fn.name)
+        with_alias_structs = {}
         _rewrite_with_statements(
             fn, structs_by_name,
             lambda fn=fn, st=st: _bound_receiver_structs(
                 fn, framed, _image_function_names, st, one_field,
                 own_scope=True),
-            functions=_functions_by_name, owner=st)
+            functions=_functions_by_name, owner=st,
+            alias_structs=with_alias_structs)
         # A one-field struct's mutator that rebinds its receiver to a name of its
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
@@ -18391,10 +18393,25 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # on this path is made from the BINDING of a base rather than from its
         # type (`model`'s own rule for a field), and `var o = Outer2()` names
         # the owner of `o.get()` as plainly as the source spells it.
+        #
+        # …and a `with` ALIAS is a binding of exactly that shape, with one
+        # difference the source's own `__enter__` annotation settles
+        # (`with_alias_structs`, filled by the rewrite above): `with M() as v:`
+        # binds `v` to `M.__enter__`'s result, and when that result's type is
+        # declared the alias's struct is known even though its VarDecl carries no
+        # annotation of its own. A name the source ALSO binds from a construction
+        # (or as a one-word value) keeps that binding: two layouts under one name
+        # is the ambiguity `_bound_receiver_structs` already drops rather than
+        # picks, and the alias is one more binding rather than a better one.
+        _bound = _bound_receiver_structs(fn, framed, _image_function_names, st,
+                                         one_field)
+        for _aname, _ast in with_alias_structs.items():
+            if _aname in _bound or _aname in one_word:
+                continue
+            _bound[_aname] = _ast
         _rewrite_one_word_field_method_calls(
             fn.body, one_word, structs_by_name, receiverless,
-            _bound_receiver_structs(fn, framed, _image_function_names, st,
-                                    one_field),
+            _bound,
             one_field)
         # `mapping` is derived inside `_rewrite_self_fields` now, because the
         # rewrite is handed the table it derives the chain from — it needs the
@@ -19677,7 +19694,8 @@ def _fn_spelled_names(fn) -> set:
 
 def _rewrite_with_statements(fn, structs_by_name: dict,
                              bound_receiver_structs=None,
-                             functions=None, owner=None) -> None:
+                             functions=None, owner=None,
+                             alias_structs=None) -> None:
     """Every `with` in `fn` becomes the protocol, or is refused by name.
 
     What it emits, for one item, is CPython's own order:
@@ -19729,6 +19747,20 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
     no suspension point for the protocol to resume across; the `is_async` flag
     has no other meaning here, and the emitters already said so where they used
     to drop the exit call.
+
+    **`alias_structs` is an optional OUT parameter: `{alias name: struct}` for
+    every alias whose `__enter__` result names a struct of this unit.**  The
+    alias is bound to `__enter__`'s RESULT, and for a manager that annotates
+    that result (`model.with_alias_struct`) the struct is written in the source.
+    Publishing it here is what lets a method call through the alias whose NAME a
+    second struct also declares lift from the alias's own type rather than being
+    refused by name; the consumer is `_prepare_functions`, which merges the
+    table into the framed-receiver table `_rewrite_one_word_field_method_calls`
+    reads.  The alias VarDecl is deliberately left UNANNOTATED: annotating it
+    would make the frame analysis treat the alias as a frame HOLDER of its own,
+    and the alias holds a word that is (for a framed struct) that frame's
+    address, not a frame the caller reserved.  A caller with no need for the
+    table passes None and pays nothing.
     """
     used = _fn_spelled_names(fn)
     counter = [0]
@@ -19774,14 +19806,15 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
         result = list(stmt.body or [])
         for item in reversed(items):
             result = _one_with_item(fn, item, result, structs_by_name,
-                                    fresh_name, receiver_evidence())
+                                    fresh_name, receiver_evidence(),
+                                    alias_structs)
         return result
 
     fn.body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
 
 
 def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
-                   evidence: dict):
+                   evidence: dict, alias_structs=None):
     """One `with` item, wrapped around `body`. Raises CodegenError if it cannot.
 
     Three protocols and one order.  CPython's is `__enter__` binds the name and
@@ -19827,6 +19860,19 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
                        args=[F.IdentExpr(tmp)], kwargs=[]),
             fn)
     tmp = fresh_name()
+    # Publish what the alias HOLDS, when the manager's own `__enter__` says it:
+    # the alias names `__enter__`'s result, and for a manager that annotates that
+    # result the struct is written in the source (`model.with_alias_struct`).
+    # `_prepare_functions` merges this into the framed-receiver table, so a method
+    # call through the alias whose NAME two structs declare lifts from the alias's
+    # own type instead of being refused by name.  Asked only for a bare-name alias
+    # — the other spellings are refused below — and a manager whose result names
+    # no struct of this unit contributes nothing.
+    if alias_structs is not None:
+        alias_name = M.with_alias_bare_name(item)
+        alias_st = M.with_alias_struct(struct, structs_by_name)
+        if alias_name is not None and alias_st is not None:
+            alias_structs[alias_name] = alias_st
     # `__exit__` takes the receiver alone, or CPython's own three exception
     # words.  The four-word shape is accepted only when the method never reads
     # them (`model.context_exit_ignores_its_exception_words`), so the three

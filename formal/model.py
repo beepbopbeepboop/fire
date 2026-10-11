@@ -49290,6 +49290,43 @@ def context_exit_arity(struct_def) -> int:
     return 1
 
 
+def with_alias_struct(struct_def, structs_by_name):
+    """The struct a `with ... as NAME` alias holds, or None if the source names none.
+
+    The alias names `__enter__`'s RESULT, not the context — CPython's
+    `TARGET = type(mgr).__enter__(mgr)` — so the struct it holds is the one that
+    result is DECLARED to be, and a manager that annotates `__enter__` has
+    written it down.  Publishing it is what lets a method call through the alias
+    whose NAME a second struct of this image also declares lift from the alias's
+    own type instead of being refused, which is the SAME evidence a field access
+    reads through `struct_field_declared_type` and a parameter through
+    `parameter_declared_structs`: a type the source wrote, rather than a guess by
+    name.
+
+    `__enter__` returning a plain word (`return self.tag`) or carrying no
+    return annotation is None, and that is the honest answer: nothing in the
+    source says which struct the alias holds, so dispatch stays by name and the
+    ambiguous case stays refused (`formal/build.py::_lift_one_word_field_method`
+    declines a name two structs declare).  A result whose annotation names a
+    type THIS unit does not declare is None for the same reason — the struct is
+    in another module and there is nothing here to lift to.
+
+    One reader, asked by the ONE lowering that decides the alias's binding
+    (`formal/build.py::_one_with_item`), and it answers from `annotation_base_name`
+    so a spelling the rest of this file already accepts (`Res`, `Self`,
+    `Optional[Res]`'s base) means here what it means everywhere else.
+    """
+    enter = next((m for m in struct_methods(struct_def)
+                  if getattr(m, "name", None) == CONTEXT_ENTER), None)
+    if enter is None:
+        return None
+    base = annotation_base_name(getattr(enter, "return_type", None),
+                                self_type=getattr(struct_def, "name", None))
+    if not base:
+        return None
+    return (structs_by_name or {}).get(base)
+
+
 def with_alias_bare_name(item):
     """The BARE NAME a `with` item's `as` clause binds, or None if it is not one.
 
