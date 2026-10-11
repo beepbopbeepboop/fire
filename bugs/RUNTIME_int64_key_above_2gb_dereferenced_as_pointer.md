@@ -1,5 +1,31 @@
 # RUNTIME: an int64 dict key in [2^31, 2^47) is dereferenced as a `char *`
 
+## Status (2026-10-10 — the PREDICATE is now sound; `ptrreg-boxed-str` is
+## green; only the `char *`-declared-local shape remains)
+
+`mojo_boxed_is_str` no longer guesses by range. It keeps the shape test as a
+fast negative plus the list/boxed exclusions, but for a pointer-shaped
+non-container word it now answers on POSITIVE membership: string iff
+`_pr_has(&_reg_str, v)` (registered) OR
+`MOJO_MALLOC_USABLE_SIZE((void*)(intptr_t)v) > 0` (live heap). A bare integer
+in `[2^31, 2^47)` is 0 and renders as its decimal. Two registrations feed it:
+codegen emits a `_mojo_register_str_pool` startup constructor (one
+`mojo_str_register(_slit_N)` per literal — emitted *after* the function bodies
+so a generated-C reader that walks from a prototype to the next `}` never stops
+at this constructor), and the runtime registers its own 256-char table via
+`_mojo_register_char_table` (that table's pointers are what
+`mojo_cstr_cmp_word` compares characters against). `ptrreg-boxed-str` is a
+normal green registration again (the `expect=` marker is removed); the harness,
+the full gimple runner, `test_gimple.py`, and selfhost/linkmode all pass.
+
+Item 1 below (`d[f()]`) is fixed by this same predicate — the runtime no longer
+needs the codegen to infer the return type, because a word that is neither
+registered nor a live heap is an integer. Item 2, the `char *`-declared-local
+shape, is the only remainder, and it never reaches the predicate:
+`_char_to_cstr` short-circuits on `typ == 'char *'` before any discriminator, so
+the generated C has no `mojo_boxed_is_str` call at all. That is a codegen issue
+and the whole of what this doc now tracks.
+
 ## Status (2026-10-03, `work/bugs-segfaults-r2` — the ARITHMETIC producers and
 ## the other dict consumers; the PREDICATE is still unchanged and
 ## `ptrreg-boxed-str` is still red)
@@ -159,18 +185,19 @@ miss and it is why a two-operand rule alone fixes nothing.**
    Nothing in items 1-3 touches the predicate, deliberately. So the `expect=`
    marker stays, and this doc stays.
 
-### What is NOT fixed
+### What remains
 
-Re-measured 2026-10-03, with the two that the earlier revision of this
-section lumped together now separated, because one is a next step and one is
-a wall:
+Item 1 below is resolved by the 2026-10-10 sound predicate; only item 2 is
+still open, and it is a codegen issue rather than a runtime-predicate one.
 
-1. **A value from a call the codegen cannot type: `d[f()]`.** `def pick(n):
-   return 3000000000 + n` then `d[pick(0)] = "x"` is a `SIGSEGV`. The return
-   value of an unannotated function is an `int64_t` with nothing recorded
-   about it, and nothing downstream can know it. This is the same wall an
-   unannotated/erased parameter and a value read out of a heterogeneous
-   container hit, and it needs real inference — `mojo/middle/`'s to own.
+1. **A value from a call the codegen cannot type: `d[f()]`.** *Fixed by the
+   2026-10-10 sound predicate.* `def pick(n): return 3000000000 + n` then
+   `d[pick(0)] = "x"` no longer crashes: the return value is an `int64_t` with
+   nothing recorded, but the runtime no longer needs the codegen to know — a
+   word that is neither registered nor a live heap is an integer, so the key
+   renders its decimal instead of `strcmp`-ing an address. (This was the "needs
+   real inference" wall; the inference moved to the runtime's provenance
+   check.)
 
 2. **A local whose C declaration is `char *` because of a LATER assignment,
    which earlier held a large integer.** Measured `SIGSEGV`:

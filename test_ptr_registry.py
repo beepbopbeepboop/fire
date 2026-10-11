@@ -233,39 +233,32 @@ static void test_dict_and_itoa(void) {
      * is an ordinary malloc'd string; the TRANSIENT one (mojo_cstr_or_int_str)
      * is a pool block and is the only thing mojo_cstr_or_int_release accepts.
      *
-     * The two halves are checked over DIFFERENT value sets, and that is not
-     * bookkeeping. `mojo_cstr_or_int_str(v)` returns `v` ITSELF — the caller
-     * hands it back unchanged and it is never pooled — for any `v` the
-     * runtime's boxed-string test claims, which is the [2GiB, 2^47) window
-     * (`_mojo_ptr_shaped`: a char* and an int64_t are the same width here, so
-     * a value in that window is a pointer until proven otherwise). 2^32 and
-     * INT64_MAX are in it, so `strcmp(t, "4294967296")` on the raw return
-     * dereferences the integer 4294967296 as a `char *` and segfaults — the
-     * correct behaviour being asserted, tested wrongly. `mojo_str_from_int`
-     * has no such test and is checked over the full range, extremes
-     * included; the transient one is checked over everything OUTSIDE the
-     * window, and the in-window entries are asserted to come back
-     * unchanged, which is the documented contract. (This harness ran with
-     * `-DNDEBUG` for its whole life — see `_flags` — so these `strcmp`s were
-     * never executed and the segfault below them was never reached.)
-     *
-     * What SHOULD hold for an in-window value is spelled out in its own
-     * group instead: `boxedstr` (test_boxed_str_discrimination) asserts that
-     * an ordinary large integer is rendered as its decimal rather than
-     * dereferenced, and that is the registered expect-marked `ptrreg-boxed-str`
-     * test. So both directions are covered: this group pins the contract the
-     * runtime actually has, and `boxedstr` is red about the one it should
-     * have. See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md. */
+     * Every entry in `vals[]` is an INTEGER, so `mojo_cstr_or_int_str` renders
+     * its decimal for ALL of them -- including the ones in the old [2GiB, 2^47)
+     * pointer-shaped window (2^32, INT64_MAX). Before the predicate was made
+     * sound (a live heap allocation or a registered string, not the range alone),
+     * an in-window value came back as the borrowed address itself, and
+     * `strcmp(t, "4294967296")` on that return dereferenced the integer 4294967296
+     * as a `char *` and segfaulted; the group then pinned that segfault contract
+     * (`t == v`) rather than the answer it should have. The sound predicate now
+     * answers "integer" for a bare in-window word, so `t` is its decimal, pooled,
+     * like every other integer -- which is what the assertion below checks, and
+     * which is the same fact the `boxedstr` group checks end to end. (This
+     * harness ran with `-DNDEBUG` for its whole life — see `_flags` — so these
+     * `strcmp`s were never executed and the segfault below them was never
+     * reached.) */
     int64_t vals[] = {0,1,-1,9,10,-10,99,100,12345,-98765,2147483647LL,-2147483648LL,4294967296LL,
                       9223372036854775807LL, (int64_t)(-9223372036854775807LL-1)};
     for (unsigned i = 0; i < sizeof vals / sizeof *vals; i++) {
         char ref[32]; snprintf(ref, sizeof ref, "%lld", (long long)vals[i]);
         char *kept = mojo_str_from_int(vals[i]); assert(strcmp(kept, ref) == 0); free(kept);
-        uint64_t u = (uint64_t)vals[i];
-        int boxed = (u >= 0x80000000ULL && u < 0x0000800000000000ULL);
         char *t = mojo_cstr_or_int_str(vals[i]);
-        if (boxed) assert(t == (char *)(intptr_t)vals[i]);
-        else assert(strcmp(t, ref) == 0);
+        /* Every entry here is an INTEGER, so the sound predicate renders its
+         * decimal whether or not it sits in the old [2GiB, 2^47) pointer-shaped
+         * window -- the in-window values used to come back as the borrowed
+         * address itself (the segfault contract); they are now their decimal,
+         * pooled, like every other out-of-window integer. */
+        assert(strcmp(t, ref) == 0);
         mojo_cstr_or_int_release(vals[i], t);
     }
     /* below the window's floor, and outside it, both spell a decimal */
@@ -287,8 +280,11 @@ static void test_dict_and_itoa(void) {
     char *b = mojo_cstr_or_int_str(-7); assert(b == a && strcmp(b, "-7") == 0); mojo_cstr_or_int_release(-7, b);
     /* a kept decimal never enters the pool: it is not the block just released */
     char *kept2 = mojo_str_from_int(5); assert(kept2 != a); assert(strcmp(kept2, "5") == 0); free(kept2);
-    /* a borrowed boxed string is returned unchanged and never pooled */
+    /* a borrowed boxed string is returned unchanged and never pooled. It is a
+     * non-heap buffer (stack), so it is registered the way a codegen literal is,
+     * which is the only way the sound predicate can tell it from a bare int. */
     char lit[] = "abc";
+    mojo_str_register(lit);
     char *same = mojo_cstr_or_int_str((int64_t)(intptr_t)lit); assert(same == lit);
     mojo_cstr_or_int_release((int64_t)(intptr_t)lit, same);
     char *c = mojo_cstr_or_int_str(1); assert(c != lit); mojo_cstr_or_int_release(1, c);
@@ -331,8 +327,11 @@ static void test_dict_int_keys(void) {
     assert(d->used == 5);
     assert(mojo_dict_get_int(d, "007") == 1 && mojo_dict_get_int(d, "+7") == 2 && mojo_dict_get_int(d, "-0") == 3);
     assert(mojo_dict_get_int_kw(d, 7) == 70 && !mojo_dict_contains_kw(d, 0) && !mojo_dict_contains_kw(d, 6));
-    /* a boxed string word goes to the string path */
+    /* a boxed string word goes to the string path. A non-heap buffer (a static
+     * array), registered like a codegen literal so the sound predicate routes it
+     * to the string path rather than keying it by the decimal of its address. */
     static char abc[] = "abc";
+    mojo_str_register(abc);
     mojo_dict_set_int_kw(d, (int64_t)(intptr_t)abc, 99);
     assert(mojo_dict_get_int(d, "abc") == 99 && mojo_dict_get_int_kw(d, (int64_t)(intptr_t)abc) == 99);
     /* bytes keys stay their own domain even when their bytes spell an integer */
@@ -576,19 +575,16 @@ static void test_dict_float_keys(void) {
     { char *k = mojo_str_from_double(NAN);       assert(strcmp(k, "nan") == 0); mojo_cstr_or_int_release(0, k); }
 }
 
-/* KNOWN FAILING -- run as `--group boxedstr`, registered as the
- * expect-marked `ptrreg-boxed-str` test. Asserts the behaviour that SHOULD
- * hold: an int64_t in the predicate's accepted range that is not a real
- * pointer must still be rendered as its decimal, not dereferenced. It does not
- * hold, and the failure is a SEGFAULT, not an assert: `_mojo_ptr_shaped`
- * accepts [2^31, 2^47) on shape alone, so 2^32 reads as a char* and
- * `mojo_cstr_or_int_str` hands it straight to strcmp. See
- * bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
- *
- * Kept as its own group rather than deleted: the case that finds a bug must
- * not be the case that gets removed, and a single group that is allowed to be
- * red is the only way to report this without either hiding it or marking the
- * eleven green groups expect= as well. */
+/* run as `--group boxedstr`, registered as `ptrreg-boxed-str`. Asserts the
+ * behaviour the predicate had to earn: an int64_t in the [2^31, 2^47)
+ * pointer-shaped window that is not a real pointer is rendered as its decimal,
+ * not dereferenced. Before `mojo_boxed_is_str` was made sound (a live heap
+ * allocation or a registered string, not the range alone) it accepted the whole
+ * window on shape alone, so 2^32 read as a char* and `mojo_cstr_or_int_str`
+ * handed it straight to strcmp -- a segfault, measured at -O0, -O2 and under
+ * ASan. The discriminator is now positive membership: a bare integer in the
+ * window is neither a live allocation nor registered, so it is answered
+ * "integer". See the `_reg_str`/`mojo_boxed_is_str` comments in fire_runtime.c. */
 static void test_boxed_str_discrimination(void) {
     /* every one of these is an ordinary integer a program may use as a key */
     int64_t big[] = {2147483648LL, 3000000000LL, 4294967296LL,
@@ -926,26 +922,30 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
     return r, ""
 
 
-# The harness's groups, and which of them the suite is allowed to see red.
-# `boxedstr` is the only known-failing one and it is a SEPARATE registered test
-# carrying an `expect=` with a reason and a bug-doc link, so a fix for it turns
-# into a FAILURE of that marker (drop the marker) instead of a silent no-op.
+# The harness's groups. `ptrreg` (the suite test that runs without `--group`)
+# covers the nine always-green groups; `boxedstr` (a bare int64 in the
+# pointer-shaped window must render as its decimal, not be dereferenced) is its
+# own dedicated suite test, `ptrreg-boxed-str`, so it is named rather than
+# folded in. It was the one known-failing group, expect-marked until the sound
+# predicate (a live heap allocation or a registered string, not the range alone)
+# made it pass; it stays a separate green test so the case that found the bug
+# is still the case that guards it.
 GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
                 "dict_int_keys", "dict_set_inline", "dict_float_keys",
                 "dict_container_keys", "type_tag")
-KNOWN_BAD_GROUPS = ("boxedstr",)
+DEDICATED_GROUPS = ("boxedstr",)
 
 
 def main():
     # `--group NAME` runs exactly one group and is how the suite addresses a
-    # single known-failing group, so the expect-marked test is a real
-    # measurement of that group rather than of the whole harness.
+    # single dedicated group, so `ptrreg-boxed-str` is a real measurement of
+    # that group rather than of the whole harness.
     only = None
     if len(sys.argv) >= 3 and sys.argv[1] == "--group":
         only = sys.argv[2]
-    if only is not None and only not in GREEN_GROUPS + KNOWN_BAD_GROUPS:
+    if only is not None and only not in GREEN_GROUPS + DEDICATED_GROUPS:
         print(f"FAIL  no such group: {only}\n  known: "
-              f"{', '.join(GREEN_GROUPS + KNOWN_BAD_GROUPS)}")
+              f"{', '.join(GREEN_GROUPS + DEDICATED_GROUPS)}")
         print("Results: 0 passed, 1 failed")
         return 1
     groups = (only,) if only else GREEN_GROUPS

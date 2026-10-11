@@ -633,6 +633,10 @@ typedef struct {
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
+/* Register a non-heap string (the codegen's `__rodata` literal pool) so
+ * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
+ * .c for the discriminator this feeds. */
+void mojo_str_register(char *s);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);

@@ -1732,19 +1732,17 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
 test('ptrreg', [PY, 'test_ptr_registry.py'], mem='tiny', cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
-# The one group of the same harness that is allowed to be red, split out so it
-# can be named instead of taking the green groups down with it. Registered
-# 2026-09-30 when the harness's asserts were found to be compiled out by
-# python3-config's -DNDEBUG (test_ptr_registry.py::_flags); with them live, a
-# pre-existing crash appeared that had been sitting in the file the whole time.
+# The one dedicated group of the same harness, split out from `ptrreg` so the
+# large-integer-key case is named rather than folded into the always-green set.
+# Registered 2026-09-30 (asserts had been compiled out by -DNDEBUG, and with
+# them live a segfault had been sitting in the file the whole time) and carried
+# an `expect=` until the sound predicate landed: a pointer-shaped int64 in
+# [2^31, 2^47) is now answered by positive membership — a live heap allocation
+# or a codegen-registered literal — not by the range alone, so a bare integer
+# renders as its decimal instead of being dereferenced.
 test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
      mem='tiny', cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
-     expect='an int64 dict key in [2^31, 2^47) is misread as a char* and '
-            'dereferenced: `d[3000000000] = 1` segfaults. The scalar body model '
-            'gives a char* and an int64_t the same 64 bits, so the shape test '
-            'cannot be right; the fix is for the codegen to stop asking. See '
-            'bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md',
      desc='a large integer dict key is not dereferenced as a pointer')
 # The two instruments from the previous round, which existed and ran by nothing
 # for the same reason until agent [5]'s estate check reported them. The taxonomy
@@ -4047,7 +4045,7 @@ BUCKETS = {
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-# `ptrreg-boxed-str` is master's split-out red group of the
+# `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
               # hostmod claim for `ast`; each was added to this bucket on its
               # own side of the merge and both are named here, so a conflict
@@ -5400,7 +5398,7 @@ def marker_failures(reason: str):
     None means the marker states no count, and this is a real answer rather
     than a failure: the markers that describe a whole-job CONDITION rather
     than a set of cases (`native-dumpfull`'s bootstrap pre-pass cost,
-    `ptrreg-boxed-str`'s segfault, `formal-struct`'s arity refusal) are the
+    `formal-struct`'s arity refusal) are the
     ones where "how many cases" is not the question. What is NOT allowed is
     for a marker that does state a count to be unchecked, and that is what
     `observed_failures` / `observed_fanout_failures` below are for.
