@@ -20883,7 +20883,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (684 entry points, 273 of them word-shaped,
+    §3.1 for the word-shaped surface (683 entry points, 272 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps
@@ -21264,9 +21264,8 @@ def no_public_api_reason(source_paths: list) -> str:
         binds" is a rule rather than a declaration. The message now names
         those two and says they do not exist yet, because a reader who is
         told there is nothing to add stops, and 6 of one stdlib scope's 46
-        files and 56 of the corpus sit behind this sentence
-        (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6
-        item 2, which is where the fix was asked for). The same sentence
+        files and 56 of the corpus sit behind this sentence (the constants-only
+        refusal is where the fix was asked for). The same sentence
         also claimed the constants "are inlined at their use site", which
         is not true of a module this path refuses: nothing is inlined,
         because the library is never built.

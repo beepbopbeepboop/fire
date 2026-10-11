@@ -36,7 +36,7 @@ item §4.2 is closed.
 
 **Why it is filed rather than mentioned:** two of the sweep-scope docs asked for
 exactly this and could not do it themselves, because the shape is in neither of
-their scopes. `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §3
+their scopes. The round-2 `std-os-io` scope audit's §3
 link 2: *"Link 2 has NO bug doc and no claim … It is filed nowhere of its own,
 and 4 files of this scope sit behind it, so it is worth a doc rather than a
 mention."* `bugs/FORMAL_std_builtin_sys_time_slice_2026-10-04.md` §3 row 12
