@@ -1,5 +1,13 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
+**Status 2026-10-12 (`work/formal281-docs`): the rule stands and items 1 and 2
+are untouched; the only stale figure is the suite size.** `test_formal_exceptions.py`
+is **315 checks, green** (both architectures) — the two Status entries below quote
+**285**, the count at `formal126-docs`; the file has grown by the `raise`/`finally`
+rows that landed since. Every claim about the RULE below (a `raise` evaluates its
+expression, runs the enclosing `finally`, and terminates; a handler arm with a
+body is refused by name; the three host-module conventions) is unchanged.
+
 **Status 2026-10-07 (`formal126-docs`): item 3 of "The next step" is DONE, and
 the claim below that "there is no test in the tree that raises on this path" is
 no longer true.** `test_formal_exceptions.py` landed 2026-10-05 and is 285
