@@ -1242,6 +1242,23 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `st_dev` is `dev_t`, which is `int32_t` on this target, so the field is
+    sign-extended: a device whose 32-bit pattern has the top bit set comes back
+    NEGATIVE, and CPython's `os.stat` reports it that way.  Measured on this
+    host for `/dev/null`: the four bytes are `0xa8fb1a80`, CPython's `st_dev`
+    is `18446744072249612928` (`0xffffffffa8fb1a80`), and this repo's image
+    answered `2835028608` (`0xa8fb1a80`) — the low 32 bits zero-extended.  The
+    UNSIGNED reader is `le32`, and the difference is the whole of this
+    function."""
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1603,6 +1620,20 @@ def fs_stat_field32(p, follow, at) -> int:
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32_signed(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    One caller — `st_dev` — because it is the one 32-bit field in the layout
+    whose C type is signed (`dev_t` is `int32_t`); `st_uid`/`st_gid` are
+    `uint32_t` and go through the unsigned reader.  The width is the same 32
+    bits and the alignment argument is `fs_stat_field32`'s; the sign is the
+    whole of the difference, and it is `le32s`'."""
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
