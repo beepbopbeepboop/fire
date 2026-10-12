@@ -11,7 +11,16 @@ reads the preheader's literals, and `_build_cfg` seeds the body's first block
 with the target). What is left is the case whose emptiness is a RUN-TIME fact
 and cannot be one by any build-time decision — a range bound a PARAMETER, which
 is §"What is left" and which now carries the measurement that closes option 1
-below.**
+below.** *2026-10-12 (`work/merge-qwen1` merge): a correction made on
+`work/formal156-docs` (2026-10-08) claimed §"What is wrong"'s `n = 3` row was a
+transcription error and that `n >= 1` prints CPython's value. Re-verified on
+the merged tree AND on a worktree of the merge base `4113d50e`, both
+backends: the §"What is wrong" program prints `q=9` — the caller's leftover
+register, garbage — for EVERY `n`, `n = 0`, `n = 1` and `n = 3` alike, where
+CPython answers `UnboundLocalError`, `0` and `2`. The original table is correct
+as written; the 2026-10-08 correction was the measurement error, and the
+residual covers the whole parameter-bound range, not only its empty case.
+The `work/formal156-docs` edit to this doc is reverted on that measurement.*
 
 Found 2026-10-03 while fixing the empty-range counter bug (that doc is deleted
 with its fix, `0340e4fc`), whose fix moved the loop's store so that an empty
