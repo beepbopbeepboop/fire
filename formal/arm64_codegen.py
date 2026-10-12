@@ -5209,11 +5209,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are — which is what keeps a
-            # nested `(s & t) | u` from being refused as "the left is not
-            # established to be a set".
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False

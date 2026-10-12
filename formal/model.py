@@ -14047,7 +14047,7 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
 #: backend decides, because whether the pair is a set algebra this path lowers
 #: is a fact about the backend and not about the operator.  arm64 lowers the
-#: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
+#: three for two sets (see `_emit_set_op`); x86-64 has no emitter and
 #: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
@@ -14117,7 +14117,7 @@ def container_operator_refusal(op: str, left_kind, right_kind,
         # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
         # question for the backend (see `SET_ALGEBRA_OPS`), and
         # `set_algebra_refusal` is where the two answers are worded.  Defer
-        # rather than refuse, so arm64 can reach `_emit_set_algebra` and x86-64
+        # rather than refuse, so arm64 can reach `_emit_set_op` and x86-64
         # can reach its own named refusal.  `aug_assign_operands_are_blobs`
         # then routes the augmented spelling through `_emit_binop`, which is
         # the second emitter the desugaring exists for.
@@ -14246,7 +14246,7 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     container operator except `+`, `|` and — on two blobs — the set-algebra
     three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
     `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
-    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
+    blobs, which is what routes them to `_emit_set_op` on arm64 and to
     `set_algebra_refusal` on x86-64 rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
@@ -49288,6 +49288,43 @@ def context_exit_arity(struct_def) -> int:
         if getattr(m, "name", None) == CONTEXT_EXIT:
             return 4 if _dunder_receiver_params(m) > 1 else 1
     return 1
+
+
+def with_alias_struct(struct_def, structs_by_name):
+    """The struct a `with ... as NAME` alias holds, or None if the source names none.
+
+    The alias names `__enter__`'s RESULT, not the context — CPython's
+    `TARGET = type(mgr).__enter__(mgr)` — so the struct it holds is the one that
+    result is DECLARED to be, and a manager that annotates `__enter__` has
+    written it down.  Publishing it is what lets a method call through the alias
+    whose NAME a second struct of this image also declares lift from the alias's
+    own type instead of being refused, which is the SAME evidence a field access
+    reads through `struct_field_declared_type` and a parameter through
+    `parameter_declared_structs`: a type the source wrote, rather than a guess by
+    name.
+
+    `__enter__` returning a plain word (`return self.tag`) or carrying no
+    return annotation is None, and that is the honest answer: nothing in the
+    source says which struct the alias holds, so dispatch stays by name and the
+    ambiguous case stays refused (`formal/build.py::_lift_one_word_field_method`
+    declines a name two structs declare).  A result whose annotation names a
+    type THIS unit does not declare is None for the same reason — the struct is
+    in another module and there is nothing here to lift to.
+
+    One reader, asked by the ONE lowering that decides the alias's binding
+    (`formal/build.py::_one_with_item`), and it answers from `annotation_base_name`
+    so a spelling the rest of this file already accepts (`Res`, `Self`,
+    `Optional[Res]`'s base) means here what it means everywhere else.
+    """
+    enter = next((m for m in struct_methods(struct_def)
+                  if getattr(m, "name", None) == CONTEXT_ENTER), None)
+    if enter is None:
+        return None
+    base = annotation_base_name(getattr(enter, "return_type", None),
+                                self_type=getattr(struct_def, "name", None))
+    if not base:
+        return None
+    return (structs_by_name or {}).get(base)
 
 
 def with_alias_bare_name(item):

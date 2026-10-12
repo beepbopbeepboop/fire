@@ -533,7 +533,7 @@ class _Reader:
                 b = self.value(getattr(node, "right", None))
                 if a is None or b is None:
                     return None
-                # `//` and `/` are the SAME IR tag.  The machine computes
+# `//` and `/` are the SAME IR tag.  The machine computes
                 # `UInt64.div` for both -- `_eval_of`'s `/` is `a // b` and
                 # `_lean_of`'s `/` is `UInt64.div`, the word reading -- so
                 # normalising the spelling here is what keeps one reader for

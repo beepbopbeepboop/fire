@@ -630,17 +630,23 @@ SET_CASES = [
      "`&` is INTERSECTION and needs a per-element membership scan per element. "
      "arm64 lowers it now; x86-64 has no set emitter and refuses it, so this "
      "case is arm64-only. Observed through a sum so a wrong element is visible"),
+    ("s_intersection_str", ['s = {"a", "b"}', 't = s & {"b"}'], "len(t)",
+     "an intersection over string elements, whose membership compare is on "
+     "`char *` WORDS — equal literals are one merged constant here, which is "
+     "what makes the union emitter's address dedup correct too"),
     ("s_difference_r", ["s = {1, 2}", "t = s - {2}", "u = 0",
                         "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
      "`-` is SET DIFFERENCE, arm64-only like the intersection. Measured before "
      "the gate: SIGSEGV on both architectures, no output, because the result is "
      "a word nowhere near a blob and `len` read a count out of it"),
-    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}", "u = 0",
+    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2, 3}", "u = 0",
                      "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
      "`^` is SYMMETRIC DIFFERENCE, arm64-only. Measured before the gate: "
-     "SIGSEGV on both"),
+     "SIGSEGV on both. Both operands have elements the other lacks, so the sum "
+     "exercises BOTH passes of the symmetric difference (left-minus-right and "
+     "right-minus-left) rather than one of them"),
     ("s_sub_r", ["s = {1, 2}", "s -= {2}", "u = 0",
                  "for x in s:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(s)"]),
@@ -791,17 +797,14 @@ OPERATOR_CASES = [
      "`-` between two containers: a TypeError in CPython, and measured as a "
      "SIGSEGV here before the gate. This one is a LIST, so the set emitter "
      "below does not answer it and the gate still refuses it on both backends"),
-    ("o_xor", ["s = {1, 2}", "t = s ^ {2}", "u = 0",
-               "for x in t:", "    u = u + x"],
-     ("sum=%d len=%d\\n", ["u", "len(t)"]),
-     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate. Two "
-     "SETS, so arm64 lowers it now; x86-64 has no set emitter and refuses it"),
-    ("o_and", ["s = {1, 2}", "t = s & {2}", "u = 0",
-               "for x in t:", "    u = u + x"],
-     ("sum=%d len=%d\\n", ["u", "len(t)"]),
-     "`&`: INTERSECTION, measured as 2 on arm64 and 163061056 on x86-64 where "
-     "CPython answers 1 — the two architectures disagreeing is the clearest "
-     "possible sign that neither computed a set. arm64 lowers it now"),
+    ("o_xor", ["a = [1, 2]", "b = [2]", "t = a ^ b"], None,
+     "`^` between two LISTS: a TypeError in CPython and a refusal here. The "
+     "two-SET shape is arm64's set-algebra lowering now (the `set` group's "
+     "`s_symdiff_r`), so this row is the one that keeps the gate's coverage of a "
+     "non-set blob on `^`"),
+    ("o_and", ["a = [1, 2]", "b = [2]", "t = a & b"], None,
+     "`&` between two LISTS: a TypeError in CPython and a refusal here — the "
+     "same split as `o_xor`, with the two-set shape in the `set` group"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -881,14 +884,15 @@ BACKEND_ONLY = {
     # `s_union` already carries. The rows were refusals on BOTH backends until
     # arm64 grew the lowering; a backend that grows one has to delete its row.
     "s_intersection_r": "x86_64",
+    "s_intersection_str": "x86_64",
     "s_difference_r": "x86_64",
     "s_symdiff_r": "x86_64",
     "s_sub_r": "x86_64",
     "s_andassign_r": "x86_64",
-    # The same two set operators re-asked in the `operator` group, where the
-    # subject is the gate rather than the set surface.
-    "o_xor": "x86_64",
-    "o_and": "x86_64",
+    # `o_xor` / `o_and` are LISTS rather than the two-set shape the `set` group
+    # carries, so they are refused on BOTH backends and are deliberately NOT
+    # backend-only: that is the row that keeps the gate's coverage of a non-set
+    # blob on `^`/`&` after arm64 grew the set-algebra lowering.
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

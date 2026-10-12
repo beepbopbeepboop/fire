@@ -3088,6 +3088,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # BOTH backends refused, from the same line of source. `stmt.op` is
         # the spelling to quote, so the diagnostic names the `+=` the reader
         # is looking at rather than the `+` the table is keyed on.
+        #
+        # A SET ALGEBRA on a SET target (`s &= t`) is a blob-on-either-side
+        # shape, so it is refused by the delegation below rather than here: the
+        # shared gate's `set_algebra_refusal` is what names it, and growing a
+        # second copy at this site would let the two spellings of one operator
+        # drift.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -7503,6 +7509,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        #
+        # A SET ALGEBRA is decided further down, at the one site that asks
+        # `set_algebra_refusal` for every two-blob shape (see the `&`/`-`/`^`
+        # guard below the union gate), so it is NOT answered here: a second
+        # two-set guard at this point would pre-empt that site and let the two
+        # spellings of one operator word the refusal differently.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -7535,7 +7547,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(reason)
         # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
         # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
+        # `_emit_set_op`, so every two-blob shape is refused by name —
         # both the two-set case (which arm64 lowers) and the not-two-sets case
         # (a CPython `TypeError`).  Without this the deferral would let the
         # operands reach the integer ALU as two blob ADDRESSES, which is the
@@ -10220,9 +10232,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are.
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False

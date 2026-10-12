@@ -224,8 +224,6 @@ def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
     check("the_unlowered_reason_names_floordiv_too",
           "//" in CT.unlowered_reason(bad, ["n"]),
           CT.unlowered_reason(bad, ["n"]))
-
-
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     """The difference every consumer needs between "promised nothing" and
     "promised something".  A checker that treats them alike reports a
