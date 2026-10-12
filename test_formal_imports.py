@@ -4041,8 +4041,8 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     could add".
 
     The fourth message-accuracy guard on `no_public_api_reason`, and the one
-    `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6 item 2
-    filed as a dead end: the branch's text ended "There is nothing an importer
+    the round-2 `std-os-io` scope audit filed as a dead end: the branch's text
+    ended "There is nothing an importer
     could bind, and nothing this backend could add." — and the second clause
     is **false**, which is why that document said of it "the sentence is a dead
     end for whoever reads the 6 files first".
