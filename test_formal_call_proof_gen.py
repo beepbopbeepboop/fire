@@ -4747,6 +4747,51 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertEqual(_program_extern_calls({}), [])
 
 
+class TestTheCompilerCallIsNotTheUniversalHalt(unittest.TestCase):
+    """The compiler's own `getrlimit`/`fflush` must not BE the theorem.
+
+    The arm64 stack-floor guard reads `RLIMIT_STACK` with a `getrlimit` once per
+    process and the bounded stops flush with `fflush`, and neither is a call the
+    PROGRAM makes.  When the guard was emitted in every PROLOGUE the universal
+    theorem stopped at that `getrlimit` — a program that computes correctly got
+    a theorem saying only "control reached the stack guard" — and a program with
+    one more real call was refused at generation.  Measured now: the guard lives
+    in the startup stub below the entry, so the walk's `[entry, func_end)` does
+    not contain it, and the exit flush is recorded in `info["compiler_traps"]`
+    so `_program_extern_calls` subtracts it.  This pins the result without Lean:
+    each of the four programs reaches a REAL `s.x0 = mojo n` universal (not the
+    `some s => True` of a `reaches_call` placeholder).
+    """
+
+    EXAMPLES = ["count", "sum", "fact"]
+
+    def _proof(self, name, src):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-univ-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        p = os.path.join(tmp, name + ".mojo")
+        with open(p, "w") as fh:
+            fh.write(src)
+        r = fb.compile_formal(p, output=p + ".aout", arch="arm64",
+                              prove=True, check=False)
+        with open(r["proof_path"], encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_a_trivial_program_keeps_its_value_theorem(self):
+        text = self._proof("plain", "def main(n: Int) -> Int:\n    return 7\n")
+        self.assertIn("main_compiles_correctly_universal", text)
+        self.assertIn("some s => s.x0 = mojo n", text)
+
+    def test_the_examples_that_the_guard_had_stopped_keep_their_theorems(self):
+        for stem in self.EXAMPLES:
+            with self.subTest(example=stem), open(
+                    os.path.join(HERE, "formal", "examples",
+                                 stem + ".mojo")) as fh:
+                text = self._proof(stem, fh.read())
+            self.assertIn(f"{stem}_compiles_correctly_universal", text)
+            self.assertIn("some s => s.x0 = mojo n", text)
+
+
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
