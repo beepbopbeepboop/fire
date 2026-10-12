@@ -1,5 +1,16 @@
 # FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it: `os.environ` is modelled, and what the 4-file sweep row is actually worth
 
+**Status 2026-10-12 (`work/formal281-docs`): nothing in this document moved, and
+the one figure it publishes for the suite is now stale — `test_formal_os_backing.py`
+is 68/70, and the two reds are a DIFFERENT subject.** They are `stat_null` on both
+architectures, and they are the `stat(2)` `st_dev` / sub-word-pointee defect filed
+as `bugs/FORMAL_os_backing_sub_word_pointer_and_stat_dev_are_red.md` — not an
+`env*` row. Every row this document rests on still passes: `environ_view` and
+`environ_view_empty` (88 answers per architecture against CPython) and the `blob`
+group. So the `70/70` below is the suite's total at that measurement; the
+`environ` half of it is unchanged, and the drop is `stat_dev`. `test_formal_
+module_attr.py`, quoted 33/33 → 35/35 as §5/§5a/§5b landed, is **36/36** here.**
+
 **Status 2026-10-05 (`work/formal27-5`): §5a had a third case and the ALIAS was
 it. `from os import environ as e` then `e.get(k)` was getting the false sentence
 §5a deleted, and the reason is a one-field omission with a general shape — the
