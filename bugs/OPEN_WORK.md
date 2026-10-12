@@ -68,7 +68,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md` | **unclaimed** | FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 
-### `formal/arm64_proof_gen` — 21 documents, 4 claimed
+### `formal/arm64_proof_gen` — 20 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -90,7 +90,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow.md` | **unclaimed** | the div0 residual goal the zero-divisor class pins is no longer REACHED, so three `test_formal_call_proof_gen.py` rows are red on any tree with a built library |
-| `FORMAL_three_examples_fail_their_proofs_on_master.md` | **unclaimed** | `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES` |
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 
