@@ -234,13 +234,22 @@ architectures.
 | `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | **unclaimed** | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
 | `FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_decode.md` | **unclaimed** | An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py` |
 
-### `formal/x86_64_endtoend_test` — 3 documents, 0 claimed
+### `formal/x86_64_endtoend_test` — 2 documents, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_end_to_end_proof.md` | **unclaimed** | a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both |
 | `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` | **unclaimed** | the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable |
-| `FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` | **unclaimed** | the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses |
+
+`FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` was here
+and is deleted (2026-10-12, `work/formal271-docs`): the path tree now treats a
+`call` whose target is outside the image as a leave and emits a disjunction over
+halt addresses (the fix the doc's own "next step" asked for), pinned by
+`test_formal_x86_64_call_tree.py` and
+`test_formal_sweep_truth.py::TestTheStackFloorGuardIsWhatGatesTheValueTheorem`.
+The one item the doc left open — the constant-VALUE theorem, gated on the
+guard's `call_rel32` — is tracked by `FORMAL_x86_64_end_to_end_proof.md`
+("the value theorem's 12 open").
 
 ### `formal/x86_64_model_fuzz` — 1 document, 0 claimed
 
