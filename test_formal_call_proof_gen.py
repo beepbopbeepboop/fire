@@ -4871,6 +4871,80 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                 f"the repair is missing, and this row is what found that")
 
 
+class TestTheStackFloorGuardReadsTheLimitInTheStartupStub(unittest.TestCase):
+    """The stack-floor guard's `RLIMIT_STACK` read is in the STARTUP STUB, once.
+
+    This is the pin for a measured regression and its fix. With the
+    `getrlimit` read
+    in every guarded PROLOGUE, `getrlimit` was the one call the universal
+    theorem's walk could not follow in *every* function, so `arm64_step` halted
+    there and the whole data-dependent corpus lost its value theorem (measured:
+    0 of 93 examples emitted `f_compiles_correctly_universal`). x86-64 already
+    reads the limit once, before `main`; the fix is the arm64 twin,
+    `formal/arm64_codegen.py::_emit_stack_floor_init`, called from `compile()`'s
+    `emit_startup` branch, which puts the `BL getrlimit` BELOW `func_offset`
+    where no run test starts and no path tree walks.
+
+    Three facts, and the middle one is what makes the first not a coincidence:
+
+    * the conditional corpus generates a VALUE theorem again — `either` is the
+      measured one, and it is the program the doc's own after-table names;
+    * the image's ONLY extern call below the entry is the stub's `getrlimit`, so
+      the read is outside every walked function body — which is what "not the
+      opaque call for every function" means, and it is checkable with no Lean;
+    * `_program_extern_calls` counts none of it, so the program's own calls are
+      the run test's subject and none of the compiler's are.
+
+    A build-only change that put the read back in the prologue would keep the
+    first assertion if it also fixed something else, so the second is asserted
+    by ADDRESS rather than by symbol: the point is WHERE the call is emitted.
+    """
+
+    def test_either_has_a_value_theorem_and_the_read_is_in_the_stub(self):
+        from formal.arm64_proof_gen import _program_extern_calls
+        tmp = tempfile.mkdtemp(prefix="a2-stackfloor-")
+        try:
+            src = os.path.join(HERE, "formal", "examples", "either.mojo")
+            r = _compile(src, os.path.join(tmp, "either.aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                text = f.read()
+            self.assertRegex(
+                text, r"(?m)^theorem either_compiles_correctly_universal",
+                "the corpus's conditional programs have lost their value "
+                "theorem again; the stack-floor read is back on a walked path")
+            info = r["info"]
+            entry = info.get("func_offset")
+            self.assertIsNotNone(entry, "the image has no entry to be below")
+            stub = [c for c in info["extern_calls"]
+                    if c["addr"] is not None and c["addr"] < entry]
+            self.assertEqual(
+                [c["sym"] for c in stub], ["getrlimit"],
+                f"the only call below the entry must be the startup stub's "
+                f"`getrlimit`: {[(c['sym'], c['addr']) for c in info['extern_calls']]}")
+            self.assertEqual(
+                [c["sym"] for c in _program_extern_calls(info)], [],
+                "the compiler's own `getrlimit` is being read as a call the "
+                "program makes")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_straight_line_program_keeps_its_value_theorem(self):
+        # The other end of the doc's table: `ret42` is the measured
+        # straight-line case, and it generates a value theorem too. Without
+        # this row the pin above could be read as "conditional programs only".
+        tmp = tempfile.mkdtemp(prefix="a2-stackfloor-ret-")
+        try:
+            src = os.path.join(HERE, "formal", "examples", "ret42.mojo")
+            r = _compile(src, os.path.join(tmp, "ret42.aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                text = f.read()
+            self.assertRegex(
+                text, r"(?m)^theorem ret42_compiles_correctly_universal",
+                "a straight-line program has lost its value theorem")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     """A model the shared generator cannot write must be CLAIMED as unwritten.
 
