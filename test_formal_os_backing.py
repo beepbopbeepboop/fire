@@ -1961,7 +1961,14 @@ def main():
     # `FAIL stat_fifo [arm64]`, which is the same line a defect in `os` prints —
     # and `bugs/OPEN_WORK.md` §C2 says this area has already been misdiagnosed
     # twice that way.
+    # `PASS=n FAIL=m of N` as well as the human `n/N passed`, so the
+    # registration's `expect=` count is CHECKABLE: the runner's count reader
+    # recognises that shape and not `n/N passed`, and a marker whose count it
+    # cannot read is reported UNCHECKED, which it treats as a failure. `KILLED`
+    # is neither, and is reported separately as before.
     print(f"\n{total - len(failed) - len(killed)}/{total} passed"
+          + f"  (PASS={total - len(failed) - len(killed)}"
+          + f" FAIL={len(failed)} of {total})"
           + (f", {len(killed)} obtained NO verdict because the machine killed "
              f"them on {EXTERNAL_SIGNALS_TEXT}, which is not a wrong answer: "
              f"{', '.join(killed)}" if killed else ""))

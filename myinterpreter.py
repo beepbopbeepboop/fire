@@ -4282,6 +4282,20 @@ class Interpreter:
         truncates the Float64 division result to an Int, it doesn't stay a float)."""
         if not isinstance(type_ann, str):
             return value
+        if value is None:
+            # A declared scalar with no initializer (`var x: Int`, or a struct
+            # field with no default) is the declared type's ZERO in Mojo, not
+            # None. Only scalars are claimed here: a `List`/`Dict` field with
+            # no initializer is an empty container and an annotation this
+            # interpreter cannot map must stay untouched, exactly as
+            # `_ARRAY_ELEM_DEFAULTS` is scoped to scalars.
+            if type_ann in self._INT_TYPE_NAMES:
+                return 0
+            if type_ann in self._FLOAT_TYPE_NAMES:
+                return 0.0
+            if type_ann == 'Bool':
+                return False
+            return value
         if type_ann in self._INT_TYPE_NAMES and isinstance(value, float):
             return int(value)
         if type_ann in self._FLOAT_TYPE_NAMES and isinstance(value, int) and not isinstance(value, bool):
@@ -5167,6 +5181,16 @@ class Interpreter:
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
+        if getattr(expr, 'is_bytes', False):
+            # A `b'...'` literal is a `bytes` object, an int SEQUENCE — not a
+            # text string. Boxing it as a `MojoString` made `for x in b"ab"`
+            # yield `'a'`/`'b'` and `list(b"cd")` yield `['c', 'd']` where
+            # CPython (and the compiled path, see emit_loops.py's `_gen_for_
+            # bytes`) yields `97`/`98` and `[99, 100]`. The parser has already
+            # decoded the literal's escapes to one character per output byte
+            # (see fire_compiler.py's `_decode_bytes_literal`), so latin-1
+            # encodes it back to exactly those bytes.
+            return expr.value.encode('latin-1')
         # `expr.is_interpolated`, and NOT "does the value start with `f"`/`t`".
         # An ordinary literal's value is its BODY and a body may begin with any
         # two characters, so that test read `s = 'f"n"'` as an f-string and

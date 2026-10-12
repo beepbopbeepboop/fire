@@ -233,13 +233,14 @@ link line produced four stages after the one that could have named the construct
 The three refusals are `formal/model.py::text_builtin_refusal`, and they are
 three messages because the three reasons have nothing in common.
 
-**And the escape spellings are a front-end gap, not an ABI one.** `\uXXXX`,
-`\UXXXXXXXX`, `\N{…}` and multi-digit octal escapes are not decoded by any engine
-in this repository, so a Mojo literal `"\u00e9"` is a six-character string where
-CPython's is one character — on the interpreter, the compiled path and both
-formal backends alike. A client that sends text as an escape spelling rather than
-as UTF-8 bytes crosses this boundary with the wrong bytes. Measured, and filed:
-`bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+**And the escape spellings are a front-end concern, not an ABI one.** `\uXXXX`,
+`\UXXXXXXXX`, `\N{…}` and multi-digit octal escapes were not decoded by any
+engine before 2026-10-07, so a Mojo literal `"\u00e9"` was a six-character string
+where CPython's is one. `fire_compiler.decode_c_escapes` (the one decoder every
+engine shares) now decodes all four, so a literal's TEXT is the same on the
+interpreter, the compiled path and both formal backends. What still differs by
+engine is the LENGTH reported for non-ASCII text: the compiled path's `len` is a
+`strlen` (bytes) where the interpreter and the formal backends count code points.
 
 ### A formal boundary is one 64-bit WORD: `Float64` is not a `double`, and a narrow integer is not a narrow register
 

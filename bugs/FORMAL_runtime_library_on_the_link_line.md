@@ -117,6 +117,17 @@ measured triple — 272 word-shaped, 216 exported, 176 reachable — plus the ot
 stale figures `1dd68a48`/`ca50560f` had published (`runtime/fire_runtime.c`
 524 KB, 411 non-word, 93 `formal/examples/*.mojo`), and both jobs are green.
 
+**Re-measured 2026-10-12 on the merged tree (`work/merge-qwen1`), the triple is
+273 word-shaped, 217 exported, 177 reachable on BOTH architectures** — a point-in-time move, not a regression: `mojo_str_register`
+(`void mojo_str_register(char *s)`) landed in `runtime/fire_runtime.h`/`fire_runtime.c`
+on master after the 2026-10-09 sweep, word-shaped, exported, and needing no heap
+handle, so it joins all three rows at once and the two gaps did not move
+(`273 − 217 = 56`, `217 − 177 = 40`). `FORMAL.md` §2.2 already published the
+move (273 of 684); §6's three-row table and the eleven-named table beside it
+were aligned in this merge, and `test_formal_doc_truth.py`'s phase-2 row is the
+check that first caught §6 still publishing 272. The "now" column above is the
+2026-10-09 sweep's point-in-time triple, kept as history rather than rewritten.
+
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
 two ceilings this document names are still the two ceilings, and the honest next

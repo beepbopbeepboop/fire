@@ -277,6 +277,22 @@ BUILTIN_PROGRAMS = {
             print(b)
             print(c)
     """),
+    # `bytes` is an int SEQUENCE, and the interpreter boxed a `b'...'` literal
+    # as a `MojoString`, so `for x in b"ab"` yielded the CHARACTERS `'a'`/`'b'`
+    # where CPython (and the compiled path) yield `97`/`98`. An engine-vs-engine
+    # diff could not see it — the compiled half is right and the interpreter
+    # wrong, so the two disagreed only once this was fixed, which is why the
+    # third opinion is required. `list(b"cd")` is deliberately NOT here: the
+    # compiled path reads the `MojoBytes` struct as a list of its slots, which
+    # is a separate codegen gap filed as
+    # `bugs/CODEGEN_list_of_bytes_reads_the_struct_slots.md`.
+    "bytes_iterates_as_ints": textwrap.dedent("""\
+        def main():
+            for x in b"ab":
+                print(x)
+            print(b"ab"[0])
+            print(b"ab" == b"ab")
+    """),
     # A method call is the only `return` EXPRESSION KIND whose type the
     # enclosing function's inference had no case for: `_quick_type`'s
     # method-call branch is gated on the RECEIVER's type naming a registered
@@ -338,6 +354,22 @@ BUILTIN_PROGRAMS = {
         def main():
             var p = Point(3, 4)
             print(p.x + p.y)
+    """),
+    # A struct field with no initializer is the declared type's ZERO in Mojo,
+    # not `None`. The interpreter stored `None` for the read of an unassigned
+    # field, so `print(p.x)` printed `None` where both the compiled path and
+    # `doc/ABI.md`'s formal backend print `0`.
+    "struct_field_with_no_initializer_is_zero": textwrap.dedent("""\
+        struct Pair:
+            var x: Int
+            var y: Int
+
+        def main():
+            var p = Pair()
+            print(p.x)
+            print(p.y)
+            p.y = 5
+            print(p.y)
     """),
     "class_methods": textwrap.dedent("""\
         class Counter:
@@ -1471,6 +1503,9 @@ CPYTHON_COMPARABLE = {
     "getattr_default_on_a_miss",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
+    # The interpreter yielded characters where the compiled path yielded ints;
+    # only CPython can say which is right, and it says ints.
+    "bytes_iterates_as_ints",
 }
 
 

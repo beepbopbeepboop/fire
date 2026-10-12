@@ -118,7 +118,7 @@ def test_mixed_compile_link_run(wd):
     # required to correctly pull in the C++ runtime bits (libstdc++) a real
     # C++20 coroutine object would need.
     exe_file = os.path.join(wd, 'mixed_exe')
-    result = mojo.link_executable([c_o, cpp_o], exe_file, cxx=True)
+    result = fire.link_executable([c_o, cpp_o], exe_file, cxx=True)
     check("link_executable(cxx=True) links main.o + poc.o via g++",
           result.returncode == 0, detail=result.stderr)
 
@@ -144,12 +144,12 @@ def test_link_executable_default_still_gcc():
     # files" style error, which is fine; we only care which binary ran).
     import unittest.mock as mock
     with mock.patch('mojo.subprocess.run') as m:
-        mojo.link_executable(['a.o'], 'out', cxx=False)
+        fire.link_executable(['a.o'], 'out', cxx=False)
         cmd = m.call_args[0][0]
         check("link_executable(cxx=False) uses gcc as driver", cmd[0] == mojo._GCC_BIN,
               detail=str(cmd))
     with mock.patch('mojo.subprocess.run') as m:
-        mojo.link_executable(['a.o'], 'out', cxx=True)
+        fire.link_executable(['a.o'], 'out', cxx=True)
         cmd = m.call_args[0][0]
         check("link_executable(cxx=True) uses g++ as driver", cmd[0] == mojo._GXX_BIN,
               detail=str(cmd))

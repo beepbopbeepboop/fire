@@ -6779,6 +6779,51 @@ fn main():
     print(b'a=b'.partition(b''))
 """, "ValueError: empty separator")
 
+    # The `str` half of the same pair. `mojo_str_partition`/`mojo_str_
+    # rpartition` built an unmarked `MojoList`, so their result PRINTED as
+    # `[...]`, `isinstance('a=b'.partition('='), tuple)` was False and
+    # `isinstance(..., list)` True where CPython says the opposite; and the
+    # empty-separator arm answered `('a=b','','')` where CPython raises
+    # ValueError.
+    test_gimple_stdout("gimple_str_partition_marks_tuple", """\
+fn main():
+    print('a=b'.partition('='))
+    print('a=b=c'.rpartition('='))
+    print('abc'.partition('='))
+    print('abc'.rpartition('='))
+    print('=a'.partition('='))
+    print('a==b'.rpartition('='))
+""", "('a', '=', 'b')\n('a=b', '=', 'c')\n('abc', '', '')\n"
+     "('', '', 'abc')\n('', '=', 'a')\n('a=', '=', 'b')\n")
+
+    test_gimple_runtime_error("gimple_str_partition_empty_sep_raises", """\
+fn main():
+    print('a=b'.partition(''))
+""", "ValueError: empty separator")
+
+    test_gimple_runtime_error("gimple_str_rpartition_empty_sep_raises", """\
+fn main():
+    print('a=b'.rpartition(''))
+""", "ValueError: empty separator")
+
+    # The four escapes the shared decoder used to leave verbatim (`\uXXXX`,
+    # `\UXXXXXXXX`, `\N{…}` and a multi-digit octal run). The compiled path
+    # hands a literal's body to the C compiler and passes known escapes
+    # through, so these need `_c_escape` to pass them through too — and
+    # `\N{…}` has no C spelling at all, so it is decoded there. Equality with
+    # the character is the pin: before the fix each spelling was a
+    # six/ten/thirty-five-character string of source text. The `\x41` control
+    # is the escape that already worked, so a fix that broke the pass-through
+    # would go red here.
+    test_gimple_stdout("gimple_named_and_octal_escapes_decode", """\
+fn main():
+    print('é' == '\\u00e9')
+    print('😀' == '\\U0001F600')
+    print('é' == '\\N{LATIN SMALL LETTER E WITH ACUTE}')
+    print('A' == '\\101')
+    print('A' == '\\x41')
+""", "True\nTrue\nTrue\nTrue\nTrue\n")
+
     # The doc's item 6a residue: `partition`'s container TYPE. The doc
     # concluded it was unfixable for want of a tuple type; re-tested, that
     # premise is STALE. A tuple type has existed for some time — a
@@ -6952,10 +6997,9 @@ fn main():
     # marked list, so every tuple reaching it through an untyped binding
     # reported itself a list — the silently-wrong direction. The codegen
     # path already excluded the marker; the two are the same question and
-    # had to stop disagreeing. `str.partition`'s unmarked result is still a
-    # list (its own filed bug:
-    # bugs/RUNTIME_str_partition_does_not_mark_its_result_as_a_tuple.md),
-    # while the `bytes` half, which sets the marker, is a tuple.
+    # had to stop disagreeing. Both `partition` halves now set the marker, so
+    # both report `not list` — the `str` half used to return an unmarked
+    # list, the last remaining member of this family.
     test_gimple_stdout("gimple_isinstance_list_excludes_tuple_on_the_boxed_path", """\
 def probe(x):
     if isinstance(x, list):
@@ -6967,7 +7011,7 @@ probe([1, 2])
 probe((1, 2))
 probe(b'a=b'.partition(b'='))
 probe('a=b'.partition('='))
-""", "list\nnot list\nnot list\nlist\n")
+""", "list\nnot list\nnot list\nnot list\n")
 
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
