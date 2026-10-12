@@ -1,11 +1,26 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) and item 4's SHORTER half are
+LANDED on arm64; items 1 (container `==`/`!=`), 2 (ordering) and item 4's
+GROWING half are unchanged.** `test_formal_container_methods.py` measures the
+whole surface against CPython on both architectures and is green; this doc is
+about the rows in it that are green *as refusals*, which is a different thing
+from green as answers.
+
+**2026-10-11 (`formal269-docs`): the SHORTER half of item 4 is lowered on
+arm64.** `a[0:1] = []` and `a[1:3] = [8]` now answer `[1, 2]` and `[3, 8, 4]`,
+match CPython on arm64, and are pinned by `l_slice_store_shrink_empty` /
+`l_slice_store_shrink_mid` (both `BACKEND_ONLY["x86_64"]`). A value SHORTER
+than the range shifts the tail down by `len(range) - len(value)` and drops the
+count — the same shape `_emit_del_list_range` uses — and the same-length case
+keeps its in-place loop, so a slice store never needs room the blob did not
+reserve. What remains is the GROWING half: a value LONGER than the range needs
+capacity past the reserved slots, which is the reservation question
+(`_scan_list_caps`) item 4 names. It is refused at build time for an inline
+literal receiver (`slice_store_static_length_refusal`) and stopped loudly at
+run time for a name-bound one (the diagnostic in `_emit_slice_store`) — both
+pinned, the second as the `l_slice_store_grow_r` NO_ANSWER row. x86-64 still
+refuses every slice store.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -95,11 +110,13 @@ with the element's own width known only at run time
    two nested loops with a different keep/drop predicate. This is the cheapest
    of the four by a wide margin and it is the one to do next.
 4. **A length-changing slice store** — `xs[a:b] = v` where `len(v) != b - a`:
-   a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
-   primitives are both already here: `_emit_del_list_range` memmoves a tail and
-   shrinks the count, and `_emit_list_append` grows it past the count into
-   reserved capacity. arm64's `_emit_slice_store` is a same-length copy loop and
-   x86-64 has no slice store at all.
+   a memmove of the tail and a count bump. The primitives are both already
+   here: `_emit_del_list_range` memmoves a tail and shrinks the count, and
+   `_emit_list_append` grows it past the count into reserved capacity. arm64's
+   `_emit_slice_store` is the same-length copy loop, x86-64 has no slice store
+   at all. **2026-10-11: the `len(v) < b - a` half is LANDED on arm64** (the
+   tail moves DOWN, which needs no extra room); `len(v) > b - a` is still
+   refused/stopped because it needs the reservation half.
 
 The stride is the whole of it, and it is not free: `model.blob_elem_stride`
 already answers it for `list:int`, `list:str` and a dict's `list:<value-elem>`
@@ -130,7 +147,13 @@ the second reason this is a project rather than a rewrite.
    different exit.
 4. **A length-changing slice store** (item 4). arm64 first (it is the backend
    that has the store), and only then x86-64, which needs a slice to stop being
-   a materialized copy before the store can mean anything.
+   a materialized copy before the store can mean anything. **The SHORTER half
+   landed 2026-10-11** (`l_slice_store_shrink_empty`/`_mid`, and the growing
+   stop is pinned by `l_slice_store_grow_r`); the GROWING half is the
+   reservation work: a literal receiver that is the target of a
+   length-changing slice store must reserve `count + (vlen - slice_len)` slots,
+   which is `_scan_list_caps`'s job, and the `slice_store_static_length_refusal`
+   gate must drop the growing case only when a backend can actually lower it.
 
 ## The rows that must not be "fixed" by deleting the case
 

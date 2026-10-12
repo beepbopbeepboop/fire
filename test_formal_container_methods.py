@@ -504,11 +504,25 @@ LIST_CASES = [
     ("l_reverse_r", ["a = [3, 1, 2]", "a.reverse()"], None,
      "`reverse` writes into the receiver's own bytes, and its length is a word "
      "read at run time"),
+    ("l_slice_store_grow_r", ["a = [3, 1, 2]", "a[0:1] = [9, 9, 9]"], NO_ANSWER,
+     "the GROWING half of the length-changing store: a value LONGER than the "
+     "range needs room the blob did not reserve. The receiver here is a NAME, "
+     "so no build knows its count and the run-time arm stops — loudly — where "
+     "`a[0:1] = []` and `a[0:1] = [9]` are answers. The static build-time "
+     "refusal covers an inline literal receiver"),
     ("l_slice_store_same", ["a = [3, 1, 2]", "a[0:1] = [9]"], "a[0]",
      "a SAME-LENGTH slice store, which arm64 lowers as an in-place replace and "
      "x86-64 does not have. arm64-only, declared in BACKEND_ONLY below rather "
      "than discovered: the group image is one build, so the case is EXCLUDED "
      "from it on x86-64 rather than failing the build"),
+    ("l_slice_store_shrink_empty", ["a = [3, 1, 2]", "a[0:1] = []"],
+     ("%d %d %d\\n", ["a[0]", "a[1]", "len(a)"]),
+     "a store whose value is EMPTY is `del a[0:1]`: the tail moves down one "
+     "and the count drops — the shrink half of the length-changing store"),
+    ("l_slice_store_shrink_mid", ["a = [3, 1, 2, 4]", "a[1:3] = [8]"],
+     ("%d %d %d\\n", ["a[0]", "a[1]", "len(a)"]),
+     "a SHORTER NON-EMPTY value over a middle range: `[3, 8, 4]`, not "
+     "`[3, 8, 2, 4]` — the tail past the range moves down too"),
 ]
 
 DICT_CASES = [
@@ -892,6 +906,10 @@ BACKEND_ONLY = {
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
+    # The SHORTER-value slice store is the same lowering on the same backend:
+    # a tail shift and a count bump. x86-64 still refuses the whole construct.
+    "l_slice_store_shrink_empty": "x86_64",
+    "l_slice_store_shrink_mid": "x86_64",
 }
 
 

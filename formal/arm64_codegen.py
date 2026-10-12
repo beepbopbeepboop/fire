@@ -12385,12 +12385,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
-        """`obj[a:b] = value` — same-length replace of the slice range.
+        """`obj[a:b] = value` — same-length replace, or a SHORTER-value shrink.
 
-        A formal list blob cannot change length without a compaction pass, so
-        this is a SAME-LENGTH replace and `len(value) != slice_len` stops the
-        program — with a DIAGNOSTIC, which is the second half of what used to
-        be wrong here. step must be 1 (or None).
+        A formal list blob cannot GROW its length without room its reservation
+        did not promise (that is the doc's item 4, the capacity half), so a
+        value LONGER than the range stops the program with a DIAGNOSTIC. A
+        value the same length is an in-place replace, and a value SHORTER is a
+        memmove of the tail down by the difference plus a count bump — the
+        same shape `_emit_del_list_range` emits, with `v` written into the
+        gap. step must be 1 (or None).
 
         **The exit was silent, and a silent exit is the worst outcome this path
         has.** Measured on this tree before the gate: `a = [3, 1, 2]` then
@@ -12399,6 +12402,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         where CPython's answer is `[9, 9, 9, 1, 2]`. The same source's
         `a[0:1] = [9]` (equal lengths) answered 9 correctly, so the defect only
         showed on the half of the construct this lowering does not implement.
+        The SHORTER half (`a[0:1] = []` is `[1, 2]`) is lowered on this tree;
+        the LONGER half is what remains, and it is refused — at build time by
+        `model.slice_store_static_length_refusal` when the build can see both
+        lengths, at run time by the diagnostic arm here when it cannot.
         x86-64 refuses the construct outright; that is a refusal at a wider
         scope than this one, and it names the same reason, so the two are one
         answer at two depths rather than two answers.
@@ -12406,7 +12413,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         Two things now, and the second is what covers what the first cannot see:
 
         * `model.slice_store_static_length_refusal` refuses AT BUILD TIME when
-          the receiver, the bounds and the value are all literal — the shape a
+          a value LONGER than the range is statically visible — the shape a
           corpus writes, and the shape above;
         * the run-time arm this method still needs, because the receiver's count
           is a word read at run time and a store into a name-bound list cannot
@@ -12484,14 +12491,43 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))
+        # `len(value) > len(range)` is the half still unimplemented: a GROWING
+        # store needs room past the blob's reserved slots, which is the
+        # reservation question the doc's item 4 names. A SHORTER value is a
+        # memmove of the tail down by `delta = len(range) - len(value)` and a
+        # count bump, both emitted just below, so the run-time arm now refuses
+        # only when the value is LONGER.
         self.asm.emit(encode_cmp_xn_xm(3, 6))
-        self.asm.emit(encode_cset_xd_cond(0, "eq"))
+        self.asm.emit(encode_cset_xd_cond(0, "ls"))      # 1 when vlen <= range
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
+        # --- shift elements [stop, count) DOWN by delta, then drop the count.
+        # delta is 0 for the same-length case, where this copies each element
+        # onto itself (harmless) and leaves the count alone.
+        self.asm.emit(encode_sub_xd_xn_xm(1, 6, 3))       # X1 = delta
+        self.asm.emit(encode_mov_zr_xn(7, 5))             # X7 = j = stop
+        mloop = f"{fn}_ssm{sid}"
+        mend = f"{fn}_sse{sid}"
+        self.asm.label(mloop)
+        self.asm.emit(encode_cmp_xn_xm(7, 2))             # j vs count
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(mend, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(14, 9, 8))     # X14 = &obj[0]
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 14, 7)) # &obj[j]
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))      # X0 = obj[j]
+        self.asm.emit(encode_sub_xd_xn_xm(13, 7, 1))      # j - delta
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(13, 14, 13))  # &obj[j-delta]
+        self.asm.emit(encode_str_xt_xn_imm(0, 13, 0))     # obj[j-delta] = X0
+        self.asm.emit(encode_add_xd_xn_imm(7, 7, 1))
+        self._emit_b_to(mloop)
+        self.asm.label(mend)
+        self.asm.emit(encode_sub_xd_xn_xm(2, 2, 1))       # count -= delta
+        self.asm.emit(encode_str_xt_xn_imm(2, 9, 0))      # obj[0] = count
         self.asm.emit(encode_movz_wd_imm(7, 0))
         loop = f"{fn}_ssl{sid}"
         self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(7, 6))
+        self.asm.emit(encode_cmp_xn_xm(7, 3))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
         self.asm.emit(encode_cbnz_xn(0, 0))           # i >= len → done
         self.asm.emit_label_rel(done_label, here_offset=-4)
@@ -12515,10 +12551,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         # emitter does not otherwise have, and a wrong-but-plausible pair of
         # numbers in a diagnostic would be worse than none.
         self._emit_stop_diagnostic(
-            "slice assignment: this path replaces the range IN PLACE, so the "
-            "replacement has to have exactly as many elements as the range; "
-            "this one does not.  Python resizes instead - xs[0:1] = [9, 9, 9] "
-            "on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
+            "slice assignment: this path shifts the tail and drops the count "
+            "when the replacement is SHORTER, and replaces in place when it is "
+            "the same length, but a replacement LONGER than the range needs "
+            "room the blob did not reserve.  Python resizes instead - "
+            "xs[0:1] = [9, 9, 9] on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
         self._emit_exit(1)
         self.asm.label(done_label)
         self.asm.emit(encode_ldp_sp_post(0, 31))
