@@ -491,7 +491,14 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 580),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 581),   # --fix writes the live figure
+    # 580 -> 581 (2026-10-10, 38d19a52): `mojo_str_register` — the registration
+    # a codegen-emitted `_mojo_register_str_pool` startup constructor makes once
+    # per `__rodata` literal, so `mojo_boxed_is_str` can answer a string's
+    # provenance (registered pool or live heap block) instead of its range
+    # shape. One name, read off the call as always: the commit that added the
+    # declaration did not touch this ladder, which is the drift this check
+    # exists to catch, and `--fix` closed it.
     # 571 -> 573 (2026-10-04, `work/bugs7-1`), TWO names, and both are the
     # consolidation this file exists to make possible:
     #   +1  `mojo_repr_slot_kind`, THE renderer for "a slot of kind `kind` holds
