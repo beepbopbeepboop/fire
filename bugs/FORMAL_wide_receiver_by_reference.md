@@ -54,11 +54,15 @@ one of them is a premise rather than a feature.**
   of it, and the failure mode is a status a caller can read rather than a SIGSEGV.
 
 Still open, unchanged: no method is proved end to end by the generator (step 6),
-no loop contract for a method, the `work_step_*` aliases are still misnamed
-pending the `_WORK_STEP` rename, and the x86-64 model has still not been re-audited
+no loop contract for a method, and the x86-64 model has still not been re-audited
 for arm64's class of mis-modelled memory form (`bugs/FORMAL_x86_64_model_has_no_
 step_for_a_gpr_to_xmm_move.md` and its siblings, claimed elsewhere). The first
-three are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs.
+two are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs.
+**The `work_step_*` aliases are now CLOSED** — `_WORK_STEP`'s entries 18/19/31
+were renamed and the three historical aliases (`work_step_ldr_pre`,
+`work_step_str_off`, `work_step_ldr_post`) are deleted; `formal/lean.py::
+ensure_library` rebuilt `lib/ProofLib.olean` under the bounded `run_lean` with
+exit 0 (302 s, peak 10.1 GB), so the library still elaborates.
 
 ## Is the one-word value a true invariant?
 
@@ -262,11 +266,11 @@ STR X0, [X5, #8]  modelled as  mem[sp+8] := x0  -- …at SP, not at X5
 
 All three are now false and their negations are proved (`by decide`, in the
 landing commit's verification). `work_step_ldr_uoff` and `work_step_str_uoff`
-are the corrected statements; `work_step_ldr_pre` and `work_step_str_off` are
-kept as aliases because `formal/arm64_proof_gen.py`'s `_WORK_STEP` table
-(`:1578`, `:1589`) dispatches on those names. **Renaming the generator's two
-table entries and deleting the aliases is a one-line follow-up that owns
-`formal/arm64_proof_gen.py`; it is not in my lane and is not done.**
+are the corrected statements, and `formal/arm64_proof_gen.py`'s `_WORK_STEP`
+table dispatches on those names. **The two historical aliases
+(`work_step_ldr_pre` and `work_step_str_off`) have been deleted** — they were
+kept only until the generator's table entries were renamed, which has since
+happened, and `test_formal_axioms.py` names `work_step_str_uoff` directly.
 
 **Blast radius measured, not assumed:** `0xF9400000` and `0xF9000000` appear in
 **zero** of the 43 `formal/examples/*_proof.lean` images, so no existing proof
@@ -313,7 +317,8 @@ arm64_step s lst2_code = some
   { s with mem := mem_write_u64 s.mem (s.sp + UInt64.ofNat 0).toNat (arm64_reg 10 s) }
 ```
 
-matched the old `work_step_str_off` exactly. Against the corrected library the
+matched the old `work_step_str_off` exactly (that theorem is since deleted;
+its corrected form is `work_step_str_uoff`). Against the corrected library the
 same proof has 19 errors, the extra 8 being `Type mismatch` at exactly those
 statements (`:4275` … `:4419`).
 
@@ -823,8 +828,10 @@ than dressed up as demonstrations.
   code is correct without it (the frame is below the callee's own blobs, and
   the per-block value flow for a frame access is a load or a store to a fixed
   `sp + 8k`), which is a fact about the emitter and not a proof.
-* **The `work_step_*` aliases are still misnamed** pending the `_WORK_STEP`
-  rename.
+* **~~The `work_step_*` aliases are still misnamed~~** pending the `_WORK_STEP`
+  rename. **CLOSED**: the generator's entries 18/19/31 use
+  `work_step_ldr_uoff`/`work_step_str_uoff32`/`work_step_str_uoff`, and the
+  three historical aliases are deleted from `lib/ProofLib.lean`.
 * **The x86-64 side of the model was not re-audited** for the same class of
   mis-modelled memory form. `X86.x86_mem_addr` looks correct on inspection and
   the 43-example model test passes against the hardware, but arm64 is the proof
@@ -1343,7 +1350,7 @@ load-bearing.**
    and is now fixed on both sides: `0xB9000000` is `STR Wt, [Xn, #imm]`, and both
    `arm64_step` and the generator had it as a post-index LOAD from `SP`.
    `lib/ProofLib.lean`'s `work_step_ldr_post` became `work_step_str_uoff32`
-   (with the old name kept as an alias, as for the other two). Measured first:
+   (the historical name is deleted now, along with the other two aliases). Measured first:
    **zero of the 43 examples emitted any of the three**, which is exactly why
    the suite was green throughout.
 
