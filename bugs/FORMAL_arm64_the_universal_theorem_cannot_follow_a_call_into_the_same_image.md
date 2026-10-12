@@ -1,5 +1,22 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**RE-MEASURED 2026-10-12 (`work/formal290-docs`): the one-call-site proof below
+does not currently TYPECHECK, and it is a different document's fix that stands in
+front of it.** `test_formal_call_proof_gen.py::TestSameImageCallLean::
+test_the_followed_call_proves_with_no_admission` is RED on this tree (measured:
+`python3 tools/memslot.py --gb 8 --label t -- python3
+test_formal_call_proof_gen.py`, 9 failures, 105 s) with
+
+    same_image_leaf_proof.lean:3890:56: error: maximum recursion depth has been reached
+
+which is the same class `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`
+records for `mod_by_var` and attributes to the `arm64_ext_imm12` merge. The
+generator still follows the call (it generates a proof, and the doc's §Status
+"what landed" is unchanged); what is not true on today's tree is the word
+"proved". So **step 1 (two call sites) and step 3 (recursion) below cannot be
+shown green until that fix lands**, and this note exists so the next worker does
+not read "rc=0, 5051 lines, 0 sorries" as the current state.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1

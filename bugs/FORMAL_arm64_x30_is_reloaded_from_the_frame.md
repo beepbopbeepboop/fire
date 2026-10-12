@@ -14,9 +14,35 @@ exists — was re-confirmed on this tree and still stands.
 all five goals quoted, and the next step is now PRICED — this one is NOT behind
 the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
 
-**RE-MEASURED 2026-10-07 (`work/formal108-docs`): the five named examples no
-longer reach this obligation, so the doc's subject is currently MASKED rather
-than fixed.** `count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
+**RE-MEASURED 2026-10-12 (`work/formal290-docs`): the "masked at generation"
+paragraph below is STALE — the five examples GENERATE again, so the subject is
+LIVE — but none of them can be shown GREEN on this tree, because their proofs
+now carry several error sites besides the `hx30fr` one and the first of them
+belongs to another document.** `2b7e5ec8` (the conditional-halt refusal) was
+followed by `14af4cbe` ("a source conditional is a barrier for the halt-address
+question, not a global refusal"), which landed after it and relaxed exactly the
+refusal the paragraph below describes. Measured:
+`formal.build.compile_formal('formal/examples/<stem>.mojo', arch='arm64',
+prove=True, check=False)` returns a proof path for all five of `count`, `pow2`,
+`fact`, `sqsum`, `sum` — no generation-time refusal. Checking `count`'s proof
+through `formal/lean.py::check_proof_cached` reports **six** error sites, not the
+two this doc's §"What is broken" describes, and the first is
+
+    x_count_proof.lean:4305:58: error: maximum recursion depth has been reached
+
+inside a `rw [runs_cons_seq …]` over a `sp ± 131072` step — the same shape
+(`maximum recursion depth` on a `sp`-arithmetic step in a run proof) that
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` records for
+`mod_by_var` and `same_image_leaf` and attributes to the `arm64_ext_imm12`
+merge. **So steps 0–2 below are still the right work and still generator-only,
+but no dec1 example can be shown to typecheck until that separate fix lands**,
+and a proof that has not typechecked is not a fix. The `FrameOk` and `hx30fr`
+sites this doc names are still among the six (`…:4564:16` is the frame window's
+`rfl`), so the diagnosis stands; only the "masked" premise is gone.
+
+## (superseded) 2026-10-07: the five named examples no longer reach this obligation
+
+`count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
 GENERATION, before a proof is emitted, with the conditional-halt refusal added
 by `2b7e5ec8` (`formal/arm64_proof_gen.py::_reached_without_a_condition`):
 
