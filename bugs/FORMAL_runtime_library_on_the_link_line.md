@@ -1,5 +1,41 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-12 (`work/formal284-docs`): the published triple was stale by
+ONE again, and the check that was supposed to catch it was itself the second
+copy.** `mojo_str_register` (`void mojo_str_register(char *s)`, added by
+`38d19a52` so codegen can register its `__rodata` literal pool) is word-shaped,
+exported and reachable with no heap handle, so the tree measures **273 / 217 /
+177** where `FORMAL.md` §6 phase 2 still published **272 / 216 / 176**.
+`test_formal_runtime_link.py` (6 checks, three per architecture) and
+`test_formal_doc_truth.py` (2 checks) were both RED on exactly that.
+
+**`test_formal_doc_truth.py` did not catch the drift because it HARDCODED the
+figure it claimed to read.** Its check was `check(len(word) == 272, "…,
+FORMAL.md §6 phase 2 publishes 272")` — a literal, whose message only *said* it
+was reading the document, so the one figure a cheap job could have verified
+rotted with the doc instead of flagging it. That check now parses §6's own
+word-shaped row (this file's first rule: "the DOCUMENT is the single copy"), so
+the next entry point added to `runtime/` moves the figure the check compares
+against rather than silently failing it.
+
+**What landed.** `FORMAL.md` §6 phase 2's triple is 273 / 217 / 177; the block
+that enumerates the gap-closing entry points is now eleven names (the eleventh is
+`mojo_str_register`); §6's arithmetic (`273 − 217 = 56`, `217 − 177 = 40`) and
+§7's `273 of 684 … 177` are re-derived from the same census; §1's
+`runtime/fire_runtime.c` size is corrected 524 → 528 KB, which
+`test_formal_doc_truth.py` also reads out of the document. Measured, both
+architectures byte-identical: `test_formal_runtime_link.py` **189 passed, 0
+failed**; `test_formal_doc_truth.py` **434 passed, 0 failed**;
+`test_runtime_header_scan.py` **72 passed** (§2.2 already read 273/684 — the
+`--fix` instrument had kept that half honest while §6 went stale).
+
+**This moves no ceiling.** It is figure drift and the check that permitted it,
+not a capability change: the three ceilings below (56 word-shaped entry points
+`runtime_dylib` does not export, 4 no header declares, 40 that need a `void *`
+handle the path cannot obtain) are unchanged, and so is the phase-6 dependency
+that closes the third. The `38d19a52` entry also raised the reachable surface by
+exactly the one name — the same shape as every re-measurement in this document.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
