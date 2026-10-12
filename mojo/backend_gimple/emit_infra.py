@@ -431,6 +431,22 @@ def _reset_func(gen, body: list = None, params: list = None,
     # table is.
     gen._boxed_vals.clear()
     gen._func_value_names.clear()
+    # The per-slot kind of a `struct.unpack` result (and of a local bound
+    # from one), in the long-form spelling the statically-indexed MojoList
+    # subscript reads. Same storage SHAPE as the two sets above — keyed by C
+    # NAMES that include temps, where `temp_counter` restarts at 0 for every
+    # function — and it was the last one still accumulating for the whole
+    # module, so a later function's `_tN` read an EARLIER function's entry.
+    # Measured: `fn make(): return struct.unpack('<if', buf[0])` followed by
+    # `fn uniform(): return struct.unpack('<HH', buf[0])` gave the CALLER of
+    # `make` the kinds `['int','int']` — the SECOND function's format, because
+    # that function had overwritten the shared `_t9` key — so `u[1]`, a float
+    # slot, was read through `mojo_list_get_int` and printed
+    # `4602678819172646912`. Per-function is correct, not merely safe: this
+    # table's cross-function half is `_return_value_slot_kinds`, keyed by
+    # CALLEE name, whose value the call site copies onto its own temp AFTER
+    # this reset (see `_lower_named_call`).
+    gen._struct_slot_kinds.clear()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
