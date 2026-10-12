@@ -1134,13 +1134,15 @@ CASES = [
      "    var c = Box[Int, [1, 2, 3, 4]]()\n"
      "    printf(\"len=%d %d\", b.length, c.length)\n"
      "    return 0\n", 0, "len=3 4"),
-    # The comptime-over-a-variadic-parameter refusal this row once pinned is
-    # unreachable: constructing the variadic struct trips the TUPLE-INDEX
-    # refusal first (staged 2026-10-06: with any actual use of `Pair[Int, 7,
-    # 8, 9]` in main, both architectures refuse at the subscript, measured).
-    # With no use it builds and proves nothing either way. The row now pins
-    # the refusal that actually stands in front of the variadic comptime.
-    ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal",
+    # The variadic comptime parameter now FOLDS. `Pair[Int, 7, 8, 9]` names a
+    # type and three comptime VALUES, so the bracket is a demand and the
+    # instantiation binds `*values` to `(7, 8, 9)`, making
+    # `len(Self.values)` the closed form 3 — measured on both architectures.
+    # Before that the bracket was not a demand at all (`type_arg_text` is the
+    # TYPE reader and answers "" for a literal), so the call site kept its
+    # brackets and the tuple-index refusal stood in front of the construct,
+    # which is the transient terminal the earlier staged wording pinned.
+    ("comptime_binding_reading_a_variadic_parameter_folds_the_instantiation",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
      "\n"
@@ -1151,7 +1153,7 @@ CASES = [
      "    var p = Pair[Int, 7, 8, 9]()\n"
      "    printf(\"len=%d\", p.size())\n"
      "    return 0\n",
-     "refuse:a subscript whose index is a tuple", None),
+     0, "len=3"),
     # …and the CONTROL. The bare `Box.length`-from-a-free-function spelling
     # this row used no longer builds — it is refused by the no-home family
     # (measured 2026-10-06 on both architectures), so the control now reads

@@ -2236,6 +2236,99 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
               f"elements are 1, 7 and 4 over a base of 10")
 
 
+# ── a comptime VALUE argument beside a TYPE argument ────────────────────────
+#
+# `Tagged[T, origin: Int]` declares one type parameter and one comptime VALUE
+# parameter, and `Tagged[Int, 0]()` names both.  This is §2 row 4 of
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`: the
+# bracket was not a demand at all, because `type_arg_text` is the pure TYPE
+# reader and answers "" for a bare literal, so the whole bracket was dropped
+# and the call site kept its brackets, where `formal/model.py`'s
+# compile-time explicit-parameter-list refusal fired.
+#
+# The two halves the value argument has to get right, and both are asserted:
+# the DEMAND (`("Int", "0")` — a value is not a type, but a bracket that also
+# names a type is an explicit-parameter list) and the SUBSTITUTION (`origin` is
+# bound to the argument's own text in the instantiated body, so `offset`
+# answers 0 for `Tagged[Int, 0]` and 7 for `Tagged[Int, 7]`).  A gate that made
+# the bracket a demand but dropped the value would build, print the same number
+# twice, and be the plausible-answer failure this file exists for.
+CVT_LIB = """\
+struct Tagged[T: AnyType, origin: Int]:
+    var v: T
+
+    def offset(self) -> Int:
+        return origin
+"""
+
+CVT_PROG = """\
+from cvtlib import Tagged
+
+def main():
+    var a = Tagged[Int, 0]()
+    var b = Tagged[Int, 7]()
+    a.v = 5
+    print(a.offset(), b.offset(), a.v)
+"""
+
+CVT_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.origin = origin
+        self.v = 0
+
+    def offset(self):
+        return self.origin
+
+def main():
+    a = Tagged(0)
+    b = Tagged(7)
+    a.v = 5
+    print(a.offset(), b.offset(), a.v)
+"""
+
+
+def test_a_comptime_value_argument_beside_a_type_argument_is_a_demand(tmpdir):
+    """`Tagged[Int, 0]` binds the value parameter; `Tagged[2]` still does not.
+
+    The demand half — a bare literal IS a value argument when the bracket also
+    names a type — and the negative half that keeps the asymmetry (`Tagged[2]`
+    and `tile[2, 3]` are comptime specializations and stay non-demands) are read
+    off `all_instantiation_calls`; the substitution is read off `instantiate`;
+    and the end-to-end half is a differential against CPython on both
+    architectures, because a demand whose value argument was dropped would
+    build, run, and print the same number twice.
+    """
+    from formal import monomorph as MM
+    prog = ("def main():\n"
+            "    var a = Tagged[Int, 0]()\n"
+            "    var b = Tagged[Int, 7]()\n"
+            "    var c = Tagged[2]()\n"
+            "    var d = tile[2, 3](7)\n")
+    found = MM.all_instantiation_calls(prog)
+    check(found.get("Tagged") == [("Int", "0"), ("Int", "7")],
+          f"`Tagged[Int, 0]` and `Tagged[Int, 7]` are demands and a bare "
+          f"literal bracket (`Tagged[2]`) is not: {found}")
+    check("tile" not in found,
+          f"`tile[2, 3]` is a comptime specialization, not a boundary symbol: "
+          f"{found}")
+    src = ("struct Tagged[T: AnyType, origin: Int]:\n"
+           "    var v: T\n"
+           "    def offset(self) -> Int:\n"
+           "        return origin\n")
+    _name, concrete = MM.instantiate(src, "Tagged", ("Int", "0"))
+    check("return 0" in concrete and "return origin" not in concrete,
+          f"the comptime value argument was not substituted into the body, so "
+          f"the instantiation does not read the value it was built for: "
+          f"{concrete!r}")
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_cvtvalue", CVT_LIB, CVT_PROG,
+                            CVT_CPYTHON, libname="cvtlib.mojo")
+        check(got == "0 7 5\n",
+              f"[{arch}] printed {got!r}; the two instantiations must answer "
+              f"their own `origin` (0 and 7) and the one field is 5")
+
+
 # ── the artifact's identity ─────────────────────────────────────────────────
 
 
@@ -2955,6 +3048,19 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
           "a one-element sequence is spelled `(1,)` and not `(1)` — a "
           "parenthesised expression is not a tuple and `len((1))` is a type "
           "error the reader would have to decode")
+
+    # …and the call-site brackets ARE a demand, which is the half that used to
+    # be dropped: `type_arg_text` answers "" for a literal, so
+    # `Pair[Int, 1, 2, 3]()` was not an instantiation at all and the call site
+    # kept its brackets. A bracket that names a TYPE beside its values is an
+    # explicit-parameter list; an all-value bracket (`tile[2, 3](…)`) is still
+    # a comptime specialization and not a demand.
+    callers = MM.all_instantiation_calls(
+        "def main():\n"
+        "    var a = Pair[Int, 1, 2, 3]()\n"
+        "    var b = tile[2, 3](7)\n")
+    check(callers.get("Pair") == [("Int", "1", "2", "3")],
+          f"`Pair[Int, 1, 2, 3]` is a demand and `tile[2, 3]` is not: {callers}")
 
     # THE REFUSAL THAT SURVIVES, because a rule that reads `*` as an exemption
     # from the arity check would take the check with it: too FEW arguments binds

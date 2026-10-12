@@ -558,6 +558,13 @@ def type_arg_text(expr, values=()) -> str:
     items are VALUES — from being read as a demand for `tile_2_3`; inside a
     display a literal is a value the argument NAMES, which is the whole
     difference between the two.
+
+    **This is the TYPE reader and a comptime VALUE argument is read beside it,
+    not here.**  `_bracket_type_args` is where a bracket naming a type is known
+    to be an explicit-parameter list, and a literal in one of its other
+    positions is read by `_display_element_text` as a value argument (`Tagged[
+    Int, 0]`); widening this function would make the all-value `Pair[2]` a
+    demand, which is the case the asymmetry above exists to keep out.
     """
     if isinstance(expr, F.IdentExpr):
         return "" if expr.name in (values or ()) else (expr.name or "")
@@ -1048,9 +1055,37 @@ def _bracket_type_args(sub, values=()) -> list:
     docstring warns against, and an unrecognised item here would be mangled into
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
+
+    **An item may also be a comptime VALUE argument, and only when the bracket
+    names a TYPE.** `Tagged[Int, 0]` is an explicit-parameter list on a generic
+    whose second parameter is a value (`struct Tagged[T, origin: Int]`): the
+    mangler needs the argument's own text and `instantiate` substitutes it into
+    the body with the same whole-word substitution a type argument gets, so the
+    text is read by `_display_element_text` — the ONE reader of a value's
+    spelling, which a display's elements already go through.  `type_arg_text`
+    itself is not widened: it stays the pure TYPE reader (a bare literal is not
+    a type name), and this function is where "the bracket also names a type"
+    makes a literal a value argument rather than a specialization.
+
+    **An all-VALUE bracket stays a non-demand, and that asymmetry is the whole
+    design.**  `tile[2, 3](…)` and `Pair[2]` are comptime specializations both
+    backends already answer through `mojo.middle.comptime.specialization_args`;
+    demanding `tile_2_3` for one as well would publish a boundary symbol for a
+    specialization the build already emits under its own name.  Requiring at
+    least one `type_arg_text` spelling keeps both out while admitting the mix.
+    A display whose element is computed, or names a value binding, still drops
+    the whole bracket (`_display_element_text` returns "" for it), for the
+    reason `_display_text` gives: half a display is a fabricated answer.
     """
-    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
-    return spelled if spelled and all(spelled) else []
+    items = bracket_items(sub)
+    spelled = [type_arg_text(i, values) for i in items]
+    if spelled and all(spelled):
+        return spelled
+    if not any(spelled):
+        return []
+    mixed = [t or _display_element_text(i, values)
+             for t, i in zip(spelled, items)]
+    return mixed if all(mixed) else []
 
 
 def bracket_items(sub) -> list:

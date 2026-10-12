@@ -2,9 +2,59 @@
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
-MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
-wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
-`7ac78995`, with every claim below measured on that tree.
+MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); **§4.1's LITERAL
+half is now FIXED (2026-10-12, `work/formal279-docs`) and §1's name-spelled
+standing instance is a DIFFERENT cause than §2 says; the wall as §2 describes
+it is still OPEN.** Filed 2026-10-05 on `work/formal27-5` at `7ac78995`, with
+every claim below measured on that tree.
+
+## 2026-10-12 (`work/formal279-docs`): the demand walk reads a comptime VALUE
+## argument, and §1's standing instance turns out not to be that wall
+
+**What landed.** `formal/monomorph.py::_bracket_type_args` now reads a comptime
+VALUE argument beside the type arguments, so `Tagged[Int, 0]()` — §2 row 4, a
+type and a value in one bracket — is a demand: the mangler gets the argument's
+own text and `instantiate` substitutes it into the body with the same whole-word
+substitution a type argument gets. `type_arg_text` is NOT widened (it stays the
+pure TYPE reader, "" for a bare literal); the value half is read by
+`_display_element_text`, the ONE reader of a value's spelling that a display's
+elements already go through, and only when the bracket ALSO names a type — an
+all-VALUE bracket (`tile[2, 3](…)`, `Pair[2]`) stays a non-demand and therefore
+a comptime specialization, which is the asymmetry the existing cases pin. The
+same change makes the variadic case-fold of §4.1 work: `Pair[Int, 7, 8, 9]` with
+`*values: T` now binds `values` to `(7, 8, 9)` and folds `len(Self.values)` to 3.
+
+Measured, both architectures: `Tagged[Int, 0]()` and `Tagged[Int, 7]()` build,
+run, and answer their own `origin` (0 and 7), where before the build refused with
+the compile-time explicit-parameter-list message. Pinned by
+`test_formal_monomorph.py::test_a_comptime_value_argument_beside_a_type_argument_is_a_demand`
+(a differential against CPython on both architectures), by the demand assertion
+added to `::test_a_variadic_bracket_parameter_takes_the_extra_arguments`, and by
+the retargeted `test_formal_run.py` row
+`comptime_binding_reading_a_variadic_parameter_folds_the_instantiation`.
+
+**The correction to §2, measured rather than argued.** §2 says the TYPE half
+works and the comptime half is the whole of the refusal, with §1's
+`Span[StaticString, ImmStaticOrigin]` as the standing instance. But
+`all_instantiation_calls` on `std/sys/arg.mojo` returns
+`{'Span': [('StaticString', 'ImmStaticOrigin')], 'external_call': […]}`
+**today, before and after this change**: a bare NAME is a type spelling to the
+reader, so §1's two-element bracket was ALREADY a demand. Its remaining refusal
+is therefore DOWNSTREAM of the demand walk (the declaring module's closure and
+the alias it names), and the case this change closes is the one §2 measured as
+row 4 — the LITERAL, `Tagged[Int, 0]`, which `type_arg_text` answered "" for.
+Nothing here moves `std/sys/arg.mojo`.
+
+**What is NOT fixed, and is now filed.** A value-parameterised ONE-FIELD
+instantiation passed to a free function SEGFAULTS, because
+`struct Tagged[T, origin: Int]` parses `origin` as a struct FIELD — the template
+survives in `structs_by_name` as a framed struct, the callee's manifest
+publishes `frame_params: [["Tagged"]]`, and a by-value one-field argument is
+read as a frame address. It is reachable through the DISPLAY spelling
+(`Tagged[Int, [1, 2]]`), which was already a demand, so it is not caused by this
+change; the parser fix it needs is in `fire_compiler.py` and owes a full
+`make gate`. The reproduction, the manifest and the exact next step are
+`bugs/FORMAL_a_typed_bracket_parameter_is_parsed_as_a_struct_field.md`.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
