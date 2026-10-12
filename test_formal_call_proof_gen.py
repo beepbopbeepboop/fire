@@ -2255,6 +2255,66 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_lemmas("syn", code, 0x1000))
 
 
+class TestExecutableStepCode(unittest.TestCase):
+    """The step lemmas cover the EXECUTABLE region, not the interned strings.
+
+    `__TEXT` carries every function body and THEN every interned string, and
+    `_step_result_plan` walks every 4-byte word it is handed — so a string byte
+    pattern that decodes as an instruction the step table knows used to get a
+    step lemma for a word no execution reaches, and the step-OK lemma's
+    discriminator fact for that branch is FALSE, which fails the whole proof to
+    typecheck with no `sorry` anywhere.  `model.stack_trap_message` (which every
+    guarded image carries) has the word `0x36312064` = `909189220`, a `TBZ`, and
+    it is the one measured red on every arm64 proof.  `executable_step_code` is
+    the ONE truncation all three generators (`generate_arm64_proof`,
+    `_generate_frame_proof`, `generate_dylib_proof`) now ask.
+    """
+
+    def test_it_truncates_at_the_first_strings_address(self):
+        import formal.arm64_proof_gen as G
+        code = bytes(range(32))
+        base = 0x1000
+        # The MINIMUM address is the end of the code, whatever order the table
+        # lists the strings in.
+        self.assertEqual(G.executable_step_code(code, base,
+                                                {"str_addrs": {"a": 0x1008,
+                                                               "b": 0x1004}}),
+                         code[:4])
+
+    def test_it_is_the_identity_with_no_strings(self):
+        import formal.arm64_proof_gen as G
+        code = bytes(range(32))
+        self.assertEqual(G.executable_step_code(code, 0x1000, {}), code)
+        self.assertEqual(G.executable_step_code(code, 0x1000,
+                                                {"str_addrs": {}}), code)
+
+    def test_a_string_address_at_or_below_the_base_clamps_to_nothing(self):
+        """Not a `min(...) - base` that can go negative and slice from the end."""
+        import formal.arm64_proof_gen as G
+        code = bytes(range(32))
+        self.assertEqual(G.executable_step_code(code, 0x1000,
+                                                {"str_addrs": {"x": 0}}), b"")
+        self.assertEqual(G.executable_step_code(code, 0x1000,
+                                                {"str_addrs": {"x": 0x1000}}),
+                         b"")
+
+    def test_the_trap_messages_word_is_planned_but_truncated_away(self):
+        """The measured reproducer, at the generator's own entry points.
+
+        The word IS one the step table decodes — that is the bug — and the
+        truncation this method computes removes it before either step-lemma
+        emitter sees it.
+        """
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        data = _struct.pack("<I", 0x36312064)
+        self.assertIn(0, G._step_result_plan(data))
+        info = {"base_addr": 0x1000, "str_addrs": {"d 16": 0x1000}}
+        step = G.executable_step_code(data, 0x1000, info)
+        self.assertEqual(step, b"")
+        self.assertEqual(G._step_result_plan(step), {})
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
