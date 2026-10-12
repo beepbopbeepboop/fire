@@ -214,12 +214,19 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | **unclaimed** | the 13-file row, split by what each call site actually hands over |
 
-### `formal/x86_64_codegen` — 2 documents, 0 claimed
+### `formal/x86_64_codegen` — 1 document, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_cross_module_function_value_call_segfaults.md` | **unclaimed** | x86-64: a comptime specialization through a FUNCTION VALUE across a dylib boundary SIGSEGVs |
-| `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` | **unclaimed** | FORMAL x86-64: `getsize` segfaults (executes at address 0) inside an imported hostmod dylib, where arm64 answers |
+
+`FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib.md` was here and is
+deleted (2026-10-12, `work/formal271-docs`): the `getsize` chain through an
+imported hostmod dylib now answers on x86-64 (5 bytes for the written file, `/etc/hosts`
+= 86) where it used to SEGFAULT at address 0, fixed by the same dylib
+call-sequence rework this section's other doc is about. The pin is
+`test_formal_run.py::fd_write_on_an_open_result_writes`, now run on BOTH
+architectures.
 
 ### `formal/x86_64_decode` — 2 documents, 0 claimed
 

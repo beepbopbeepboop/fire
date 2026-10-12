@@ -3543,6 +3543,13 @@ FD_CASES = [
  # `os.path.getsize` is the reader (`formal/hostmods/os/path`'s own `fs_stat`),
  # so the program measures its own effect: 5 bytes is `hello`, and the exit
  # status is the assertion rather than a constant the harness chose.
+ # **And it is RUN ON BOTH ARCHITECTURES** (via `both_arch_names` below), which
+ # it was not when it was written: the `getsize` chain through the
+ # `os_path___syscalls` hostmod dylib answered 86 on arm64 and SEGFAULTED
+ # (`EXC_BAD_ACCESS address 0x0`) on x86-64, and a host-architecture-only run
+ # could not see it.  The x86-64 side was fixed by the dylib call-sequence
+ # rework (the cross-module function-value call); this row is the standing pin
+ # for that shape now that the bug doc is gone.
  ("fd_write_on_an_open_result_writes",
   "from os.path import getsize\n"
   "\n"
@@ -25152,11 +25159,19 @@ def main():
     # the opposite of what the row says. `PRINT_KWARG_CASES` is the group
     # that made that worth stating: three of its five rows are refusals and
     # two are answered.
-    both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
+    both_arch_names = (({c[0] for c in BOTH_ARCH_CASES}
                       | {c[0] for c in PRINT_KWARG_CASES}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
-                                             "deref_a_binary64_pointee"))}) - {
+                                             "deref_a_binary64_pointee"))})
+                      # `fd_write_on_an_open_result_writes` lives in `FD_CASES`
+                      # for its group's own narrative (it is the sibling of
+                      # `fd_write_close_roundtrip`) but its subject is a `getsize`
+                      # call through a hostmod dylib, which is exactly the shape
+                      # that once SEGFAULTED on x86-64 and answered on arm64.
+                      # Built and run on the host alone it could not see that, so
+                      # it is routed through the both-architecture runner here.
+                      | {"fd_write_on_an_open_result_writes"}) - {
         c[0] for c in PRINT_KWARG_CASES
         if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything
