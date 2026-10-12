@@ -15541,6 +15541,17 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
 #: reduced limit gave SIGSEGV (exit 139) at every depth from 100 upwards: a guard
 #: whose budget exceeds the process's real stack never fires, and the process
 #: runs off the end of it.
+#:
+#: **The SHALLOW depth is per architecture, because a call frame is not.**
+#: arm64 reserves `ARM64_CONTAINER_BUDGET` (128 KiB) per call and x86-64
+#: `X86_64_CONTAINER_BUDGET` (16 KiB), and this group lowers `ulimit -s` to
+#: 2 MiB. At 2 MiB arm64's budget is `2 MiB - STACK_FLOOR_MARGIN_BYTES - one
+#: frame` ≈ 1.625 MiB, which affords **12 frames** — so a 100-deep recursion is
+#: not shallow on arm64 at all: it needs 12.8 MiB and is refused at any limit
+#: this backend has (measured: `deep(100)` traps even at the default 8 MiB, where
+#: the cap affords ~60 frames). 5 leaves margin under the 12 and still needs
+#: 640 KiB, so an arm64 that did NOT read the limit (cap 7.5 MiB) would answer
+#: it and then SIGSEGV — which is the pair's whole purpose.
 _REDUCED_STACK_SOURCES = (
     # name, program, the depth that must still ANSWER (per arch), the depth that
     # must refuse (per arch).  The SHALLOW depth is per arch because a frame is:
@@ -15622,7 +15633,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
             run = subprocess.run(
                 ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
                 capture_output=True, text=True, timeout=RUN_TIMEOUT)
-            want = 2 if depth >= 5000 else 0
+            want = 2 if must_refuse else 0
             if run.returncode != want:
                 out_rows.append((
                     name, arch, False,
