@@ -189,8 +189,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    result = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                           exit=False).result
+    # `wasSuccessful() and 0 or 1` is 1 either way (`0` is falsy, so the `or`
+    # always wins): the script printed OK and exited 1, so a shell — or
+    # `tools/memslot.py`, which reports the child's exit — read a passing census
+    # as a failure. Every other `test_formal_*.py` uses the conditional below.
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":
