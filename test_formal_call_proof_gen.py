@@ -5626,7 +5626,24 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
 
 
 class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
-    """The measurement itself: the residual is `1 = 0`, and it is FALSE."""
+    """The measurement itself: the residual is `1 = 0`, and it is FALSE.
+
+    The class works by DISSECTION: `_symbolic_divisor_proof` partitions the
+    generated proof at `theorem q_compiles_correctly_universal`, and the tail
+    from there is what it patches (`_ADMIT` -> `_TRACE`) so Lean prints the
+    residual goal. **Both halves can stop existing without anything here
+    raising**: if the generator no longer emits that theorem, `text.partition`
+    puts the WHOLE file in `head`, `tail` is empty, `tail.replace(_ADMIT, …)`
+    is a no-op, no `trace_state` is ever installed, and the rows below report a
+    `fdiv64` diagnosis about a fixture that is gone. That is exactly the bug
+    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+    is about, and the mechanism check is its step 1: `setUpClass` records,
+    per spelling, WHY the admission did not occur in the tail it built
+    (`cls.blind`, None when it did), and
+    `test_the_measurement_class_can_still_see_what_it_measures` fails by name
+    when it did not, so this class can only report the `fdiv64` diagnosis
+    when it really measured a residual.
+    """
 
     @classmethod
     def setUpClass(cls):

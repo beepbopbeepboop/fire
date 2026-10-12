@@ -5,6 +5,17 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
+**Step 1 LANDED 2026-10-08 (`work/formal152-docs`).** `setUpClass` now records
+`cls.traced[label] = _ADMIT in tail` (and records a generation refusal the same
+way), and the new row `test_the_mechanism_that_prints_the_residual_fired` fails
+when it did not fire — so this class can no longer report a `fdiv64` diagnosis
+about a goal it never traced. `## The exact next step` item 1 is marked done
+below; item 2 (which of the two the class should measure) is the work that
+remains, and this row is what makes it verifiable. **The new row is only
+observable with an integrator's `prooflib` build** — `lib/ProofLib.olean` is
+absent on this worktree, so the class SKIPS there; the file parses and every
+Lean-free class in it is green.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
@@ -171,9 +182,10 @@ Two independent drifts, and a fix needs both:
 
 ## The exact next step
 
-1. Add the mechanism check first (it is five lines and it is what makes the
-   rest of the work verifiable): `setUpClass` records whether `_ADMIT` occurred
-   in the tail it built, and a row fails when it did not.
+1. ~~Add the mechanism check first~~ **DONE 2026-10-08**:
+   `setUpClass` records whether `_ADMIT` occurred in the tail it built (and
+   catches a generation refusal into the same flag), and
+   `test_the_mechanism_that_prints_the_residual_fired` fails when it did not.
 2. Then decide which of the two the class should measure:
    * **subtract `info["compiler_traps"]` in `_unfollowable_calls` too.** This is
      the same fix as
