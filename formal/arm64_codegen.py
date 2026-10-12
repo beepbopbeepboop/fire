@@ -3849,7 +3849,12 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        # rest_count = count - n_fixed, and n_fixed is the REGISTER X6, not a
+        # literal 6. `encode_sub_xd_xn_imm(3, 3, 6)` subtracted the immediate
+        # six, so every star tail was three elements short and the blob's count
+        # word came out negative (`for a, *rest in [(1, 2, 3)]` made
+        # `len(rest)` answer -3 on arm64, where CPython answers 2).
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))     # rest_count
         self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
@@ -3858,9 +3863,16 @@ dylib_exports: list = None, globals_base: int = None,
         oob = f"{tag}_so{self._while_counter}"
         oob_end = f"{tag}_sx{self._while_counter}"
         self.asm.label(loop)
+        # X0 = (i >= rest_count); CBNZ to `done` — the loop runs while
+        # `i < rest_count` and must STOP when `i` reaches it. This was `cbz`,
+        # so the loop left the moment `0 < rest_count` and copied nothing;
+        # it then ran until the rest_cap guard fired, and `for a, *rest in
+        # [(1,)]` exited 1 with nothing printed on both backends (the starred
+        # for-target defect, fixed with its x86-64 star arm).
+        # The `i >= rest_cap` guard below is unchanged and still `cbnz`.
         self.asm.emit(encode_cmp_xn_xm(4, 3))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))

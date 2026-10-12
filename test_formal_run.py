@@ -6388,6 +6388,30 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A STARRED target — `for a, *rest in …` — the one tuple-target shape the
+    # nesting rows above do not cover. It failed on BOTH backends for two
+    # independent reasons, one per backend:
+    #   * arm64's rest-blob builder subtracted an IMMEDIATE six rather than the
+    #     register holding `n_fixed` (`encode_sub_xd_xn_imm(3, 3, 6)`), so every
+    #     tail was three elements short and its count word came out negative
+    #     (`len(rest)` answered -3), and its copy loop branched to `done` on the
+    #     wrong side of `i < rest_count` so a nonempty tail never copied;
+    #   * x86-64 had no star arm at all: it stripped the `*` and compared the
+    #     element's count against the flattened arity, so `(1, 2, 3)` against
+    #     `a, *rest` was 3 vs 2 and exited 1 with nothing printed.
+    # The expected 36 is `(1 + 2 + 3) + (10 + 20)`: `a` is summed and each
+    # `rest` walked, so a wrong tail LENGTH moves the number and a wrong tail
+    # CONTENT moves it differently.
+    ("both_arch_a_starred_for_target_binds_the_tail",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, *rest in [(1, 2, 3), (10, 20)]:\n"
+     "        s = s + a\n"
+     "        for x in rest:\n"
+     "            s = s + x\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=36"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.
