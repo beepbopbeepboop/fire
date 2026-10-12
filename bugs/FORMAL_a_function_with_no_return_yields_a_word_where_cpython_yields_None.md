@@ -18,8 +18,87 @@ was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
 gate counts §4 asked for are no longer the decisive measurement — the position
 the rule is asked at is.
 **What is left is §0b's "What is still not fixed": the positions where nothing
-OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
-read local), which need either a liveness pass or direction (b) below.**
+OBSERVES the value (an operand, an argument, a `return`, an assigned-then-never-
+read local), which need either a liveness pass or direction (b) below.** The
+`returned` bucket is now closed AT THE OBSERVATION SURFACE (§0e): a function
+whose value is a return-less call's result is itself read as producing no value,
+so `print(h(…))` for `def h(): return g()` is refused; what remains of it is a
+`return g(…)` whose result is used as an OPERAND or an ARGUMENT, which §0c's
+position counts put at 0 same-file sites in this repository.
+
+## 0e. The `returned` position, closed where the value is OBSERVED
+## (2026-10-12, `work/formal288-docs`)
+
+**`def h(a, b): return g(a, b)` with a return-less `g` is a function whose
+result is `None` in CPython, and this path printed the word `g`'s epilogue left
+behind.** Measured before the fix, both architectures, exit 0:
+
+```console
+$ cat .tmp/r/hret.mojo
+def g(a, b):
+    w = 1
+
+def h(a, b):
+    return g(a, b)
+
+def main() -> Int32:
+    print(h(1, 2))
+    return 0
+$ .tmp/r/hret.arm64.out            # and --backend=x86_64: the same
+0
+$ python3 -c 'exec(open(".tmp/r/hret.mojo").read()); main()'
+None
+```
+
+`h` HAS a `return` with an expression, so `fn_returns_a_value` read `h` as a
+function that produces a value and the §0b refusal never fired — the same
+divergence §0b refuses, reached through an intermediate function instead of
+directly. CPython's `h(1, 2)` is `None`, so there is no reading on which this is
+a different question from `print(g(1, 2))`.
+
+**What landed.** `formal/model.py`:
+
+* `function_returns_a_value(fn, callee_returns_value=None)` grew the optional
+  resolver, and `_body_returns_a_value` is the shared walk: with a resolver, a
+  `return f(…)` whose callee produces no value is not a value-producing return.
+  Without one the answer is the source-only one and is unchanged, which is what
+  the census and `ValueKinds.returns_a_value` ask for.
+* `function_returns_a_value_resolver(functions)` is the ONE implementation of
+  the transitive half, so the two backends and this file's test cannot answer
+  "does `f` produce a value" three ways. A name that is not a function of the
+  unit (a linked module's export) and a name already on the recursion stack (a
+  cycle) both answer True — the safe direction, where a wrong "no value" would
+  refuse a program CPython runs.
+
+Both emitters' `_callee_returns_value` now build that resolver over
+`self._functions`, so `print(h(…))` is refused by the SAME rule that already
+refuses `print(g(…))` and `v = g(); print(v)` — one call deeper, and the message
+names `h`, the callee the reader has to change. Measured after the fix, both
+architectures: exit 1 with the §0b sentence naming `h`.
+
+**It is not direction (a) and it costs nothing here.** This does not add a
+refusal at a new consuming position — the position is still the one where a
+value this path cannot carry becomes TEXT, and §0b measured that position at 0
+sites in 379 files. It makes the PREDICATE transitive, exactly as `v = g()`
+already makes it one binding deep. The `returned` bucket's own sites are 8,
+all stdlib (`_format_float.mojo` ×3, `math.mojo` ×3, `python.mojo`,
+`simd.mojo`), and they are refused only if their result is rendered, which none
+of them is.
+
+**Rows.** `test_formal_value_model.py`'s three `MODEL_RULES`
+(`a_functions_only_return_a_return_less_call_yields_nothing`,
+`a_functions_return_of_a_value_returning_call_still_yields`,
+`a_cycle_of_returns_still_reads_as_returning`) ask the shared reader through the
+same resolver the emitters use, and the build row
+`a_printed_return_of_a_return_less_call_is_refused` pins both architectures.
+Measured with the fix: `test_formal_value_model.py` PASS=128,
+`test_formal_run.py` PASS=1209 FAIL=0,
+`test_formal_hostmods_census.py` 74/74 rows, `test_formal_argparse.py` PASS=10.
+
+**What this does NOT fix, and it is the rest of §0b's list:** a `return g(…)`
+whose result is used as an OPERAND or as another call's ARGUMENT, and the
+`assigned`-and-never-read local. Those are the positions §0c counts, and they
+still want direction (b) or a liveness pass.
 
 ## 0d. The other spelling of "render this word" was unguarded and is now fixed
 ## (2026-10-07, `work/formal142-docs`)
