@@ -3276,6 +3276,27 @@ def _step_branch_index(w: int):
     return None
 
 
+def _imm12_scaled(w: int) -> int:
+    """The EFFECTIVE immediate of an ADD/SUB (immediate): the 12-bit field,
+    scaled by 4096 when the instruction's `sh` bit (bit 22) is set.
+
+    This is the rule `lib/ProofLib.lean::arm64_ext_imm12` implements and the one
+    `formal/arm64_codegen.py::_emit_imm_shift12` emits, and a Python-side `sp`
+    tracker that read the 12-bit field alone did NOT apply it. The frame scratch
+    is `_SCRATCH = 32 << 12` and the prologue writes it as ONE scaled immediate
+    (`sub sp, sp, #32, lsl #12`), so such a tracker computed `sp - 32` for an
+    instruction the machine applies as `sp - 131072` — measured: the emitted
+    goal of `formal/examples/condassign2.mojo` reads a slot at
+    `sp - 131072 - 16` while the generated branch-condition proof rewrote
+    `sp - 32 - 16`, so the `rw` found no occurrence of its pattern and `rfl`
+    never got off the ground. Four trackers (`_frame_ldp_addrs`,
+    `_frame_read_addrs`, `_hcond_mem_rws`, `_sp_stores`) had the bug; the
+    add/sub step RHS did not, because it scaled the field where it read it, and
+    `_step_rhs_generic` spells the library helper `arm64_ext_imm12` directly.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _step_rhs(w: int, idx: int):
     """Return the Lean `some ...` result the model produces for word w.
 
@@ -3347,7 +3368,7 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
-        imm12 = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm12 = _imm12_scaled(w)
         return (f"some {{ s with nzcv := arm64_subs_flags "
                 f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
     if idx == 14:  # B
@@ -3403,16 +3424,15 @@ def _step_rhs(w: int, idx: int):
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
-        # `sh` (bits 23:22) is `LSL #0` at 0 and `LSL #12` at 1; the arm's mask
-        # keeps bit 23, so a word reaching here has `sh ∈ {0, 1}`. `& 0x1` makes
-        # the shift total without ever computing a reserved immediate.
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        # The immediate is the 12-bit field scaled by the `sh` bit; `_imm12_scaled`
+        # is the one reader of it, the same rule `arm64_ext_imm12` states.
+        imm = _imm12_scaled(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm = _imm12_scaled(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3993,10 +4013,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     return addrs
 
 
@@ -4493,10 +4513,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     return out
 
 
@@ -4530,10 +4550,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4593,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _imm12_scaled(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _imm12_scaled(w)
     return sp_off
 
 
@@ -4964,9 +4984,7 @@ def _cbz_reg_const(block, words: dict, r: int):
             if rd != 31:
                 known[rd] = (w >> 5) & 0xffff
         elif idx in (9, 10):  # ADD imm 32/64
-            imm = (w >> 10) & 0xfff
-            if (w >> 22) & 1:
-                imm <<= 12
+            imm = _imm12_scaled(w)
             if rd == 31:
                 continue
             if rn == 31 or rn not in known:

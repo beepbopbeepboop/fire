@@ -767,6 +767,58 @@ class TestGeneratorSource(unittest.TestCase):
                     "the immediate is not scaled by the sh field, or an "
                     "unshifted one was scaled")
 
+    def test_every_sp_tracker_scales_an_add_sub_immediate_by_its_sh_bit(self):
+        """The ADD/SUB (immediate) `sh` bit is the difference between
+        `sp - 32` and `sp - 131072`, and FOUR `sp` trackers read the field alone.
+
+        `_SCRATCH` is `32 << 12`, which `_emit_imm_shift12` writes as ONE
+        scaled immediate (`sub sp, sp, #32, lsl #12`). `lib/ProofLib.lean`'s
+        `arm64_ext_imm12` applies the `sh` bit and `_step_rhs` spells the answer
+        as that helper, so the model's goal reads `sp - 131072` — but
+        `_frame_ldp_addrs`, `_frame_read_addrs`, `_hcond_mem_rws` and
+        `_sp_stores` unpacked the 12-bit field by hand and produced `sp - 32`.
+        Measured: `formal/examples/condassign2.mojo`'s branch-condition proof
+        rewrote a slot the emitted goal does not name, so its `rw` matched
+        nothing and the example was one of `test_formal.py`'s undeclared reds.
+        The row pins the shared reader and each consumer, so a revert in any one
+        of them fails here rather than at the proof.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            return int.from_bytes(fn(*args), "little")
+
+        scaled = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
+        plain = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 0)
+        shifted_add = word(A.encode_add_xd_xn_imm_sh, 31, 31, 20, 1)
+        self.assertEqual(G._imm12_scaled(scaled), 32 << 12,
+                         "a scaled ADD/SUB immediate is not multiplied by 4096")
+        self.assertEqual(G._imm12_scaled(plain), 32,
+                         "an unscaled ADD/SUB immediate was scaled")
+        self.assertEqual(G._imm12_scaled(shifted_add), 20 << 12,
+                         "the sh bit is not read for an ADD immediate")
+
+        stp = word(A.encode_stp_sp_pre, 29, 30, 16)
+        ldp = word(A.encode_ldp_sp_post, 29, 30, 16)
+        words = {0: scaled, 4: stp, 8: ldp}
+        block = {"instrs": [0, 4, 8]}
+        self.assertEqual(G._sp_stores(words, [0], 0, []), -(32 << 12),
+                         "`_sp_stores` did not apply the sh bit, so a BL's "
+                         "frame-slot offsets are 4096x too small")
+        for name, addrs in (("_frame_read_addrs",
+                             G._frame_read_addrs(block, words, "s")),
+                            ("_frame_ldp_addrs",
+                             G._frame_ldp_addrs([block], words, "s")),
+                            ("_hcond_mem_rws",
+                             G._hcond_mem_rws([0, 4, 8], [8], words, "s"))):
+            with self.subTest(tracker=name):
+                self.assertTrue(addrs, f"{name} produced no address")
+                self.assertIn(f"UInt64.ofNat {32 << 12}", addrs[-1],
+                              f"{name} did not scale the prologue's `sub sp` by "
+                              f"its sh bit; its address is a slot the emitted "
+                              f"goal does not contain")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
