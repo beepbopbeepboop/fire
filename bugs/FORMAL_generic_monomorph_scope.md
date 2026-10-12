@@ -253,6 +253,29 @@ instantiation's type argument, so:
     def main():
         var a = Pair[Colour]()      # refused
 
+**Measured 2026-10-12 (`work/formal281-docs`): the consumer's type IS accepted
+now, and the refusal this section names is gone — the example above refuses for a
+DIFFERENT reason.** Two facts, both measured arm64 (the build is the same on
+x86-64):
+
+  * the exact shape above — `lib` declares only `struct Pair[T]: var first: T` —
+    refuses with the **export gate**, not with `specialization_call_refusal`:
+    *"formal dylib has no public functions … only the struct type(s)
+    `Pair_1_T_6_Colour`"*; and
+  * add one method to `Pair` (`def get_first(self) -> T: return self.first`) and
+    the SAME program **BUILDS on both architectures**, with `lib`'s own library
+    emitting `struct Pair_1_T_6_Colour: var first: Colour` (read out of the cached
+    `formal-mono` source) and exporting `lib_Pair_1_T_6_Colour_get_first` (read
+    out of its manifest).
+
+So `type_arg_text` does not reject `Colour`, and the defining module compiles the
+instantiation with `Colour` undeclared — exactly the shape §5 warns about. What
+still refuses is the first USE that needs the layout: `var c = a.get_first(); var
+v: Int = c.rgb` refuses with *"this path has no way to say what `c` holds"*. That
+is §5's hazard deferred to first use rather than a refusal at the demand, and no
+test pins either half (neither the constructor's acceptance nor the use's
+refusal). Nothing here is fixed; what is corrected is which sentence is true.
+
 **Why the conservative direction is right.** The instantiation is compiled into
 `lib`'s library, and `lib` does not declare `Colour`, so `Pair_1_T_6_Colour`
 would be a body whose field layout the defining module cannot compute. Accepting
