@@ -241,15 +241,87 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     gives about the memoised parse: these nodes are shared with every other reader
     in the process, and a template removed from one build's view of them would be
     gone from the next build's too.
+
+    **A struct template that never reads one of its own parameters is NOT a
+    template for any purpose this path has, so it is kept** (the test is
+    `_struct_template_is_concrete`, and the why is on it). Keeping it is what
+    makes an INFERRED-argument construction of it (`Marker(b.a)`, no brackets)
+    reach `structs_by_name`: the declaration is the only thing that puts the name
+    there, so dropping every struct template left the construction unclassified
+    and the field access through its binding refused — with a sentence about an
+    escape the program does not have. The gimple path and the interpreter both
+    read the shape as the ordinary struct it is, so this makes the three front
+    ends agree rather than adding an inference this path does not have.
     """
     import fire_compiler as F                        # lazy — the AST classes
     drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
+            if template_kind(src, n) == KIND_STRUCT
+            and not _struct_template_is_concrete(src, n)} - set(keep or ())
     if not drop:
         return stmts
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
+
+
+def _struct_template_is_concrete(src: str, name: str) -> bool:
+    """True when `name`'s generic struct template is, in fact, an ordinary struct.
+
+    The test is the parameter NAMES against the declaration's BODY: a template
+    that never names one of its own bracket parameters outside the parameter list
+    itself has no field type, no default and no method that depends on it, so its
+    layout and every one of its methods are the same for every argument list and
+    compiling it with the parameters unbound is exactly right. `Marker[T:
+    AnyType]` with `var v: Int` is the shape; `Wrapper[T: AnyType]` with
+    `var v: T` is not, and neither is `Box[T: AnyType, keys: List[T]]` with
+    `len(Self.keys)` — those DO read a parameter and are still dropped.
+
+    **The scan is over SOURCE TEXT, not the parsed `StructDef`, and that is not
+    a convenience.** The parser files a struct's bracket parameters among its
+    fields (measured: `Marker[T: AnyType, keys: List[Int]]` reports `keys` as a
+    field), so a node walk cannot tell a parameter from an ordinary field. The
+    text can: `type_param_names` reads the names out of the header and
+    `head_match` marks where the header ends, so everything after the `]` is
+    body.
+
+    **`\\b<name>\\b` and no cleverness.** A whole-word match is what a reference
+    to a parameter IS (`Self.T` matches the `T` in it, which `_fold_self_params`
+    relies on for the same reason), it cannot miss a live reference, and a body
+    that names a parameter only inside a string literal or a comment is dropped
+    rather than kept — the safe direction, since keeping a template that reads a
+    parameter is the `len(Self.keys)` refusal this drop exists to avoid.
+
+    **A `comptime` member makes the template not ordinary either**, even when it
+    reads no parameter, and that is a second, independent exception. A class-body
+    `comptime` value is read through an INSTANTIATION, so a template that has one
+    is not layout-equivalent to a non-generic struct: with its base name kept, an
+    inferred construction binds the base struct and the fold loses the
+    instantiation it needs. Measured, both directions, on two cases this drop
+    already had: `struct Box[T: AnyType, keys: List[T]]: comptime length = 3`
+    went from an answered `b.size()` to "a method call on a value ... the
+    receiver is a name ... 'size' is not one of those methods", and
+    `Pair[T: AnyType, *values: T]: comptime length = len(Self.values)` from
+    the tuple-index refusal to "`Self.length` reads a `comptime` class attribute
+    ... 'values', a PARAMETER". Both are templates the instantiation machinery
+    owns, so both stay dropped.
+
+    **A variadic parameter is named `*values`, and the `*` is stripped before the
+    scan.** `type_param_names` splits on `:` and keeps the spelling, so a body's
+    `Self.values` would not match the escaped `*values`. Stripping the marker is
+    what makes the body scan see the reference for what it is.
+    """
+    import elaborate, monomorphize as _mm             # lazy — see module docstring
+    decl = elaborate.extract_struct_source(src, name)
+    if decl is None:
+        return False
+    params = [p.lstrip("*") for p in elaborate.type_param_names(decl)]
+    if not params:
+        return False
+    head = _mm.head_match(decl, kinds=r'(?:struct)')
+    body = decl[head.end():] if head else decl
+    if re.search(r"(?m)^\s*comptime\b", body):
+        return False
+    return not any(re.search(rf"\b{re.escape(p)}\b", body) for p in params)
 
 
 def template_kind(src: str, name: str) -> str:

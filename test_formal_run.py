@@ -11642,6 +11642,35 @@ CONSTRUCTION_CASES = [
      "def main(n):\n"
      "    printf(\"tag=%d\", make6())\n"
      "    return 0\n", 0, "tag=0"),
+    # A GENERIC struct constructed with its type arguments INFERRED — the
+    # spelling the interpreter and the gimple path both build, and the one the
+    # formal path used to refuse. `Marker[T: AnyType]` whose body never reads
+    # `T` is an ordinary struct here, so `Marker(b.a)` is an ordinary
+    # construction and must classify as one. Before the fix the file's own
+    # generic struct template was DROPPED (`formal/monomorph.py`'s
+    # `without_template_bodies`) before the constructor-binding pass ran, so
+    # `Marker` never reached `structs_by_name`, the construction was never
+    # classified, and the frame argument deferred to a "no way to say what 'm'
+    # holds" refusal. 7 = the one field read back through the slot table, so a
+    # regression that dropped the template again (and refused) or bound the
+    # wrong slot would be visible rather than merely non-zero.
+    ("constr_an_inferred_generic_construction_is_an_ordinary_construction",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: Int\n"
+     "\n"
+     "struct Bag:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def tag(b: Bag) -> Int:\n"
+     "    var m = Marker(b.a)\n"
+     "    return m.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = Bag()\n"
+     "    g.a = 7\n"
+     "    g.b = 8\n"
+     "    return tag(g)\n", 7, None),
 ]
 
 # ── a one-field HOLDER's CONSTRUCTOR store: which refusal answers it ──
@@ -21106,19 +21135,21 @@ ORIGIN_OF_CASES = [
      "    o.a = 9\n"
      "    printf(\"%d\", t.a * 1000 + t.b * 10 + o.a)\n"
      "    return 0\n", 0, "9069"),
-    # A control, and it is reported as one: this built BEFORE the change and
-    # still builds, on both architectures. A type ANNOTATION is not a runtime
-    # expression, so nothing is emitted for the `origin_of` in it and the
-    # escape check — which walks `fn.body` for statements — never saw it.
-    # This row's premise — a generic `Marker[...]` constructed from a ref
-    # parameter's field — is now refused at the BINDING, before the
-    # annotation is ever relevant: any annotated (or inferred-type-arg)
-    # construction of a generic struct in this position loses its home
-    # classification on both architectures (filed as
-    # bugs/FORMAL_generic_local_binding_has_no_home.md). The row pins the
-    # refusal that actually fires, so a re-point at the annotation itself is
-    # possible only after that defect is fixed — with `Marker[Int](b.a)`,
-    # the explicit-type-argument spelling, it builds.
+    # A type ANNOTATION is not a runtime expression, so nothing is emitted for
+    # the `origin_of` in it and the escape check — which walks `fn.body` for
+    # statements — never saw it. The expected value is `tag`'s return read off
+    # the source: `m.v` is the `Int` field `Marker(b.a)` filled from the ref
+    # parameter's field, so 7, on both architectures.
+    #
+    # This row used to be REFUSED, and the refusal was never about the
+    # annotation: any inferred-type-argument construction of a generic struct
+    # (`Marker(b.a)`, no brackets) lost its binding's home, because the generic
+    # template was dropped before `structs_by_name` was built. Fixed in
+    # `formal/monomorph.py::without_template_bodies` (a struct template that
+    # never reads its own parameters is kept and treated as the ordinary struct
+    # it is), which is why the row now asserts the value rather than the refusal.
+    # The `Marker[Int](b.a)` spelling, and the annotation's `origin_of` reading
+    # as a type token, are unchanged.
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -21132,7 +21163,7 @@ ORIGIN_OF_CASES = [
      "    var g = Bag()\n"
      "    g.a = 7\n"
      "    g.b = 8\n"
-     "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
+     "    return tag(g)\n", 7, None),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that
@@ -21253,7 +21284,19 @@ TYPE_ARGUMENT_LIST_CASES = [
     # `std/collections/deque.mojo` is this shape, and it is here because
     # `structs_by_name` is the only thing that settles it — a declared struct
     # has no runtime container representation at all, so a subscript on its name
-    # cannot be a lookup into one.
+    # cannot be a lookup into one, and the honest sentence is the
+    # explicit-parameter-list one, naming `s` as the element with no
+    # declaration.
+    #
+    # It said "a S receiver is stored in a container" until the
+    # param-independent-struct-template fix: `Triple` reads none of its three
+    # parameters, so it is KEPT rather than dropped from `structs_by_name`
+    # (`formal/monomorph.py::_struct_template_is_concrete`), and a name that IS
+    # in the table lets the bracket reach its explicit-parameter-list answer.
+    # Before the fix the template was dropped, the base name was not in the
+    # table, and the bracket fell through to the container/escape check — the
+    # same false diagnosis `type_argument_list_on_a_type_constructor` was
+    # written to move off.
     ("type_argument_list_on_a_struct_this_unit_declares",
      "struct S:\n"
      "    var a: Int\n"
@@ -21266,14 +21309,13 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    s.b = 4\n"
      "    var m = Triple[Int, s, False](5)\n"
      "    return m.v + s.a\n",
-     "refuse:a S receiver is stored in a container", None),
-    # The construct this row used to watch — the explicit-parameter-list
-    # refusal — is displaced: the container/escape check fires first for an
-    # instance type argument, and the type-name spelling
-    # (`Triple[Int, S, False]`) trips the tuple-index refusal instead. The
-    # explicit-parameter-list sentence itself is still pinned by
-    # `type_argument_list_on_a_type_constructor` (the `Pointer[Int, s]`
-    # spelling, which still passes).
+     "refuse:compile-time explicit-parameter list", None),
+    # The construct this row used to reach INSTEAD of the answer — the
+    # explicit-parameter-list refusal — no longer displaces the row above it:
+    # `Triple[Int, s, False]` now draws that sentence too, because the
+    # param-independent template is in `structs_by_name`. The type-NAME spelling
+    # (`Triple[Int, S, False]`) is the one still displaced, onto the tuple-index
+    # refusal.
     # NO FRAME ANYWHERE, which is what pins the change as being about the
     # CONSTRUCT rather than about the escape check. Every row above could be
     # satisfied by a fix that only reworded the frame-address refusal; this one
@@ -25154,6 +25196,9 @@ def main():
     # two are answered.
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
                       | {c[0] for c in PRINT_KWARG_CASES}
+                      | {c[0] for c in ORIGIN_OF_CASES
+                         if c[0] ==
+                         "origin_of_in_a_local_type_annotation_is_still_a_type"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
                                              "deref_a_binary64_pointee"))}) - {
