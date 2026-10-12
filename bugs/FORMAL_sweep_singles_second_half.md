@@ -1,5 +1,31 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
+**Status 2026-10-12 (`work/formal282-docs`): §1's and §3's rows are both
+MASKED on this tree — the two files now stop one refusal EARLIER, at the
+f-string — so their own refusals are unchanged but unreached, and neither
+file's row can be re-measured until that wall moves. Measured, both
+architectures, byte-identical:**
+
+```
+$ python3 tools/memslot.py --gb 8 --label t -- \
+      python3 fire.py build --formal --no-prove --backend=<a> -o .tmp/x formal/x86_64_decode.py
+build: an f-string literal on line 133 is refused on this path: …  (`f"SIB with
+index {index} is not emitted"`)          # not §1's `field(default_factory=F)`
+
+$ … -o .tmp/x regex_compile.py
+build: an f-string literal on line 116 is refused on this path: … (`f"regex
+parse error at {self.i} in {self.p!r}"`)   # not §3's `atom is assigned …`
+```
+
+Both walls are `FORMAL_string_composition_has_no_buffer` (the missing string
+buffer, itself behind `FORMAL_module_state_no_storage` for `os.path`), so this
+is "the row moved" and not "the row was fixed": §1's `field(default_factory=F)`
+and §3's frame-address rebind are still the refusals behind it, and §5
+(`write_repr_to` on a value receiver, in stdlib files) is unchanged. **Nothing
+in this file is a fix here, and the reason is the same for all of it: the
+three remaining rows are each a value-model decision, and the two buildable
+files now sit behind a third.**
+
 **Status: filed 2026-10-03 from the sweep map
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
