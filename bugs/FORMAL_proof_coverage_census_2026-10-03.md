@@ -10,9 +10,12 @@ carry one — the stack-floor guard's `getrlimit` (not recorded as a
 `compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
 same regression is why
 `test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is red.
-Both root causes, with the reproduction and the fix, are
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`;
-the code is another claim's, so this census was not edited to absorb it.
+Both root causes are FIXED: the halt-path walk now carries `(block, crossed)`
+and answers for the halt's own path rather than for any reachable conditional
+(`caa3d1a7`), and a call below the entry function — the startup stub's
+`getrlimit` — is subtracted by address in
+`formal/arm64_proof_gen.py::_program_extern_calls`, so both tests are green
+again.
 
 **§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
 of the TREE, and there is now a mode that says what it is in 1.7 seconds instead

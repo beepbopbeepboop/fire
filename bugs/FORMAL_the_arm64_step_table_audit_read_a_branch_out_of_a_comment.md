@@ -39,10 +39,9 @@ failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
 `formal/arm64_proof_gen.py::_reached_without_a_condition` (the
 conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
 `sum_range` refuses there instead of at its owned loop-contract refusal. The
-cause is a logic bug in that check, not a reopened gap, and it is filed with
-the reproduction and the fix as
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`.
-That doc is another claim's code, so nothing here was edited.
+cause was a logic bug in that check, not a reopened gap, and it is fixed: the
+walk now carries `(block, crossed)` and answers for the halt's own path rather
+than for any reachable conditional (`caa3d1a7`), so the family generates again.
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
