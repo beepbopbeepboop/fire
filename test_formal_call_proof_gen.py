@@ -4687,6 +4687,84 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertEqual(_program_extern_calls({}), [])
 
 
+class TestTheArm64StackFloorReadIsInTheStartupStub(unittest.TestCase):
+    """The arm64 stack-floor guard reads `RLIMIT_STACK` ONCE, in the stub.
+
+    This is the pin for a measured regression and its fix. With the `getrlimit`
+    read in every guarded PROLOGUE, `getrlimit` was the one call the universal
+    theorem's walk could not follow in *every* function: `arm64_step` cannot
+    step a `BL` whose target is out of the image, so the model halted there and
+    the whole data-dependent corpus lost its value theorem (measured: 0 of 93
+    examples emitted `<stem>_compiles_correctly_universal`). The fix is the
+    arm64 twin of x86-64's `_emit_stack_floor_init`, which already read the
+    limit once before `main`: `formal/arm64_codegen.py::_emit_stack_floor_init`
+    is called from `compile()`'s `emit_startup` branch, so the `BL getrlimit`
+    sits BELOW `func_offset`, where no run test starts and no path tree walks.
+
+    Two facts, and the second keeps the first from being a coincidence:
+
+    * a source-conditional program has a value theorem again — `either` and
+      `absval` are both in the refused group the doc names, and both generate
+      one now;
+    * the image's ONLY extern call below the entry is the stub's `getrlimit`, so
+      the read is outside every walked function body.
+
+    The second is asserted by ADDRESS, because the point is WHERE the call is: a
+    build-only change that moved the read back into the prologue while the
+    theorem survived for some other reason would keep the first assertion and
+    still be the bug the doc describes.
+
+    Cheap: proof generation, no Lean.
+    """
+
+    #: A conditional program from each side of the doc's own before/after table
+    #: (`either` was already covered by the recursion-family census; `absval`
+    #: is the straight `if n > 0` its table names), plus the straight-line
+    #: control that proves the value theorem was not a conditional-only thing.
+    PROGRAMS = ("either", "absval", "ret42")
+
+    def _proof(self, stem):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-stub-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(HERE, "formal", "examples", stem + ".mojo")
+        self.assertTrue(os.path.isfile(src), f"no example at {src}")
+        r = fb.compile_formal(src, arch="arm64",
+                              output=os.path.join(tmp, stem + ".aout"),
+                              prove=True, check=False)
+        with open(r["proof_path"], encoding="utf-8") as f:
+            return r, f.read()
+
+    def test_a_source_conditional_program_has_a_value_theorem(self):
+        for stem in self.PROGRAMS:
+            with self.subTest(program=stem):
+                _r, text = self._proof(stem)
+                self.assertRegex(
+                    text,
+                    rf"(?m)^theorem {stem}_compiles_correctly_universal",
+                    f"{stem} has lost its value theorem; the stack-floor read "
+                    f"is on a walked path again, so `getrlimit` is back in the "
+                    f"prologue")
+
+    def test_the_only_call_below_the_entry_is_the_stub_getrlimit(self):
+        from formal.arm64_proof_gen import _program_extern_calls
+        r, _text = self._proof("either")
+        info = r["info"]
+        entry = info.get("func_offset")
+        self.assertIsNotNone(entry, "the image has no entry to be below")
+        below = [c for c in info["extern_calls"]
+                 if c["addr"] is not None and c["addr"] < entry]
+        self.assertEqual(
+            [c["sym"] for c in below], ["getrlimit"],
+            f"the run test starts at the entry, so the only call below it must "
+            f"be the stub's `getrlimit`: "
+            f"{[(c['sym'], hex(c['addr'])) for c in info['extern_calls']]}")
+        self.assertEqual(
+            [c["sym"] for c in _program_extern_calls(info)], [],
+            "the compiler's own `getrlimit` is being read as a call the "
+            "program makes")
+
+
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
