@@ -256,6 +256,33 @@ def main(n):
     {"a": "1000", "b": "2000", "c": "3000", "d": "0"},
 ))
 
+# Width TWO, which the four-arm load/store dispatch handles but no case here
+# reached: the width-1, -4 and -8 rows all pass a backend that special-cased
+# only `width == 1` and fell through to the 64-bit load for everything else,
+# because 2 and 4 took the SAME wrong arm. This row separates them, and it
+# separates the two SIGNEDNESSES as well: `Pointer[Int16]`'s `-2` is a
+# sign-extending load (`ldrsh`/`movsx`) and `Pointer[UInt16]`'s `40000` is a
+# zero-extending one (`ldrh`/`movzx`), so a loader that picked one arm for both
+# fails one half of the row rather than passing on the widths alone.
+CASES.append(Case(
+    "pointer_subscript_i16_u16",
+    '''\
+def main(n):
+    var s: Pointer[Int16] = malloc(16)
+    s[0] = -2
+    s[1] = 300
+    printf("a=%d@@", s[0])
+    printf("b=%d@@", s[1])
+    var u: Pointer[UInt16] = malloc(16)
+    u[0] = 40000
+    u[1] = 65535
+    printf("c=%d@@", u[0])
+    printf("d=%d@@", u[1])
+    return 0
+''',
+    {"a": "-2", "b": "300", "c": "40000", "d": "65535"},
+))
+
 CASES.append(Case(
     "pointer_subscript_i64",
     '''\
