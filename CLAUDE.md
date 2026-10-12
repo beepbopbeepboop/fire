@@ -445,10 +445,7 @@ the registry and is therefore a fact about the tree rather than about a run.
 A doc that states a test's STATUS is checked against the registry by
 `test_suite.py`, and `tools/dangling_doc_refs.py` walks the citations —
 ratcheted per file, so a citation of a doc deleted by its own fix cannot be
-added back, and in BOTH spellings: a `bugs/<name>.md` path and a bare
-`<STEM>.md` with no directory, which is the spelling `formal/` and its tests
-use and which was measured here for the first time (220 citations the
-`bugs/`-prefixed walk cannot see). A doc that states a tally is not checked, because there is nothing
+added back. A doc that states a tally is not checked, because there is nothing
 to check it against until somebody runs the gate.
 
 ## Known failures: `expect=` or `disabled=`, decided by cost
@@ -507,22 +504,8 @@ Every file that cited it now cites nothing. Run
 in the same commit, and fix what it names: rewrite the citation to name the
 BUG (its symptom, or the commit that fixed it), or delete the sentence if the
 path was all it said. `--ratchet` fails only when a file GAINS a citation,
-against the per-file ceilings in `tools/dangling_refs_baseline.py` — two
-tables, `BASELINE` for the `bugs/`-prefixed class and `BARE_BASELINE` for a
-bare `<STEM>.md`, because a bare stem resolves against every `.md` in the tree
-and the two answers cannot share a ceiling — and it is a registered gate job
-(`doc-refs`, in `check`) — so the corpus of dangling citations can only shrink
-from here, and it grew from 309 to 480 while nothing was watching it. To bank a
-sweep, `--write-baseline` regenerates both ceilings and prints what moved.
-
-DEBUGGING METHOD (recorded 2026-10-24 after merge fix):
-- Tool used: lldb (arm64 macOS; gdb not installed, gcc-15 lacks ASan lib)
-- Strategy for self-host GIMPLE crash: source-level fprintf instrumentation in
-  runtime/fire_runtime.c (mojo_dict_items, mojo_dict_get_int, mojo_list_get_int)
-  + disassemble of generated C via objdump/nm to locate exact instruction offset
-- Key finding for bootstrap-stage2-dump-is-empty: deterministic corrupt dict
-  value (MojoList with bad data pointer 0x74736f78) inside GimpleGen member
-  table (435-entry dict, key = _lower_set_literal etc., value = corrupt pair).
-- ASan attempt blocked: gcc-mp-15 has no libasan; clang rejects gcc-extension
-  bare-`...` vararg stubs in generated fire.ci. Workaround: instrumentation
-  + manual disassembly.
+against the per-file ceilings in `tools/dangling_refs_baseline.py`, and it is
+a registered gate job (`doc-refs`, in `check`) — so the corpus of dangling
+citations can only shrink from here, and it grew from 309 to 480 while nothing
+was watching it. To bank a sweep, `--write-baseline` regenerates the ceilings
+and prints what moved.

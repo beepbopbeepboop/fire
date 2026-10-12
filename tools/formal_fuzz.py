@@ -1291,13 +1291,6 @@ STRINGS = ["ab", "cd", "ef", "gh", "", "a", "xyz", "pqrs"]
 #: fixed dict for a second reason: an x86-64 image run through Rosetta is
 #: launched with that variable whether the parent put it there or not, so
 #: declaring it is what makes the two architectures compare the SAME block.
-#:
-#: **What the mix draws is `os.getenv(k)` under three spellings** — `print`,
-#: `!= ""` and `is None` (`environ_stmt`) — and every key it can name is one of
-#: the four below. It does NOT draw `len(os.getenv(k))` (refused: `len` of an
-#: `Optional` has no representation) nor `os.environ` (a module view whose
-#: `len`/subscript are refused; its coverage is the sweep row in
-#: `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`).
 FIXED_ENV = {
     "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
     "FORMAL_FUZZ_PLAIN": "one",

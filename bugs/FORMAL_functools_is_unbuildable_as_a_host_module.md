@@ -6,22 +6,6 @@ step" has LANDED.** Found on `construct:sweep5:hostmods-core` (2026-10-02), whos
 brief was to add `functools` to `formal/hostmods/` alongside `collections`,
 `enum` and `contextlib`. `enum` and `contextlib` landed; this is the other two.
 
-**Status 2026-10-13 (`work/formal413-docs`): the `functools` entry in
-`formal/imports.py`'s `HOST_MODULE_ADVICE` carried the SAME false diagnosis this
-document records in §"What I saw §2", and it is removed.** The advice said "the
-higher-order functions are a callable this path has no representation for" — the
-capability §"Status 2026-10-04" measures as LANDED: a function value is a CODE
-ADDRESS on this path, and `reduce`'s own shape builds and answers CPython on both
-architectures. So the one thing a reader of the `import functools` refusal was
-told to add is already there. The entry now names what actually stops the module:
-the arithmetic (`reduce`/`partial`) can be written OUT, and the DECORATOR
-spellings are the gate — a decorator is parsed and never applied, which is
-`bugs/COMPILE_FAIL_decorator_application_dropped.md`'s defect. Pinned by
-`test_formal_imports.py`'s `test_host_module_advice_is_honest`, which fails if the
-phrase, or the absent decorator clause, comes back. **This changes no behavior and
-no scope**: `import functools` still refuses, and the module is still not
-writable until the decorator half lands.
-
 **Status 2026-10-05 (`work/formal23-4`): `reduce` is WRITABLE and the module is
 blocked by ONE thing that is not a `functools` capability at all — the module was
 WRITTEN, measured on both architectures, and not landed, and the reason is

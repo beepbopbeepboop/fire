@@ -21,7 +21,6 @@ import argparse
 import tempfile
 import subprocess
 import fcntl
-import contextlib
 from concurrent.futures import ProcessPoolExecutor
 
 import cas
@@ -170,25 +169,6 @@ _PROBE_SRC = 'int mojo_probe(void) { return 0; }\n'
 _driver_probe: dict = {}
 
 
-@contextlib.contextmanager
-def _staging_dir(prefix: str):
-    """A `tempfile.mkdtemp` directory removed on the way out, success or raise.
-
-    `ignore_errors=True` is deliberate: the failure worth raising is the
-    caller's, and a cleanup error must not mask it. The three sites that stage
-    objects into a directory — `_driver_targets` (a driver probe), `build` (the
-    stdlib objects and the linked dylib) and `runtime_dylib` (the runtime
-    objects) — each used to spell this shape out, and `build`'s copy was
-    missing, which leaked a `mojostdlib_*` directory. One reader of the shape
-    is what keeps the next staging site from being the one that forgets.
-    `formal/build.py::_publish_signed_image` is the same shape."""
-    d = tempfile.mkdtemp(prefix=prefix)
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
 def _driver_targets(driver: str, arch: str) -> tuple:
     """(works, why) — can `driver` emit an object FOR `arch`? Measured, not assumed."""
     key = (driver, arch)
@@ -196,11 +176,12 @@ def _driver_targets(driver: str, arch: str) -> tuple:
         return _driver_probe[key]
     result = (False, 'not probed')
     try:
+        wd = tempfile.mkdtemp(prefix='mojo_archprobe_')
         # The probe directory holds a one-line C file and its object; the object
         # is read and then nothing needs the directory, so it is removed here or
         # it leaks one dir per probed (driver, arch) — the same class of leak
         # `runtime_dylib` had, in the same file.
-        with _staging_dir('mojo_archprobe_') as wd:
+        try:
             src = os.path.join(wd, 'probe.c')
             out = os.path.join(wd, 'probe.o')
             with open(src, 'w') as f:
@@ -217,6 +198,8 @@ def _driver_targets(driver: str, arch: str) -> tuple:
             else:
                 detail = (proc.stderr or proc.stdout or '').strip().splitlines()
                 result = (False, detail[-1] if detail else f'exit {proc.returncode}')
+        finally:
+            shutil.rmtree(wd, ignore_errors=True)
     except Exception as e:
         result = (False, str(e))
     _driver_probe[key] = result
@@ -957,336 +940,329 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     arch = normalize_arch(arch)
     objflags = _OBJ_FLAGS + arch_flags(arch) + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # Every object, the generated reflection C and its object, and the staged
-    # dylib live under this work directory, and `os.replace` moves only the
-    # finished dylib out — so nothing removes it unless `_staging_dir` does.
-    # Measured at ~324 kB for a ONE-module cold build (a full stdlib build is
-    # 664 modules plus the runtime and the reflection table, so tens to hundreds
-    # of MB), created unconditionally even on a cache hit, and leaked per cold
-    # CAS before this.
-    with _staging_dir('mojostdlib_') as workdir:
-        objs = []
+    workdir = tempfile.mkdtemp(prefix='mojostdlib_')
+    objs = []
 
-        # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
-        # over EVERY module in this build (before any per-module job runs) to
-        # index which bare names are concrete structs ANYWHERE in the compile
-        # unit — not just in the one file that happens to reference them. This
-        # is what lets reflect.collect_exports_src (called per-module, in
-        # parallel, with no visibility into sibling files on its own) recognize
-        # a module-level global whose struct type is defined in a DIFFERENT
-        # file (e.g. box.3d/game's `g_world: World` in game_ffi.mojo, with
-        # `struct World` defined in engine_world.mojo) as struct-typed, and so
-        # advertise a SYM_GLOBAL reflection export for it — see
-        # reflect.collect_exports's `known_structs` param docstring for exactly
-        # why this is safe (the accessor is always consumed as generic `void *`
-        # regardless of which file the struct's real layout lives in). A parse
-        # failure on one file here just contributes no names from that file —
-        # the exact same file will fail again (and get reported) in its own
-        # real `_compile_module_job` below, so silently skipping it here isn't
-        # hiding anything.
-        known_structs = set()
-        for _path in modules:
-            try:
-                known_structs |= reflect.collect_local_struct_names_src(open(_path).read())
-            except Exception:
-                pass
-        known_structs = frozenset(known_structs)
+    # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
+    # over EVERY module in this build (before any per-module job runs) to
+    # index which bare names are concrete structs ANYWHERE in the compile
+    # unit — not just in the one file that happens to reference them. This
+    # is what lets reflect.collect_exports_src (called per-module, in
+    # parallel, with no visibility into sibling files on its own) recognize
+    # a module-level global whose struct type is defined in a DIFFERENT
+    # file (e.g. box.3d/game's `g_world: World` in game_ffi.mojo, with
+    # `struct World` defined in engine_world.mojo) as struct-typed, and so
+    # advertise a SYM_GLOBAL reflection export for it — see
+    # reflect.collect_exports's `known_structs` param docstring for exactly
+    # why this is safe (the accessor is always consumed as generic `void *`
+    # regardless of which file the struct's real layout lives in). A parse
+    # failure on one file here just contributes no names from that file —
+    # the exact same file will fail again (and get reported) in its own
+    # real `_compile_module_job` below, so silently skipping it here isn't
+    # hiding anything.
+    known_structs = set()
+    for _path in modules:
+        try:
+            known_structs |= reflect.collect_local_struct_names_src(open(_path).read())
+        except Exception:
+            pass
+    known_structs = frozenset(known_structs)
 
-        # Per-module transitive local-dependency fingerprint (BUG-2026-032): index
-        # every module in this build under each spelling it might be imported as,
-        # then fold the content hash of each module's reachable local-import
-        # closure into its CAS key. Cheap text pre-pass; a parse failure on one
-        # file just contributes nothing (it fails again, reported, in its own job).
-        _dep_src_by_key: dict = {}
-        for _path in (modules if track_local_deps else ()):
-            try:
-                _src = open(_path).read()
-            except Exception:
-                continue
-            _nm = _module_name_for(_path)
-            _base = os.path.splitext(os.path.basename(_path))[0]
-            for _k in {_nm, _nm.split('.')[-1], _base}:
-                _dep_src_by_key.setdefault(_k, (_path, _src))
-        dep_fps = {}
-        for _path in modules:
-            if not _dep_src_by_key:
-                dep_fps[_path] = ''
-                continue
-            try:
-                dep_fps[_path] = _local_dep_fingerprint(_path, _dep_src_by_key)
-            except Exception:
-                dep_fps[_path] = ''
+    # Per-module transitive local-dependency fingerprint (BUG-2026-032): index
+    # every module in this build under each spelling it might be imported as,
+    # then fold the content hash of each module's reachable local-import
+    # closure into its CAS key. Cheap text pre-pass; a parse failure on one
+    # file just contributes nothing (it fails again, reported, in its own job).
+    _dep_src_by_key: dict = {}
+    for _path in (modules if track_local_deps else ()):
+        try:
+            _src = open(_path).read()
+        except Exception:
+            continue
+        _nm = _module_name_for(_path)
+        _base = os.path.splitext(os.path.basename(_path))[0]
+        for _k in {_nm, _nm.split('.')[-1], _base}:
+            _dep_src_by_key.setdefault(_k, (_path, _src))
+    dep_fps = {}
+    for _path in modules:
+        if not _dep_src_by_key:
+            dep_fps[_path] = ''
+            continue
+        try:
+            dep_fps[_path] = _local_dep_fingerprint(_path, _dep_src_by_key)
+        except Exception:
+            dep_fps[_path] = ''
 
-        # Compile every module's source → object first (fully independent per
-        # module, so parallelizes cleanly across processes — same scheme as
-        # compile_stdlib.py's ProcessPoolExecutor use). Order is preserved
-        # (pool.map, not as_completed) because the symbol-collision dedup below
-        # is order-sensitive ("first module wins") and must stay sequential.
-        if jobs > 1:
-            with ProcessPoolExecutor(max_workers=jobs) as pool:
-                results = list(pool.map(
-                    _compile_module_job, modules,
-                    [workdir] * len(modules), [use_cache] * len(modules),
-                    [objflags] * len(modules), [known_structs] * len(modules),
-                    [dep_fps[p] for p in modules]))
-            # Merge each job's own CAS hit/miss into this process's cas.stats —
-            # see _compile_module_job's docstring on why worker-process stats
-            # don't propagate on their own. Only needed here: the jobs<=1 path
-            # below calls cas.get_or_build in-process, where it already
-            # increments cas.stats directly — redoing it here would double-count.
-            for r in results:
-                hit = r[-1]
-                if hit is True:
-                    cas.stats['hits'] += 1
-                elif hit is False:
-                    cas.stats['misses'] += 1
-        else:
-            results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs,
-                                           dep_fps[path])
-                       for path in modules]
-
-        # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
-        # symbol from it if present, else falls back to source), so it need not be
-        # complete — it must only link. When two modules define the same external
-        # symbol (e.g. an `abs` overload in both math and complex -> mojo_abs), keep
-        # the first and drop the colliding module (and its reflection exports). This
-        # is a stopgap; the real fix is overload-aware mangling of free functions
-        # (STDLIB-BUGS.md SB-1). Written plainly so the self-host compiler handles it.
-        all_exports = []
-        seen_syms = set()
-        skipped = 0
-        excluded = 0
-        for path, name, ofile, exports, error, _hit in results:
-            if error is not None:
-                print(f"  skip {os.path.relpath(path)}: {error}", file=sys.stderr)
-                skipped += 1
-                continue
-            defs = _defined_symbols(gcc, ofile)
-            clash = defs & seen_syms
-            if clash:
-                # A duplicate definition (e.g. a generic struct copied into two modules).
-                # Rather than drop the whole module — losing its UNIQUE symbols too —
-                # demote just the clashing symbols to file-local in this object and keep
-                # the rest. The first module's copy stays the exported definition.
-                edited = _localize_symbols(ofile, clash, workdir, name)
-                if edited:
-                    ofile = edited
-                    defs = defs - clash   # clashing syms no longer exported here
-                    print(f"  localize {len(clash)} dup symbol(s) in {name} "
-                          f"(e.g. {sorted(clash)[0]})", file=sys.stderr)
-                else:
-                    one = sorted(clash)[0]
-                    print(f"  exclude {name} from dylib: symbol already defined ({one})",
-                          file=sys.stderr)
-                    excluded += 1
-                    continue
-            seen_syms |= defs
-            objs.append(ofile)
-            all_exports.extend(exports)
-        if skipped:
-            print(f"  ({skipped} modules skipped)", file=sys.stderr)
-        if excluded:
-            print(f"  ({excluded} modules excluded for symbol collisions)", file=sys.stderr)
-
-        # Runtime handling:
-        # - For production (link_runtime=False): compile each unit of the runtime
-        #   and fold it into the dylib (no separate runtime dylib needed)
-        # - For testing (link_runtime=True): build the standalone runtime dylib and
-        #   link against it
-        #
-        # The unit list is `_RUNTIME_UNITS`, the SAME one `runtime_dylib()` uses.
-        # It used to be written out twice, and the two copies had already drifted
-        # in the way that matters: the copy here picked the context-switch source
-        # from `platform.machine()` (the HOST) while the key for the object it was
-        # about to compile folded in the same host — so a build FOR another
-        # architecture compiled aarch64 assembly under a name that claimed
-        # otherwise. One table, selected on the target, is the fix; the reasoning
-        # for folding each unit in unconditionally is the hand-verified crashes
-        # recorded below and in runtime_dylib()'s own docstring.
-        rt_units = runtime_units(arch, opt_flag)
-        cc, cxx = toolchain_for(arch, gcc, gxx)
-
-        if link_runtime:
-            # For test modules: link against standalone runtime dylib (which
-            # itself now also folds in mojo_async_runtime.o — see
-            # runtime_dylib()'s own docstring). Per-arch, for the same reason as
-            # everything else here: a test module built for one architecture and a
-            # runtime dylib built for the other is a link that succeeds and a
-            # dlopen that does not.
-            rt_dylib = runtime_dylib(gcc, arch=arch)
-            rt_path = rt_dylib
-        else:
-            # For production: include every runtime object directly. The keys are
-            # per unit (source + flags + toolchain + arch), and the arch is
-            # spelled out in each because `toolchain_fingerprint` folds the FLAGS
-            # — and a driver that ignores its target flag produces identical bytes
-            # under a different name, which is the whole failure this per-arch work
-            # is about.
-            for _src, _lang, _uflags in rt_units:
-                _stem = os.path.splitext(os.path.basename(_src))[0]
-                _driver = cxx if _lang == 'c++' else cc
-                _key = 'rtobj/' + cas._hash(
-                    'mojo-rtobj-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
-                    cas.toolchain_fingerprint(_driver, _uflags), arch, _stem,
-                    open(_src).read())
-
-                def _build_rt_obj(_src=_src, _uflags=_uflags, _driver=_driver,
-                                  _stem=_stem):
-                    o = os.path.join(workdir, _stem + '.o')
-                    subprocess.run([_driver, *_uflags, '-c', '-o', o, _src], check=True)
-                    return open(o, 'rb').read()
-                _o, _ = cas.get_or_build(_key, '.o', _build_rt_obj)
-                objs.append(_o)
-            rt_path = None
-
-        if extra_exports:
-            all_exports.extend(extra_exports)
-
-        # Safety net: an export entry (from reflect.collect_exports_src's source
-        # scan, or from extra_exports/collect_runtime_exports_h's header scan)
-        # can drift out of sync with what actually got a compiled body — e.g.
-        # BUG-2026-036, where a same-file overloaded free function (`def
-        # CUDA(...)` declared twice in std/gpu/host/_nvidia_cuda.mojo) was still
-        # advertised as a normal export even though gen_module's own "overloaded
-        # top-level functions ... can't be emitted as distinct C symbols, drop
-        # them here" pass never compiled a body for it, or a stale prototype in
-        # fire_runtime.h (e.g. MojoList__write_to) was never actually defined in
-        # fire_runtime.c. Either way the reflection table would forward-declare
-        # and take the address of a symbol with zero definitions anywhere in the
-        # dylib — `extern void sym();` with nothing behind it — which links fine
-        # (production dylibs use `-undefined dynamic_lookup`) but crashes EVERY
-        # dlopen of the dylib at runtime with "symbol not found in flat
-        # namespace", not just uses of the broken function. Cross-check every
-        # non-TYPE export's expected C symbol against what `nm` says the actual
-        # object set defines, and drop anything orphaned instead of shipping a
-        # dylib that can't even be loaded.
-        all_defs = set()
-        for o in objs:
-            all_defs |= _defined_symbols(gcc, o)
-        _kept = []
-        _misresolved, _undefined = [], []
-        for e in all_exports:
-            if e['kind'] == reflect.SYM_TYPE:
-                _kept.append(e)
-                continue
-            sym = reflect.export_csym(e)
-            if ('_' + sym) in all_defs:
-                _kept.append(e)
-            elif ('_' + e['name']) in all_defs:
-                # The entry names a symbol the dylib really defines, but the
-                # export-csym rule resolved it to a different one — see
-                # runtime_export_entries' report on why almost all of
-                # fire_runtime.h's 565 entry points are measured as misresolved on
-                # this tree, and why the fix is in reflect.export_csym rather than
-                # here. The exact figure is not written down here on purpose: it is
-                # printed by the report below on every build, so this comment cannot
-                # carry a second copy of a number the build measures for itself. A separate class from the
-                # genuinely-orphaned entry below because nothing is missing here:
-                # the definition is present and the table just is not naming it.
-                _misresolved.append(f"{e['name']} -> {sym}")
-            else:
-                _undefined.append(e['name'])
-        all_exports = _kept
-        for line in format_export_report(len(_kept) + len(_misresolved) + len(_undefined),
-                                         _misresolved, _undefined):
-            print(f"  {line}", file=sys.stderr)
-
-        # Reflection table source — deterministic given all_exports, so it can
-        # participate in the dylib link key before writing the file.
-        reflect_src = reflect.emit_table_c(all_exports)
-
-        # Compute dylib link key and check CAS.  The key folds in every .o on the
-        # link line (module objects + runtime .o or runtime dylib digest), the
-        # reflect table source, the toolchain, the target architecture, and the
-        # link mode — so changing any object or configuration invalidates the
-        # cached dylib. The arch is a separate key input rather than only arriving
-        # inside the per-object flags, because the LINK step carries its own
-        # `-arch` and a link that silently ignored it would otherwise be
-        # indistinguishable from a correct one.
-        extra_link_digest = cas.file_digest(rt_dylib) if link_runtime else ''
-        link_key = cas.dylib_link_key(
-            objs, reflect_src, cc, undefined=not link_runtime,
-            extra_digest=extra_link_digest, arch=arch)
-
-        # One exclusive section from here to the return, covering the currency
-        # check, the link and the publish. The CAS is consulted INSIDE the lock
-        # and not before it: a check-then-act on a shared filesystem is the
-        # stampede, and `out` is the most-shared path in the tree (every parallel
-        # `fire.py build` in the gate wants this one library). Everything above
-        # the lock — the per-module compiles, all individually content-addressed —
-        # still runs in parallel across callers, so the serialised section is only
-        # the table compile and the link.
-        #
-        # Correctness does NOT rest on that lock; `_OutputLock`'s own docstring
-        # gives the measurement (a compiled `fcntl.flock` is the extern preamble's
-        # weak stub), and the guarantee is the staged link plus `os.replace` below,
-        # which hold whether or not the lock did anything.
-        #
-        # `as _lock_fd` is not decoration: it is what makes the compiled path emit
-        # the `__exit__` call at all (see `_OutputLock`'s own note, and
-        # the doc for that, deleted with its fix).
-        with _OutputLock(out) as _lock_fd:
-            if use_cache:
-                # Re-checked under the lock: a caller that queued behind another
-                # one's fresh link finds the artifact published and returns,
-                # which is what turns N racing builds into one build.
-                cached_dylib = cas.lookup(link_key, '.dylib')
-                if cached_dylib:
-                    cas.stats['hits'] += 1
-                    _publish_bytes(cached_dylib, out)
-                    _arch_or_die(out, arch, 'cached dylib')
-                    return out
+    # Compile every module's source → object first (fully independent per
+    # module, so parallelizes cleanly across processes — same scheme as
+    # compile_stdlib.py's ProcessPoolExecutor use). Order is preserved
+    # (pool.map, not as_completed) because the symbol-collision dedup below
+    # is order-sensitive ("first module wins") and must stay sequential.
+    if jobs > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(
+                _compile_module_job, modules,
+                [workdir] * len(modules), [use_cache] * len(modules),
+                [objflags] * len(modules), [known_structs] * len(modules),
+                [dep_fps[p] for p in modules]))
+        # Merge each job's own CAS hit/miss into this process's cas.stats —
+        # see _compile_module_job's docstring on why worker-process stats
+        # don't propagate on their own. Only needed here: the jobs<=1 path
+        # below calls cas.get_or_build in-process, where it already
+        # increments cas.stats directly — redoing it here would double-count.
+        for r in results:
+            hit = r[-1]
+            if hit is True:
+                cas.stats['hits'] += 1
+            elif hit is False:
                 cas.stats['misses'] += 1
+    else:
+        results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs,
+                                       dep_fps[path])
+                   for path in modules]
 
-            # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
-            reflect_c = os.path.join(workdir, '_mojo_reflect.c')
-            reflect_o = os.path.join(workdir, '_mojo_reflect.o')
-            with open(reflect_c, 'w') as f:
-                f.write(reflect_src)
-            # -fno-builtin: the table forward-declares every exported symbol as
-            # `extern void sym();` purely to take its address. Some exported names
-            # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
-            # rejects the unprototyped redeclaration as a conflicting type.
-            subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
-                            '-c', '-o', reflect_o, reflect_c], check=True)
-            objs.append(reflect_o)
-
-            # Link into the WORK DIRECTORY and rename into place, because `out` is
-            # a fixed path every other job links against: a dylib linked straight
-            # to `out` is a partially-written Mach-O at every path a concurrent
-            # reader can reach it, which is the silent half of the race
-            # `_OutputLock` names. `_dylink` is given the final install name
-            # explicitly for the reason `runtime_dylib`'s own staged link gives
-            # it — the install name is baked into the load command of everything
-            # that links this library, so deriving it from a staging path and
-            # renaming afterwards produces an artifact that disagrees with its own
-            # name.
-            staged = os.path.join(workdir, os.path.basename(out))
-            # Linking depends on whether runtime is included or linked separately.
-            # link_driver=cxx: the production dylib now always folds in mojo_
-            # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
-            # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
-            # fire.py's own link_executable(cxx=True) convention exactly.
-            if link_runtime:
-                # For test modules: link against runtime dylib, all symbols must resolve
-                link = _dylink(cc, staged, objs, undefined=False, extra_libs=[rt_path],
-                               rpath=os.path.dirname(rt_path), link_driver=cxx,
-                               install_name='@rpath/' + os.path.basename(out),
-                               arch=arch)
+    # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
+    # symbol from it if present, else falls back to source), so it need not be
+    # complete — it must only link. When two modules define the same external
+    # symbol (e.g. an `abs` overload in both math and complex -> mojo_abs), keep
+    # the first and drop the colliding module (and its reflection exports). This
+    # is a stopgap; the real fix is overload-aware mangling of free functions
+    # (STDLIB-BUGS.md SB-1). Written plainly so the self-host compiler handles it.
+    all_exports = []
+    seen_syms = set()
+    skipped = 0
+    excluded = 0
+    for path, name, ofile, exports, error, _hit in results:
+        if error is not None:
+            print(f"  skip {os.path.relpath(path)}: {error}", file=sys.stderr)
+            skipped += 1
+            continue
+        defs = _defined_symbols(gcc, ofile)
+        clash = defs & seen_syms
+        if clash:
+            # A duplicate definition (e.g. a generic struct copied into two modules).
+            # Rather than drop the whole module — losing its UNIQUE symbols too —
+            # demote just the clashing symbols to file-local in this object and keep
+            # the rest. The first module's copy stays the exported definition.
+            edited = _localize_symbols(ofile, clash, workdir, name)
+            if edited:
+                ofile = edited
+                defs = defs - clash   # clashing syms no longer exported here
+                print(f"  localize {len(clash)} dup symbol(s) in {name} "
+                      f"(e.g. {sorted(clash)[0]})", file=sys.stderr)
             else:
-                # For production: cross-module references resolve at load time
-                link = _dylink(cc, staged, objs, undefined=True, link_driver=cxx,
-                               install_name='@rpath/' + os.path.basename(out),
-                               arch=arch)
-            subprocess.run(link, check=True)
-            _arch_or_die(staged, arch, 'linked dylib')
-            os.replace(staged, out)
-            # Publish the linked dylib to the shared CAS so future builds skip the
-            # link (even on use_cache=False runs: the fresh link is the correct
-            # artifact). Inside the lock, so the latecomer above finds it.
-            with open(out, 'rb') as f:
-                cas.publish(link_key, '.dylib', f.read())
-            return out
+                one = sorted(clash)[0]
+                print(f"  exclude {name} from dylib: symbol already defined ({one})",
+                      file=sys.stderr)
+                excluded += 1
+                continue
+        seen_syms |= defs
+        objs.append(ofile)
+        all_exports.extend(exports)
+    if skipped:
+        print(f"  ({skipped} modules skipped)", file=sys.stderr)
+    if excluded:
+        print(f"  ({excluded} modules excluded for symbol collisions)", file=sys.stderr)
+
+    # Runtime handling:
+    # - For production (link_runtime=False): compile each unit of the runtime
+    #   and fold it into the dylib (no separate runtime dylib needed)
+    # - For testing (link_runtime=True): build the standalone runtime dylib and
+    #   link against it
+    #
+    # The unit list is `_RUNTIME_UNITS`, the SAME one `runtime_dylib()` uses.
+    # It used to be written out twice, and the two copies had already drifted
+    # in the way that matters: the copy here picked the context-switch source
+    # from `platform.machine()` (the HOST) while the key for the object it was
+    # about to compile folded in the same host — so a build FOR another
+    # architecture compiled aarch64 assembly under a name that claimed
+    # otherwise. One table, selected on the target, is the fix; the reasoning
+    # for folding each unit in unconditionally is the hand-verified crashes
+    # recorded below and in runtime_dylib()'s own docstring.
+    rt_units = runtime_units(arch, opt_flag)
+    cc, cxx = toolchain_for(arch, gcc, gxx)
+
+    if link_runtime:
+        # For test modules: link against standalone runtime dylib (which
+        # itself now also folds in mojo_async_runtime.o — see
+        # runtime_dylib()'s own docstring). Per-arch, for the same reason as
+        # everything else here: a test module built for one architecture and a
+        # runtime dylib built for the other is a link that succeeds and a
+        # dlopen that does not.
+        rt_dylib = runtime_dylib(gcc, arch=arch)
+        rt_path = rt_dylib
+    else:
+        # For production: include every runtime object directly. The keys are
+        # per unit (source + flags + toolchain + arch), and the arch is
+        # spelled out in each because `toolchain_fingerprint` folds the FLAGS
+        # — and a driver that ignores its target flag produces identical bytes
+        # under a different name, which is the whole failure this per-arch work
+        # is about.
+        for _src, _lang, _uflags in rt_units:
+            _stem = os.path.splitext(os.path.basename(_src))[0]
+            _driver = cxx if _lang == 'c++' else cc
+            _key = 'rtobj/' + cas._hash(
+                'mojo-rtobj-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
+                cas.toolchain_fingerprint(_driver, _uflags), arch, _stem,
+                open(_src).read())
+
+            def _build_rt_obj(_src=_src, _uflags=_uflags, _driver=_driver,
+                              _stem=_stem):
+                o = os.path.join(workdir, _stem + '.o')
+                subprocess.run([_driver, *_uflags, '-c', '-o', o, _src], check=True)
+                return open(o, 'rb').read()
+            _o, _ = cas.get_or_build(_key, '.o', _build_rt_obj)
+            objs.append(_o)
+        rt_path = None
+
+    if extra_exports:
+        all_exports.extend(extra_exports)
+
+    # Safety net: an export entry (from reflect.collect_exports_src's source
+    # scan, or from extra_exports/collect_runtime_exports_h's header scan)
+    # can drift out of sync with what actually got a compiled body — e.g.
+    # BUG-2026-036, where a same-file overloaded free function (`def
+    # CUDA(...)` declared twice in std/gpu/host/_nvidia_cuda.mojo) was still
+    # advertised as a normal export even though gen_module's own "overloaded
+    # top-level functions ... can't be emitted as distinct C symbols, drop
+    # them here" pass never compiled a body for it, or a stale prototype in
+    # fire_runtime.h (e.g. MojoList__write_to) was never actually defined in
+    # fire_runtime.c. Either way the reflection table would forward-declare
+    # and take the address of a symbol with zero definitions anywhere in the
+    # dylib — `extern void sym();` with nothing behind it — which links fine
+    # (production dylibs use `-undefined dynamic_lookup`) but crashes EVERY
+    # dlopen of the dylib at runtime with "symbol not found in flat
+    # namespace", not just uses of the broken function. Cross-check every
+    # non-TYPE export's expected C symbol against what `nm` says the actual
+    # object set defines, and drop anything orphaned instead of shipping a
+    # dylib that can't even be loaded.
+    all_defs = set()
+    for o in objs:
+        all_defs |= _defined_symbols(gcc, o)
+    _kept = []
+    _misresolved, _undefined = [], []
+    for e in all_exports:
+        if e['kind'] == reflect.SYM_TYPE:
+            _kept.append(e)
+            continue
+        sym = reflect.export_csym(e)
+        if ('_' + sym) in all_defs:
+            _kept.append(e)
+        elif ('_' + e['name']) in all_defs:
+            # The entry names a symbol the dylib really defines, but the
+            # export-csym rule resolved it to a different one — see
+            # runtime_export_entries' report on why almost all of
+            # fire_runtime.h's 565 entry points are measured as misresolved on
+            # this tree, and why the fix is in reflect.export_csym rather than
+            # here. The exact figure is not written down here on purpose: it is
+            # printed by the report below on every build, so this comment cannot
+            # carry a second copy of a number the build measures for itself. A separate class from the
+            # genuinely-orphaned entry below because nothing is missing here:
+            # the definition is present and the table just is not naming it.
+            _misresolved.append(f"{e['name']} -> {sym}")
+        else:
+            _undefined.append(e['name'])
+    all_exports = _kept
+    for line in format_export_report(len(_kept) + len(_misresolved) + len(_undefined),
+                                     _misresolved, _undefined):
+        print(f"  {line}", file=sys.stderr)
+
+    # Reflection table source — deterministic given all_exports, so it can
+    # participate in the dylib link key before writing the file.
+    reflect_src = reflect.emit_table_c(all_exports)
+
+    # Compute dylib link key and check CAS.  The key folds in every .o on the
+    # link line (module objects + runtime .o or runtime dylib digest), the
+    # reflect table source, the toolchain, the target architecture, and the
+    # link mode — so changing any object or configuration invalidates the
+    # cached dylib. The arch is a separate key input rather than only arriving
+    # inside the per-object flags, because the LINK step carries its own
+    # `-arch` and a link that silently ignored it would otherwise be
+    # indistinguishable from a correct one.
+    extra_link_digest = cas.file_digest(rt_dylib) if link_runtime else ''
+    link_key = cas.dylib_link_key(
+        objs, reflect_src, cc, undefined=not link_runtime,
+        extra_digest=extra_link_digest, arch=arch)
+
+    # One exclusive section from here to the return, covering the currency
+    # check, the link and the publish. The CAS is consulted INSIDE the lock
+    # and not before it: a check-then-act on a shared filesystem is the
+    # stampede, and `out` is the most-shared path in the tree (every parallel
+    # `fire.py build` in the gate wants this one library). Everything above
+    # the lock — the per-module compiles, all individually content-addressed —
+    # still runs in parallel across callers, so the serialised section is only
+    # the table compile and the link.
+    #
+    # Correctness does NOT rest on that lock; `_OutputLock`'s own docstring
+    # gives the measurement (a compiled `fcntl.flock` is the extern preamble's
+    # weak stub), and the guarantee is the staged link plus `os.replace` below,
+    # which hold whether or not the lock did anything.
+    #
+    # `as _lock_fd` is not decoration: it is what makes the compiled path emit
+    # the `__exit__` call at all (see `_OutputLock`'s own note, and
+    # the doc for that, deleted with its fix).
+    with _OutputLock(out) as _lock_fd:
+        if use_cache:
+            # Re-checked under the lock: a caller that queued behind another
+            # one's fresh link finds the artifact published and returns,
+            # which is what turns N racing builds into one build.
+            cached_dylib = cas.lookup(link_key, '.dylib')
+            if cached_dylib:
+                cas.stats['hits'] += 1
+                _publish_bytes(cached_dylib, out)
+                _arch_or_die(out, arch, 'cached dylib')
+                return out
+            cas.stats['misses'] += 1
+
+        # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
+        reflect_c = os.path.join(workdir, '_mojo_reflect.c')
+        reflect_o = os.path.join(workdir, '_mojo_reflect.o')
+        with open(reflect_c, 'w') as f:
+            f.write(reflect_src)
+        # -fno-builtin: the table forward-declares every exported symbol as
+        # `extern void sym();` purely to take its address. Some exported names
+        # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
+        # rejects the unprototyped redeclaration as a conflicting type.
+        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                        '-c', '-o', reflect_o, reflect_c], check=True)
+        objs.append(reflect_o)
+
+        # Link into the WORK DIRECTORY and rename into place, because `out` is
+        # a fixed path every other job links against: a dylib linked straight
+        # to `out` is a partially-written Mach-O at every path a concurrent
+        # reader can reach it, which is the silent half of the race
+        # `_OutputLock` names. `_dylink` is given the final install name
+        # explicitly for the reason `runtime_dylib`'s own staged link gives
+        # it — the install name is baked into the load command of everything
+        # that links this library, so deriving it from a staging path and
+        # renaming afterwards produces an artifact that disagrees with its own
+        # name.
+        staged = os.path.join(workdir, os.path.basename(out))
+        # Linking depends on whether runtime is included or linked separately.
+        # link_driver=cxx: the production dylib now always folds in mojo_
+        # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
+        # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
+        # fire.py's own link_executable(cxx=True) convention exactly.
+        if link_runtime:
+            # For test modules: link against runtime dylib, all symbols must resolve
+            link = _dylink(cc, staged, objs, undefined=False, extra_libs=[rt_path],
+                           rpath=os.path.dirname(rt_path), link_driver=cxx,
+                           install_name='@rpath/' + os.path.basename(out),
+                           arch=arch)
+        else:
+            # For production: cross-module references resolve at load time
+            link = _dylink(cc, staged, objs, undefined=True, link_driver=cxx,
+                           install_name='@rpath/' + os.path.basename(out),
+                           arch=arch)
+        subprocess.run(link, check=True)
+        _arch_or_die(staged, arch, 'linked dylib')
+        os.replace(staged, out)
+        # Publish the linked dylib to the shared CAS so future builds skip the
+        # link (even on use_cache=False runs: the fresh link is the correct
+        # artifact). Inside the lock, so the latecomer above finds it.
+        with open(out, 'rb') as f:
+            cas.publish(link_key, '.dylib', f.read())
+        return out
 
 
 def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None,
@@ -1415,23 +1391,25 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
     os.makedirs(os.path.dirname(out), exist_ok=True)
     # Everything below happens inside a staging DIRECTORY that is removed on the
     # way out, whether the build succeeded or raised. Only the finished dylib
-    # leaves (`os.replace(staged, out)`), and without `_staging_dir` the eight
+    # leaves (`os.replace(staged, out)`), and without this `finally` the eight
     # runtime objects, the reflection table's generated C and its object, and
     # the linked dylib itself sit in `$TMPDIR` for the life of the machine —
     # ~520 kB per COLD build, which per-test CAS homes make routine. The
     # `ignore_errors=True` is deliberate: the failure that matters is the
     # build's, and a stale directory is worth less than a cleanup error masking
     # it. `formal/build.py::_publish_signed_image` is the same shape.
+    wd = tempfile.mkdtemp(prefix='mojo_rt_')
     # The work directory holds the runtime objects, the generated reflection C
     # and its object, and the staged dylib — and `os.replace` below moves only
     # the dylib out, so nothing else removes `wd` unless this does. It is per
     # COLD CAS (a cache hit returned above), and this tree has many callers with
     # a fresh `GMOJO_HOME` per test, so the leak measured ~500 kB per cold build
-    # (34 leaked dirs, ~17 MB, in twelve minutes of one corpus run).
-    # `_staging_dir` is the model `formal/build.py::_publish_signed_image` uses:
+    # (34 leaked dirs, ~17 MB, in twelve minutes of one corpus run). The
+    # `finally` is the model `formal/build.py::_publish_signed_image` uses:
     # stage, publish, and remove the staging DIRECTORY so a killed build leaves
-    # no debris for a later glob to mistake for a library.
-    with _staging_dir('mojo_rt_') as wd:
+    # no debris for a later glob to mistake for a library. `ignore_errors=True`
+    # because the failure worth raising is the build's, not the cleanup's.
+    try:
         objs = []
         for src, lang, unit_flags in units:
             stem = os.path.splitext(os.path.basename(src))[0]
@@ -1476,6 +1454,8 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         _arch_or_die(staged, arch, 'linked runtime dylib')
         os.replace(staged, out)
         return out
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
 
 
 # The headers that declare the runtime's public C surface, in the order they
@@ -1509,7 +1489,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 595
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 581
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

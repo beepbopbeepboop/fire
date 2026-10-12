@@ -1544,16 +1544,6 @@ class MojoClass:
                     if array_default is not None:
                         setattr(instance, f.name, array_default)
                         continue
-                    # A `List`/`Dict`/`Set` field (bare or `List[T]` spelling)
-                    # with no initializer binds a fresh empty container of the
-                    # declared kind — the compiled path's answer and real
-                    # Mojo's — instead of None. Own local + `continue`, never
-                    # folded into `value`: same self-host inference reason as
-                    # the `_array_field_default` branch directly above.
-                    container_default = self.interpreter._container_field_default(getattr(f, 'type_ann', None))
-                    if container_default is not None:
-                        setattr(instance, f.name, container_default)
-                        continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
@@ -4285,57 +4275,12 @@ class Interpreter:
         'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
     }
     _FLOAT_TYPE_NAMES = {'Float16', 'Float32', 'Float64', 'BFloat16'}
-    # Container kinds this interpreter models, mapped to the builtin
-    # constructor that produces the EMPTY value — the same constructors the
-    # scope defines `List`/`Dict`/`Set` to (see _MojoGenericCtor). A
-    # container-annotated declaration with no initializer is an empty
-    # container of the declared kind in real Mojo and on the compiled path,
-    # not None; see `_container_field_default`.
-    _CONTAINER_FIELD_CTORS = {'List': list, 'Dict': dict, 'Set': set}
-
-    def _container_field_default(self, type_ann):
-        """A `List`/`Dict`/`Set` declaration with NO explicit initializer —
-        a struct field (`var xs: List[Int]` in a class body) or a local
-        (`var xs: List[Int]` in a function body) — is an empty container of
-        the declared kind, same as real Mojo and the compiled path, not None
-        (a `List[Int]` field with no initializer read as None, so
-        `q.xs.append(1)` raised `'NoneType' object has no attribute
-        'append'` where the language and the compiled path accept it).
-        Both the bare `List` spelling and the `List[T]`/`Dict[K,V]`/
-        `Set[T]` subscript spelling the parser records name the kind the same
-        way (the compiler stores the subscript with no spaces, e.g.
-        `Dict[String,Int]`), so only the pre-`[` base name is read. Returns
-        None — leaving the value untouched — for any other annotation (a
-        scalar, a `String`, a container this interpreter does not model such
-        as `Deque`, or a `borrowed ...` prefix), the same conservative rule
-        `_coerce_to_declared_type`'s scalar arm and `_array_field_default`
-        follow: a default this interpreter cannot name is never invented."""
-        if not isinstance(type_ann, str):
-            return None
-        ctor = self._CONTAINER_FIELD_CTORS.get(type_ann.split('[', 1)[0].strip())
-        if ctor is None:
-            return None
-        return ctor()
 
     def _coerce_to_declared_type(self, value, type_ann):
         """Coerce a var's initializer to its declared scalar type, mirroring
         real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
         truncates the Float64 division result to an Int, it doesn't stay a float)."""
         if not isinstance(type_ann, str):
-            return value
-        if value is None:
-            # A declared scalar with no initializer (`var x: Int`, or a struct
-            # field with no default) is the declared type's ZERO in Mojo, not
-            # None. Only scalars are claimed here: a `List`/`Dict` field with
-            # no initializer is an empty container and an annotation this
-            # interpreter cannot map must stay untouched, exactly as
-            # `_ARRAY_ELEM_DEFAULTS` is scoped to scalars.
-            if type_ann in self._INT_TYPE_NAMES:
-                return 0
-            if type_ann in self._FLOAT_TYPE_NAMES:
-                return 0.0
-            if type_ann == 'Bool':
-                return False
             return value
         if type_ann in self._INT_TYPE_NAMES and isinstance(value, float):
             return int(value)
@@ -4347,17 +4292,6 @@ class Interpreter:
 
     def execute_VarDecl(self, node: N.VarDecl):
         """Execute variable declaration."""
-        if node.value is None and ',' not in node.name:
-            # A `List`/`Dict`/`Set` local with no initializer is an empty
-            # container of the declared kind — the compiled path's answer
-            # and real Mojo's — not None. Same helper and same conservative
-            # scope as the struct-field arm in `MojoClass.__call__`; the
-            # `','` guard keeps the tuple-unpacking shape (`var a, b`) on
-            # its own path below, where one value feeds both names.
-            container_default = self._container_field_default(getattr(node, 'type_ann', None))
-            if container_default is not None:
-                self.scope.define(node.name, container_default)
-                return container_default
         value = self.eval_expr(node.value)
         # `var a, b = expr` (tuple unpacking) is parsed as a single VarDecl
         # whose `name` is a comma-joined string ("a,b") — see
@@ -5233,16 +5167,6 @@ class Interpreter:
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
-        if getattr(expr, 'is_bytes', False):
-            # A `b'...'` literal is a `bytes` object, an int SEQUENCE — not a
-            # text string. Boxing it as a `MojoString` made `for x in b"ab"`
-            # yield `'a'`/`'b'` and `list(b"cd")` yield `['c', 'd']` where
-            # CPython (and the compiled path, see emit_loops.py's `_gen_for_
-            # bytes`) yields `97`/`98` and `[99, 100]`. The parser has already
-            # decoded the literal's escapes to one character per output byte
-            # (see fire_compiler.py's `_decode_bytes_literal`), so latin-1
-            # encodes it back to exactly those bytes.
-            return expr.value.encode('latin-1')
         # `expr.is_interpolated`, and NOT "does the value start with `f"`/`t`".
         # An ordinary literal's value is its BODY and a body may begin with any
         # two characters, so that test read `s = 'f"n"'` as an f-string and

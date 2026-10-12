@@ -1,26 +1,5 @@
 # COMPILE_FAIL: Lib/socket.py — an unrelated grab-bag of compile gaps (title STALE)
 
-## Status 2026-10-25 — the 2026-10-02 named blocker (enum.py:380) is GONE (fixed in the merge); the row is now downstream of the known classes, and the minimal-shape census surfaces a NEW owner flag: enum's runtime member VALUES are wrong
-
-Fresh whole-closure `python3 fire.py build .../Lib/socket.py` on master `93d13780` (post mojo-reference2 merge b35a79ea, plus f234a398, baa9854b, cb156b54, 93d13780):
-
-- **rc 1, 178 gcc-stage `error:` lines, 0 in socket.py's own file.** The row's 2026-10-02 named blocker (`Lib/enum.py:380`, `mojo_list_len`/`mojo_list_get_str` on an int64_t) no longer fires — fixed by the merge's stdlib-codegen chain (61adf216's 27-failure class and siblings).
-- Census of the 178: typing 61, enum 22, pickle 9, subprocess 8, functools 8, ast 8, collections 8, tracemalloc 7, pprint 7, posixpath 6, os 6, contextlib 4, ... — all downstream of the known classes.
-- Plus 56 module rejects (`# ERROR:` lines): weakref `d.pop(key, default)` ×18; the next()-receiver family ×36 (traceback 10, inspect 8, dis 8, re 6, gettext 2); argparse `d.pop` ×2; _collections_abc generator `.close()` ×2. The next() family remains the largest reject bucket, unchanged in substance from the 2026-10-02 entry.
-
-**Owner flag (NEW, runtime values, not a compile gap)** — minimal-shape census probes (small closures pulling in enum/re/argparse/typing; sources `probe_r6_{enum,re,argparse,typing}.py`, binaries `out_r6/probe_r6_*`): all four COMPILE GREEN (no new own-file compile class), but the enum probe RUNS with wrong values against CPython 3.14:
-
-```
-print(Color.RED)    CPython: Color.RED        compiled: 1              (raw value, no member identity)
-print(Color(2))     CPython: Color.GREEN      compiled: 38048512       (garbage word)
-print(list(Color))  CPython: [3 members]      compiled: Unhandled exception: TypeError: object is not iterable
-                                                        (and the binary exits 0; CPython exits 1 on an unhandled exception)
-```
-
-That is the silent-wrong-values family this doc's sibling parsing row recorded for `globals()`: compiles, runs, prints wrong output. Flagged, not attempted — the enum metaclass member-value/repr/iteration machinery wants its own row.
-
-**Verdict**: doc-named blocker fixed-in-merge; remainder downstream of known classes (the next()-receiver family remains the largest). Doc stays open.
-
 ## Status 2026-10-02 — the blocker did NOT move, and the census above it was short
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py` on

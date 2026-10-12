@@ -7,19 +7,6 @@ was a silent wrong answer rather than a refusal until 2026-10-05
 (`formal29-2-r2`); §"What was measured" below records that, and it is a different
 kind of finding from the narrow formats this document is about.
 
-**Status 2026-10-13 (`work/formal348-docs`): a loose end of the binary64 codegen
-is swept — the two byte-wise ALU encoders the floating compare needs were left in
-the ISA census's `BACKLOG` after they became covered.** `cf0d8869` ("IEEE-754
-binary64 on both backends") wired `encode_and_r8_r8` / `encode_or_r8_r8` into
-`formal/x86_64_codegen.py`, so the two are emitted and, once the fuzz pool drew
-them, the census reads `yes yes yes` for both — which made their two
-`tools/formal_isa_census.BACKLOG` entries an exemption that exempted nothing.
-`test_formal_isa_census.py`'s anti-rot half is what reports it, and it is a
-different check from the fp step arms still in that backlog (the
-`encode_fadd_dd_dn_dm` family, a named doc of their own). The entries are
-removed and `FORMAL_x86_64_instruction_coverage_backlog.md` is corrected. The
-SCOPE below is untouched.
-
 ## What is supported, and where
 
 `formal/model.py`'s `FLOAT_KIND` is **IEEE-754 binary64** and nothing else, and

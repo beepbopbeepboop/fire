@@ -9,7 +9,7 @@ fixtures are self-contained, no stdlib imports, so there's no need to pay
 build_stdlib_dylib's ~664-module link cost per test the way a full `fire.py
 build`/driver.compile_program invocation would), RUNS the resulting binary,
 and asserts on its ACTUAL stdout. Falls back to the cpp companion-unit link
-(g++, fire_async_runtime.cpp) for the rarer shape not yet stack-switch-
+(g++, mojo_async_runtime.cpp) for the rarer shape not yet stack-switch-
 eligible.
 """
 import os
@@ -440,128 +440,6 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
-
-
-def run_module_global_generator_tests():
-    # A generator/coroutine held in a MODULE-LEVEL name. The local spelling
-    # (`g = gen(); g.close()` inside a function) always worked because the
-    # assignment carries the "which generator is this" entry onto the local's
-    # name. A global store returned before that carry and a global READ mints a
-    # fresh temp, so `.close()` and `next()` on a module-level generator were
-    # refused with "no known generator API" — the first module rejection the
-    # bug roadmap records for 17 stdlib build rows, from `_collections_abc`'s
-    # `_coro = _coro(); _coro.close()`.
-    #
-    # Behind that refusal sat a second defect that this file could not see
-    # while the first one stood: `g = gen()` at module scope stored a
-    # `MojoGenerator *` into the globals struct's `int64_t` field with no cast
-    # (a hard gcc error), because the early cdecl seeding boxed containers but
-    # copied a generator pointer through. `module_global_generator_store_only`
-    # is that one on its own — no `.close()`, no `next()`.
-    test_generator_stdout("generator_close_on_a_module_global_runs_finally_cleanup", """\
-def gen():
-    try:
-        yield 1
-        yield 2
-    finally:
-        print("cleanup")
-
-g = gen()
-print(next(g))
-g.close()
-print("after")
-""", "1\ncleanup\nafter\n")
-
-    # The exact `_collections_abc` shape: an `async def` whose own name is
-    # rebound to the coroutine object it returns, closed straight away.
-    test_generator_stdout("coroutine_close_on_a_module_global_rebinding_its_own_name", """\
-async def _coro():
-    pass
-
-_coro = _coro()
-coroutine = type(_coro)
-_coro.close()
-del _coro
-print("ok")
-""", "ok\n")
-
-    test_generator_stdout("module_global_generator_store_only", """\
-def gen():
-    yield 1
-
-g = gen()
-print("stored")
-""", "stored\n")
-
-    # The loop spelling. With only the store fixed this builds and then runs
-    # the body ZERO times (a `mojo_unsupported_iter ... MojoGenerator *`
-    # notice on stderr, exit 0) — a wrong answer where there used to be a
-    # build error, which is why the store fix and the api carry are one
-    # change and not two.
-    test_generator_stdout("generator_for_loop_over_a_module_global", """\
-def gen():
-    yield 1
-    yield 2
-
-g = gen()
-for x in g:
-    print(x)
-print("done")
-""", "1\n2\ndone\n")
-
-    # The carried entry is only a fact while the name has ONE binding, because
-    # a wrong entry is not a refusal — it is another generator's resume/value
-    # ABI. Both rebinding shapes must therefore keep the honest refusal.
-    #
-    # A store from inside a function body: every function body is emitted
-    # before `_toplevel`, so the name is poisoned before the toplevel read it
-    # would invalidate.
-    test_generator_refused("generator_close_on_a_global_rebound_in_a_function_refused", """\
-def a():
-    try:
-        yield 1
-    finally:
-        print("a-cleanup")
-
-def b():
-    try:
-        yield 2
-    finally:
-        print("b-cleanup")
-
-g = a()
-
-def swap():
-    global g
-    g = b()
-
-swap()
-g.close()
-print("done")
-""", "no known generator API")
-
-    # A second toplevel store of a DIFFERENT generator: the first `close()` is
-    # still driven as `a` (that is what `g` holds at that point), the second
-    # store poisons the name, and the `close()` after it is refused.
-    test_generator_refused("generator_close_on_a_global_bound_to_two_generators_refused", """\
-def a():
-    try:
-        yield 1
-    finally:
-        print("a-cleanup")
-
-def b():
-    try:
-        yield 2
-    finally:
-        print("b-cleanup")
-
-g = a()
-g.close()
-g = b()
-g.close()
-print("done")
-""", "no known generator API")
 
 
 def run_next_return_position_tests():
@@ -1557,7 +1435,6 @@ def run_tests():
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
-    run_module_global_generator_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning

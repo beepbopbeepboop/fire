@@ -492,56 +492,11 @@ class ModuleLoader:
                 # doesn't have — out of scope here; left as an honest
                 # (link-time, not silent) failure for that narrower case.
 
-                # Block stack for nested-def detection: (indent, kind), kind
-                # 'fn' or 'other'. Maintained as the loop walks (see the
-                # nested-closure note on the skip below for the measured
-                # failure this exists for).
-                _block_stack: list = []
-                for _raw_line in src_content.split('\n'):
-                    line = _raw_line.strip()
+                for line in src_content.split('\n'):
+                    line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    _indent = len(_raw_line) - len(_raw_line.lstrip(' '))
-                    while _block_stack and _block_stack[-1][0] >= _indent:
-                        _block_stack.pop()
-                    _is_defline = line.startswith('fn ') or line.startswith('def ')
-                    _nested_def = _is_defline and any(
-                        _k == 'fn' for _i, _k in _block_stack)
-                    if _is_defline:
-                        _block_stack.append((_indent, 'fn'))
-                    elif line.endswith(':'):
-                        _block_stack.append((_indent, 'other'))
-                    if _nested_def:
-                        # A nested closure (`def inner` inside a function
-                        # body): the stripped-line match used to register it
-                        # as a module-level function export, and — because the
-                        # param extraction only keeps ANNOTATED params (`if
-                        # ':' in param`) while the Python stdlib's nested defs
-                        # are unannotated — the entry came out `int64_t
-                        # fsdecode (void)`: a 0-arg prototype the importer
-                        # emits as `extern int64_t os_fsdecode (void);` for
-                        # `os.fsdecode(x)` — gcc's "too many arguments ...
-                        # expected 0, have 1" at Lib/ntpath.py:317/373/387/461
-                        # and Lib/posixpath.py:266/278/325 (the
-                        # os_fsdecode/os_fsencode 0-arg-stub class on rows
-                        # 10/24/25, measured 2026-10-24). It is doubly wrong:
-                        # the C function a nested def compiles to is named
-                        # after the ENCLOSING function (closure_lifted_name:
-                        # `outer_inner`), so the `module_name` symbol the
-                        # extern names does not exist at all — the
-                        # module-level binding (`fsencode, fsdecode =
-                        # _fscodec()` in os.py) is a VALUE, and its
-                        # cross-module call falls to the dynamic dispatch
-                        # path, which refuses loudly rather than binding to a
-                        # non-existent symbol. Module-level defs inside
-                        # module-level control flow and class methods are NOT
-                        # nested: their innermost open block is 'other', and
-                        # they register exactly as before. The overload
-                        # COUNTING pre-pass above deliberately still sees
-                        # nested defs, so a module-level def that merely
-                        # shares a name with a nested one keeps its measured
-                        # variadic treatment byte for byte.
-                        continue
+
                     # Match 'fn name(...) -> Type:' or 'fn name(...)'
                     if line.startswith('fn ') or line.startswith('def '):
                         # Remove 'fn ' or 'def '

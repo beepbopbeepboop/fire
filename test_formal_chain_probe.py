@@ -9,8 +9,8 @@ link per round, by rewriting the refusing module in a throwaway copy of the
 stdlib and asking again.
 
 It could not do that for the tree's single largest cause. Measured 2026-10-04 on
-the round-2 `std-os-io` scope
-(`std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`), round 0 of a
+`std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`
+(`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §1), round 0 of a
 46-file scope reported
 
     === round 0: 3 built, 3 refusing module(s)
@@ -343,7 +343,8 @@ class TestStubbedImportEdit(unittest.TestCase):
     What is left behind is at an indentation no header introduces, which is how
     the walk's own damage became 43 of 46 files reporting
     `build: 32:0: Unexpected INDENT('')` and three of this scope's links never
-    being measured (§6 item 3 of that round-2 `std-os-io` audit).
+    being measured (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`
+    §6 item 3).
 
     So the edit REPLACES the import — all of it, continuation lines included —
     with `pass` (`NEUTRALISED`), which is what this dialect's own

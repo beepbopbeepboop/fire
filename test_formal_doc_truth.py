@@ -428,17 +428,8 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    # The figure is READ OUT OF §6, not restated here: this file's first rule
-    # is that the document is the single copy, and a literal `272` here was a
-    # second copy that went stale the moment a runtime entry point was added
-    # (`mojo_str_register`, `38d19a52`) while `FORMAL.md` still said 272.
-    mw = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
-                   text)
-    check(mw is not None,
-          'FORMAL.md §6 phase 2 still publishes the word-shaped figure')
-    check(mw is not None and len(word) == int(mw.group(1)),
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 '
-          f'publishes {mw and mw.group(1)}')
+    check(len(word) == 272,
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')

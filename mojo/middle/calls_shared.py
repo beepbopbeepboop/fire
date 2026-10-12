@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, conv_is_read_only
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -368,20 +368,6 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-        # part 4 (measured 2026-10-22, _progress's `_get_terminal_size()`):
-        # a tuple-literal default padded into a call whose param is a
-        # synthesized by-value `MojoTuple_*` struct must be the REAL tuple,
-        # not the historical null/zero pair. That param's coercion is the
-        # list->struct materialization in `_sce_simple_emit`, which reads the
-        # list's slots — a NULL list (the old `('int64_t', '0')` padded word)
-        # would read from address 0 and the `(MojoList *)((int64_t)0)` cast it
-        # required was itself invalid GIMPLE. Lower the literal to its runtime
-        # list (the identical representation a `return (80, 24)` uses) and let
-        # the coercion materialize the struct. Gated on the struct param so the
-        # change cannot disturb the other (already-working) padding sites.
-        _pc = _as_cstr(param_ctype) if param_ctype is not None else ''
-        if _pc.startswith('MojoTuple_'):
-            return gen.lower_expr(_dflt)
         return _null_default_pair(param_ctype, int_ctype='int64_t')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('True',):
         return ('int', '1')
@@ -601,63 +587,6 @@ def _param_ctype_at(chosen: dict, index: int):
     return None
 
 
-_REF_SCALAR_CSET = frozenset({
-    'int64_t', 'int', 'long', 'double', 'float', '_Bool',
-    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
-
-
-def _ref_scalar_param_ctype(chosen: dict, index: int):
-    """The `chosen` candidate's parameter `index` C type when it is a
-    REF-SCALAR pointer (part 6 family D piece 2, 2026-10-23) — a read-only
-    conv (read/ref/imm) whose declared type is a pointer to a concrete
-    scalar — else None. The definition side (funcs_shared._param_ctype) and
-    this check answer the same question from opposite ends, so the address-
-    of below can never fire against a parameter the signature did not
-    actually change. Defensive like `_param_ctype_at`: a candidate built
-    without `param_ctypes`/`param_convs` (self-hosted boxed reads) just
-    gets the old value-passing behavior."""
-    try:
-        _cts = chosen.get('param_ctypes') or []
-        _convs = chosen.get('param_convs') or []
-    except AttributeError:
-        return None
-    if not isinstance(_cts, (list, tuple)):
-        return None
-    if not (0 <= index < len(_cts)):
-        return None
-    ct = _cts[index]
-    if not (isinstance(ct, str) and ct.endswith(' *')):
-        return None
-    if ct[:-2] not in _REF_SCALAR_CSET:
-        return None
-    if not isinstance(_convs, (list, tuple)) or index >= len(_convs):
-        return None
-    if not conv_is_read_only(_convs[index]):
-        return None
-    return ct
-
-
-def _ref_scalar_lvalue_pair(gen, arg_node, ctype) -> tuple:
-    """Lower ONE call-site argument for a ref-scalar parameter: the ADDRESS
-    of the argument's own storage. An addressable lvalue — an identifier
-    declared in the current function (var_types is the whole declared-name
-    table, locals and params) — passes `&name`, which is the whole point:
-    the callee reads through it to the caller's variable (test_product's
-    Observable increment must reach copy_a/copy_b, measured). Any other
-    expression is lowered as a value into a fresh local and THAT local's
-    address is passed — real Mojo requires an lvalue here, and the stdlib's
-    measured call sites all pass locals, so the box is the honest fallback
-    (today's value semantics for that argument, no worse than the old
-    by-value param) rather than a guess about a temporary's lifetime."""
-    if isinstance(arg_node, IdentExpr) and gen.var_types.get(arg_node.name):
-        cname = (getattr(gen, '_c_names', None) or {}).get(arg_node.name, arg_node.name)
-        return (ctype, f'&{cname}')
-    at, av = gen.lower_expr(arg_node)
-    elem = ctype[:-2]
-    tmp = gen._new_val(elem, av)
-    return (ctype, f'&{tmp}')
-
-
 def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list | None,
                                    defaults: dict | None = None) -> list:
     """Build the C arg-value list (self excluded) for a resolved struct
@@ -721,14 +650,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(('MojoDict *', gen._pack_kwargs_dict(
                 {_kn: gen.lower_expr(_kv) for _kn, _kv in kw.items()})))
         return out
-    # PART 6 (2026-10-23, family D piece 2): a ref-scalar parameter (the
-    # caller passes the ADDRESS of its own variable — see
-    # _ref_scalar_param_ctype) takes the lvalue box instead of a value.
-    out = []
-    for _ai, _an in enumerate(args):
-        _rct = _ref_scalar_param_ctype(chosen, _ai)
-        out.append(_ref_scalar_lvalue_pair(gen, _an, _rct) if _rct is not None
-                   else gen.lower_expr(_an))
+    out = [gen.lower_expr(a) for a in args]
     # A `**kwargs` parameter is a concrete `MojoDict *` (see
     # _gen_struct_method's param loop), so literal keyword arguments at
     # the call site must be PACKED into a real dict. Otherwise the
@@ -754,9 +676,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(gen._default_expr_to_pair(
                 (defaults or {}).get(chosen['param_names'][_fill]),
                 param_ctype=_param_ctype_at(chosen, _fill)))
-        _rct = _ref_scalar_param_ctype(chosen, idx)
-        out[idx] = (_ref_scalar_lvalue_pair(gen, kw[pname], _rct) if _rct is not None
-                    else gen.lower_expr(kw[pname]))
+        out[idx] = gen.lower_expr(kw[pname])
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
         _rest = {}
@@ -826,51 +746,3 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _none = gen._intern_string('None')
         return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
-
-
-def _py_box_expr(gen, node):
-    """Does this expression STATICALLY produce a PythonObject box word?
-
-    Returns (is_box, holds_double_bits) for the box-binform dispatch
-    (2026-10-21 part 4, further, test_python_object): a binary op is
-    routed to the runtime's boxed-word class checks only when at least
-    one operand is provably a box, so ordinary int64 arithmetic in every
-    other file keeps its exact lowering. The shapes:
-
-    - `PythonObject(...)` — the constructor itself; the DOUBLE-BITS flag
-      is set when its argument is a float literal (`PythonObject(0.123)`
-      stores the IEEE pattern, not a value).
-    - an IdentExpr local recorded in `gen._pybox_vars` — the recording
-      sites (emit_stmts) are the `var x = PythonObject(...)` declaration
-      and every assignment whose value is itself a box expression, so
-      `c = a / b; c / 2` stays tracked (a truediv result is always double
-      bits and lands in `gen._pybox_double_vars` too).
-    - a BinaryOp/UnaryOp whose operand is a box — box arithmetic and
-      unary ops produce boxes (`-a` on a box is a box).
-    """
-    if node is None:
-        return False, False
-    tn = type(node).__name__
-    if tn == 'CallExpr':
-        f = getattr(node, 'func', None)
-        args = getattr(node, 'args', None) or ()
-        if (type(f).__name__ == 'IdentExpr' and f.name == 'PythonObject'
-                and len(args) == 1):
-            a = args[0]
-            dbl = (type(a).__name__ == 'FloatLiteral'
-                   or (type(a).__name__ == 'IntLiteral'
-                       and isinstance(getattr(a, 'value', None), float)))
-            return True, dbl
-    if tn == 'IdentExpr':
-        if node.name in getattr(gen, '_pybox_vars', ()):
-            return True, node.name in getattr(gen, '_pybox_double_vars', ())
-        return False, False
-    if tn == 'BinaryOp':
-        lb, ld = _py_box_expr(gen, getattr(node, 'left', None))
-        rb, rd = _py_box_expr(gen, getattr(node, 'right', None))
-        if lb or rb:
-            return True, (getattr(node, 'op', None) == '/') or ld or rd
-        return False, False
-    if tn == 'UnaryOp':
-        return _py_box_expr(gen, getattr(node, 'operand', None))
-    return False, False

@@ -1192,20 +1192,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                for n, s in suite.REGISTRY.items()
                if getattr(s, 'expect', '')}
     stated = {n: c for n, c in counted.items() if c is not None}
-    # A strict MAJORITY rather than a hard-coded floor: the floor went stale
-    # the moment six count-stating markers were removed for going green
-    # (2026-10-07, the fire-rename link-fix in the async cluster — see
-    # `BUCKETS['coroutine']`), and a floor that has to be edited every time a
-    # known red is fixed is the wrong instrument. "Most" is the property the
-    # check's own name asserts.
     check('expect count: most registered markers state a count',
-          len(stated) * 2 > len(counted),
+          len(stated) >= 12,
           f'only {len(stated)} of {len(counted)} markers state one '
           f'({sorted(stated)}); a rule with nothing to check reports green '
           f'forever')
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
-          stated == {'async-void-return': 3,
+          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
+                     'async-with-lock-guard': 2,
                      'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
@@ -1213,17 +1208,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # they named were rewrites of an assertion that could no longer see the case
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-parity` is a SIXTH drop, and the same shape as the
-    # three above rather than as `formal-x86-machine-model`: its marker said
-    # `1 of 83 ... printf_float_operand_read_from_an_xmm_register`, and the row
-    # it named now builds and runs on BOTH backends because its operands are
-    # declared `Float64` doubles instead of the integers whose bits happened to
-    # be a double's — the kind the printf conversion rule now refuses by name.
-    # 4ceb7603 (2026-10-13) removed the marker and the bug doc with that change;
-    # a later bulk merge reverted the test half and kept the doc deletion, which
-    # put the row back in the census's red list with nothing to cite (4ceb7603,
-    # restored 2026-10-16).
-    # `formal-x86-machine-model` is a FIFTH drop and the only one of the
+    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
     # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
     # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
     # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
@@ -1241,70 +1226,24 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # but it PASSES"). The count was never the problem; the marker was. Its
     # entry is gone here for the reason the two above name: a census that still
     # states a removed marker fails on the registry's own state.
-    #
-    # SIX more dropped on 2026-10-07, all for the same anti-rot reason:
-    # `mutable-async-capture` (2), `transitive-closure-capture` (2),
-    # `taskgroup` (3), `async-with-lock-guard` (2), `nested-async-generic` (2)
-    # and `async-runtime-scaffold` (1 of 2) are GREEN now. The 563ec43a fire
-    # rename had rewritten `import mojo` to `import fire` but left every
-    # `mojo.link_executable(...)` call site and the `mojo_async_runtime.cpp`
-    # path constant behind, so all ten async suites died at link with `name
-    # 'mojo' is not defined`; with that fixed, these six run and pass, and a
-    # marker on a passing test is reported as a FAILURE.
-    #
-    # `formal-os-backing` is a NINTH drop and the one this census's own rule
-    # caught last: it carried `expect='2 of 70: stat_null dev width …'` from
-    # the 2026-10-08 state, and both halves of that red were then closed on
-    # master — the 32-bit pointer-subscript class by the width-and-signedness
-    # subscript emitters, and `stat_null`'s `dev` by an oracle that compares
-    # the 32-bit device number both sides agree on (CPython's sign-extended
-    # `0xffffffffa8fb1a80` is above 2**63, which this backend's signed 64-bit
-    # integer cannot print). The job is 72/72, and an `expect=` on a passing
-    # test is reported as a FAILURE ("marked expect=… but it PASSES"), which
-    # is what removed it. Its three bug docs went with it.
-    #
-    # `bootstrap-stage2-dumps` no longer states a count: its `40 of 46` marker
-    # was removed on master (2026-10-03/04, the stage2 dumps stopped dying the
-    # way the marker described), so it is out of the census here for the same
-    # reason as the six async drops — a census that states a marker the registry
-    # no longer has fails on the registry's own state. The branch's parallel
-    # `formal-x86-64-parity` registration was likewise not taken in the
-    # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
-    # too, since 4ceb7603 removed its marker (see above).
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
+                     'mutable-async-capture': 2, 'nested-async-generic': 2,
+                     'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
-# NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
-                     # is in this census any more, and that is the union of the two
-                     # sides of the 2026-10-17 merge, each of which dropped one of
-                     # them for its own reason:
-                     #   * `formal-os-backing` was an ADDITION from the 2026-10-07
-                     #     re-measurement; it became the NINTH drop when both halves
-                     #     of its 2-of-70 red closed (see the prose above).
-                     #   * `formal-x86-parity` (1) was the 2026-10-06 registration,
-                     #     then a SEVENTH drop and then briefly RESTORED on
-                     #     2026-10-16 — 4ceb7603 removed its marker and made its one
-                     #     row `Float64` doubles instead of the integers whose bits
-                     #     happen to be a double's, but a later bulk merge reverted
-                     #     the TEST half of that fix while the doc deletion (the
-                     #     other half) survived, so the row went red on both
-                     #     backends again and the marker came back with it, a
-                     #     half-applied fix of the same class as the dropped
-                     #     definitions in
-                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
-                     #     — and then master's `5e45d0b5` restored the test half for
-                     #     real, so the marker is gone a second time and the count
-                     #     with it.  The registry is the authority for both: a
-                     #     census entry for a job that no longer carries an
-                     #     `expect=` fails this very check.
+                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
+                     # parity differential was registered in a bucket and given
+                     # a count-checked `expect=`; a census that did not state
+                     # the new marker would fail on the registry's own state,
+                     # which is this check working.
+                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. A FANOUT states its count the same way — checked against '
-          f'per-item verdicts rather than against a summary line, see '
-          f'`observed_fanout_failures`; the registry no longer carries one '
-          f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is NOT here and that is the '
+          f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
+          f'(40 of its 46 items exit non-zero), and it is checked against the '
+          f'per-item verdicts rather than against a summary line \u2014 see '
+          f'`observed_fanout_failures`. `gimplerunner` is NOT here and that is the '
           f'mechanism working: its `expect=` was removed when the last of the '
           f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
@@ -2094,14 +2033,17 @@ STALE_PER_CHILD_BUDGETS = {
     'test_ab_native.py': 2,
     'test_arm64_emission.py': 1,
     'test_async_runtime_scaffold.py': 1,
-            'test_closure_capture_comptime_func_params.py': 2,
+    'test_async_void_return.py': 5,
+    'test_async_with_lock_guard.py': 5,
+    'test_closure_capture_comptime_func_params.py': 2,
     'test_comptime_bracket_params.py': 1,
     'test_container_equality.py': 3,
     'test_container_membership.py': 3,
     'test_container_ordering.py': 3,
     'test_coro_detached_async.py': 4,
     'test_coro_future_await.py': 4,
-        'test_coro_runtime.py': 1,
+    'test_coro_nested_async_capture.py': 5,
+    'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
@@ -2121,7 +2063,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
-    'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
+    'test_formal_proof_breadth.py': 5,
     'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2132,17 +2074,15 @@ STALE_PER_CHILD_BUDGETS = {
                                       # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
-                                       # hostmod-dylib row's build of the reduced
-                                       # program, the same 600 s wall the file's
-                                       # other three build sites carry
+    'test_formal_x86_64_dylib.py': 3,
     'test_general_mutable_closure_capture.py': 2,
     'test_import_integration.py': 4,
-    'test_link_mode.py': 3,  # +1 2026-10-24: the non-shadow stderr probe in
-                            # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
+    'test_link_mode.py': 2,
     'test_metal_codegen.py': 9,
     'test_mixed_cpp_link.py': 1,
-            'test_nonlocal.py': 2,
+    'test_mutable_async_capture.py': 5,
+    'test_nested_async_generic.py': 5,
+    'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
     'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2151,7 +2091,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
     'test_taskgroup.py': 4,
-        'test_x86_64_containers.py': 1,
+    'test_transitive_closure_capture.py': 5,
+    'test_x86_64_containers.py': 1,
     'test_x86_64_decode.py': 1,
 }
 
@@ -3958,12 +3899,43 @@ UNREGISTERED = {
         'is listed rather than registered — a registered job that skips its only '
         'substantive case is a green line that says nothing.',
 
-    # `test_formal_doc_truth.py` was here (listed rather than registered, its
-    # branch's task said not to touch the registry) and is REGISTERED as
-    # `formal-doc-truth` in `check` as of 2026-10-07: the cost rule always
-    # wanted it (0.17 s, no build, no Lean) and the one file whose job is "does
-    # the document still say what the code says" was a test nobody ran, with
-    # four of its rows drifted.
+    # A DOCUMENT check, and the cheapest file in this list by a wide margin:
+    # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
+    # files. 0.17 s wall and 81 MB maximum RSS measured three times on
+    # 2026-10-04 (`/usr/bin/time -l`, because at 0.17 s memcap's own poll cannot
+    # see a process that is gone before the first tick), no build and no Lean.
+    #
+    # It is listed rather than registered because its branch's task says not to
+    # touch the registry — NOT because it is expensive. It is the cheapest thing
+    # here, so the cost rule wants it registered rather than excused, and the
+    # only thing standing between it and a registration is the instruction.
+    #
+    # Exact next step, in `check` beside `suite-self-test` and `doc-refs`, which
+    # are the other two files that read the tree's own documents:
+    #
+    #   test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'],
+    #        extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
+    #               'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
+    #               'formal/lean.py', 'formal/build.py',
+    #               'formal/arm64_proof_gen.py',
+    #               'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
+    #               'reflect.py'],
+    #        desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
+    #             'agrees with the tree')
+    #
+    # `extra` names the runtime headers and `lib/` because two of its six groups
+    # read them, and `doc-refs`'s own key does not: a `formal/hostmods/` edit
+    # that moved a declared `mojo_*` signature would otherwise replay a recorded
+    # PASS.
+    'test_formal_doc_truth.py': (
+        'Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md -- counts, '
+        'function names, limits, refusal messages, ABI signatures, tool flags -- '
+        'out of the documents and compares them with the tree, both directions. '
+        '0.17 s and 81 MB measured, no build and no Lean; it found three wrong '
+        'numbers in FORMAL.md §2.2 (540/219/321 against a real 668/262/406) and '
+        'three `lib/` holes published as live in §7 that had been closed for a '
+        'week. Listed because this branch\'s task says not to register anything; '
+        'the cost argues for the registration above.'),
 
     # ── the formal backend's per-construct suites, run by hand ──
     #
@@ -5318,32 +5290,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'nothing reports green forever, which is the one thing it must not be '
           f'able to do, and the fixtures are the only corpus that exists here by '
           f'construction')
-    # The ratchet's prefixed ledger (tools/dangling_refs_baseline.BASELINE)
-    # is the declared set of files that still carry DELIBERATE citations of
-    # deleted docs (its header: "deliberate rather than unfixed" — the
-    # test_suite.py negative controls are the precedent). A name cited ONLY
-    # in such a ledgered file is not a sweep gap: it is a declared entry
-    # held to its per-file ceiling by the doc-refs job, and growth in a
-    # ledgered file fails THERE, so the zero invariant below covers the rest.
-    # Measured 2026-10-24: the owner-held tools/control.py's `norm_claim`
-    # docstring spells the `FORMAL_x` claim family (its dot-md member — a
-    # placeholder, no such doc) as one worked example, and that file cannot
-    # be reworded by the campaign (owner-held), so that one citation sits
-    # behind a deliberate ledger entry with a comment. (Named here WITHOUT
-    # the doc's spelling — prefix or bare — because the ratchet reads this
-    # very file, and spelling the placeholder in a comment is how the
-    # owner's control.py line red it: a comment citing a doc that is not
-    # there is still a citation.) Without the exclusion the check below is
-    # red on the owner's b73591b9 commit for a line the campaign has no
-    # right to edit.
-    try:
-        import dangling_refs_baseline as _baseline_mod
-        _ledgered_files = set(getattr(_baseline_mod, 'BASELINE', {}))
-    except ImportError:
-        _ledgered_files = set()
-    outside = {n: v for n, v in by_doc.items()
-               if n not in fixtures
-               and not (v and all(f in _ledgered_files for f, _ in v))}
+    outside = {n: v for n, v in by_doc.items() if n not in fixtures}
     check('dangling refs: ...and outside those controls the corpus is empty, '
           'which is what a sweep buys',
           not outside,
@@ -5444,7 +5391,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           dangling_doc_refs.stale_baseline_entries(synth, led)
           == {'c.py': (0, 2), 'd.py': (1, 4)},
           f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
-          f'ledger is a CEILING, so a worker who fixes a citation needs no '
+          f'ledger is a CEILING, so a file that fixed its citations needs no '
           f'entry change to stay green and an entry left behind by a fix is '
           f'indistinguishable from one still needed — a worker who fixes a '
           f'citation should drop the entry rather than leave it')
@@ -5470,93 +5417,6 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'corpus keys {sorted(synth)}; "fixed every citation in this file" '
           f'and "the ledger never mentioned this file" were the same '
           f'observation, so the join has to be over the LEDGER')
-
-    # ── the BARE class is a VERDICT now, and this is the check that says so ──
-    #
-    # `the surviving-citation bug`: a bug doc was
-    # deleted with its fix and three documents kept citing it by bare stem — a
-    # census row, a per-stem table row, a prose pointer — while `--ratchet` was
-    # GREEN, because the spelling `BARE_REF` matches has no `bugs/` in front of
-    # it and the ratchet only read `BASELINE`.  `bare_find` reported the class
-    # and `BARE_REF`'s own comment said a ledger for it "would have to bless
-    # every existing sentence", which was true when it was written and stopped
-    # being true when the `deleted_convention` skip landed: a line that SAYS the
-    # doc was deleted is not counted, so there is a convention and the ledger is
-    # seeded from the census like the other one.
-    #
-    # Three checks, and each one is a way that could be got wrong independently:
-    # the ledger exists and is green on arrival (a missing table defaults every
-    # ceiling to 0, so an absent `BARE_BASELINE` would turn the gate into 86 red
-    # lines rather than a sentence); the same reader that judges the prefixed
-    # class judges this one, on a synthetic corpus, so "it is wired to a verdict"
-    # is not the same claim as "the table was written"; and the planted corpus
-    # below is seen by `bare_find` and NOT by `find`, which is the whole defect
-    # stated as a difference between two functions rather than as prose.
-    bare_led = dangling_doc_refs.load_baseline('BARE_BASELINE')
-    pref_led = dangling_doc_refs.load_baseline()
-    bare_gains = dangling_doc_refs.ratchet_regressions(bare_by_file, bare_led)
-    check('dangling refs: the BARE class has a ledger of its own, and it is '
-          'green on arrival — a citation spelled without `bugs/` is judged too',
-          bool(bare_led) and pref_led is not bare_led and not bare_gains
-          and all(f in bare_led for f in bare_by_file),
-          f'BARE_BASELINE has {len(bare_led)} entries and the corpus has '
-          f'{len(bare_by_file)} citing files; gains {bare_gains[:5]}. Two '
-          f'tables because two classes: `doc/ELABORATION.md` is cited bare by '
-          f'four real files and must never be a ceiling, and the same spelling '
-          f'of a document that is nowhere must be. An absent table is not a '
-          f'green light — every ceiling would read 0 — which is why this asks '
-          f'for the table rather than for the absence of complaints')
-    check('dangling refs: the BARE ratchet is the SAME reader as the prefixed '
-          'one, so it fails on a gain and not on a leftover',
-          dangling_doc_refs.ratchet_regressions(synth, led) == [('b.py', 2, 1)]
-          and dangling_doc_refs.sanctioned(synth, led) == {'a.py', 'd.py'},
-          'one implementation for both ledgers, checked against the same '
-          'synthetic corpus: a file over its ceiling is a gain in either class '
-          'and a file under one is not')
-
-    # The planted corpus, which is the defect itself. A file in `.tmp/` (which
-    # `.git/info/exclude` keeps out of the tree, so the self-test leaves no
-    # trace) citing a document that is nowhere, by bare stem — and `candidates`
-    # is redirected at it so the guarantee is the file rather than this tree's
-    # own corpus, which is exactly the trade the checks above make.
-    plant_dir = os.path.join(HERE, '.tmp')
-    os.makedirs(plant_dir, exist_ok=True)
-    plant = os.path.join(plant_dir, 'docrefs_plant.md')
-    with open(plant, 'w', encoding='utf-8') as f:
-        f.write('see NO_SUCH_DOC_ANYWHERE.md for why\n')
-    rel_plant = os.path.relpath(plant, dangling_doc_refs.ROOT).replace(
-        os.sep, '/')
-    old_candidates = dangling_doc_refs.candidates
-    try:
-        dangling_doc_refs.candidates = lambda skip=(): [rel_plant]
-        _h, planted_doc, planted_file = dangling_doc_refs.find()
-        p_bare_doc, p_bare_file = dangling_doc_refs.bare_find()
-        # `--ratchet`'s OWN verdict function, with both corpora and both
-        # ledgers handed in — so what is under test is the wiring the CLI uses,
-        # not two halves of a walk called from a test.
-        p_pref, p_gains = dangling_doc_refs.ratchet_verdict(
-            planted_file, p_bare_file, {}, {})
-    finally:
-        dangling_doc_refs.candidates = old_candidates
-        try:
-            os.remove(plant)
-        except OSError:
-            pass
-    check('dangling refs: a bare citation of a document that is nowhere is a '
-          'GAIN the ratchet reports — the class it used to walk past',
-          not planted_doc and not p_pref
-          and 'NO_SUCH_DOC_ANYWHERE.md' in p_bare_doc
-          and p_bare_file.get(rel_plant) == [('NO_SUCH_DOC_ANYWHERE.md', 1)]
-          and p_gains == [(rel_plant, 1, 0)],
-          f'the prefixed walk found {planted_doc} and the bare walk found '
-          f'{sorted(p_bare_doc)}; one verdict over both halves said '
-          f'prefixed={p_pref} bare={p_gains}. `find()` cannot see a stem '
-          f'with no `bugs/` in front of it, which is why four citations of one '
-          f'deleted document sat in three files with the ratchet green. The '
-          f'planted name is one of this file\'s own prefixed fixtures, so the '
-          f'walk that cannot see it is shown on a name the walk that can has '
-          f'already been using as a control; the plant is removed above '
-          f'either way')
 
 
 def test_the_formal_doc_index_is_current():
@@ -5625,22 +5485,6 @@ def test_the_formal_doc_index_is_current():
     rc, out = run_check(['--check'])
     check('formal doc index: OPEN_WORK.md\'s generated block is current',
           rc == 0, out.strip() or f'--check exited {rc}')
-
-    # A committed MERGE CONFLICT MARKER is always a bug, and the block check
-    # above cannot see one in the HAND-maintained half of OPEN_WORK.md — it
-    # compares the generated region only, and that is where one sat from a merge
-    # until 2026-10-08 (a `=======` plus a duplicated table). Checked over the
-    # whole file, and shown to fire on a planted string rather than only on the
-    # clean tree it is run against.
-    planted_marker = 'before\n=======\nafter\n'
-    check('formal doc index: a committed merge conflict marker is caught',
-          F.conflict_markers(F.open_work_text()) == []
-          and F.conflict_markers(planted_marker) == [2]
-          and F.conflict_markers('<<<<<<< HEAD\nx\n>>>>>>> other\n') == [1, 3],
-          'a `=======` / `<<<<<<<` / `>>>>>>>` line in OPEN_WORK.md must fail '
-          '--check: the block comparison cannot see the hand-maintained half, '
-          'so the marker this checks for went unnoticed through every gate '
-          'until a reader found it')
 
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')

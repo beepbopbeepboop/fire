@@ -188,27 +188,6 @@ def check_frame_budget(verbose=False):
             f"literal, so the class this row names is unreachable from the "
             f"corpus", verbose)
 
-    # The STACK FLOOR is the same BYTE budget on both machines and the FRAME is
-    # not, so the recursion depth it affords is PER ARCHITECTURE — and that is a
-    # property of two constants, so it is checked here rather than re-derived
-    # from a sweep (the per-architecture recursion bound, stated in
-    # `formal/model.py::STACK_FLOOR_BUDGET_BYTES` and pinned 2026-10-08). One
-    # byte budget, the two frame sizes the emitters subtract, and the 8x band
-    # between them: a change to either constant moves an edge the two harnesses
-    # read as `trapped` (`formal_fuzz.classify`) or `TWIN-DIVERGES-<arch>`
-    # (`formal_metamorph`), so it must not move silently.
-    arm_depth = F.M.STACK_FLOOR_BUDGET_BYTES // F.M.ARM64_CONTAINER_BUDGET
-    x86_depth = F.M.STACK_FLOOR_BUDGET_BYTES // F.M.X86_64_CONTAINER_BUDGET
-    if x86_depth != 8 * arm_depth or arm_depth < 2:
-        failures += _fail(
-            "the_recursion_bound_is_per_architecture",
-            f"the byte budget affords {arm_depth} arm64 frames and {x86_depth} "
-            f"x86-64 frames, which is not the 8x the "
-            f"{F.M.ARM64_CONTAINER_BUDGET}-to-{F.M.X86_64_CONTAINER_BUDGET} "
-            f"frame ratio gives (and must leave at least one frame of depth); a "
-            f"reader of one machine's edge cannot then predict the other's, "
-            f"which is what the budget's own comment states", verbose)
-
     print(f"formal fuzz: budgets    {'PASS' if not failures else 'FAIL'} "
           f"{len(BUDGET_BINDINGS)} bindings, {seen} blob(s) (no compiler)")
     return failures

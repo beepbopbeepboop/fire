@@ -454,10 +454,10 @@ statement inside it.
   <li>Read the generated code. Decide explicitly: is it valid, and why not?</li>
   <li>If compiled-in, instrument the compiler; if runtime, use gated watchpoints.</li>
   <li>Shrink the repro before iterating.</li>
-  <li>Fix the root cause, then re-run the full gate — a type-inference change has whole-program blast radius.</li>
+  <li>Fix the root cause, then re-run the full gate — a type-inference change has
+      whole-program blast radius.</li>
 </ol>
 
-<!-- ASan note (2026-10-24): MacPorts gcc-mp-15 libasan at /opt/local/lib/gcc15/libasan.dylib; build with -B/opt/local/lib/gcc15/ -fsanitize=address -fgimple; run with DYLD_LIBRARY_PATH=/opt/local/lib/gcc15. clang rejects generated fire.ci bare-... vararg stubs (ISO-C error), use gcc-15 for both compile+link. ASan binary at /tmp/mojo_asan is running --it catches heap corruption precisely; bootstrap-stage2-transitive corrupt-MojoList bug (0x74736f78 at val->data[2]) root cause still pending, this run should catch the exact writer -->
-
+</div>
 </body>
 </html>

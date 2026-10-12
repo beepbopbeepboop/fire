@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node, _as_int,
+    py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node,
     desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
 from module_loader import load_module, get_symbol_type
@@ -394,7 +394,7 @@ from mojo.middle.types import (
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
-    dispatch_table_global_ctype, _tuple_cname,
+    dispatch_table_global_ctype,
 )
 from mojo.middle.solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
@@ -402,8 +402,7 @@ from mojo.middle.solvers import (
     FunctionCompilability, TypePromotionSolver, ClosureInfo,
 )
 from mojo.middle.exprtypes import (
-    _walk_ast, _walk_ast_invalidate, _walk_ast_reset,
-    _UnsupportedGeneratorShape, _UnsupportedAsyncShape,
+    _walk_ast, _UnsupportedGeneratorShape, _UnsupportedAsyncShape,
     _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _async_quick_eligible,
     _generator_quick_eligible, _async_gen_quick_eligible, _await_call_ctype,
     _is_async_call_to_known_fn, _local_literal_ctype, _receiver_key,
@@ -751,11 +750,6 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
         inherited = [m for name, m in merged_methods.items() if name not in own_names]
         s.fields = merged_fields + s.fields
         s.methods = inherited + s.methods
-        # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
-        # identity, and therefore blind to "this node now reaches more
-        # children than when it was last walked" — must not be able to answer
-        # for `s`, or for any node that contains it, again.
-        _walk_ast_invalidate(s)
 
     for s in all_struct_defs:
         if isinstance(s, StructDef):
@@ -1105,22 +1099,6 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
-        # Module-GLOBAL analogue of `_generator_var_api`: global name -> the api
-        # of the generator/coroutine its toplevel store bound to it. A global
-        # lives in the `_<mod>_globals` struct, so reading it mints a FRESH
-        # temp that `_generator_var_api` has never heard of; without this table
-        # `.close()` and `next()` on a module-level generator were refused as
-        # "no known generator API" (`_collections_abc`'s `_coro.close()`).
-        # Written by `_note_global_generator_store`, read by `_lower_IdentExpr`'s
-        # global-read arm. An entry is a fact only while the name is not in
-        # `_global_generator_api_poisoned`.
-        self._global_generator_api: dict[str, dict] = {}
-        # Globals whose generator API is not ONE known fact: rebound to a
-        # different generator or to a non-generator, stored from inside a
-        # function body, or written through the generic `_write_dest` path.
-        # Such a name keeps the honest refusal rather than a guessed api —
-        # a wrong api calls another generator's resume/value ABI.
-        self._global_generator_api_poisoned: set = set()
         # A3 stack-switch lowered BODY function name -> `{param: generator
         # api}` for the SOURCE parameters whose declared default names one
         # of this module's generators (`def walk_tree(root, *,
@@ -1795,10 +1773,6 @@ class GimpleGen:
         # at compile time instead of needing a real runtime value for NAME —
         # see _gen_for_iter's materialize[...] special case.
         self._comptime_list_asts: dict = {}
-        # Names whose folded comptime value is a STRING (measured
-        # provenance for the read fallback's pointer-range window — see
-        # the `_comptime_str_names` check in emit_exprs's comptime read).
-        self._comptime_str_names: set = set()
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
         # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->
@@ -1852,27 +1826,6 @@ class GimpleGen:
         # repr() must still render them as "True"/"False" like real Python
         # bools instead of falling into the plain-int branch and printing 0/1.
         self.struct_bool_fields: dict[str, set[str]] = {}
-        # PART 6 (2026-10-22, family C): struct name -> the field names of
-        # IN-TU MATERIALIZED structs whose annotation is `Optional[...]`
-        # with a NON-POINTER scalar payload (Int/Int64/... — a zero payload
-        # value is a legitimate Some(0), so the raw-word None=0 convention
-        # misreads it; pointer payloads keep the raw word, None=NULL is
-        # already distinguishable). Each such field gets an adjacent
-        # `_Bool <f>_is_some` side-band in the C layout (measured blast
-        # radius over the 610-file sweep: 5 instantiations in 3 files —
-        # _Once[Int64]._inner, _PeekableIterator[_ListIterOwned[Int]]._next,
-        # _Product2[...]._inner_a_elem x3). Spliced-body writes store the
-        # side-band; boolean-context reads consult it; value reads
-        # (unsafe_value/unsafe_take/.copy()) keep the raw word.
-        self._tagged_optional_fields: dict[str, set[str]] = {}
-        # PART 6 (2026-10-22, family C): temp-name -> (obj_cname, op,
-        # safe_field) for a temp holding a READ of a tagged-Optional field.
-        # The boolean-context conversions (_ensure_bool_cond's int64 arm and
-        # _lower_UnaryOp's `not` int64 arm) consult it to test the is_some
-        # side-band instead of the raw word, so Some(0) reads back Some.
-        # Value-context reads (unsafe_value/.copy()) record but are never
-        # consulted. Reset per function with the other per-func tables.
-        self._tagged_opt_read: dict[str, tuple] = {}
         # struct name -> field names declared `object = None` (or bare
         # `object`, no default_factory) in the real dataclass but hardcoded
         # here to a concrete 'MojoList *'/'MojoDict *' ctype anyway (e.g.
@@ -2021,13 +1974,6 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
-        # PART 6 (2026-10-23, closing piece): set True by emit_calls when a
-        # bare `stat(<char*>)` C-ABI FFI call site is lowered in this TU;
-        # module_gen then emits the one C-ABI struct/prototype/helper block
-        # (gs_cstat + the materialized stat_8_PathLike_6_String). Per-TU:
-        # the block is static, so at most one definition per translation
-        # unit regardless of how many call sites fire the branch.
-        self._needs_cabi_stat: bool = False
         # Which per-translation-unit device-introspection definitions have been
         # emitted ('definitions' once the empty or full sidecar is out) -- shared
         # by reference with every nested temp_gen (emit_resolve), exactly like
@@ -2468,17 +2414,6 @@ class GimpleGen:
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
         self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
-        # struct name -> {method name -> that method's mangled C symbol}, the
-        # METHOD half of a generated `_mojo_getattr_<Struct>` (its FIELD half
-        # is `struct_field_types`). Written by module_gen's
-        # `_emit_struct_method_prototypes` — beside the prototypes it names,
-        # so an arm cannot reference a symbol nothing declared — and read by
-        # `_emit_reflection_dispatch`, which emits
-        # `mojo_bound_method_new(<symbol>, obj)` for each entry: the same
-        # value a typed receiver's `c.add` builds (see
-        # `_lower_bound_method_value`), for the one receiver spelling it
-        # cannot reach, a value erased to int64_t.
-        self._getattr_method_arms: dict = {}
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -4860,11 +4795,6 @@ class GimpleGen:
         return fn.body
     def _set_fn_body(self, fn, body) -> None:
         fn.body = body
-        # Replaces a retained FunctionDef's whole body, which IS an in-place
-        # AST mutation as far as `_walk_ast`'s memo is concerned — it keys on
-        # the FunctionDef's identity and cannot see that the node now reaches a
-        # different set of children.
-        _walk_ast_invalidate(fn)
 
     # ---- delegates: gimple_gen_stmts.py ----
     def gen_stmt(self, node):
@@ -5212,65 +5142,6 @@ class GimpleGen:
         return ginf._char_to_cstr(self, typ, val, transient, word_ok)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
-    def _ensure_tuple_struct(self, ann) -> str:
-        """Register the SYNTHESIZED by-value struct for a `Tuple[...]`
-        annotation (one field `_0`..`_N-1` per element — `_tuple_cname`'s
-        docstring has the measured origin, part 4: the chain/zip
-        out-parameter wrappers) in struct_field_types, and return its C
-        name. Idempotent: the element ctys are a pure function of the
-        annotation, so the struct-field pass, the local-var pass and the
-        method-return pass — every site that hands a `Tuple[...]` to
-        `_mojo_type` — register the identical struct.
-
-        An element mention naming a REGISTERED struct (an in-TU
-        materialized wrapper/inner, or an imported struct) is a POINTER
-        element: those structs are constructed through
-        `_lower_struct_constructor`, which always hands back a `NAME *`
-        (heap allocation or the reserved frame slot) — the tuple's slot
-        must hold that pointer, not a value copy. Everything else
-        resolves through `_mojo_type` (the scalar ctys the value tuples
-        carry — zip's element is a `Tuple[Int, String]` of words).
-
-        A non-`Tuple[...]` annotation returns its plain `_mojo_type`
-        ctype unchanged — the hook sites call this unconditionally and
-        branch on the `MojoTuple_` prefix."""
-        if not isinstance(ann, str) or not ann.strip():
-            return 'int64_t'
-        _base = ann.strip().split('[', 1)[0].strip()
-        if _base not in ('Tuple', 'tuple'):
-            return _mojo_type(ann)
-        # Python-mode gate (measured 2026-10-22, selfhost build): a `.py`
-        # module's `tuple[...]` annotation is a RUNTIME container, not the
-        # synthesized by-value struct — registering the struct here would
-        # feed the same `unknown type name 'MojoTuple_...'` failure that
-        # `_resolve_type`'s sibling gate refuses (see its note).
-        if (getattr(self, '_current_filename', '') or '').endswith('.py'):
-            return 'MojoList *'
-        name = _tuple_cname(ann.split('[', 1)[1].rstrip(']').strip())
-        if name in self.struct_field_types:
-            return name
-        fields = {}
-        for i, _e in enumerate(_split_top_level_commas(
-                ann.split('[', 1)[1].rstrip(']').strip())):
-            _e = ' '.join(_e.split())
-            if (_e in self.struct_field_types
-                    or _e in getattr(self, '_intu_structs', {})
-                    or _e in getattr(self, '_imported_generic_structs', {})):
-                fields[f'_{i}'] = f'{_e} *'
-            else:
-                _ect = _mojo_type(_e)
-                if isinstance(_ect, str) and _ect.startswith('MojoTuple_'):
-                    # A nested VALUE tuple: register the inner struct too,
-                    # or the outer typedef references an unknown type and
-                    # the whole TU fails gcc with `unknown type name`
-                    # (measured 2026-10-21 part 4 integration:
-                    # test_builtin/test_tuple's `Tuple[Int, Tuple[String,
-                    # Float32]]` emitted the outer typedef whose `_1` field
-                    # names the never-registered inner struct).
-                    self._ensure_tuple_struct(_e)
-                fields[f'_{i}'] = _ect
-        self.struct_field_types[name] = fields
-        return name
     def _infer_param_types(self, func: FunctionDef,
                            owner_struct: str | None = None) -> dict[str, str]:
         return ginf._infer_param_types(self, func, owner_struct)
@@ -5312,8 +5183,6 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
-    def _materialize_in_tu_wrapper(self, csn: str, w: str) -> str:
-        return ginf._materialize_in_tu_wrapper(self, csn, w)
     def _stringify_value(self, et: str, ev: str, enode=None) -> str:
         return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:
@@ -5984,16 +5853,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # here, while still deduping correctly *within* one call across every
     # nested GimpleGen instance recursive import-inlining creates (shared
     # by reference — see `_compile_imported_module`'s sharing block).
-    #
-    # `_walk_ast_reset()` joins it for the same reason and with the same
-    # scope: the shared whole-AST traversal memo is keyed on node identity, so
-    # it is scoped to exactly one whole-program compile. One call here IS one
-    # independent artifact, which is the whole interval over which that memo
-    # has reuse to offer — every level of the import recursion is inside this
-    # one call — and dropping it here is also what stops a process that
-    # compiles many modules in a row (`compile_stdlib.py`, the test runners)
-    # from pinning every AST it ever walked.
-    _walk_ast_reset()
     gfn._selfhost_begin_compile()
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()

@@ -596,29 +596,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # `struct_field_types`, `func_param_types`/`func_return_types`,
             # `_module_globals` — and `_struct_allocs_needed`, whose actual
             # emission is gated on `_emitted_allocs` (rolled back just above),
-            # so a stale entry there cannot lose a definition. TWO more
-            # classes of knowledge stay on purpose, and the distinction is
-            # worth stating because it cost a real measurement to learn:
-            # the SIGNATURE registries (`_home_def_param_types`,
-            # `_home_def_return_types`, `_imported_home_param_types`) key
-            # `(home-qualifier, name)` and are RE-PUBLISHED by any later
-            # successful compilation of the defining file under whatever
-            # spelling wins — so a failed attempt's early signature value
-            # (even a mis-inferred one) is the ONLY source of that signature
-            # for importers that compile BEFORE the defining module's
-            # successful attempt (a unit's externs emission reads the store
-            # in its current state; rolling the early value back exposed a
-            # measured `conflicting types for 'info_get_default_storage_…'`
-            # on c_analyzer/__main__.py, where the `_regexes` unit's
-            # declaration fell back to int64 instead of the char * the
-            # failed attempt had already inferred). Their wrong-value risk
-            # is contained by SPelling ISOLATION: each successful spelling
-            # publishes under its own key, and the spelling-CLAIM registries
-            # below are what decide which key a call site consults. Only
-            # those three claim registries are rolled back — a claim named
-            # by a spelling whose compilation was discarded, and nothing
-            # else. See the snapshot block below for the measured c_parser
-            # poisoning chain.
+            # so a stale entry there cannot lose a definition.
             str_pool_declared_before = set(gen._str_pool_declared)
             emitted_c_helpers_before = set(gen._emitted_c_helpers)
             regex_progs_defined_before = set(gen._regex_progs_defined)
@@ -626,88 +604,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             emitted_singletons_before = set(gen._emitted_singletons)
             stub_syms_before = set(gen._emitted_unresolved_stub_syms)
             auto_stubbed_before = set(gen._auto_stubbed)
-            # The self-import guard set is ADD-ONLY elsewhere: the only
-            # removal is this handler's rollback of the paths added during
-            # THIS attempt. That one removal is load-bearing, not cosmetic.
-            # A file whose attempt ends in failure has its `imported_code`
-            # destroyed by the except handler below, yet its guard entry
-            # (added just after this snapshot) survives — so the file is
-            # permanently "mid-initialization" for every LATER importer of
-            # it under ANY spelling: the guard's `continue` refuses the
-            # candidate, `_compile_imported_module` returns (None, []), the
-            # importer marks the name compiled-with-nothing, and the file's
-            # definitions exist nowhere while its call sites still reference
-            # the mangled symbols the (discarded) attempt registered in the
-            # shared knowledge registries — gcc "implicit declaration of
-            # function ...", measured on c_parser/parser/_common.py where
-            # `c_parser/info.py`'s failed attempt compiled
-            # `c_parser/parser/_regexes.py` as `.parser._regexes` and every
-            # sibling's `._regexes` import was then refused by the stale
-            # entry, dropping `_ind`'s definition from the whole unit. A
-            # SUCCESSFUL attempt keeps its entries on purpose: a sibling
-            # spelling must NOT re-compile a file whose code is already in
-            # the unit (the "two spellings, one compilation" dedup this set
-            # exists for), so only the failure path rolls back — and rolls
-            # back ALL entries added during the attempt, not just `_ap_key`,
-            # because every nested file's code lived in this attempt's
-            # discarded `imported_code` too.
-            compiling_paths_before = set(gen._compiling_file_paths)
-            # THREE spelling-CLAIM knowledge registries, snapshotted the same
-            # way (the SIGNATURE registries — `_home_def_param_types`,
-            # `_home_def_return_types`, `_imported_home_param_types` — are
-            # deliberately NOT: see the block above, where their measured
-            # `conflicting types` consequence of being rolled back is
-            # recorded). Every entry in these three makes a CLAIM keyed by a
-            # module SPelling of a file: "references to this bare name /
-            # struct mean the copy compiled under THIS spelling" / "this
-            # spelling's C-qualifier is THAT". Such a claim is only true
-            # while that spelling's own compilation is alive in the unit. A
-            # failed attempt's nested SUCCESSFUL compile of a file under
-            # spelling S publishes S's home claims and the spelling-remap
-            # entries that unify later spellings of the same file to S —
-            # then the attempt fails and S's code is discarded, but the
-            # mark rollbacks above do not touch these (KNOWLEDGE, not
-            # emission marks), so the corpse keeps dictating the survivors:
-            #
-            # Measured, on c_parser/parser/__init__.py: the failed
-            # `..info` attempt compiled `_regexes.py` as `.parser.
-            # _regexes` and published (a) the home claim `_imported_
-            # func_home['_ind'] = '.parser._regexes'`, (b) the path-keyed
-            # `_inline_module_qualifiers` remap `abs(_regexes.py) ->
-            # '.parser._regexes'` (plus the `parser__regexes` spelling-key
-            # copy this function makes at each re-import). The attempt
-            # then failed on `rendered` and the code went, but the survivor
-            # unit `._regexes` (nested in `._common`) started its import
-            # with the path key still pointing at the corpse, so the
-            # spelling-remap copy at the top of this function unified
-            # `_regexes` to `.parser._regexes` and its OWN definition of
-            # `_ind` was emitted as `parser__regexes__ind_0f1876` (the
-            # corpse's qualifier, the survivor's suffix); `._common`'s call
-            # site then resolved the QUALIFIER to `_regexes` (its own scope
-            # registration — a different tier than the remap) while the
-            # SUFFIX tier walked the shared home claim `.parser._regexes`
-            # and hashed the corpse's mis-inferred param list into
-            # `_regexes__ind_15d274` — gcc "implicit declaration of
-            # function '_regexes__ind_15d274'; did you mean
-            # '_regexes__ind_0f1876'?".
-            #
-            # The SIGNATURE stores the corpse also wrote (the def-side
-            # param/return truth under key `parser__regexes`) are left
-            # alone, for the two reasons the block above records: they are
-            # re-published under each winning spelling's OWN key by any
-            # later successful compile (so the survivor's correct signature
-            # is not refused by the corpse's first-wins entry), and their
-            # early values are the only source of a signature for units
-            # that compile before the defining module's successful attempt.
-            # Discarding exactly the claim keys ADDED during this attempt
-            # (not clearing) is unconditionally safe: the only writer of a
-            # claim for a spelling is a compilation OF that spelling, so a
-            # claim absent before this attempt was made by this attempt's
-            # own discarded code, and any later successful compilation of
-            # the same file re-claims through the identical paths.
-            imported_func_home_before = set(gen._imported_func_home)
-            imported_struct_home_before = set(gen._imported_struct_home)
-            inline_mod_qual_before = set(gen._inline_module_qualifiers)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -1230,49 +1126,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._emitted_unresolved_stub_syms.discard(_y)
                 for _b in list(gen._auto_stubbed - auto_stubbed_before):
                     gen._auto_stubbed.discard(_b)
-                # The self-import guard entries this attempt added (this
-                # file plus every nested file whose code lived in the
-                # `imported_code` about to be destroyed) go with the code —
-                # see the snapshot's own comment for the measured
-                # `_regexes.py` consequence of the stale entry: a file
-                # permanently "mid-initialization" whose later importers
-                # are all refused, leaving call sites for symbols nothing
-                # defines.
-                for _p in list(gen._compiling_file_paths - compiling_paths_before):
-                    gen._compiling_file_paths.discard(_p)
-                # `_sub_toplevels` (snapshot at the top of the loop, `sub_
-                # toplevels_before`) is the shared ordered list of submodule
-                # toplevel-function names the root's `main()` must call, and
-                # each entry's DEFINITION lands in that module's own parts —
-                # the same `code` string this handler throws away whole. A
-                # failed attempt's entry survives its definition, so the root
-                # preamble declares the name (`void __X_toplevel(void);`) and
-                # `main()` calls it while no object defines it — an
-                # undefined-symbol link failure. Measured on the same
-                # c_parser cluster as the guard leak above: the failed
-                # `c_parser/info.py` attempt registered `__parser__regexes_
-                # toplevel` (its `.parser._regexes` spelling) while the
-                # sibling's later successful `._regexes` compile registered
-                # `___regexes_toplevel` and defined only THAT one — the
-                # stale name was declared and called from main with no body.
-                # Truncate, don't clear: an outer module's own entry
-                # (registered before this attempt's snapshot) is not this
-                # failed attempt's to retract.
-                del gen._sub_toplevels[sub_toplevels_before:]
-                # The three spelling-claim registries — see the snapshot
-                # block above for the measured c_parser poisoning chain
-                # (corpse qualifier dictating the survivor's own definition
-                # + the corpse's home claim dictating `._common`'s call-
-                # site suffix) and for why the SIGNATURE registries are
-                # deliberately NOT in this list (re-published per winning
-                # spelling; rolling them back exposed a measured
-                # `conflicting types` on c_analyzer/__main__.py).
-                for _k in list(gen._imported_func_home.keys() - imported_func_home_before):
-                    del gen._imported_func_home[_k]
-                for _k in list(gen._imported_struct_home.keys() - imported_struct_home_before):
-                    del gen._imported_struct_home[_k]
-                for _k in list(gen._inline_module_qualifiers.keys() - inline_mod_qual_before):
-                    del gen._inline_module_qualifiers[_k]
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
@@ -2277,45 +2130,6 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
-    # part 4 (measured 2026-10-22): a RUNTIME (list-backed) tuple stored into
-    # a synthesized by-value `MojoTuple_*` struct. A direct `(MojoTuple_...)
-    # <ptr/word>` cast is invalid C ("conversion to non-scalar type requested"
-    # / "non-register as LHS of unary operation"). Real: parsing_floats's
-    # `w_and_q = _get_w_and_q(...)` (local LHS) and _progress's
-    # `self._term_dims = _get_terminal_size()` (field LHS, routed here through
-    # `_safe_coerce_emit`'s needs_temp struct temp). Materialize each element
-    # from the list slots instead — the same per-element list reads the
-    # subscript/unpack paths use — one same-type temp per element (a call
-    # result lands in a same-type temp; a cross-type store is cast explicitly;
-    # a cast never stores through a component ref).
-    if (d.startswith('MojoTuple_') and d in gen.struct_field_types
-            and s != d
-            and (s.endswith(' *') or s in gimple_ctypes._SCALAR_INT_TYPES)):
-        _tf = gen.struct_field_types[d]
-        if s == 'MojoList *':
-            _lp = v
-        else:
-            _lv = gen._ensure_local(s, v)
-            _lp = gen._new_val('MojoList *', f'(MojoList *){_lv}')
-        for _fn in sorted(_tf, key=lambda _f: int(_f[1:])):
-            _i = int(_fn[1:])
-            _fc = _tf[_fn]
-            _idx = gen._new_val('int64_t', f'(int64_t){_i}')
-            if _fc in ('double', 'float'):
-                _rv = gen._new_val('double', f'mojo_list_get_double ({_lp}, {_idx})')
-                if _fc == 'float':
-                    _rv = gen._new_val('float', f'(float){_rv}')
-            elif _fc == 'char *':
-                _rv = gen._new_val('char *', f'mojo_list_get_str ({_lp}, {_idx})')
-            elif _fc.endswith(' *'):
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
-                _rv = gen._new_val(_fc, f'({_fc}){_rv}')
-            else:
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
-                if _fc != 'int64_t':
-                    _rv = gen._new_val(_fc, f'({_fc}){_rv}')
-            gen._emit(f'  {dest}.{_fn} = {_rv};')
-        return
     if True:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
@@ -2921,84 +2735,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                     materialize=lambda _a: _materialize_return_struct_mentions(
                         gen, _a, source))
         else:
-            # False-green guard (2026-10-21, measured in clean master's C):
-            # INSIDE a still-generic definition-site method body, an argument
-            # read from a field whose annotation names an UNBOUND TYPE
-            # PARAMETER of the enclosing struct has ERASED to a plain scalar
-            # (`int64_t`) — inference then binds the callee's type parameter
-            # to that scalar (`next(self._inner)` in `_MapIterator.__next__`
-            # -> `next[IteratorType := Int64]`), and the emitted call
-            # (`next_12_IteratorType_5_Int64`) is a monomorphization of a
-            # template whose parameter is trait-bounded (Iterator) by a type
-            # that does not conform — nothing that compiles can define it,
-            # and the -fsyntax-only gate cannot see that. 4 such calls in
-            # std/iter alone. Refuse, so the transactional fallback in
-            # module_gen's struct-method loop drops THIS method to
-            # prototype-only instead of emitting the guaranteed-undefined
-            # call. Only fires where `gen._current_struct_type_params` is
-            # non-None (the loop sets it around `_gen_struct_method` and
-            # restores it after), so free functions / closures / the
-            # instantiating TU elaborate exactly as before.
-            #
-            # The CONTAINER DISCRIMINATOR below is load-bearing, measured:
-            # the first cut refused on the erased-field argument alone and
-            # broke `StridedRange._unsigned_count` — its `ceildiv(
-            # self.end - self.start, self.step)` arguments are the same
-            # erased `Scalar[Self.dtype]` fields, but `ceildiv[T:
-            # CeilDivable](numerator: T, denominator: T) -> T` has no
-            # type-member access on `T`, so `ceildiv[Int64]` is a REAL
-            # scalar monomorphization, defined by other TUs (measured:
-            # bench_heap_parallel / test_math / _swisstable all define
-            # `ceildiv_1_T_5_Int64`), and the Part 1 tree emitted exactly
-            # this body and linked it. The discriminator: the guard fires
-            # only when the callee's own template treats its type parameter
-            # as a CONTAINER — a `<param>.Element` / `.IteratorType` /
-            # `.IteratorOwnedType` type-member access in its signature or
-            # body (`next[IteratorType: Iterator] -> IteratorType.Element`
-            # matches; `ceildiv` does not).
-            _tp = getattr(gen, '_current_struct_type_params', None)
-            if _tp:
-                for _a, (_ct, _v) in zip(node.args, arg_pairs):
-                    if not (isinstance(_a, gimple_ctypes.MemberExpr)
-                            and isinstance(_a.obj, gimple_ctypes.IdentExpr)
-                            and _a.obj.name == 'self'):
-                        continue
-                    _sn = getattr(gen, '_current_struct_name', None)
-                    _ann = (getattr(gen, '_field_annotations', None) or {}).get(
-                        f"{_sn}.{_a.member}") if _sn else None
-                    if not (_ann and any(re.search(rf'\b{re.escape(p)}\b', _ann)
-                                         for p in _tp)):
-                        continue
-                    try:
-                        _tmpl = elaborate.extract_fn_source(
-                            module_src, g, arg_count=len(arg_pairs))
-                    except Exception:
-                        _tmpl = None
-                    if not _tmpl:
-                        continue
-                    _container = False
-                    for _p in elaborate.type_param_names(_tmpl):
-                        if re.search(
-                                rf'\b{re.escape(_p)}\s*\.\s*'
-                                r'(?:Element|IteratorType|IteratorOwnedType)\b',
-                                _tmpl):
-                            _container = True
-                            break
-                    if not _container:
-                        continue
-                    raise RuntimeError(
-                        "cannot compile module: `{}(...)` in function "
-                        "`{}` is called with a field whose annotation "
-                        "(`{}`) names an unbound type parameter of the "
-                        "enclosing struct — the field erases to a plain "
-                        "scalar here, so the type argument inferred from it "
-                        "is a placeholder, and the callee's own template "
-                        "treats that parameter as a container — no "
-                        "monomorphization of the callee can be defined "
-                        "(measured: std/iter's `next_12_IteratorType_5_"
-                        "Int64`, 1 declaration, 0 definitions); the "
-                        "definition-site body cannot be emitted".format(
-                            g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs])
     except RuntimeError:
