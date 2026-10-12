@@ -5,21 +5,68 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
-element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
-`[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
-the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
-is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+**Status: the FLAT-container half of the relocation LANDED (2026-10-06), and the
+NESTED-COMPREHENSION element landed 2026-10-12 by a different route than the
+relocation §"What the obvious fix actually is" describes — both on BOTH
+backends. A comprehension whose element is a container literal is per-iteration,
+and so is an element that is ITSELF a comprehension whose result is flat: the
+nested comprehension's FINISHED result blob is byte-copied into a slot of a
+`cap`-sized array, so the aliasing is gone and the exit-1 count-overrun with it
+(`[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63`, CPython's
+answer, where it exited 1). What is STILL refused is an element whose
+per-iteration materialisation would carry the ADDRESS of a container the element
+position BUILT — a list of lists, a slice, a constructor call, and a nested
+comprehension whose own element builds a container — which is the shallow-copy
+boundary and is unchanged. Read "What landed 2026-10-12" first; the paragraphs
+under the 2026-10-06 section price what is left.
+
+## What landed 2026-10-12: the nested comprehension's RESULT is copied, not relocated
+
+**The doc's own framing was that a nested-comprehension element needs the
+nested `res_offset` to become a run-time register address, because the nested
+result is reserved by `_emit_comprehension` before the walk. It does not.**
+The nested result is a complete `[count][element…]` blob in the frame by the
+time the element site is reached (its comprehension has finished), so the
+element site can do exactly what it already does for a flat container literal:
+copy the blob into a per-iteration slot and hand the COPY to
+`_compr_append_elem`. The only difference is the size — the flat case's size is
+the ledger delta (the literal's own reservation), while a nested comprehension's
+delta also carries its iterables, so the emitters read the size the nested
+comprehension RECORDED when it reserved its result (`_last_compr_result_size`,
+set at the one `_reserve_blob` call in each `_emit_comprehension`). The copy is
+sound under the same rule the flat predicate states, one level in, which is what
+`model.comprehension_result_is_flat` decides: the nested result's WORDS must be
+scalars or deliberately shared references, never the address of a container the
+element position built. It recurses through a nested comprehension and rejects a
+container-building element, so a nested comprehension over a container element
+stays refused (pinned by
+`a_nested_comprehension_over_a_container_element_is_refused`).
+
+**Why this is not the relocation the section below priced, and why that is
+fine.** Nothing in `_emit_compr_gen` changes: `res_offset` stays a compile-time
+constant, every `_compr_append_elem`/`_compr_append_pair` base recompute is
+untouched, and no register has to survive `_emit_expr`. The per-iteration
+storage is the ARRAY, indexed by the outer result count, which the flat case
+already introduced; this only teaches it a second blob size and a second source.
+
+**Measured, both architectures, after** (the same program on arm64 and x86-64):
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum of `v[0]` | `63` | refused (was `93`, exit 1 before the refusal) | **`63`** |
+| `[[x * y for x in [1, 2]] for y in [3, 4]]`, `r[0][1] r[1][1]` | `6 8` | refused | **`6 8`** |
+| three-level `[[[z for z in [1, 2]] for y in [1]] for x in [1, 2]]`, `r[i][0][1]` | `2 2` | refused | **`2 2`** |
+| `[[x + y for x in [1, 2] if x > 1] for y in [10, 20, 30]]`, `r[i][0]` | `12 22 32` | refused | **`12 22 32`** |
+| `[{k: k + y for k in [1, 2]} for y in [10, 20, 30]]`, `sum(d[1])` | `63` | refused | **`63`** |
+| `[[[z] for z in [1]] for y in [10, 20, 30]]` (element builds a container) | — | refused | refused (recursion boundary) |
+
+**What is left, and it is the genuine runtime-blob-base relocation below:** an
+element whose per-iteration storage must carry a container built INSIDE it — the
+list of lists (`[[y]]`), a slice (`a[0:2]`), a constructor call, and the
+dict-VALUE that opens a container (`{k: [v for v in …] for k in …}`, whose value
+site is the dict branch's `_refuse_an_element_blob`, not
+`_materialize_compr_element`). Copying those shallowly would carry an inner
+ADDRESS, so they keep the refusal.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
@@ -247,7 +294,12 @@ it affordable is the measured 0 above.
     $ python3 .tmp/ds/alias.mojo                        # 63
     $ python3 tools/memslot.py --gb 8 --label t -- \
           python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
-    build: a comprehension in main: the element `[…] for …` opens a container, …
+    Built: .tmp/al  [arm64/macho]
+    $ .tmp/al                                          # 63, and the same on --backend=x86_64
+    # …and the shapes that are STILL refused, in one line each:
+    $ python3 tools/memslot.py --gb 8 --label t -- \
+          python3 fire.py build --formal --no-prove -o .tmp/ll .tmp/ll.mojo
+    build: a comprehension in main: the element `[[y]]` opens a container, …
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
     $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
     $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
@@ -255,10 +307,14 @@ it affordable is the measured 0 above.
 and the tests, no builds for the census:
 
 ```sh
-python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_refused \
-  a_nested_comprehension_as_the_element_is_refused \
+python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_tuple_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_set_literal_is_per_iteration \
+  a_nested_comprehension_as_the_element_is_per_iteration \
+  a_dict_comprehension_as_the_element_is_per_iteration \
   a_dict_comprehension_whose_value_opens_a_container_is_refused \
-  a_comprehension_element_that_is_a_set_literal_is_refused \
+  a_list_of_lists_as_the_element_is_refused \
+  a_nested_comprehension_over_a_container_element_is_refused \
   a_one_iteration_comprehension_element_container_still_builds \
   nested_comprehension_in_a_generator_iterable \
   comprehension_body_is_not_a_container_position

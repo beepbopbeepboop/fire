@@ -17445,16 +17445,35 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which was the reproducer and the case the refusal
+    # named as exiting 1 rather than merely answering wrongly. It is
+    # materialised per iteration the same way, but with the nested
+    # comprehension's own recorded RESULT size rather than the ledger delta
+    # (the delta also carries the nested iterables): the nested result is fully
+    # built before the copy, so each outer iteration gets its own result. 63 is
+    # CPython 3.14's answer for the program below.
+    ("a_nested_comprehension_as_the_element_is_per_iteration",
      "def main() -> Int:\n"
      "    var s = 0\n"
      "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
      "        s = s + v[0]\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n",
-     "refuse:the element `[…] for …` opens a container", None),
+     0, "63"),
+    # …and the DICT-comprehension half of the nested case, read through an
+    # ITERATION because a list-of-dicts SUBSCRIPT (`r[0][1]`) is a separate,
+    # pre-existing capability gap (a dict constructed in a literal element is
+    # the same refusal), while `for d in r` binds `d` with the dict kind and
+    # `d[1]` resolves. 11 + 21 + 31 = 63, CPython 3.14's answer.
+    ("a_dict_comprehension_as_the_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [{k: k + y for k in [1, 2]} for y in [10, 20, 30]]\n"
+     "    var s = 0\n"
+     "    for d in r:\n"
+     "        s = s + d[1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "63"),
     # The DICT half: the VALUE opens the container, and it is the shape the
     # `nested_comprehension_in_a_generator_iterable` row used to carry as its
     # fourth case — so this row is that coverage, strengthened from "builds and
@@ -17474,6 +17493,20 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
      "refuse:the element `[[y]]` opens a container", None),
+    # The SAME shallow-copy boundary one level in: a nested comprehension whose
+    # own ELEMENT builds a container is not `comprehension_result_is_flat`, so
+    # copying its result would carry the address of the inner container the
+    # element built and every outer iteration would share it. The recursion in
+    # the predicate is what makes this a refusal rather than a silent alias.
+    ("a_nested_comprehension_over_a_container_element_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[z] for z in [1]] for y in [10, 20, 30]]\n"
+     "    var s = 0\n"
+     "    for v in r:\n"
+     "        s = s + v[0][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:the element `[…] for …` opens a container", None),
     # ONE iteration, and this row is the other side of the rule rather than
     # tidiness: `_compr_cap` is an UPPER BOUND on the iteration count, so
     # `cap == 1` means the body runs at most once and one shared blob is then
