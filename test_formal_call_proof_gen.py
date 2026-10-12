@@ -4114,6 +4114,15 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     Lean-free by construction: it reads the GENERATED proof's text and
     `test_formal.py`'s table, and it builds both programs with proof generation
     OFF to establish that the gap is in the PROOF layer and not in codegen.
+
+    **Update 2026-10-12 (`work/formal270-docs-r2`): `pow2` is no longer a
+    marker.** The `formal/arm64_proof_gen.py` sp-tracker fix (`_imm12_scaled`,
+    the ADD/SUB immediate's `sh` bit) computes the frame slot's address
+    correctly, so `pow2`'s generated proof now TYPECHECKS — with ONE admitted
+    `sorry` at this same `runs-ret-frame-ok-window` leaf — where it used to
+    hard-fail at the `rfl`. `count` moves too but stays hard-red (at `maximum
+    recursion depth` now). So `MARKED` is `("count",)`; the read-off-the-text
+    rows still cover both proofs, which is what says the x30 gap has not moved.
     """
 
     #: The two shapes the generated proof must carry for this doc's failure to be
@@ -4126,6 +4135,15 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     ADRP = "arm64_set_reg 17"
 
     STEMS = ("count", "pow2")
+
+    #: Of `STEMS`, the ones still declared in `test_formal.py::EXPECTED_FAILURES`.
+    #: `pow2` left the table on 2026-10-12: the sp-tracker fix (`_imm12_scaled`)
+    #: corrected the frame slot's address, so its generated proof now TYPECHECKS
+    #: with one admitted `sorry` at the `runs-ret-frame-ok-window` leaf instead of
+    #: hard-failing at the `rfl` below, and `test_formal.py`'s stale-entry check
+    #: would reject a marker for it.  `count` is still a hard red (at `maximum
+    #: recursion depth` now), and the other two tests still cover BOTH proofs.
+    MARKED = ("count",)
 
     @classmethod
     def setUpClass(cls):
@@ -4154,9 +4172,9 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_both_are_marked_with_the_address_in_the_reason(self):
+    def test_the_still_declared_stem_is_marked_with_the_address_in_the_reason(self):
         import test_formal as T
-        for stem in self.STEMS:
+        for stem in self.MARKED:
             self.assertIn(stem, T.EXPECTED_FAILURES,
                           "%s is an UNMARKED failure of the `formal` suite job: "
                           "the next session reads the marker list, does not "

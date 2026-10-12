@@ -8,6 +8,34 @@ cases are still red, and the fix is in a write set another worker holds. Found
 2026-10-04 on `work/formal21-4` while landing the floor correction for `//` and
 `%`, and it is PRE-EXISTING: it reproduces on the base commit.**
 
+## Status 2026-10-12 (`work/formal270-docs-r2`): `pow2` typechecks now, `count` moved, and it was the FRAME ADDRESS in a Python `sp` tracker
+
+**Read this before the 2026-10-04 Status: "the two frame cases are still red" is
+now half true.** A separate fix in `formal/arm64_proof_gen.py` — four Python-side
+`sp` trackers read an ADD/SUB immediate's 12-bit field and dropped its `sh` bit,
+so the prologue's `sub sp, sp, #32, lsl #12` (`_SCRATCH = 32 << 12`) was tracked
+as `sp - 32` instead of `sp - 131072` — corrected the addresses the generated
+proofs rewrite. Measured (`--remeasure`, arm64, both re-banked in
+`tools/formal_proof_census_baseline.json`):
+
+* **`pow2` no longer hard-fails: it TYPECHECKS with ONE admitted `sorry`**, at the
+  same `runs-ret-frame-ok-window` / x30 leaf this document names, so it LEFT
+  `test_formal.py::EXPECTED_FAILURES` (the stale-entry check rejects a marker for
+  a stem that now returns rc 0). It is still UNPROVEN — a hole is not a proof.
+* **`count` is still a hard red, but at a NEW site**: `maximum recursion depth`
+  at `count_proof.lean:4305:58`, the `arm64_ext_imm12`/`work_step_add_imm64`
+  kernel reduction owned by
+  `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`. It too now
+  admits one `sorry` at the x30 leaf the corrected address lets Lean reach.
+* **`fact`, `sqsum`, `sum`** are the same shape as `pow2` (lean-rejected →
+  typechecks with one `sorry` each); the full measurement, and the reader set the
+  fix touched, is `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_
+  are_declared.md`'s 2026-10-12 Status.
+
+The diagnosis below (the epilogue's `x30` read through an ADRP/ADD-materialised
+address is the obligation) is unchanged and still the `sorry` leaf's subject; what
+changed is that the file now gets far enough to report it as a hole.
+
 ## Status 2026-10-04 (`work/formal25-6`): declared, pinned, and the cause is not the dead `if`
 
 **The failure is unchanged and reproduces byte for byte** (`python3

@@ -9,6 +9,97 @@ make sure the instrument was not inventing them.
 **Status: NOT FIXED, and deliberately not marked either.** The next step is
 below and it is per-family, not a one-line edit.
 
+## Status 2026-10-12 (`work/formal270-docs-r2`): the corpus is 93, one undeclared red was FIXED at the root cause, and the table below is the 52-example snapshot
+
+**The corpus grew from 52 examples to 93 after this document was written, and
+the census's own count is the current answer. Measured on the 52-example tree
+the row above belonged to, and re-measured 2026-10-12 after the fix below:**
+
+| what | 2026-10-05 (52 rows) | 2026-10-12 (`--only` re-measure) |
+|---|---|---|
+| `proved` | 34 (then 37) | **55** |
+| `refused` | 4 | 24 |
+| `lean-rejected` | 12 (then 9) | **9** |
+| `sorry` (typechecks, one admitted hole) | — | **3** |
+| `too-large` (not a verdict on the proof) | 2 | 2 |
+| total | 52 | 93 |
+
+So the title's arithmetic ("15 of 52 … names 7 of them") is a snapshot of the
+52-example tree, not a claim about this one — `test_formal.py::EXPECTED_FAILURES`
+carries 32 entries today, and the families below are the ones the new corpus
+added a spelling of.
+
+**`condassign2` is FIXED, and it is a row this document never had.** It was an
+undeclared `lean-rejected` red on arm64:
+
+```console
+$ cat formal/examples/condassign2.mojo          # x = 0; if n > 0: x = n; return x
+$ python3 fire.py build --formal --backend=arm64 -o .tmp/cond.out \
+      formal/examples/condassign2.mojo
+  before: condassign2_proof.lean:3948:10: error: Tactic `rewrite` failed:
+          Did not find an occurrence of the pattern
+  now:    Built: .tmp/cond.out  [arm64/macho]   (rc 0, 2.5 GB peak, 0 holes)
+```
+
+The cause is one instruction field read by four readers, none of which scaled it.
+`_SCRATCH` is `32 << 12`, and `_emit_imm_shift12` writes it as ONE scaled
+immediate (`sub sp, sp, #32, lsl #12`). `lib/ProofLib.lean`'s model applies the
+`sh` bit (`arm64_ext_imm12`), so the emitted goal reads a stack slot at
+`sp - 131072 - 16` — while `formal/arm64_proof_gen.py`'s `_frame_ldp_addrs`,
+`_frame_read_addrs`, `_hcond_mem_rws` and `_sp_stores` unpacked the 12-bit field
+by hand and produced `sp - 32 - 16`. The generated branch-condition proof then
+`rw`'d an address the goal does not contain, and its `rfl` never got off the
+ground. One shared reader, `_imm12_scaled`, is now what all four call (the
+add/sub step RHS already scaled the field where it read it, and
+`_step_rhs_generic` spells `arm64_ext_imm12`), and
+`test_formal_call_proof_gen.py::TestGeneratorSource::\
+test_every_sp_tracker_scales_an_add_sub_immediate_by_its_sh_bit` pins the reader
+and each consumer with no Lean run. It is the same `sh`-bit family
+`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` fixed in
+the model and in `_step_rhs`; this was the reader set that fix did not reach.
+
+**The fix also moved four rows of this table, and it is worth reading what a
+corrected frame address does to a proof: it lets Lean get FURTHER, and where the
+obligation that was already a `sorry`-leaf is reached it is now COUNTED.** All
+four were re-measured with `--remeasure` and re-banked in
+`tools/formal_proof_census_baseline.json` (the hole ratchet is reset by the same
+write):
+
+* **`fact`, `sqsum`, `sum` (rows #1–#3) are NO LONGER undeclared hard reds.** Each
+  `lean-rejected` at the `rfl` on the epilogue x30 read is now a `sorry`: the
+  proof TYPECHECKS with exactly ONE admitted hole, at the same
+  `runs-ret-frame-ok-window` leaf. `sqsum.mojo`'s bytes are unchanged since the
+  initial commit, so this is the sp-tracker fix and not a moved example. They are
+  still UNPROVEN (a hole is not a proof, and §"The `sorry` column" above is the
+  right reading of one); item 1's "not to mark them" still holds, because there is
+  now no hard failure to mark.
+* **`pow2` is the same shape**: `lean-rejected` → `sorry` (one admitted hole),
+  so it LEFT `test_formal.py::EXPECTED_FAILURES` — the runner's stale-entry check
+  would otherwise reject a marker for a stem that now returns rc 0 — and
+  `count` (still hard-red) moved from the epilogue x30 `rfl` to
+  `maximum recursion depth` at `count_proof.lean:4305:58`, the
+  `arm64_ext_imm12`/`work_step_add_imm64` reduction owned by
+  `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`; it too now
+  admits one `sorry` at the x30 leaf. `bugs/FORMAL_three_examples_fail_their_
+  proofs_on_master.md`'s "the two frame cases are still red" is now half true and
+  is that doc's to correct.
+* **`sgt8`/`sle8`/`ug8`**: the same fix closes
+  `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange::\
+  test_lean_accepts_the_three_examples`, whose "a rewrite that no longer finds
+  its pattern" is the identical wrong-address failure measured on the base tree
+  (9 failures without the fix over the five proof-generator classes, 8 with it,
+  and no new one).
+
+**What is still a hard red, and whose it is.** `mod_by_var` has NO marker and is
+owned by `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`; the
+declared families keep their `EXPECTED_FAILURES` markers and their owners
+(`sum_range` — which the generator now DECLINES rather than emitting the false
+contract, `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+signed_flag.md`; `udivmod`/`floordiv`; `countdown`; `wge`; `fib`; `count`).
+`both`/`either` are `too-large`, which is not a verdict on the proof. Nothing
+here is newly marked: an entry needs a measured reason and an owner, and every
+one already has an owner.
+
 ## What was run
 
 ```console
@@ -81,9 +172,9 @@ about** — it was 11 before rows #4–#6 closed.
 
 | # | example | status | the site it stops at | declared? | whose |
 |---:|---|---|---|---|---|
-| 1 | `fact` | `lean-rejected` | `fact_proof.lean:2880:16: Tactic 'rfl' failed` — the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
-| 2 | `sqsum` | `lean-rejected` | `sqsum_proof.lean:3250:16`, the same goal | **no** | as #1 |
-| 3 | `sum` | `lean-rejected` | `sum_proof.lean:2880:16`, the same goal | **no** | as #1 |
+| 1 | `fact` | `sorry` (2026-10-12, 1 hole) | `fact_proof.lean:2880:16: Tactic 'rfl' failed` — the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)`; now the `rfl` is reached and the x30 leaf admits a `sorry` instead | **no** | the family of #2, #3, #6, #7 |
+| 2 | `sqsum` | `sorry` (2026-10-12, 1 hole) | `sqsum_proof.lean:3250:16`, the same goal; same move as #1 | **no** | as #1 |
+| 3 | `sum` | `sorry` (2026-10-12, 1 hole) | `sum_proof.lean:2880:16`, the same goal; same move as #1 | **no** | as #1 |
 | 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on `sgt8_proof.lean:2332:41: unsolved goals n : UInt64 …` — a narrow typed parameter's truncation with no range hypothesis on the theorem, so Lean refused the file with no `sorry` in it. The universal theorem now carries `nw : n < 128` and the truncation discharges against it; 0 admitted `sorry`. Pinned by `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. Note the obligation is now spelled `t32s (t32u (t8s n))` — the extra `t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW` — so the `t32s (t8s n)` this row used to quote no longer matches the generator's text | **n/a — fixed** | — |
 | 5 | `sle8` | **PASS (2026-10-05)** | as #4; the obligation was byte-identical to #4's | **n/a — fixed** | — |
 | 6 | `ug8` | **PASS (2026-10-05)** | as #4, and its obligation is the different `t8u n = n` entirely | **n/a — fixed** | — |
@@ -93,7 +184,7 @@ about** — it was 11 before rows #4–#6 closed.
 | 10 | `udivmod` | `refused` (generate) | `universal theorem: 2 calls this walk cannot follow (0x100000450 -> 0x1000004ec (opaque), 0x1000004bc -> 0x1000004ec (opaque))` | **no** | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` |
 | 11 | `floordiv` | `refused` (generate) | the same universal-theorem refusal, two call sites | **no** | as #10 |
 | — | `count` | `lean-rejected` | `count_proof.lean:2587:16`, the #1 goal | yes | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
-| — | `pow2` | `lean-rejected` | `pow2_proof.lean:2880:16`, the #1 goal | yes | as above |
+| — | `pow2` | `sorry` (2026-10-12, 1 hole) | `pow2_proof.lean:2880:16`, the #1 goal; now TYPECHECKS (one admitted hole) and is out of `test_formal.py::EXPECTED_FAILURES` | yes | as above |
 | — | `countdown` | `lean-rejected`, **2 holes** | `countdown_proof.lean:61:57: ⊢ (if sKey 0 < sKey (UInt64.ofNat m) then 1 else 0) = if 0 < UInt64…` | yes | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §Still open 3 |
 | — | `wge` | `lean-rejected`, **1 hole** | `wge_proof.lean:61:57: ⊢ (if sKey 1 ≤ sKey (UInt64.ofNat m) then 1 else 0) = …` | yes | as above |
 | — | `fib` | `lean-rejected` | `fib_proof.lean:41:71: case pos n : UInt64 … (if sKey n ≤ sKey 1 then (some …))` | yes | tree-recursion `FrameOk` (the doc's own reason) |
