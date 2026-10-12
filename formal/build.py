@@ -15060,7 +15060,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 continue
             if shape.positional and shape.positional[0] in M.struct_receivers(fdef):
                 continue
-            slots, _err = M.bind_call_arguments(
+            slots, _dropped, _err = M.bind_call_arguments(
                 fdef.name, fdef, call.args or [], call.kwargs or [])
             if slots is None:
                 continue
@@ -16572,13 +16572,15 @@ def _refuse_try_handlers(functions, fn) -> None:
 def _refuse_variadic_reads(functions: list, fn, shape) -> None:
     """Refuse a body that reads its `*args` / `**kwargs` parameter.
 
-    The caller side is already correct and needs no change: `_bind_call_args`
-    passes the fixed parameters and drops the rest, which is exactly what a
-    variadic callee that ignores its variadic parameter does. The hole is the
-    read. `def f(x, *rest): return rest[2]` called `f(1, 2, r)` was read as
-    three fixed parameters, so `rest` was parameter 1 and index 2 had no
-    parameter at all — measured on both architectures, the program built and
-    died with SIGSEGV. It is refused here, by name, with the reason, rather
+    The caller side gives the extra arguments no register home:
+    `_bind_call_args` passes the fixed parameters and the rest are `dropped`
+    (and, since 2026-10-08, still EVALUATED for their side effects —
+    `bind_call_arguments` returns them and the emitters run them, because a
+    dropped expression is not a skipped one in CPython). The hole this function
+    closes is the read. `def f(x, *rest): return rest[2]` called `f(1, 2, r)`
+    was read as three fixed parameters, so `rest` was parameter 1 and index 2
+    had no parameter at all — measured on both architectures, the program built
+    and died with SIGSEGV. It is refused here, by name, with the reason, rather
     than left to a register or a bound check.
 
     `del` of one and a re-binding of one are not reads and are not refused."""
