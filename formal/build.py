@@ -17663,6 +17663,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and never sees the module statements, and here rather than at either
     # front end because this is the one pipeline both of them go through.
     M.refuse_module_level_mlir_templates(stmts)
+    # The CONSTANT half of string composition, folded to a plain literal BEFORE
+    # the refusals below run: an f-string every field of which is a literal, and
+    # a `+`/`*` whose operands are all literals, have a value the build already
+    # knows, so they need no buffer and refusing them refused a constant. What is
+    # left for the refusals is the run-time half. Same place and same reason as
+    # the two passes around it: a rewrite from either backend would be two copies
+    # of one decision (`model.py::fold_constant_string_literals`).
+    M.fold_constant_string_literals(stmts)
     # An f-string/t-string LITERAL, asked HERE for the same reason and in the
     # same place as the line above: the parser keeps an interpolated literal's
     # whole SOURCE TOKEN as its value, one consumer reads that (`myinterpreter`

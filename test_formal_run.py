@@ -2010,17 +2010,43 @@ CASES = [
      "    if m is a: r = r + 2\n"
      "    printf(\"%d\\n\", r)\n"
      "    return 0\n", 0, "1"),
-    # `+` on two strings. It is a refusal and the pre-change behaviour was the
-    # worst of anything in this group: `[]` on arm64 and a SEGFAULT on x86-64,
-    # from one line, so the two backends did not even agree on whether the
-    # program worked. Asserted as a refusal on both, which is also the assertion
-    # that they now agree.
-    ("str_concat_refused",
+    # `+` on two strings. The RUN-TIME form is a refusal and the pre-change
+    # behaviour was the worst of anything in this group: `[]` on arm64 and a
+    # SEGFAULT on x86-64, from one line, so the two backends did not even agree
+    # on whether the program worked. Asserted as a refusal on both, which is also
+    # the assertion that they now agree — and the operands are VARIABLES, because
+    # a concat of two literals is a value the build already knows and FOLDS to a
+    # literal (`str_concat_of_two_literals_folds` below), which needs no buffer.
+    # The run-time half is what the refusal still owns.
+    ("str_concat_of_two_variables_refused",
+     "def main(n):\n"
+     "    s = \"ab\"\n"
+     "    t = \"cd\"\n"
+     "    printf(\"[%s]\\n\", s + t)\n"
+     "    return 0\n",
+     "refuse:on two strings is refused on this path", None),
+    # …and the CONSTANT half, which is the "compile-time composition" shape
+    # `bugs/FORMAL_string_composition_has_no_buffer.md` §7 names: the build knows
+    # both operands, so the result is an ordinary interned literal and no buffer
+    # is involved. The answer is CPython's `"ab" + "cd"`.
+    ("str_concat_of_two_literals_folds",
      "def main(n):\n"
      "    s = \"ab\" + \"cd\"\n"
      "    printf(\"[%s]\\n\", s)\n"
-     "    return 0\n",
-     "refuse:on two strings is refused on this path", None),
+     "    return 0\n", 0, "[abcd]"),
+    # The other constant string operator, `str * int` with both constant — the
+    # corpus's own `"=" * 72` separator idiom (`bootstrap-validate.mojo`) and the
+    # same missing-buffer refusal one row down the table.
+    ("str_repeat_of_a_literal_folds",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", \"=\" * 3)\n"
+     "    return 0\n", 0, "[===]"),
+    # A non-positive count is the EMPTY string, which is CPython's answer and
+    # what a reader who wrote `"=" * 0` is asking for.
+    ("str_repeat_by_zero_is_the_empty_string",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", \"=\" * 0)\n"
+     "    return 0\n", 0, "[]"),
     # `+` where ONE side is a string is not string concatenation and must not be
     # refused: the mixed case is the pointer/offset arithmetic a caller may have
     # meant, and refusing it would turn a working program into a diagnostic over
@@ -2702,15 +2728,44 @@ CASES = [
     # (`fire_compiler.py`'s t/f-string placeholder, which `myinterpreter` and
     # `gimple_codegen` both read) and `decoded_literal` — the reader every
     # engine shares — handed that text to the emitters, so the interpolation was
-    # never evaluated. Refused rather than lowered: composition needs a buffer,
-    # and a string on this path is a bare `char *` interned into read+execute
-    # `__TEXT` (the same missing buffer as `str_concat_refused` above).
+    # never evaluated. Refused rather than lowered: a RUN-TIME field needs a
+    # buffer, and a string on this path is a bare `char *` interned into
+    # read+execute `__TEXT` (the same missing buffer as
+    # `str_concat_of_two_variables_refused` above). The field here is a NAME, so
+    # the literal-fold below cannot answer it and this stays the refusal.
     ("fstring_literal_refused",
      "def main(n):\n"
      "    k = 7\n"
      "    printf(\"[%s]\\n\", f\"n={k}\")\n"
      "    return 0\n",
      "refuse:an f-string literal", None),
+    # ── and the CONSTANT half of that composition, which the build can answer ──
+    #
+    # An f-string whose every field is a LITERAL has a value the build already
+    # knows (`bugs/FORMAL_string_composition_has_no_buffer.md` §7's "compile-time
+    # composition for the case where every hole is a literal"); CPython folds
+    # these too, so refusing one refuses a CONSTANT, and the fold realises it as
+    # an ordinary interned literal. Four rows, because each is a different thing
+    # the fold has to get right: no field at all, one literal field, a mix of
+    # literal kinds (a string field must render WITHOUT quotes and `None` must
+    # render as `None`), and a RAW f-string, whose literal chunk keeps its
+    # backslash rather than decoding it.
+    ("fstring_with_no_field_is_a_constant",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", f\"n=7\")\n"
+     "    return 0\n", 0, "[n=7]"),
+    ("fstring_of_a_literal_field_folds",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", f\"n={5}\")\n"
+     "    return 0\n", 0, "[n=5]"),
+    ("fstring_of_mixed_literal_fields_folds",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", f\"{'a'}b{None}\")\n"
+     "    return 0\n", 0, "[abNone]"),
+    ("raw_fstring_keeps_its_backslash",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", rf\"a\\n{5}\")\n"
+     "    return 0\n", 0, "[a\\n5]"),
     # THE ADVICE, and it is here because the refusal NAMES a rewrite and a
     # rewrite nobody has run is a guess. The message used to say "print the
     # parts as separate operands, or build the text with `+`", and both halves
@@ -2718,8 +2773,10 @@ CASES = [
     # operands, so it prints `n= 7` where the f-string printed `n=7` — a
     # wrong-but-exit-0 answer, which is the one failure this suite exists to
     # catch and the worst thing a refusal can advise — and `+` on two strings
-    # is refused by `str_concat_refused` for the same missing buffer, so it is
-    # not a way round it.
+    # with a RUN-TIME operand is refused by
+    # `str_concat_of_two_variables_refused` for the same missing buffer, so it
+    # is not a way round it (a concat of two LITERALS folds, which is why that
+    # row's operands are variables).
     #
     # What the message says instead is `printf("n=%d", n)`, and THIS is that
     # case: the advice, spelled as the program it names, required to build and

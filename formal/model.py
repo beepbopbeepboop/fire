@@ -11480,6 +11480,28 @@ def interpolated_literal_quote_start(spelled: str) -> int:
     return i
 
 
+def interpolated_literal_is_template(spelled: str) -> bool:
+    """True when an interpolated literal's prefix carries `t`/`T` — a t-string.
+
+    The prefix is a SET OF SPELLING FLAGS (`f`, `t`, `r`, `b`, `u`, up to two in
+    any order), so the `t` is not a fixed position and a reader that looked at
+    `spelled[0]` called an `rt"…"` an f-string — the same defect
+    `interpolated_literal_quote_start` exists to close, one question over. It is
+    a function for the same reason that one is: two readers need the same
+    answer, and the FIX that composes a constant f-string
+    (`fold_constant_string_literals`) must LEAVE a t-string alone, because a
+    t-string's value is a TEMPLATE (`str.format` evaluating an argument against
+    it) rather than its interpolated text, so composing one would answer a
+    different object. Raw source text is the input, so a non-str answers False.
+    """
+    if not isinstance(spelled, str):
+        return False
+    for ch in spelled[:interpolated_literal_quote_start(spelled)]:
+        if ch == 't' or ch == 'T':
+            return True
+    return False
+
+
 def interpolated_literal_segments(spelled: str) -> list:
     """`[('lit', text) | ('field', expr, spec, conv)]` — an f-string's own parts.
 
@@ -11662,12 +11684,7 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
     # t-string's prefix may be `tr`/`rt`, so `spelled[:1] in ("t", "T")` called
     # a `rt"…"` "an f-string". The prefix letters are read with the same helper
     # `interpolated_literal_segments` now uses, so both spell the width once.
-    _prefix_end = (interpolated_literal_quote_start(spelled)
-                   if isinstance(spelled, str) else 0)
-    is_t = False
-    for _ch in spelled[:_prefix_end]:
-        if _ch == 't' or _ch == 'T':
-            is_t = True
+    is_t = interpolated_literal_is_template(spelled)
     kind = "a t-string" if is_t else "an f-string"
     at = f" on line {where}" if where else ""
     try:
@@ -11771,6 +11788,237 @@ def refuse_interpolated_literals(stmts) -> None:
         if is_interpolated_literal(node):
             raise CodegenError(interpolated_literal_refusal(
                 node, getattr(node, "line", "")))
+
+
+# ── the COMPILE-TIME half of string composition ───────────────────────────
+#
+# `interpolated_literal_refusal` and `string_concat_refusal` are both about the
+# same missing buffer, and both are about it only when the result is a RUN-TIME
+# value. An interpolated literal every one of whose fields is a literal, and a
+# `+`/`*` whose operands are all literals, have a value the build already knows —
+# CPython folds them at compile time too — so refusing them refuses a CONSTANT,
+# which needs no buffer: it is the same `char *` interned into `__TEXT` that
+# every other string literal on this path is. `fold_constant_string_literals`
+# realises them, and `formal/build.py::_prepare_functions` runs it BEFORE
+# `refuse_interpolated_literals` so what is left for the refusals is only the
+# shape that genuinely has no home.
+#
+# It is deliberately NOT a general `+` on strings: a run-time operand keeps the
+# refusal, and the fold is the constant case only. The bound below is the one
+# the doc asks for (`bugs/FORMAL_string_composition_has_no_buffer.md` §7.1, "a
+# buffer with a compile-time-known bound") applied to what a fold may build: a
+# constant larger than this is not folded and keeps the refusal it had.
+
+#: The largest constant string a fold may build, in BYTES. A constant is bytes
+#: in `__TEXT`, so `"=" * 10**9` is a request for a gigabyte of read-only text —
+#: a resource bug rather than a value. The bound is arbitrary and generous: the
+#: corpus's own uses are `"=" * 72` and short concatenations.
+MAX_CONSTANT_STRING_BYTES = 1 << 20
+
+#: The sentinel for "this field is not a literal", which is NOT `None`: a field
+#: the source spells `None` is a literal whose CPython text is `"None"`, and a
+#: reader that could not tell the two apart would either render every computed
+#: field as `None` or refuse the one literal that MEANS it.
+_NOT_A_LITERAL = object()
+
+
+def _interpolated_field_text(expr: str):
+    """CPython's text for a no-spec, no-conversion f-string field, or the
+    `_NOT_A_LITERAL` sentinel.
+
+    **The literal half of composition, and the run-time half is what is left.**
+    CPython renders a field with no format spec and no conversion as
+    `format(value, "")`, which is `str(value)`; for a literal that is a
+    compile-time constant, so `f"n={5}"` is the string `"n=5"` and no buffer is
+    involved. For a field that is a NAME, a CALL, or an operator
+    `ast.literal_eval` does not fold — it takes a leading sign and a complex sum
+    and not `f"{1 + 2}"`, which CPython renders `"3"` — the sentinel is returned,
+    and the caller reads it as "leave the refusal in place". The refusal is the
+    honest answer there: this fold answers what the build KNOWS, and it does not
+    grow into an expression evaluator.
+
+    **The field arrives as TEXT and is read as the Python expression it is.**
+    `interpolated_literal_segments` hands back the `{…}` interior as source text
+    (the parser keeps an f-string's whole token), and an f-string is a Python
+    literal, so the field is parsed with Python's own `ast` and evaluated with
+    `ast.literal_eval` — the ONE reader that answers "is this a literal", and
+    the reason not to re-implement it is that a second literal reader is a second
+    set of rules about which spellings are constants. Only SCALARS are accepted
+    (`int`, `float`, `complex`, `str`, `bytes`, `bool`, `None`): a display like
+    `f"{[1, 2]}"` is a constant too, but rendering a container's `str` is the
+    container representation question rather than this one, and leaving it to the
+    refusal is the honest narrower half.
+
+    The value is rendered with `str`, which is `format(value, "")` — the exact
+    function CPython applies to a spec-less, conversion-less field — so
+    `f"{True}"` is `"True"`, `f"{None}"` is `"None"` and `f"{'a'}"` is `"a"`
+    rather than `"'a'"`. `str(None)` is the one that would look wrong written as
+    a word (`None` is not the empty string) and is CPython's answer.
+    """
+    import ast as _ast                                   # lazy — stdlib only
+    try:
+        parsed = _ast.parse(expr, mode="eval").body
+    except (SyntaxError, ValueError):
+        return _NOT_A_LITERAL
+    try:
+        value = _ast.literal_eval(parsed)
+    except (ValueError, SyntaxError, TypeError, MemoryError):
+        return _NOT_A_LITERAL
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        return str(value)
+    return _NOT_A_LITERAL
+
+
+def _interpolated_constant_text(node):
+    """The text of an f-string every field of which is a literal, or None.
+
+    Three refusals, each with its own reason:
+
+      * a t-string — its value is a template, not its interpolated text
+        (`interpolated_literal_is_template`), so composing it would answer a
+        different object;
+      * a FORMAT SPEC or CONVERSION — `{k:04d}` and `{k!r}` are renderings rather
+        than values (`bugs/FORMAL_string_composition_has_no_buffer.md` §7.3), and
+        a rendering of a literal is a further question (`"{:04d}"`'s width,
+        `!r`'s quotes) that this fold does not answer;
+      * a field `_interpolated_field_text` does not know — the run-time half.
+
+    The literal CHUNKS are the raw token's text with `{{`/`}}` already unescaped
+    by the segment reader, and they are decoded only for a non-raw literal: an
+    `rf"a\\n{5}"` keeps its backslash (`is_raw` is the parser's record and the
+    only place the distinction survives), exactly as `decoded_literal` keeps it
+    for an ordinary raw string.
+    """
+    spelled = node.value
+    if not isinstance(spelled, str) or interpolated_literal_is_template(spelled):
+        return None
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError:
+        return None
+    raw = bool(getattr(node, "is_raw", False))
+    out = []
+    for seg in segs:
+        if seg[0] == 'lit':
+            out.append(seg[1] if raw else F.decode_c_escapes(seg[1]))
+            continue
+        _kind, expr, spec, conv = seg
+        if spec or conv:
+            return None
+        text = _interpolated_field_text(expr)
+        if text is _NOT_A_LITERAL:
+            return None
+        out.append(text)
+    composed = "".join(out)
+    if len(composed.encode("utf-8", "surrogatepass")) > MAX_CONSTANT_STRING_BYTES:
+        return None
+    return composed
+
+
+def _constant_string_text(node):
+    """The text of a compile-time-constant STRING expression, or None.
+
+    The recursive half, for the value of a `+`/`*` operand: a non-bytes string
+    literal (decoded through `decoded_literal`, so a raw string keeps its
+    backslashes), a constant interpolated literal, or a `+`/`*` over two of them.
+    `None` means "not a constant string", which is the input that keeps the
+    operator's refusal.
+
+    **`str * int` and `int * str` are both folded, and only when the count is a
+    literal too**, because that is CPython's rule: `"=" * 3` is `"==="` and
+    `"=" * n` is a run-time value the refusal still owns. A non-positive count
+    is the empty string (`"=" * 0`, `"=" * -1`), which is CPython's answer. The
+    product is length-checked BEFORE it is built, so `"=" * 10**9` is not
+    materialised to check it.
+    """
+    if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", False):
+        if getattr(node, "is_interpolated", False):
+            return _interpolated_constant_text(node)
+        return F.decoded_literal(node)
+    if isinstance(node, F.BinaryOp):
+        if node.op == "+":
+            left = _constant_string_text(node.left)
+            right = _constant_string_text(node.right)
+            if left is not None and right is not None \
+                    and len(left) + len(right) <= MAX_CONSTANT_STRING_BYTES:
+                return left + right
+            return None
+        if node.op == "*":
+            for text_side, count_side in ((node.left, node.right),
+                                          (node.right, node.left)):
+                text = _constant_string_text(text_side)
+                if text is None:
+                    continue
+                count = fold_literal_expr(count_side)
+                if not isinstance(count, int) or isinstance(count, bool):
+                    continue
+                if count <= 0:
+                    return ""
+                if len(text) * count <= MAX_CONSTANT_STRING_BYTES:
+                    return text * count
+                return None
+    return None
+
+
+def _synthesized_string_literal(text: str, node) -> F.StringLiteral:
+    """A `StringLiteral` whose value is `text`, at `node`'s position.
+
+    **A synthesized literal carries an ESCAPED body**, which is the convention
+    `formal/model.py::print_format` follows and the reason is
+    `fire_compiler.decoded_literal`: every engine READS a literal by decoding its
+    body, and `is_raw=False` is the parser's record for a literal with no `r` —
+    so the body has to be `text` with each backslash doubled, and the decoder
+    gives `text` back. Handing the decoded `text` in directly would decode it a
+    second time and turn a source `"a\\nb"` into a newline.
+    """
+    return F.StringLiteral(value=text.replace("\\", "\\\\"),
+                           line=getattr(node, "line", 0),
+                           col=getattr(node, "col", 0),
+                           is_raw=False, is_interpolated=False, is_bytes=False)
+
+
+def fold_constant_string_literals(stmts) -> None:
+    """Rewrite every constant string composition in `stmts` into a literal.
+
+    Asked over the MODULE's statements, once, by `formal/build.py::
+    _prepare_functions` and BEFORE `refuse_interpolated_literals`, in the same
+    place and for the same reason that refusal is asked there: a rewrite from
+    either backend's expression walk would be two copies of one decision, and the
+    executable and dylib paths would then be able to answer differently about one
+    source file.
+
+    **The walk is `rewrite_tree`'s, parents put back**, because the nodes that
+    fold are not always a statement's own expression — `if "a" + "b" == c:` and
+    `f(k, "x" + "y")` are two of the places a constant hides, and a rewrite that
+    only looked at assignment right-hand sides would leave them. The visit
+    replaces a node only when a REPLACEMENT was computed:
+
+      * an INTERPOLATED literal every field of which is literal — the f-string
+        half, whose composed text is `_interpolated_constant_text`'s;
+      * a `+`/`*` whose operands are all constant strings — the concatenation
+        half.
+
+    An ordinary string literal is returned unchanged rather than rewritten: it
+    is already the value the fold would build, and re-synthesizing it would
+    launder an `is_raw` literal through a non-raw node. An f-string with a
+    computed field, a format spec or a conversion is returned unchanged too, so
+    the refusal below still names it — with the SAME sentence and the same field
+    counts it named before, because this pass changes only what it can answer.
+    """
+    def visit(node):
+        if isinstance(node, F.StringLiteral):
+            if not getattr(node, "is_interpolated", False):
+                return node
+            text = _interpolated_constant_text(node)
+        elif isinstance(node, F.BinaryOp) and node.op in ("+", "*"):
+            text = _constant_string_text(node)
+        else:
+            return node
+        if text is None:
+            return node
+        return _synthesized_string_literal(text, node)
+
+    rewrite_tree(stmts, visit)
 
 
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
