@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (524 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (525 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
